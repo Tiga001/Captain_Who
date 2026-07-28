@@ -1,7 +1,7 @@
 use super::MAX_OUTPUT_BYTES;
 use crate::exact_capture::ExactToolResultArchiveFile;
 use crate::exact_capture::{EXACT_TEXT_CAPTURE_MAX_BYTES, EXACT_TEXT_CAPTURE_STOP_REASON};
-use crate::protocol::AgentToolResult;
+use crate::protocol::{AgentCommandOutputStream, AgentToolResult};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -622,15 +622,37 @@ impl CapturedProcessOutput {
 
 pub type ProcessOutputCaptureHandle = thread::JoinHandle<std::io::Result<CapturedProcessOutput>>;
 
+/// Best-effort observer for the bounded, user-visible preview of a process stream.
+///
+/// The observer never receives bytes beyond the normal ToolResult preview budget, and failures in
+/// the observer must not affect pipe draining or the authoritative command result.
+pub type ProcessOutputObserver =
+    Arc<dyn Fn(AgentCommandOutputStream, String) + Send + Sync + 'static>;
+
 /// Drains one process pipe without allowing either memory growth or a full pipe deadlock.
 ///
 /// `budget` is shared by stdout and stderr. After the hard capture ceiling is reached the reader
 /// continues draining and counting bytes, but does not retain them. This makes the omitted range
 /// explicit instead of silently presenting the retained prefix as complete.
 pub fn spawn_process_output_capture<R>(
+    reader: R,
+    budget: ProcessOutputCaptureBudget,
+    policy: ProcessOutputCapturePolicy,
+) -> ProcessOutputCaptureHandle
+where
+    R: Read + Send + 'static,
+{
+    spawn_process_output_capture_with_observer(reader, budget, policy, None, None)
+}
+
+/// Drains one process pipe and emits only the same bounded prefix retained for the ToolResult
+/// preview. UTF-8 characters split across OS pipe reads are reassembled before notification.
+pub fn spawn_process_output_capture_with_observer<R>(
     mut reader: R,
     budget: ProcessOutputCaptureBudget,
     policy: ProcessOutputCapturePolicy,
+    stream: Option<AgentCommandOutputStream>,
+    observer: Option<ProcessOutputObserver>,
 ) -> ProcessOutputCaptureHandle
 where
     R: Read + Send + 'static,
@@ -638,6 +660,7 @@ where
     thread::spawn(move || {
         let mut spool = NamedTempFile::new()?;
         let mut preview = Vec::with_capacity(policy.preview_bytes());
+        let mut pending_live_utf8 = Vec::new();
         let mut original_bytes = 0_u64;
         let mut captured_bytes = 0_u64;
         let mut buffer = [0_u8; 16 * 1024];
@@ -656,7 +679,21 @@ where
                 let preview_remaining = policy.preview_bytes().saturating_sub(preview.len());
                 let preview_from_chunk = preview_remaining.min(retained);
                 preview.extend_from_slice(&buffer[..preview_from_chunk]);
+                if preview_from_chunk > 0 {
+                    if let (Some(stream), Some(observer)) = (stream, observer.as_ref()) {
+                        pending_live_utf8.extend_from_slice(&buffer[..preview_from_chunk]);
+                        emit_complete_utf8_chunks(
+                            &mut pending_live_utf8,
+                            stream,
+                            observer.as_ref(),
+                            false,
+                        );
+                    }
+                }
             }
+        }
+        if let (Some(stream), Some(observer)) = (stream, observer.as_ref()) {
+            emit_complete_utf8_chunks(&mut pending_live_utf8, stream, observer.as_ref(), true);
         }
         spool.flush()?;
         let omitted_bytes = original_bytes.saturating_sub(captured_bytes);
@@ -670,6 +707,43 @@ where
             spool: ProcessOutputSpool::new(spool),
         })
     })
+}
+
+fn emit_complete_utf8_chunks(
+    pending: &mut Vec<u8>,
+    stream: AgentCommandOutputStream,
+    observer: &(dyn Fn(AgentCommandOutputStream, String) + Send + Sync + 'static),
+    flush: bool,
+) {
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                if !text.is_empty() {
+                    observer(stream, text.to_string());
+                }
+                pending.clear();
+                return;
+            }
+            Err(error) if error.valid_up_to() > 0 => {
+                let valid_up_to = error.valid_up_to();
+                let text = String::from_utf8_lossy(&pending[..valid_up_to]).into_owned();
+                pending.drain(..valid_up_to);
+                if !text.is_empty() {
+                    observer(stream, text);
+                }
+            }
+            Err(error) if error.error_len().is_some() => {
+                let invalid_bytes = error.error_len().unwrap_or(1);
+                pending.drain(..invalid_bytes.min(pending.len()));
+                observer(stream, "\u{fffd}".to_string());
+            }
+            Err(_) if flush => {
+                pending.clear();
+                return;
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 fn utf8_boundary_safe_lossy_preview(bytes: &[u8]) -> String {
@@ -722,6 +796,39 @@ mod tests {
             captured.spool_file().unwrap().metadata().unwrap().len(),
             captured.captured_bytes()
         );
+    }
+
+    #[test]
+    fn live_observer_reassembles_utf8_and_stays_within_preview_budget() {
+        let mut output = vec![b'a'; 16 * 1024 - 1];
+        output.extend_from_slice("你".as_bytes());
+        output.extend_from_slice(b"tail-beyond-preview");
+        let preview_bytes = 16 * 1024 - 1 + "你".len();
+        let policy = ProcessOutputCapturePolicy::with_limits(preview_bytes, 64 * 1024);
+        let budget = ProcessOutputCaptureBudget::new(policy.max_capture_bytes());
+        let observed = Arc::new(std::sync::Mutex::new(String::new()));
+        let observed_for_callback = Arc::clone(&observed);
+        let observer: ProcessOutputObserver = Arc::new(move |stream, chunk| {
+            assert_eq!(stream, AgentCommandOutputStream::Stdout);
+            observed_for_callback.lock().unwrap().push_str(&chunk);
+        });
+
+        let captured = join_process_output_capture(
+            spawn_process_output_capture_with_observer(
+                Cursor::new(output),
+                budget,
+                policy,
+                Some(AgentCommandOutputStream::Stdout),
+                Some(observer),
+            ),
+            "stdout",
+        )
+        .unwrap();
+
+        assert_eq!(*observed.lock().unwrap(), captured.preview());
+        assert!(observed.lock().unwrap().ends_with('你'));
+        assert!(!observed.lock().unwrap().contains('\u{fffd}'));
+        assert!(captured.preview_truncated());
     }
 
     #[test]

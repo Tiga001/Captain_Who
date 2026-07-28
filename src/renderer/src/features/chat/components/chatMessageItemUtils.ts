@@ -748,6 +748,7 @@ export function getRunCommandGroupItems(
       {
         call,
         cancelled: settledStatus === 'cancelled',
+        liveOutput: run.commandOutputPreviews?.[call.id],
         result,
         settledStatus
       }

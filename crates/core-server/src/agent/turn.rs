@@ -153,6 +153,7 @@ impl AgentService {
                 Some(worker_conversation_id.clone()),
                 Some(worker_assistant_message_id.clone()),
                 skill_resources.clone(),
+                notifications.clone(),
             );
             let trace_observer = service.trace_observer(
                 &worker_run_id,

@@ -87,6 +87,113 @@ fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources()
 }
 
 #[test]
+fn automatic_command_streams_bounded_output_with_stable_call_identity() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage);
+    let mut input = command_test_input(fixture.path());
+    input
+        .context
+        .as_mut()
+        .expect("command test context")
+        .permissions
+        .command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+    let run_id = "run-live-command";
+    let call_id = "live-command";
+    let command = command_request(
+        call_id,
+        "printf 'stdout-live\\n'; printf 'stderr-live\\n' >&2",
+    );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None)
+                .with_notifications(notifications),
+            AgentProposedAction::Command { command },
+            AgentCancellationToken::new(),
+        )
+        .unwrap();
+
+    assert!(result.ok);
+    let mut events = Vec::new();
+    while let Ok(notification) = receiver.try_recv() {
+        if notification["params"]["type"] == "command_output" {
+            events.push(notification["params"].clone());
+        }
+    }
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|event| event["runId"] == run_id));
+    assert!(events.iter().all(|event| event["callId"] == call_id));
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0]["sequence"].as_u64() < pair[1]["sequence"].as_u64()));
+    let output = events
+        .iter()
+        .filter_map(|event| event["output"].as_str())
+        .collect::<String>();
+    assert!(output.contains("stdout-live"));
+    assert!(output.contains("stderr-live"));
+}
+
+#[test]
+fn explicitly_approved_command_streams_output_with_the_original_call_identity() {
+    let fixture = tempdir().unwrap();
+    let run_id = "run-live-explicit-command";
+    let call_id = "live-explicit-command";
+    let command = command_request(
+        call_id,
+        "printf 'explicit-stdout\\n'; printf 'explicit-stderr\\n' >&2",
+    );
+    let record = PendingActionRecord {
+        storage_id: pending_action_storage_id(run_id, call_id),
+        snapshot: PendingAgentActionSnapshot {
+            action_id: call_id.to_string(),
+            action_type: "command".to_string(),
+            tool_name: "run_command".to_string(),
+            tool_call_id: Some(call_id.to_string()),
+            run_id: run_id.to_string(),
+            conversation_id: Some("conversation-live-explicit".to_string()),
+            assistant_message_id: Some("assistant-live-explicit".to_string()),
+            action: AgentProposedAction::Command { command },
+            created_at: 1,
+            status: PendingActionStatus::Approved,
+        },
+        agent_input: command_test_input(fixture.path()),
+    };
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let output_observer = command_output_observer(run_id, call_id, &notifications);
+
+    let result =
+        run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
+            &record,
+            AgentCancellationToken::new(),
+            None,
+            None,
+            None,
+            Some(output_observer),
+        )
+        .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    let mut events = Vec::new();
+    while let Ok(notification) = receiver.try_recv() {
+        if notification["params"]["type"] == "command_output" {
+            events.push(notification["params"].clone());
+        }
+    }
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|event| event["runId"] == run_id));
+    assert!(events.iter().all(|event| event["callId"] == call_id));
+    let output = events
+        .iter()
+        .filter_map(|event| event["output"].as_str())
+        .collect::<String>();
+    assert!(output.contains("explicit-stdout"));
+    assert!(output.contains("explicit-stderr"));
+}
+
+#[test]
 fn explicit_user_execution_is_bound_to_the_backend_action_snapshot() {
     let fixture = tempdir().unwrap();
     let frozen_request = command_request("frozen-command", "mkdir frozen-snapshot");

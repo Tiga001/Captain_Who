@@ -634,6 +634,7 @@ function stringifyAgentRun(run: ChatAgentRunView | undefined): string | null {
   if (!run) return null
   const persistedRun = { ...run }
   delete persistedRun.fileWritePreviews
+  delete persistedRun.commandOutputPreviews
   return JSON.stringify(persistedRun)
 }
 

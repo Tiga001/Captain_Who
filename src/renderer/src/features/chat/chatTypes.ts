@@ -1,4 +1,5 @@
 import type {
+  AgentCommandOutputStream,
   AgentDiffProposal,
   AgentContextCompactionEventOutcome,
   AgentFileDraftSnapshot,
@@ -84,6 +85,17 @@ export interface ChatGuidanceTimelineItem {
   sequence?: number
 }
 
+export interface ChatCommandOutputChunk {
+  sequence: number
+  stream: AgentCommandOutputStream
+  output: string
+}
+
+export interface ChatCommandOutputPreview {
+  callId: string
+  chunks: ChatCommandOutputChunk[]
+}
+
 export type ChatAgentTimelineItem =
   | { id: string; type: 'message'; content: string; streamId?: string }
   | ChatGuidanceTimelineItem
@@ -119,6 +131,8 @@ export interface ChatAgentRunView {
   diffs: AgentDiffProposal[]
   fileDrafts?: AgentFileDraftSnapshot[]
   fileWritePreviews?: ChatFileWritePreview[]
+  /** Ephemeral live process output. Final ToolResults remain the durable source of truth. */
+  commandOutputPreviews?: Record<string, ChatCommandOutputPreview>
   messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
   timeline: ChatAgentTimelineItem[]
   state?: AgentStateSnapshot

@@ -12,10 +12,10 @@ use crate::{
     AgentCommandArtifactScope, AgentCommandArtifactSnapshotCoverage,
     AgentCommandArtifactValidation, AgentCommandArtifactValidationStatus,
     AgentCommandExpectedArtifactOutcome, AgentCommandExpectedArtifactOutcomeKind,
-    AgentCommandRequest, AgentCommandRiskLevel, AgentCommandRuntimeBinding,
-    AgentCommandRuntimeKind, AgentCommandRuntimeRequest, AgentCommandRuntimeResolution,
-    AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission, AgentToolResult,
-    AgentWritePermission, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    AgentCommandOutputStream, AgentCommandRequest, AgentCommandRiskLevel,
+    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimeRequest,
+    AgentCommandRuntimeResolution, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
+    AgentToolResult, AgentWritePermission, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -57,12 +57,14 @@ pub(crate) use managed_runtime::{
 pub use managed_runtime::{
     run_authorized_command_with_artifact_runtime,
     run_authorized_command_with_artifact_runtime_and_inputs,
+    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer,
 };
 pub use output_capture::{
     join_process_output_capture, materialize_process_tool_result_archive,
-    process_output_spool_substitutions, spawn_process_output_capture, CapturedProcessOutput,
-    ProcessOutputCaptureBudget, ProcessOutputCaptureHandle, ProcessOutputCaptureMetadata,
-    ProcessOutputCapturePolicy, ProcessOutputSpool, ProcessOutputSpoolSubstitution,
+    process_output_spool_substitutions, spawn_process_output_capture,
+    spawn_process_output_capture_with_observer, CapturedProcessOutput, ProcessOutputCaptureBudget,
+    ProcessOutputCaptureHandle, ProcessOutputCaptureMetadata, ProcessOutputCapturePolicy,
+    ProcessOutputObserver, ProcessOutputSpool, ProcessOutputSpoolSubstitution,
 };
 pub use policy::*;
 use risk::*;

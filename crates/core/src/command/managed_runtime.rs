@@ -64,19 +64,47 @@ pub fn run_authorized_command_with_artifact_runtime_and_inputs(
     artifact_runtime: Option<&ArtifactRuntimeProvider>,
     file_inputs: Option<&AgentFileInputExecutionContext>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
+        workspace_root,
+        request,
+        permissions,
+        authorization_source,
+        cancellation_token,
+        action_cancel_flag,
+        artifact_runtime,
+        file_inputs,
+        None,
+    )
+}
+
+/// Executes the same authorized command path while forwarding a bounded, best-effort live preview
+/// to the host. The observer is not part of authorization, audit persistence, or the final result.
+#[allow(clippy::too_many_arguments)]
+pub fn run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
+    workspace_root: Option<&Path>,
+    request: &AgentCommandRequest,
+    permissions: AgentPermissions,
+    authorization_source: CommandAuthorizationSource,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    artifact_runtime: Option<&ArtifactRuntimeProvider>,
+    file_inputs: Option<&AgentFileInputExecutionContext>,
+    output_observer: Option<ProcessOutputObserver>,
+) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
     if request.runtime.is_none() && request.runtime_binding.is_none() {
         if !request.inputs.is_empty() {
             return Err(CommandExecutionError::from(
                 "run_command.inputs 只适用于后端已绑定运行配置的 Managed Builder。".to_string(),
             ));
         }
-        return run_authorized_command(
+        return run_authorized_command_with_output_observer(
             workspace_root,
             request,
             permissions,
             authorization_source,
             cancellation_token,
             action_cancel_flag,
+            output_observer,
         );
     }
 
@@ -130,6 +158,7 @@ pub fn run_authorized_command_with_artifact_runtime_and_inputs(
             artifact_runtime,
             binding,
             file_inputs,
+            output_observer,
         ),
         (None, Some(legacy)) => runtime_failure_result(
             root.as_deref(),
@@ -179,6 +208,7 @@ fn execute_with_frozen_profile(
     provider: Option<&ArtifactRuntimeProvider>,
     binding: &AgentCommandRuntimeBinding,
     file_inputs: Option<&AgentFileInputExecutionContext>,
+    output_observer: Option<ProcessOutputObserver>,
 ) -> AgentCommandExecutionResult {
     if let Err(error) = super::validate_command_runtime_binding(binding) {
         return runtime_failure_result(
@@ -309,6 +339,7 @@ fn execute_with_frozen_profile(
         cancellation_token,
         action_cancel_flag,
         prepared_inputs.as_ref(),
+        output_observer,
     );
     if let Err(error) = provider.verify_integrity() {
         let code = format!("artifactRuntime.{}", error.code().stable_name());
@@ -493,6 +524,7 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
         resolution,
         cancellation_token,
         action_cancel_flag,
+        None,
         None,
     );
 
@@ -928,6 +960,7 @@ fn run_managed_process(
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
     prepared_inputs: Option<&PreparedAgentFileInputs>,
+    output_observer: Option<ProcessOutputObserver>,
 ) -> AgentCommandExecutionResult {
     if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
         return AgentCommandExecutionResult {
@@ -1023,9 +1056,20 @@ fn run_managed_process(
     };
     let capture_policy = ProcessOutputCapturePolicy::process_default();
     let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
-    let stdout_reader =
-        spawn_process_output_capture(stdout, capture_budget.clone(), capture_policy);
-    let stderr_reader = spawn_process_output_capture(stderr, capture_budget, capture_policy);
+    let stdout_reader = spawn_process_output_capture_with_observer(
+        stdout,
+        capture_budget.clone(),
+        capture_policy,
+        Some(AgentCommandOutputStream::Stdout),
+        output_observer.clone(),
+    );
+    let stderr_reader = spawn_process_output_capture_with_observer(
+        stderr,
+        capture_budget,
+        capture_policy,
+        Some(AgentCommandOutputStream::Stderr),
+        output_observer,
+    );
 
     let deadline = Duration::from_millis(timeout_ms);
     let mut timed_out = false;

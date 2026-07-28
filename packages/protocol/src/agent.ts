@@ -1481,7 +1481,8 @@ export type AgentEvent =
   | {
       type: 'command_output'
       runId: string
-      command: string
+      callId: string
+      sequence: number
       stream: AgentCommandOutputStream
       output: string
     }

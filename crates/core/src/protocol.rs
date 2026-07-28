@@ -2124,7 +2124,8 @@ pub enum AgentEvent {
     },
     CommandOutput {
         run_id: String,
-        command: String,
+        call_id: String,
+        sequence: u64,
         stream: AgentCommandOutputStream,
         output: String,
     },

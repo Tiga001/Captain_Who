@@ -1,13 +1,17 @@
-import { SquareTerminal } from 'lucide-react'
+import { Check, Copy, SquareTerminal } from 'lucide-react'
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
+import type { ChatCommandOutputPreview } from '../../chatTypes'
+import { copyTextToClipboard } from '../chatMessageItemUtils'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import { getToolCallLabel, type SettledToolStatus } from './toolActivityUtils'
 
 interface RunCommandToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
+  liveOutput?: ChatCommandOutputPreview
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -19,6 +23,8 @@ interface RunCommandToolActivityGroupProps {
 }
 
 type RunCommandStatus = 'running' | 'completed' | 'failed' | 'rejected' | 'cancelled'
+
+const COPIED_INDICATOR_MS = 1300
 
 function getObjectValue(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -71,6 +77,10 @@ function getCommandOutput(commandResult: ReturnType<typeof getCommandResult>) {
     .map((value) => value.trim())
     .filter(Boolean)
     .join('\n\n')
+}
+
+function getLiveCommandOutput(preview: ChatCommandOutputPreview | undefined) {
+  return preview?.chunks.map((chunk) => chunk.output).join('') ?? ''
 }
 
 function getCommandStatus(
@@ -144,6 +154,7 @@ function getGroupLabel(
 export function RunCommandToolActivity({
   cancelled = false,
   call,
+  liveOutput,
   result,
   settledStatus
 }: RunCommandToolActivityProps) {
@@ -154,10 +165,27 @@ export function RunCommandToolActivity({
   const commandResult = getCommandResult(result)
   const command = commandResult?.command || details.command
   const commandOutput = getCommandOutput(commandResult)
+  const liveCommandOutput = getLiveCommandOutput(liveOutput)
+  const copyableOutput = commandOutput || liveCommandOutput
   const commandFailed = result?.ok === false
   const status = getRunCommandStatus({ cancelled, call, result, settledStatus })
-  const hasDetails = Boolean(command || rejectedMessage || result?.error || commandResult)
+  const hasDetails = Boolean(
+    command || rejectedMessage || result?.error || commandResult || liveCommandOutput
+  )
   const isPending = status === 'running'
+  const [copied, setCopied] = useState(false)
+  const outputRef = useRef<HTMLPreElement>(null)
+  const keepLiveOutputPinnedRef = useRef(true)
+  useEffect(() => {
+    if (!copied) return undefined
+    const timerId = window.setTimeout(() => setCopied(false), COPIED_INDICATOR_MS)
+    return () => window.clearTimeout(timerId)
+  }, [copied])
+  useLayoutEffect(() => {
+    if (!isPending || !liveCommandOutput || !keepLiveOutputPinnedRef.current) return
+    const output = outputRef.current
+    if (output) output.scrollTop = output.scrollHeight
+  }, [isPending, liveCommandOutput])
   const iconBadge = (() => {
     if (rejected) {
       return (
@@ -202,19 +230,57 @@ export function RunCommandToolActivity({
     >
       {hasDetails && (
         <div className="agent-activity__details run-command-activity__details">
-          {commandResult ? (
+          {commandResult || liveCommandOutput || isPending ? (
             <div className="run-command-shell" role="group" aria-label={t('agent.command.shell')}>
               <div className="run-command-shell__title">{t('agent.command.shell')}</div>
               {command && <pre className="run-command-shell__command">$ {command}</pre>}
-              <pre className="run-command-shell__output">
-                {commandOutput || t('agent.command.noOutput')}
-              </pre>
+              <div className="run-command-shell__output-region">
+                <pre
+                  className={[
+                    'run-command-shell__output',
+                    isPending ? 'run-command-shell__output--live' : ''
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onScroll={(event) => {
+                    const output = event.currentTarget
+                    keepLiveOutputPinnedRef.current =
+                      output.scrollHeight - output.scrollTop - output.clientHeight < 24
+                  }}
+                  ref={outputRef}
+                >
+                  {copyableOutput ||
+                    t(isPending ? 'agent.command.waitingForOutput' : 'agent.command.noOutput')}
+                </pre>
+                {copyableOutput && (
+                  <button
+                    aria-label={
+                      copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')
+                    }
+                    className="run-command-shell__copy"
+                    onClick={() => {
+                      void copyTextToClipboard(copyableOutput)
+                        .then(() => setCopied(true))
+                        .catch(() => setCopied(false))
+                    }}
+                    title={copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')}
+                    type="button"
+                  >
+                    {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                  </button>
+                )}
+              </div>
               <div
                 className="run-command-shell__status"
-                data-status={commandFailed ? 'failed' : 'succeeded'}
+                data-status={isPending ? 'running' : commandFailed ? 'failed' : 'succeeded'}
+                aria-live="polite"
               >
-                <span aria-hidden="true">{commandFailed ? '×' : '✓'}</span>
-                <span>{getCommandStatus(commandResult, result?.ok, t)}</span>
+                <span aria-hidden="true">{isPending ? '•' : commandFailed ? '×' : '✓'}</span>
+                <span>
+                  {isPending
+                    ? t('agent.command.runningStatus')
+                    : getCommandStatus(commandResult, result?.ok, t)}
+                </span>
               </div>
             </div>
           ) : (
@@ -247,6 +313,7 @@ export function RunCommandToolActivityGroup({ items }: RunCommandToolActivityGro
       <RunCommandToolActivity
         cancelled={item.cancelled}
         call={item.call}
+        liveOutput={item.liveOutput}
         result={item.result}
         settledStatus={item.settledStatus}
       />
@@ -269,6 +336,7 @@ export function RunCommandToolActivityGroup({ items }: RunCommandToolActivityGro
             cancelled={item.cancelled}
             call={item.call}
             key={item.call.id}
+            liveOutput={item.liveOutput}
             result={item.result}
             settledStatus={item.settledStatus}
           />

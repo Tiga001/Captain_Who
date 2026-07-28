@@ -14,6 +14,8 @@ import type {
 import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
+  ChatCommandOutputChunk,
+  ChatCommandOutputPreview,
   ChatFileWritePreview,
   ChatGuidanceTimelineItem,
   ChatMessage,
@@ -34,6 +36,8 @@ import {
   upsertWebSearchActivityFromResult
 } from '../features/chat/agentWebSearch'
 import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
+
+const MAX_LIVE_COMMAND_OUTPUT_CHARS = 256 * 1024
 
 function createAgentRun(
   runId: string | null,
@@ -145,6 +149,40 @@ function upsertById<T>(items: T[], nextItem: T, getId: (item: T) => string) {
   }
 
   return items.map((item, index) => (index === itemIndex ? nextItem : item))
+}
+
+function appendCommandOutputChunk(
+  callId: string,
+  existing: ChatCommandOutputPreview | undefined,
+  chunk: ChatCommandOutputChunk
+): ChatCommandOutputPreview {
+  if (
+    !chunk.output ||
+    existing?.chunks.some((candidate) => candidate.sequence === chunk.sequence)
+  ) {
+    return existing ?? { callId, chunks: [] }
+  }
+
+  let chunks = [...(existing?.chunks ?? []), chunk].sort(
+    (left, right) => left.sequence - right.sequence
+  )
+  let excess = chunks.reduce((total, candidate) => total + candidate.output.length, 0)
+  excess = Math.max(0, excess - MAX_LIVE_COMMAND_OUTPUT_CHARS)
+
+  if (excess > 0) {
+    chunks = chunks.flatMap((candidate) => {
+      if (excess <= 0) return [candidate]
+      if (candidate.output.length <= excess) {
+        excess -= candidate.output.length
+        return []
+      }
+      const output = candidate.output.slice(excess)
+      excess = 0
+      return [{ ...candidate, output }]
+    })
+  }
+
+  return { callId, chunks }
 }
 
 function upsertFileWritePreview(
@@ -1170,29 +1208,35 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'tool_result') {
+    const nextRun: ChatAgentRunView = {
+      ...currentRun,
+      status: 'running',
+      toolResults: upsertById(currentRun.toolResults, agentEvent.result, (result) => result.callId),
+      webSearchActivities: upsertWebSearchActivityFromResult(currentRun, agentEvent.result),
+      readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
+      fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),
+      fileWritePreviews:
+        agentEvent.result.tool === 'write_file' && !agentEvent.result.ok
+          ? (currentRun.fileWritePreviews ?? []).filter(
+              (preview) =>
+                preview.toolCallId !== undefined && preview.toolCallId !== agentEvent.result.callId
+            )
+          : (currentRun.fileWritePreviews ?? [])
+    }
+    if (currentRun.commandOutputPreviews?.[agentEvent.result.callId]) {
+      const commandOutputPreviews = { ...currentRun.commandOutputPreviews }
+      delete commandOutputPreviews[agentEvent.result.callId]
+      if (Object.keys(commandOutputPreviews).length > 0) {
+        nextRun.commandOutputPreviews = commandOutputPreviews
+      } else {
+        delete nextRun.commandOutputPreviews
+      }
+    }
+
     return {
       ...message,
       status: 'pending',
-      agentRun: {
-        ...currentRun,
-        status: 'running',
-        toolResults: upsertById(
-          currentRun.toolResults,
-          agentEvent.result,
-          (result) => result.callId
-        ),
-        webSearchActivities: upsertWebSearchActivityFromResult(currentRun, agentEvent.result),
-        readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
-        fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),
-        fileWritePreviews:
-          agentEvent.result.tool === 'write_file' && !agentEvent.result.ok
-            ? (currentRun.fileWritePreviews ?? []).filter(
-                (preview) =>
-                  preview.toolCallId !== undefined &&
-                  preview.toolCallId !== agentEvent.result.callId
-              )
-            : (currentRun.fileWritePreviews ?? [])
-      }
+      agentRun: nextRun
     }
   }
 
@@ -1291,7 +1335,30 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'command_output') {
-    return message
+    if (!agentEvent.output || (currentRun.runId && currentRun.runId !== agentEvent.runId)) {
+      return message
+    }
+
+    const existing = currentRun.commandOutputPreviews?.[agentEvent.callId]
+    const nextPreview = appendCommandOutputChunk(agentEvent.callId, existing, {
+      sequence: agentEvent.sequence,
+      stream: agentEvent.stream,
+      output: agentEvent.output
+    })
+    if (nextPreview === existing) return message
+
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        commandOutputPreviews: {
+          ...(currentRun.commandOutputPreviews ?? {}),
+          [agentEvent.callId]: nextPreview
+        }
+      }
+    }
   }
 
   if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {

@@ -63,6 +63,7 @@ pub(super) struct AutoApprovedActionContext {
     conversation_id: Option<String>,
     assistant_message_id: Option<String>,
     skill_resources: Option<Arc<SkillResourceSession>>,
+    notifications: Option<CoreServerNotificationSender>,
 }
 
 impl AutoApprovedActionContext {
@@ -79,8 +80,46 @@ impl AutoApprovedActionContext {
             conversation_id,
             assistant_message_id,
             skill_resources,
+            notifications: None,
         }
     }
+
+    pub(super) fn with_notifications(
+        mut self,
+        notifications: CoreServerNotificationSender,
+    ) -> Self {
+        self.notifications = Some(notifications);
+        self
+    }
+}
+
+/// Bridges bounded process preview chunks to Renderer events without coupling command success to
+/// the UI channel. The authoritative result remains the final paired ToolResult.
+pub(super) fn command_output_observer(
+    run_id: &str,
+    call_id: &str,
+    notifications: &CoreServerNotificationSender,
+) -> ProcessOutputObserver {
+    let run_id = run_id.to_string();
+    let call_id = call_id.to_string();
+    let notifications = notifications.clone();
+    let sequence = Arc::new(Mutex::new(0_u64));
+    Arc::new(move |stream, output| {
+        if output.is_empty() {
+            return;
+        }
+        // Keep sequence assignment and enqueue atomic across stdout/stderr reader threads so the
+        // receiver sees the same total order encoded in the event.
+        let mut next_sequence = sequence.lock().unwrap_or_else(|error| error.into_inner());
+        *next_sequence = next_sequence.saturating_add(1);
+        let _ = notifications.send(agent_event_notification(AgentEvent::CommandOutput {
+            run_id: run_id.clone(),
+            call_id: call_id.clone(),
+            sequence: *next_sequence,
+            stream,
+            output,
+        }));
+    })
 }
 
 fn proposed_action_failure_result(
@@ -891,6 +930,7 @@ impl AgentService {
         conversation_id: Option<String>,
         assistant_message_id: Option<String>,
         skill_resources: Option<Arc<SkillResourceSession>>,
+        notifications: CoreServerNotificationSender,
     ) -> AgentHostActionExecutor {
         let service = self.clone();
         let context = AutoApprovedActionContext::new(
@@ -899,7 +939,8 @@ impl AgentService {
             conversation_id,
             assistant_message_id,
             skill_resources,
-        );
+        )
+        .with_notifications(notifications);
         Arc::new(move |action, cancellation_token| {
             let mut refreshed = context.clone();
             service
@@ -1129,6 +1170,7 @@ impl AgentService {
             conversation_id,
             assistant_message_id,
             skill_resources,
+            notifications,
         } = context;
         cancellation_token.check()?;
         if self.is_agent_input_scope_deleting(&agent_input) {
@@ -1394,27 +1436,32 @@ impl AgentService {
                     Arc::clone(&self.storage),
                 );
                 file_effect_guard.mark_effects_started();
-                let command_result = run_authorized_command_with_artifact_runtime_and_inputs(
-                    workspace_root.as_deref(),
-                    &command,
-                    permissions,
-                    CommandAuthorizationSource::Automatic,
-                    cancellation_token.clone(),
-                    None,
-                    self.artifact_runtime.as_deref(),
-                    Some(&file_input_context),
-                )
-                .unwrap_or_else(|error| {
-                    let policy_evaluation = error.policy_evaluation().cloned();
-                    let artifact_observation = error.artifact_observation().cloned();
-                    let mut result = failed_command_result(
-                        &command_for_error,
-                        error.to_string(),
-                        policy_evaluation,
-                    );
-                    result.artifact_observation = artifact_observation;
-                    result
+                let output_observer = notifications.as_ref().map(|notifications| {
+                    command_output_observer(&run_id, &command.id, notifications)
                 });
+                let command_result =
+                    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
+                        workspace_root.as_deref(),
+                        &command,
+                        permissions,
+                        CommandAuthorizationSource::Automatic,
+                        cancellation_token.clone(),
+                        None,
+                        self.artifact_runtime.as_deref(),
+                        Some(&file_input_context),
+                        output_observer,
+                    )
+                    .unwrap_or_else(|error| {
+                        let policy_evaluation = error.policy_evaluation().cloned();
+                        let artifact_observation = error.artifact_observation().cloned();
+                        let mut result = failed_command_result(
+                            &command_for_error,
+                            error.to_string(),
+                            policy_evaluation,
+                        );
+                        result.artifact_observation = artifact_observation;
+                        result
+                    });
                 let command_succeeded = command_result.error.is_none()
                     && !command_result.timed_out
                     && !command_result.cancelled
@@ -2696,6 +2743,7 @@ impl AgentService {
             skill_resources,
             Arc::clone(&self.storage),
         );
+        let output_observer = command_output_observer(&run_id, &command.id, &notifications);
         file_effect_guard.mark_effects_started();
         let mut command_result = match tokio::task::spawn_blocking(move || {
             let _guard = guard;
@@ -2703,12 +2751,13 @@ impl AgentService {
             // command. The executor short-circuits before spawning a process, while still
             // producing the frozen runtime and artifact-observation evidence expected by the
             // durable command-result contract.
-            run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
+            run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
                 &execution_record,
                 cancellation_token,
                 Some(cancel_flag),
                 artifact_runtime.as_deref(),
                 Some(&file_input_context),
+                Some(output_observer),
             )
         })
         .await
@@ -3271,6 +3320,7 @@ impl AgentService {
             record.snapshot.conversation_id.clone(),
             record.snapshot.assistant_message_id.clone(),
             skill_resources.clone(),
+            notifications.clone(),
         );
         let trace_conversation_id = record
             .snapshot
@@ -3623,6 +3673,7 @@ pub(super) fn run_explicitly_approved_command_from_snapshot(
     )
 }
 
+#[cfg(test)]
 pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
     record: &PendingActionRecord,
     cancellation_token: AgentCancellationToken,
@@ -3630,11 +3681,29 @@ pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtim
     artifact_runtime: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeProvider>,
     file_inputs: Option<&AgentFileInputExecutionContext>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
+        record,
+        cancellation_token,
+        action_cancel_flag,
+        artifact_runtime,
+        file_inputs,
+        None,
+    )
+}
+
+pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
+    record: &PendingActionRecord,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    artifact_runtime: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeProvider>,
+    file_inputs: Option<&AgentFileInputExecutionContext>,
+    output_observer: Option<ProcessOutputObserver>,
+) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
     let AgentProposedAction::Command { command } = &record.snapshot.action else {
         return Err("待审批操作不包含可执行命令。".to_string().into());
     };
     let workspace_root = workspace_root_optional(&record.agent_input);
-    run_authorized_command_with_artifact_runtime_and_inputs(
+    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
         workspace_root.as_deref(),
         command,
         permissions_from_input(&record.agent_input),
@@ -3643,6 +3712,7 @@ pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtim
         action_cancel_flag,
         artifact_runtime,
         file_inputs,
+        output_observer,
     )
 }
 

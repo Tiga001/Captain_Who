@@ -8,11 +8,32 @@ pub fn run_authorized_command(
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    run_authorized_command_with_output_observer(
+        workspace_root,
+        request,
+        permissions,
+        authorization_source,
+        cancellation_token,
+        action_cancel_flag,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_authorized_command_with_output_observer(
+    workspace_root: Option<&Path>,
+    request: &AgentCommandRequest,
+    permissions: AgentPermissions,
+    authorization_source: CommandAuthorizationSource,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    output_observer: Option<ProcessOutputObserver>,
+) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
     if request.runtime.is_some() || request.runtime_binding.is_some() || !request.inputs.is_empty()
     {
         // A host-bound runtime or file input must never be interpreted as an ordinary PATH/shell
         // command by a compatibility caller that has not supplied the managed provider.
-        return run_authorized_command_with_artifact_runtime(
+        return run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
             workspace_root,
             request,
             permissions,
@@ -20,6 +41,8 @@ pub fn run_authorized_command(
             cancellation_token,
             action_cancel_flag,
             None,
+            None,
+            output_observer,
         );
     }
     let root = workspace_root
@@ -54,12 +77,13 @@ pub fn run_authorized_command(
             Some(&observation_cancellation),
         )
     });
-    let execution = run_shell_command(
+    let execution = run_shell_command_with_output_observer(
         &cwd,
         root.as_deref(),
         request,
         cancellation_token,
         action_cancel_flag,
+        output_observer,
     );
     let artifact_observation = observer.as_ref().zip(before).map(|(observer, before)| {
         // The process may have failed, timed out, or been cancelled after producing a file.
@@ -182,12 +206,31 @@ pub(super) fn clean_relative_path(path: &str) -> Result<PathBuf, String> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn run_shell_command(
     cwd: &Path,
     root: Option<&Path>,
     request: &AgentCommandRequest,
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<AgentCommandExecutionResult, String> {
+    run_shell_command_with_output_observer(
+        cwd,
+        root,
+        request,
+        cancellation_token,
+        action_cancel_flag,
+        None,
+    )
+}
+
+pub(super) fn run_shell_command_with_output_observer(
+    cwd: &Path,
+    root: Option<&Path>,
+    request: &AgentCommandRequest,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    output_observer: Option<ProcessOutputObserver>,
 ) -> Result<AgentCommandExecutionResult, String> {
     // An approval can be cancelled after the backend registers the frozen action but before its
     // worker reaches this blocking executor. Consume that intent before spawning a process so a
@@ -232,21 +275,25 @@ pub(super) fn run_shell_command(
         .map_err(|error| format!("启动命令失败：{error}"))?;
     let capture_policy = ProcessOutputCapturePolicy::process_default();
     let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
-    let stdout_reader = spawn_process_output_capture(
+    let stdout_reader = spawn_process_output_capture_with_observer(
         child
             .stdout
             .take()
             .ok_or_else(|| "无法读取命令 stdout。".to_string())?,
         capture_budget.clone(),
         capture_policy,
+        Some(AgentCommandOutputStream::Stdout),
+        output_observer.clone(),
     );
-    let stderr_reader = spawn_process_output_capture(
+    let stderr_reader = spawn_process_output_capture_with_observer(
         child
             .stderr
             .take()
             .ok_or_else(|| "无法读取命令 stderr。".to_string())?,
         capture_budget,
         capture_policy,
+        Some(AgentCommandOutputStream::Stderr),
+        output_observer,
     );
 
     let deadline = Duration::from_millis(timeout_ms);

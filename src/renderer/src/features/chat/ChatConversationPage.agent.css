@@ -649,9 +649,69 @@
   margin: 0;
 }
 
+.agent-activity__details .run-command-shell pre.run-command-shell__command {
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.run-command-shell__output-region {
+  position: relative;
+  min-width: 0;
+}
+
 .run-command-shell__output {
+  width: 100%;
+  box-sizing: border-box;
   margin: 0;
   color: var(--mc-color-text-muted) !important;
+}
+
+.agent-activity__details .run-command-shell pre.run-command-shell__output {
+  max-height: 260px;
+  padding-right: 40px;
+  overflow-x: auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.run-command-shell__copy {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 6px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-hover);
+  border: 0;
+  border-radius: var(--mc-radius-md);
+  cursor: pointer;
+  place-items: center;
+}
+
+.run-command-shell__copy:hover {
+  color: var(--mc-color-text-muted);
+  background: color-mix(in srgb, var(--mc-color-surface-muted) 92%, transparent);
+}
+
+.run-command-shell__copy:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.run-command-shell__copy svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  stroke-width: var(--mc-icon-stroke-medium);
 }
 
 .todo-update-activity__details {
@@ -737,6 +797,23 @@
 
 .run-command-shell__status[data-status='failed'] {
   color: var(--mc-color-text-danger);
+}
+
+.run-command-shell__status[data-status='running'] > :first-child {
+  color: var(--mc-color-text-accent);
+  animation: mc-command-output-pulse 1s ease-in-out infinite;
+}
+
+@keyframes mc-command-output-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .run-command-shell__status[data-status='running'] > :first-child {
+    animation: none;
+  }
 }
 
 .apply-patch-activity__details {

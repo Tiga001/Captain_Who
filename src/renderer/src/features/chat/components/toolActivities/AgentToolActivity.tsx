@@ -117,6 +117,7 @@ export function AgentToolActivity({
       <RunCommandToolActivity
         cancelled={cancelled && !result}
         call={call}
+        liveOutput={run.commandOutputPreviews?.[call.id]}
         result={result}
         settledStatus={settledStatus}
       />
