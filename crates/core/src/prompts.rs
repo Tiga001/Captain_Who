@@ -158,8 +158,11 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     if has_tool(tool_definitions, "read_image") {
         rules.push("- read_image 只需要一个 path。查看附件时把 attachments_list 返回的 readPath 原样放进 path；查看生成图片时把 image_generation 返回的 path 原样放进 path；工作区或绝对图片直接使用其路径。不要自行拼 source 对象、URI、附件 ID 或内部文件位置。".to_string());
         if has_tool(tool_definitions, "image_generation") {
-            rules.push("- image_generation 成功结果中的 path 可直接交给 read_image。用户要求检查刚生成的图片时应读取这个 path，不要重新生成，也不要到附件库中寻找生成物。visualInputDelivery 只描述生成发生时的视觉投递，不能证明后续请求仍携带图片像素。".to_string());
+            rules.push("- image_generation 成功结果中的 path 可直接交给 read_image.path，也可原样交给后续 image_generation 编辑的 inputPath。用户要求检查刚生成的图片时应读取这个 path，不要重新生成，也不要到附件库中寻找生成物。visualInputDelivery 只描述生成发生时的视觉投递，不能证明后续请求仍携带图片像素。".to_string());
         }
+    }
+    if has_tool(tool_definitions, "run_command") {
+        rules.push("- run_command.inputs 中每个文件只填写 path；需要脚本内固定名称时再填写可选 mountPath。不要构造 source 类型对象，Host 会自动识别 workspace、绝对路径、附件、生成物和 Skill 资源并冻结内容身份。".to_string());
     }
     if has_tool(tool_definitions, "workspace_map") {
         rules.push("- 用户询问项目结构、技术栈、入口或整体架构时，先用 workspace_map 建立有边界的概览，再通过 search_files、search_code 或 read_* 深入。".to_string());
@@ -435,6 +438,7 @@ mod tests {
 
         assert!(prompt.contains("read_image 只需要一个 path"));
         assert!(prompt.contains("image_generation 成功结果中的 path 可直接交给 read_image"));
+        assert!(prompt.contains("后续 image_generation 编辑的 inputPath"));
         assert!(prompt.contains("不要重新生成"));
         assert!(prompt.contains("不要到附件库中寻找生成物"));
         assert!(prompt.contains("只描述生成发生时的视觉投递"));

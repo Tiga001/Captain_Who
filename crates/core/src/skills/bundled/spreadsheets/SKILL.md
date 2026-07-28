@@ -24,14 +24,11 @@ Bind source workbooks, CSVs, images, attachments, and earlier generated files th
 ```json
 {
   "mountPath": "source/template.xlsx",
-  "source": {
-    "type": "workspace",
-    "path": "inputs/template.xlsx"
-  }
+  "path": "inputs/template.xlsx"
 }
 ```
 
-Use the exact attachment `readPath` returned by `attachments_list`. Use `type="workspace"`, `external`, `generated_artifact`, or `skill_resource` for those corresponding sources. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
+Use the exact path returned by the producing tool or supplied by the user. The Host automatically recognizes workspace, absolute/system, `@attachments/...`, `image-artifact://...`, and revision-bound `skill://...` paths. `mountPath` is optional and defaults to the source filename. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
 
 Every Builder command must declare its generated workbook with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
 

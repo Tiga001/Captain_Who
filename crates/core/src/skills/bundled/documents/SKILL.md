@@ -24,14 +24,11 @@ Bind every non-workspace input through `run_command.inputs`:
 ```json
 {
   "mountPath": "images/campus.jpg",
-  "source": {
-    "type": "attachment",
-    "readPath": "@attachments/<attachment-id>/campus.jpg"
-  }
+  "path": "@attachments/<attachment-id>/campus.jpg"
 }
 ```
 
-Use the exact attachment `readPath` returned by `attachments_list`. Use `type="workspace"`, `external`, `generated_artifact`, or `skill_resource` for those corresponding sources. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
+Use the exact path returned by the producing tool or supplied by the user. The Host automatically recognizes workspace, absolute/system, `@attachments/...`, `image-artifact://...`, and revision-bound `skill://...` paths. `mountPath` is optional and defaults to the source filename. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
 
 Every Builder command must declare its generated document with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
 

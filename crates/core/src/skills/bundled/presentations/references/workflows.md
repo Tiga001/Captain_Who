@@ -41,9 +41,9 @@ Keep `operation`, its semantic fields, and `reason` at the root. Never add a `re
 provider arguments, an executable, slide DOM paths, or shell flags. `reason` is required,
 user-visible audit text only; it never grants permission.
 
-Image, template, data, and deck inputs use the shared `AgentFileInputRef` object rather than
-guessed paths. For an attachment, call `attachments_list` and copy its exact `readPath`. For an
-earlier generated image, use a `generated_artifact` reference. If the backend returns
+Image, template, data, and deck inputs use one path string. For an attachment, call
+`attachments_list` and copy its exact `readPath`; for a generated image, copy its exact
+`image-artifact://...` path. If the backend returns
 `office.capability_not_supported`, `capabilityNotSupported`, or
 `recovery=useManagedScript`, preserve the error and switch to the Builder path. Do not repeat the
 same failed call with invented fields.
@@ -65,10 +65,7 @@ Add a slide, then place a registered image with explicit presentation geometry:
 {
   "operation": "insertImage",
   "filePath": "outputs/product-intro.pptx",
-  "source": {
-    "type": "attachment",
-    "readPath": "@attachments/<attachment-id>/hero.png"
-  },
+  "imagePath": "@attachments/<attachment-id>/hero.png",
   "slideNumber": 2,
   "x": "7in",
   "y": "1.6in",
@@ -125,26 +122,18 @@ Every input needed by a Builder must be explicit in `run_command.inputs`:
   "inputs": [
     {
       "mountPath": "media/hero.png",
-      "source": {
-        "type": "generated_artifact",
-        "uri": "image-artifact://sha256/<exact-digest>",
-        "path": "/absolute/saved/path/to/hero.png"
-      }
+      "path": "image-artifact://sha256/<exact-digest>"
     }
   ],
   "reason": "Build the presentation and track its output"
 }
 ```
 
-Supported source types are:
+Supported paths are workspace-relative paths, authorized absolute/system paths, exact attachment
+`readPath` values, exact generated `image-artifact://...` paths, and exact revision-bound
+`skill://...` URIs. The Host resolves the internal source type.
 
-- `attachment`: exact registered `readPath`.
-- `workspace`: workspace file `path`.
-- `external`: authorized external file `path`.
-- `generated_artifact`: exact image Artifact `uri` plus the exact absolute `savedPath` as `path`.
-- `skill_resource`: exact revision-bound `uri`.
-
-`mountPath` is a private input-root-relative filename. The Host freezes and revalidates the input,
+`mountPath` is an optional private input-root-relative filename and defaults to the source filename. The Host freezes and revalidates the input,
 then exposes the run-scoped root in `MYCOPILOT_INPUT_ROOT`. The Builder resolves
 `MYCOPILOT_INPUT_ROOT / mountPath`. Never let Python or Node.js open `@attachments`, `skill://`, an
 attachment library path, or another private storage path directly.

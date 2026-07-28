@@ -681,7 +681,7 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 7);
+            assert_eq!(capability["contractVersion"], 8);
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
@@ -704,9 +704,9 @@ mod tests {
             assert_eq!(render_output["resultField"], "outputs");
             assert_eq!(render_output["role"], "render");
             assert_eq!(render_output["kind"], "image");
-            assert_eq!(render_output["sourceField"], "source");
+            assert_eq!(render_output["pathField"], "readPath");
             assert_eq!(render_output["consumerTool"], "read_image");
-            assert_eq!(render_output["consumerField"], "source");
+            assert_eq!(render_output["consumerField"], "path");
             assert_eq!(render_output["readabilityField"], "readableByAgent");
             assert_eq!(render_output["sizeField"], "sizeBytes");
             assert_eq!(render_output["selectionField"], "pageSelection");
@@ -741,16 +741,16 @@ mod tests {
             assert!(script.get("requiredPackagesField").is_none());
             assert_eq!(script["inputs"]["field"], "inputs");
             assert_eq!(script["inputs"]["mountPathField"], "mountPath");
-            assert_eq!(script["inputs"]["sourceField"], "source");
+            assert_eq!(script["inputs"]["pathField"], "path");
             assert_eq!(script["inputs"]["rootEnvironment"], "MYCOPILOT_INPUT_ROOT");
             assert_eq!(
-                script["inputs"]["sourceTypes"],
+                script["inputs"]["pathKinds"],
                 serde_json::json!([
-                    "attachment",
                     "workspace",
-                    "external",
-                    "generated_artifact",
-                    "skill_resource"
+                    "absolute_or_system",
+                    "attachment_read_path",
+                    "generated_artifact_uri",
+                    "revision_bound_skill_uri"
                 ])
             );
             assert_eq!(script["observation"]["requiredFromModel"], false);

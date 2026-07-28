@@ -1,7 +1,4 @@
-use super::{
-    schema::agent_file_input_ref_schema, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
-    ToolExecutionContext,
-};
+use super::{AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess, ToolExecutionContext};
 use crate::office::{
     compile_office_semantic_request, OfficeChartKind, OfficeChartSeries,
     OfficeConditionalFormatKind, OfficeCreateIntent, OfficeDocumentBlockIntent,
@@ -26,7 +23,13 @@ use crate::protocol::{
     AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentWritePermission,
     AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
 };
-use crate::{file_input::AgentFileInputExecutionContext, AgentFileInputRef};
+use crate::{
+    file_input::{
+        agent_file_input_ref_from_model_path, agent_file_input_ref_matches_model_path,
+        AgentFileInputExecutionContext,
+    },
+    AgentFileInputRef,
+};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -247,7 +250,7 @@ impl OfficeTool {
 
     fn execute(&self, context: &ToolExecutionContext, value: Value) -> AgentResult<Value> {
         context.check_cancelled()?;
-        let args = parse_args(value, self.tool_name())?;
+        let args = parse_args_with_context(context, value, self.tool_name())?;
         if args.is_status() {
             args.validate_status_call(self.tool_name())?;
             return serde_json::to_value(self.engine.status(context.cancellation_token())).map_err(
@@ -288,7 +291,7 @@ impl OfficeTool {
         call: &AgentToolCall,
     ) -> AgentResult<AgentProposedAction> {
         context.check_cancelled()?;
-        let args = parse_args(call.args.clone(), self.tool_name())?;
+        let args = parse_args_with_context(context, call.args.clone(), self.tool_name())?;
         if args.is_status() {
             args.validate_status_call(self.tool_name())?;
             return Err(AgentError::new(
@@ -350,7 +353,13 @@ impl OfficeTool {
     }
 
     fn requires_approval_for_call(&self, value: &Value) -> bool {
-        let Ok(args) = parse_args(value.clone(), self.tool_name()) else {
+        let Ok(args) =
+            parse_args_with_model_path_resolver(value.clone(), self.tool_name(), |path| {
+                Ok(AgentFileInputRef::Workspace {
+                    path: path.trim().to_string(),
+                })
+            })
+        else {
             return true;
         };
         if args.is_status() {
@@ -1506,7 +1515,35 @@ impl OfficeToolArgs {
     }
 }
 
+#[cfg(test)]
 fn parse_args(value: Value, tool_name: &str) -> AgentResult<OfficeToolArgs> {
+    parse_args_with_model_path_resolver(value, tool_name, |_| {
+        Err(AgentError::new(
+            "Office insertImage.imagePath requires a live file-input context.",
+        ))
+    })
+}
+
+fn parse_args_with_context(
+    context: &ToolExecutionContext,
+    value: Value,
+    tool_name: &str,
+) -> AgentResult<OfficeToolArgs> {
+    let file_inputs = AgentFileInputExecutionContext::new(
+        context.attachment_library().cloned(),
+        context.skill_resources_optional(),
+    )
+    .with_storage(context.storage_optional());
+    parse_args_with_model_path_resolver(value, tool_name, |path| {
+        agent_file_input_ref_from_model_path(&file_inputs, path).map_err(AgentError::from)
+    })
+}
+
+fn parse_args_with_model_path_resolver(
+    value: Value,
+    tool_name: &str,
+    resolve_model_path: impl Fn(&str) -> AgentResult<AgentFileInputRef>,
+) -> AgentResult<OfficeToolArgs> {
     let object = value
         .as_object()
         .ok_or_else(|| AgentError::new(format!("{tool_name} parameters must be a JSON object.")))?;
@@ -1562,6 +1599,7 @@ fn parse_args(value: Value, tool_name: &str) -> AgentResult<OfficeToolArgs> {
         .as_object_mut()
         .expect("validated object")
         .remove("reason");
+    normalize_office_image_path(&mut semantic_value, tool_name, resolve_model_path)?;
     let parsed: OfficeSemanticOperationWire =
         serde_json::from_value(semantic_value).map_err(|error| {
             AgentError::structured(
@@ -1579,6 +1617,46 @@ fn parse_args(value: Value, tool_name: &str) -> AgentResult<OfficeToolArgs> {
         .into_parsed(document_kind)
         .map_err(map_semantic_error)?;
     Ok(OfficeToolArgs { request, reason })
+}
+
+fn normalize_office_image_path(
+    value: &mut Value,
+    tool_name: &str,
+    resolve_model_path: impl Fn(&str) -> AgentResult<AgentFileInputRef>,
+) -> AgentResult<()> {
+    let object = value.as_object_mut().expect("validated Office object");
+    let is_insert_image =
+        object
+            .get("operation")
+            .and_then(Value::as_str)
+            .is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "insertImage" | "insert_image" | "addImage" | "add_image"
+                )
+            });
+    if !is_insert_image {
+        return Ok(());
+    }
+    let image_path = object.remove("imagePath");
+    if image_path.is_some() && object.contains_key("source") {
+        return Err(AgentError::new(format!(
+            "{tool_name}.imagePath cannot be combined with the legacy source field."
+        )));
+    }
+    let Some(image_path) = image_path else {
+        return Ok(());
+    };
+    let image_path = image_path
+        .as_str()
+        .ok_or_else(|| AgentError::new(format!("{tool_name}.imagePath must be a path string.")))?;
+    let source = resolve_model_path(image_path)?;
+    object.insert(
+        "source".to_string(),
+        serde_json::to_value(source)
+            .map_err(|error| AgentError::new(format!("cannot bind Office image path: {error}")))?,
+    );
+    Ok(())
 }
 
 fn document_kind_for_tool_name(tool_name: &str) -> AgentResult<OfficeDocumentKind> {
@@ -1626,8 +1704,24 @@ pub(crate) fn validate_frozen_office_trace_args(
         OfficeDocumentKind::Spreadsheet => "office_spreadsheet",
         OfficeDocumentKind::Presentation => "office_presentation",
     };
-    let args = parse_args(operation.clone(), tool_name)
-        .map_err(|_| format!("{tool_name} frozen ToolCall arguments are invalid"))?;
+    let frozen_source = frozen
+        .prepared
+        .request
+        .inputs
+        .first()
+        .map(|input| &input.source);
+    let args = parse_args_with_model_path_resolver(operation.clone(), tool_name, |path| {
+        let source = frozen_source.ok_or_else(|| {
+            AgentError::new("The frozen Office request has no matching image input.")
+        })?;
+        if !agent_file_input_ref_matches_model_path(source, path).map_err(AgentError::from)? {
+            return Err(AgentError::new(
+                "Office imagePath differs from the frozen image input.",
+            ));
+        }
+        Ok(source.clone())
+    })
+    .map_err(|_| format!("{tool_name} frozen ToolCall arguments are invalid"))?;
     let reason = args.reason.clone();
     let request = args
         .into_request()
@@ -1743,7 +1837,14 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
         }),
     );
     properties.insert("style".to_string(), semantic_style_schema());
-    properties.insert("source".to_string(), agent_file_input_ref_schema());
+    properties.insert(
+        "imagePath".to_string(),
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "description": "insertImage only. Pass one workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI. The Host resolves authority and mounts the verified bytes automatically.",
+        }),
+    );
     properties.insert(
         "altText".to_string(),
         json!({
@@ -2607,6 +2708,8 @@ mod tests {
             for field in ["operation", "reason", "filePath", "outputPath", "timeoutMs"] {
                 assert!(schema["properties"].get(field).is_some(), "missing {field}");
             }
+            assert!(schema["properties"]["imagePath"].is_object());
+            assert!(schema["properties"].get("source").is_none());
         }
     }
 
@@ -2775,12 +2878,25 @@ mod tests {
 
     #[test]
     fn semantic_image_input_compiles_without_model_visible_provider_tokens() {
-        let request = parse_args(
+        let fixture = tempdir().unwrap();
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(fixture.path().to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        }));
+        let request = parse_args_with_context(
+            &context,
             json!({
                 "operation": "insertImage",
                 "filePath": "deck.pptx",
                 "slideNumber": 1,
-                "source": { "type": "workspace", "path": "assets/hero.png" },
+                "imagePath": "assets/hero.png",
                 "x": "1in",
                 "y": "1in",
                 "width": "12cm",
@@ -2854,6 +2970,57 @@ mod tests {
                 format!("__mycopilot_agent_input__/{}", request.inputs[0].mount_path)
             );
         }
+    }
+
+    #[test]
+    fn model_image_path_survives_frozen_approval_validation() {
+        let fixture = tempdir().unwrap();
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(fixture.path().to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                ..AgentPermissions::default()
+            },
+        }));
+        let tool = OfficeTool::new(
+            OfficeDocumentKind::Presentation,
+            Arc::new(PreparingOfficeEngine),
+        );
+        let call = AgentToolCall {
+            id: "office-image-path".to_string(),
+            tool: "office_presentation".to_string(),
+            args: json!({
+                "operation": "insertImage",
+                "filePath": "deck.pptx",
+                "imagePath": "assets/hero.png",
+                "slideNumber": 1,
+                "x": "1in",
+                "y": "1in",
+                "width": "6in",
+                "height": "3in",
+                "reason": "Insert the hero image"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let AgentProposedAction::OfficeOperation { office_operation } =
+            tool.proposed_action(&context, &call).unwrap()
+        else {
+            panic!("insertImage must create an Office approval action");
+        };
+
+        validate_frozen_office_trace_args(&office_operation, &call.args).unwrap();
+        let mut changed = call.args;
+        changed["imagePath"] = json!("assets/other.png");
+        assert!(validate_frozen_office_trace_args(&office_operation, &changed).is_err());
     }
 
     #[test]

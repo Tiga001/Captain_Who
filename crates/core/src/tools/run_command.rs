@@ -1,6 +1,4 @@
-use super::{
-    clean_relative_path, schema::agent_file_input_ref_schema, AgentTool, ToolExecutionContext,
-};
+use super::{clean_relative_path, AgentTool, ToolExecutionContext};
 use crate::command::{
     classify_command_risk, infer_managed_artifact_builder_command,
     infer_managed_artifact_command_kind, validate_command_runtime_binding,
@@ -9,8 +7,10 @@ use crate::command::{
     MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
 };
 use crate::file_input::{
-    normalize_agent_file_input_specs, prepare_agent_file_input_bindings,
-    AgentFileInputExecutionContext, MAX_AGENT_FILE_INPUTS, MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
+    agent_file_input_ref_from_model_path, agent_file_input_ref_matches_model_path,
+    default_agent_file_input_mount_path, normalize_agent_file_input_specs,
+    prepare_agent_file_input_bindings, AgentFileInputExecutionContext, MAX_AGENT_FILE_INPUTS,
+    MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandArtifactObservationKind,
@@ -46,7 +46,7 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized attachments, workspace/external files, generated Artifacts, or activated Skill resources into a private read-only input root. The managed script reads MYCOPILOT_INPUT_ROOT plus each declared mountPath; it must never open @attachments or skill:// directly.".to_string(),
+            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -88,19 +88,23 @@ impl AgentTool for RunCommandTool {
                     "inputs": {
                         "type": "array",
                         "maxItems": MAX_AGENT_FILE_INPUTS,
-                        "description": "Optional read-only inputs for a managed Office Builder or explicit runtimeProfile command. The host freezes hash/size, revalidates after approval, and materializes each source below MYCOPILOT_INPUT_ROOT at mountPath. This field is unavailable for ordinary shell commands.",
+                        "description": "Optional read-only inputs for a managed Office Builder or explicit runtimeProfile command. Pass one path per file; the host resolves its authority, freezes hash/size, revalidates after approval, and materializes it below MYCOPILOT_INPUT_ROOT. This field is unavailable for ordinary shell commands.",
                         "items": {
                             "type": "object",
                             "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "A workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI."
+                                },
                                 "mountPath": {
                                     "type": "string",
                                     "minLength": 1,
                                     "maxLength": MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
-                                    "description": "Stable safe relative path beneath MYCOPILOT_INPUT_ROOT, for example images/campus.png."
-                                },
-                                "source": agent_file_input_ref_schema()
+                                    "description": "Optional stable safe relative path beneath MYCOPILOT_INPUT_ROOT. If omitted, the host uses the source filename."
+                                }
                             },
-                            "required": ["mountPath", "source"],
+                            "required": ["path"],
                             "additionalProperties": false
                         }
                     }
@@ -293,7 +297,21 @@ struct RunCommandArgs {
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
     #[serde(default)]
-    inputs: Vec<AgentFileInputSpec>,
+    inputs: Vec<RunCommandInputWire>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RunCommandInputWire {
+    ModelPath(RunCommandModelPathInput),
+    Legacy(AgentFileInputSpec),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RunCommandModelPathInput {
+    path: String,
+    mount_path: Option<String>,
 }
 
 fn command_request_from_call(
@@ -342,12 +360,13 @@ fn command_request_from_call(
         context.skill_resources_optional(),
     )
     .with_storage(context.storage_optional());
+    let input_specs = resolve_run_command_inputs(&input_context, args.inputs)?;
     let workspace_root = context.workspace_root_optional()?;
     let inputs = prepare_agent_file_input_bindings(
         workspace_root.as_deref(),
         context.permissions(),
         &input_context,
-        &args.inputs,
+        &input_specs,
         Some(&context.cancellation_token()),
     )
     .map_err(|error| {
@@ -379,6 +398,29 @@ fn command_request_from_call(
         runtime: None,
         runtime_binding: runtime_binding.map(Box::new),
     })
+}
+
+fn resolve_run_command_inputs(
+    context: &AgentFileInputExecutionContext,
+    inputs: Vec<RunCommandInputWire>,
+) -> AgentResult<Vec<AgentFileInputSpec>> {
+    inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| match input {
+            RunCommandInputWire::Legacy(spec) => Ok(spec),
+            RunCommandInputWire::ModelPath(input) => {
+                let source = agent_file_input_ref_from_model_path(context, &input.path)
+                    .map_err(AgentError::from)?;
+                Ok(AgentFileInputSpec {
+                    mount_path: input
+                        .mount_path
+                        .unwrap_or_else(|| default_agent_file_input_mount_path(&source, index)),
+                    source,
+                })
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -901,8 +943,6 @@ pub(crate) fn validate_frozen_command_trace_args(
         .map(sanitize_observe)
         .transpose()
         .map_err(|_| "run_command frozen ToolCall observe hint is invalid".to_string())?;
-    let inputs = normalize_agent_file_input_specs(&args.inputs)
-        .map_err(|_| "run_command frozen ToolCall inputs are invalid".to_string())?;
     let frozen_inputs = frozen
         .inputs
         .iter()
@@ -911,6 +951,7 @@ pub(crate) fn validate_frozen_command_trace_args(
             source: binding.source.clone(),
         })
         .collect::<Vec<_>>();
+    let inputs = normalize_frozen_run_command_inputs(args.inputs, &frozen_inputs)?;
     let mut expected_observe = explicit_observe.clone();
     let runtime_matches = match (&frozen.runtime_binding, &frozen.runtime) {
         (Some(binding), None) => {
@@ -977,9 +1018,44 @@ struct FrozenRunCommandArgs {
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
     #[serde(default)]
-    inputs: Vec<AgentFileInputSpec>,
+    inputs: Vec<RunCommandInputWire>,
     /// Legacy field accepted only while reconciling already-persisted pending actions.
     runtime: Option<AgentCommandRuntimeRequest>,
+}
+
+fn normalize_frozen_run_command_inputs(
+    inputs: Vec<RunCommandInputWire>,
+    frozen_inputs: &[AgentFileInputSpec],
+) -> Result<Vec<AgentFileInputSpec>, String> {
+    if inputs.len() != frozen_inputs.len() {
+        return Err("run_command frozen ToolCall inputs differ from prepared inputs".to_string());
+    }
+    let specs = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| match input {
+            RunCommandInputWire::Legacy(spec) => Ok(spec),
+            RunCommandInputWire::ModelPath(input) => {
+                let frozen = &frozen_inputs[index];
+                if !agent_file_input_ref_matches_model_path(&frozen.source, &input.path)
+                    .map_err(|_| "run_command frozen ToolCall input path is invalid".to_string())?
+                {
+                    return Err(
+                        "run_command frozen ToolCall input path differs from prepared input"
+                            .to_string(),
+                    );
+                }
+                Ok(AgentFileInputSpec {
+                    mount_path: input.mount_path.unwrap_or_else(|| {
+                        default_agent_file_input_mount_path(&frozen.source, index)
+                    }),
+                    source: frozen.source.clone(),
+                })
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    normalize_agent_file_input_specs(&specs)
+        .map_err(|_| "run_command frozen ToolCall inputs are invalid".to_string())
 }
 
 fn normalize_trace_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
@@ -1304,6 +1380,11 @@ mod tests {
         let properties = definition.input_schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("runtimeProfile"));
         assert!(!properties.contains_key("runtime"));
+        let input_item = &properties["inputs"]["items"];
+        assert_eq!(input_item["required"], json!(["path"]));
+        assert!(input_item["properties"]["path"].is_object());
+        assert!(input_item["properties"]["mountPath"].is_object());
+        assert!(input_item["properties"].get("source").is_none());
         let serialized = serde_json::to_string(&definition.input_schema).unwrap();
         for forbidden in [
             "requiredPackages",
@@ -1317,6 +1398,28 @@ mod tests {
                 "model schema leaked backend runtime authority: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn model_path_input_derives_a_private_mount_name_without_source_routing() {
+        let resolved = resolve_run_command_inputs(
+            &AgentFileInputExecutionContext::default(),
+            vec![RunCommandInputWire::ModelPath(RunCommandModelPathInput {
+                path: "assets/hero.png".to_string(),
+                mount_path: None,
+            })],
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved,
+            vec![AgentFileInputSpec {
+                mount_path: "hero.png".to_string(),
+                source: crate::protocol::AgentFileInputRef::Workspace {
+                    path: "assets/hero.png".to_string(),
+                },
+            }]
+        );
     }
 
     #[test]
@@ -1669,10 +1772,7 @@ mod tests {
                 "command": "python scripts/build.py --output report.docx",
                 "inputs": [{
                     "mountPath": "images/campus.png",
-                    "source": {
-                        "type": "attachment",
-                        "readPath": read_path
-                    }
+                    "path": read_path
                 }]
             }),
             approval_status: AgentApprovalStatus::Required,
@@ -1728,6 +1828,7 @@ mod tests {
             request.inputs[0].sha256,
             format!("{:x}", Sha256::digest(b"campus-image"))
         );
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
         let serialized = serde_json::to_string(&request).unwrap();
         assert!(!serialized.contains(root.to_string_lossy().as_ref()));
     }

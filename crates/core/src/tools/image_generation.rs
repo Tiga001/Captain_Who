@@ -3,6 +3,10 @@ use super::{
     ToolExecutionContext,
 };
 use crate::conversation_trace::canonical_tool_result_for_context;
+use crate::file_input::{
+    agent_file_input_ref_from_model_path, read_verified_agent_file_input, AgentFileInputError,
+    AgentFileInputExecutionContext,
+};
 use crate::image_generation::{
     ImageGenerationDataUrlInput, ImageGenerationEditRequest, ImageGenerationExecutionId,
     ImageGenerationExecutionPhase, ImageGenerationExecutionReceipt,
@@ -27,9 +31,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
-use std::io::{Cursor, Read};
-use std::path::{Component, Path, PathBuf};
+use std::io::Cursor;
+#[cfg(test)]
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const TOOL_NAME: &str = "image_generation";
@@ -640,7 +644,7 @@ fn is_terminal_image_generation_result(value: &Value) -> bool {
 fn image_generation_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
         name: TOOL_NAME.to_string(),
-        description: "Generate one verified image from text, or edit one authorized workspace or @attachments image, using the application-configured image provider. Pass only a typed request and a short user-facing reason. Provider URLs, credentials, model ids, data URLs, output URLs, and execution ids are resolved by the host and must never be supplied.".to_string(),
+        description: "Generate one verified image from text, or edit one authorized image, using the application-configured image provider. For edits, pass only the image path returned by another tool or supplied by the user; workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths are recognized automatically. Pass only a typed request and a short user-facing reason. Provider URLs, credentials, model ids, data URLs, output URLs, and execution ids are resolved by the host and must never be supplied.".to_string(),
         input_schema: json!({
             "type": "object",
             "additionalProperties": false,
@@ -672,7 +676,7 @@ fn image_generation_tool_definition() -> AgentToolDefinition {
                                 },
                                 "inputPath": {
                                     "type": "string",
-                                    "description": "An authorized workspace/read-all path or the exact @attachments/... readPath returned by attachments_list."
+                                    "description": "The exact image location returned or provided: a workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI."
                                 },
                                 "sizePreset": { "type": "string", "enum": ["2K"] }
                             },
@@ -984,66 +988,59 @@ fn load_authorized_image_input(
     input_path: &str,
 ) -> AgentResult<ImageGenerationDataUrlInput> {
     context.check_cancelled()?;
-    let authorized = authorize_image_input_path(context, input_path.trim())?;
-    let _preparation_permit = context.acquire_model_image_preparation()?;
-    let mut file = open_authorized_regular_file(&authorized).map_err(input_open_error)?;
-    let before = file.metadata().map_err(|error| {
-        input_error(
-            "inputUnavailable",
-            &format!("The input image metadata could not be read: {error}"),
-        )
-    })?;
-    if before.len() == 0 || before.len() > MAX_IMAGE_GENERATION_INPUT_BYTES as u64 {
-        return Err(input_error(
-            "inputTooLarge",
-            "The input image is empty or exceeds the input size limit.",
-        ));
-    }
-    if authorized
-        .attachment
-        .as_ref()
-        .is_some_and(|reference| reference.size_bytes != before.len())
+    let file_inputs = AgentFileInputExecutionContext::new(
+        context.attachment_library().cloned(),
+        context.skill_resources_optional(),
+    )
+    .with_storage(context.storage_optional());
+    let source = agent_file_input_ref_from_model_path(&file_inputs, input_path)
+        .map_err(agent_file_input_error)?;
+    if matches!(&source, crate::protocol::AgentFileInputRef::External { .. })
+        && context.permissions().read != crate::protocol::AgentReadPermission::All
     {
         return Err(input_error(
-            "inputConflict",
-            "The attachment content changed after it was authorized.",
+            "inputReadScopeDenied",
+            "Reading an image outside the workspace requires read access to all locations.",
         ));
     }
-
-    let mut bytes = Vec::with_capacity(before.len() as usize);
-    (&mut file)
-        .take(MAX_IMAGE_GENERATION_INPUT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            input_error(
-                "inputUnavailable",
-                &format!("The input image could not be read: {error}"),
-            )
-        })?;
-    context.check_cancelled()?;
-    let after = file.metadata().map_err(|error| {
-        input_error(
-            "inputUnavailable",
-            &format!("The input image identity could not be rechecked: {error}"),
-        )
-    })?;
-    if bytes.len() as u64 != before.len() || after.len() != before.len() {
-        return Err(input_error(
-            "inputConflict",
-            "The input image changed while it was being read.",
-        ));
+    let attachment = match &source {
+        crate::protocol::AgentFileInputRef::Attachment { read_path } => {
+            let reference = context.attachment_reference_for_path(read_path)?.clone();
+            if reference.kind != AgentInputAttachmentKind::Image {
+                return Err(input_error(
+                    "inputNotImageAttachment",
+                    "The selected attachment was not authorized as an image attachment.",
+                ));
+            }
+            Some(reference)
+        }
+        _ => None,
+    };
+    let _preparation_permit = context.acquire_model_image_preparation()?;
+    let workspace_root = context.workspace_root_optional()?;
+    let snapshot = read_verified_agent_file_input(
+        workspace_root.as_deref(),
+        context.permissions(),
+        &file_inputs,
+        &source,
+        Some(&context.cancellation_token()),
+        MAX_IMAGE_GENERATION_INPUT_BYTES as u64,
+    )
+    .map_err(agent_file_input_error)?;
+    if snapshot.size_bytes == 0 {
+        return Err(input_error("inputTooLarge", "The input image is empty."));
     }
 
-    validate_decoded_input(&bytes)?;
+    validate_decoded_input(&snapshot.bytes)?;
     context.check_cancelled()?;
-    let input = ImageGenerationDataUrlInput::from_bytes(&bytes).map_err(|error| {
+    let input = ImageGenerationDataUrlInput::from_bytes(&snapshot.bytes).map_err(|error| {
         input_error(
             "inputInvalid",
             &format!("The input image is not a supported, valid PNG, JPEG, or WebP file: {error}"),
         )
     })?;
     context.check_cancelled()?;
-    if let Some(reference) = authorized.attachment {
+    if let Some(reference) = attachment {
         if let Some(claimed) = reference
             .mime_type
             .as_deref()
@@ -1061,410 +1058,29 @@ fn load_authorized_image_input(
     Ok(input)
 }
 
-enum AuthorizedImageInputLocation {
-    Anchored { root: PathBuf, relative: PathBuf },
-    UnrestrictedAbsolute(PathBuf),
-}
-
-struct AuthorizedImageInput {
-    location: AuthorizedImageInputLocation,
-    attachment: Option<crate::protocol::AgentAttachmentReference>,
-}
-
-fn authorize_image_input_path(
-    context: &ToolExecutionContext,
-    input_path: &str,
-) -> AgentResult<AuthorizedImageInput> {
-    if input_path.starts_with("@attachments/") {
-        let reference = context.attachment_reference_for_path(input_path)?.clone();
-        if reference.kind != AgentInputAttachmentKind::Image {
-            return Err(input_error(
-                "inputNotImageAttachment",
-                "The selected attachment was not authorized as an image attachment.",
-            ));
+fn agent_file_input_error(error: AgentFileInputError) -> AgentError {
+    let code = match error.code() {
+        "agent.fileInput.authorizationDenied" if error.message().contains("符号链接") => {
+            "image_generation.inputSymlinkRejected"
         }
-        if reference.size_bytes == 0
-            || reference.size_bytes > MAX_IMAGE_GENERATION_INPUT_BYTES as u64
-        {
-            return Err(input_error(
-                "inputTooLarge",
-                "The selected image attachment is empty or exceeds the input size limit.",
-            ));
-        }
-        let library = context.attachment_library().ok_or_else(|| {
-            input_error(
-                "inputUnavailable",
-                "The attachment library is unavailable for this run.",
-            )
-        })?;
-        let root = library
-            .root_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                input_error(
-                    "inputUnavailable",
-                    "The attachment library root is unavailable.",
-                )
-            })?;
-        let root = PathBuf::from(root).canonicalize().map_err(|error| {
-            input_error(
-                "inputUnavailable",
-                &format!("The attachment library root is unavailable: {error}"),
-            )
-        })?;
-        if !root.is_dir() {
-            return Err(input_error(
-                "inputUnavailable",
-                "The attachment library root is not a directory.",
-            ));
-        }
-        return Ok(AuthorizedImageInput {
-            location: AuthorizedImageInputLocation::Anchored {
-                root,
-                relative: super::clean_relative_path(&reference.storage_rel_path)?,
-            },
-            attachment: Some(reference),
-        });
-    }
-
-    let path = Path::new(input_path);
-    if path.is_absolute() || is_system_path_alias(input_path) {
-        if context.permissions().read != crate::protocol::AgentReadPermission::All {
-            return Err(input_error(
-                "inputReadScopeDenied",
-                "Reading an image outside the workspace requires read access to all locations.",
-            ));
-        }
-        let absolute = crate::system_paths::expand_system_path(input_path)
-            .map_err(AgentError::new)?
-            .unwrap_or_else(|| path.to_path_buf());
-        if !absolute.is_absolute() {
-            return Err(input_error(
-                "inputInvalidPath",
-                "The external image input path must be absolute.",
-            ));
-        }
-        let direct_metadata = std::fs::symlink_metadata(&absolute).map_err(input_open_error)?;
-        if direct_metadata.file_type().is_symlink() {
-            return Err(input_error(
-                "inputSymlinkRejected",
-                "Symbolic-link image inputs are not accepted for external image generation.",
-            ));
-        }
-        let absolute = absolute.canonicalize().map_err(input_open_error)?;
-        return Ok(AuthorizedImageInput {
-            location: AuthorizedImageInputLocation::UnrestrictedAbsolute(absolute),
-            attachment: None,
-        });
-    }
-
-    Ok(AuthorizedImageInput {
-        location: AuthorizedImageInputLocation::Anchored {
-            root: context.workspace_root()?,
-            relative: super::clean_relative_path(input_path)?,
-        },
-        attachment: None,
-    })
-}
-
-fn is_system_path_alias(input: &str) -> bool {
-    ["~", "@home", "@desktop", "@documents", "@downloads"]
-        .iter()
-        .any(|alias| {
-            input == *alias
-                || input
-                    .strip_prefix(alias)
-                    .is_some_and(|remainder| matches!(remainder.chars().next(), Some('/' | '\\')))
-        })
-}
-
-fn open_authorized_regular_file(authorized: &AuthorizedImageInput) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        match &authorized.location {
-            AuthorizedImageInputLocation::Anchored { root, relative } => {
-                open_regular_file_beneath(root, relative)
-            }
-            AuthorizedImageInputLocation::UnrestrictedAbsolute(path) => {
-                open_absolute_regular_file(path)
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        open_authorized_regular_file_windows(authorized)
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let (target, scope_root) = match &authorized.location {
-            AuthorizedImageInputLocation::Anchored { root, relative } => {
-                (root.join(relative), Some(root.as_path()))
-            }
-            AuthorizedImageInputLocation::UnrestrictedAbsolute(path) => (path.clone(), None),
-        };
-        let canonical = target.canonicalize()?;
-        if scope_root.is_some_and(|root| !canonical.starts_with(root)) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "authorized image path escaped its trusted root",
-            ));
-        }
-        let metadata = std::fs::symlink_metadata(&target)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "path is not a direct regular file",
-            ));
-        }
-        OpenOptions::new().read(true).open(canonical)
-    }
-}
-
-fn input_open_error(error: std::io::Error) -> AgentError {
-    #[cfg(unix)]
-    if error.raw_os_error() == Some(libc::ELOOP) {
-        return input_error(
-            "inputSymlinkRejected",
-            "Symbolic-link image inputs are not accepted for external image generation.",
-        );
-    }
-    input_error(
-        "inputUnavailable",
-        &format!("The authorized input image could not be opened safely: {error}"),
+        "agent.fileInput.authorizationDenied" => "image_generation.inputReadScopeDenied",
+        "agent.fileInput.tooLarge" => "image_generation.inputTooLarge",
+        "agent.fileInput.integrityMismatch" => "image_generation.inputConflict",
+        "agent.fileInput.notFound"
+        | "agent.fileInput.invalidRequest"
+        | "agent.fileInput.io"
+        | "agent.fileInput.snapshotUnavailable" => "image_generation.inputUnavailable",
+        code => code,
+    };
+    AgentError::structured(
+        code,
+        error.message(),
+        json!({
+            "type": "image_generation_input",
+            "code": code,
+            "recovery": error.recovery()
+        }),
     )
-}
-
-#[cfg(unix)]
-fn open_absolute_regular_file(path: &Path) -> std::io::Result<File> {
-    if !path.is_absolute() {
-        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-    }
-    let relative = path.strip_prefix(Path::new("/")).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "absolute image path has no filesystem root",
-        )
-    })?;
-    open_regular_file_beneath(Path::new("/"), relative)
-}
-
-#[cfg(unix)]
-fn open_regular_file_beneath(root: &Path, relative: &Path) -> std::io::Result<File> {
-    use std::ffi::{CString, OsStr};
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    fn component_name(component: &OsStr) -> std::io::Result<CString> {
-        CString::new(component.as_bytes())
-            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
-    }
-
-    fn open_directory_at(parent: &File, component: &OsStr) -> std::io::Result<File> {
-        let component = component_name(component)?;
-        // SAFETY: `parent` owns a live directory descriptor and `component` is NUL-free for the
-        // duration of the call. Ownership of a successful descriptor transfers to `File`.
-        let descriptor = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY
-                    | libc::O_DIRECTORY
-                    | libc::O_NOFOLLOW
-                    | libc::O_NONBLOCK
-                    | libc::O_CLOEXEC,
-            )
-        };
-        if descriptor < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `openat` returned a new owned descriptor.
-        Ok(unsafe { File::from_raw_fd(descriptor) })
-    }
-
-    let mut directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open("/")?;
-    for component in root.components() {
-        match component {
-            Component::RootDir | Component::CurDir => {}
-            Component::Normal(name) => directory = open_directory_at(&directory, name)?,
-            Component::ParentDir | Component::Prefix(_) => {
-                return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-            }
-        }
-    }
-
-    let components = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(Ok(name)),
-            Component::CurDir => None,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                Some(Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)))
-            }
-        })
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let Some((file_name, parent_components)) = components.split_last() else {
-        return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-    };
-    for component in parent_components {
-        directory = open_directory_at(&directory, component)?;
-    }
-    let file_name = component_name(file_name)?;
-    // `O_NONBLOCK` is essential here: an attacker-controlled FIFO must not block before `fstat`
-    // can reject it. `O_NOFOLLOW` prevents the final component from becoming a symlink.
-    // SAFETY: the parent descriptor and NUL-free filename remain live for the call.
-    let descriptor = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            file_name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: `openat` returned a new owned descriptor.
-    let file = unsafe { File::from_raw_fd(descriptor) };
-    if !file.metadata()?.file_type().is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "path is not a regular file",
-        ));
-    }
-    Ok(file)
-}
-
-#[cfg(windows)]
-fn open_authorized_regular_file_windows(
-    authorized: &AuthorizedImageInput,
-) -> std::io::Result<File> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, SECURITY_IDENTIFICATION,
-    };
-
-    let (target, scope_root) = match &authorized.location {
-        AuthorizedImageInputLocation::Anchored { root, relative } => {
-            (root.join(relative), Some(root.as_path()))
-        }
-        AuthorizedImageInputLocation::UnrestrictedAbsolute(path) => (path.clone(), None),
-    };
-    for path in target.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        let metadata = std::fs::symlink_metadata(path)?;
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "reparse-point image paths are not accepted",
-            ));
-        }
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .security_qos_flags(SECURITY_IDENTIFICATION)
-        .open(&target)?;
-    let metadata = file.metadata()?;
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_file() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "path is not a direct regular file",
-        ));
-    }
-    if let Some(root) = scope_root {
-        let opened_path = windows_final_path(&file)?;
-        if !windows_path_is_within(&opened_path, root) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "authorized image path escaped its trusted root",
-            ));
-        }
-    }
-    Ok(file)
-}
-
-#[cfg(windows)]
-fn windows_final_path(file: &File) -> std::io::Result<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
-    };
-
-    let mut buffer = vec![0u16; 512];
-    loop {
-        let capacity = u32::try_from(buffer.len())
-            .map_err(|_| std::io::Error::other("Windows path buffer exceeds u32"))?;
-        // SAFETY: the file owns a live handle and the buffer exposes `capacity` writable u16s.
-        let written = unsafe {
-            GetFinalPathNameByHandleW(
-                file.as_raw_handle() as HANDLE,
-                buffer.as_mut_ptr(),
-                capacity,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-            )
-        };
-        if written == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let written = usize::try_from(written)
-            .map_err(|_| std::io::Error::other("Windows path length exceeds usize"))?;
-        if written < buffer.len() {
-            buffer.truncate(written);
-            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
-        }
-        buffer.resize(written.saturating_add(1), 0);
-    }
-}
-
-#[cfg(windows)]
-fn windows_path_is_within(path: &Path, root: &Path) -> bool {
-    use std::os::windows::ffi::OsStrExt;
-
-    fn key(path: &Path) -> Vec<u16> {
-        const FORWARD_SLASH: u16 = b'/' as u16;
-        const BACKSLASH: u16 = b'\\' as u16;
-        let verbatim_prefix = [BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH];
-        let verbatim_unc_prefix = [
-            BACKSLASH,
-            BACKSLASH,
-            b'?' as u16,
-            BACKSLASH,
-            b'U' as u16,
-            b'N' as u16,
-            b'C' as u16,
-            BACKSLASH,
-        ];
-        let mut units = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        if units.starts_with(&verbatim_unc_prefix) {
-            units.splice(..verbatim_unc_prefix.len(), [BACKSLASH, BACKSLASH]);
-        } else if units.starts_with(&verbatim_prefix) {
-            units.drain(..verbatim_prefix.len());
-        }
-        for unit in &mut units {
-            if *unit == FORWARD_SLASH {
-                *unit = BACKSLASH;
-            } else if (b'A' as u16..=b'Z' as u16).contains(unit) {
-                *unit += u16::from(b'a' - b'A');
-            }
-        }
-        while units.last() == Some(&BACKSLASH) {
-            units.pop();
-        }
-        units
-    }
-
-    let path = key(path);
-    let root = key(root);
-    path == root || (path.starts_with(&root) && path.get(root.len()).copied() == Some(b'\\' as u16))
 }
 
 fn normalize_image_mime_type(value: &str) -> Option<String> {
@@ -1870,6 +1486,12 @@ mod tests {
         AgentPermissions, AgentReadPermission, AgentRunContext, AgentWorkspaceContext,
         ModelCapabilities,
     };
+    use crate::storage::image_generation_execution_repository::{
+        ImageGenerationArtifactJournalRecord, ImageGenerationExecutionIdentityRecord,
+        ImageGenerationExecutionTerminalUpdate, StoredImageGenerationArtifactState,
+        StoredImageGenerationExecutionStatus,
+    };
+    use crate::storage::service::StorageService;
     use image::ImageEncoder;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1960,6 +1582,67 @@ mod tests {
         }))
         .with_runtime_services("run-1".to_string(), None)
         .with_tool_call_id("call-1".to_string())
+    }
+
+    fn publish_generated_artifact(root: &Path, bytes: &[u8]) -> (Arc<StorageService>, String) {
+        let storage = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let artifact_id = format!("sha256:{sha256}");
+        let storage_relative_path = format!("objects/{sha256}.png");
+        let identity = ImageGenerationExecutionIdentityRecord {
+            execution_id: "execution-image-edit-input".to_string(),
+            request_fingerprint: format!("sha256:{}", "b".repeat(64)),
+            safe_request_json: r#"{"schemaVersion":1}"#.to_string(),
+            profile_id: "default".to_string(),
+            adapter_id: "test".to_string(),
+            profile_revision: 1,
+            model_id: "test-image-model".to_string(),
+            operation: "generate".to_string(),
+        };
+        storage.claim_image_generation_execution(&identity).unwrap();
+        storage
+            .prepare_image_generation_artifact(
+                &identity.execution_id,
+                &ImageGenerationArtifactJournalRecord {
+                    ordinal: 0,
+                    artifact_id,
+                    state: StoredImageGenerationArtifactState::Candidate,
+                    storage_relative_path: storage_relative_path.clone(),
+                    format: "png".to_string(),
+                    media_type: "image/png".to_string(),
+                    width: 1,
+                    height: 1,
+                    size_bytes: bytes.len() as u64,
+                    sha256: sha256.clone(),
+                    created_at: 1,
+                    published_at: None,
+                },
+                Some("provider-request"),
+                Some(200),
+            )
+            .unwrap();
+        storage
+            .finalize_image_generation_execution(
+                &identity.execution_id,
+                &ImageGenerationExecutionTerminalUpdate {
+                    expected_request_fingerprint: identity.request_fingerprint,
+                    expected_artifact_sha256: Some(sha256.clone()),
+                    status: StoredImageGenerationExecutionStatus::Succeeded,
+                    remote_outcome_unknown: false,
+                    provider_succeeded: true,
+                    commit_may_have_succeeded: false,
+                    provider_request_id: Some("provider-request".to_string()),
+                    http_status: Some(200),
+                    terminal_result_json: r#"{"schemaVersion":1,"status":"succeeded"}"#.to_string(),
+                },
+            )
+            .unwrap();
+        let path = root
+            .join("image-generation-artifacts")
+            .join(storage_relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+        (storage, format!("image-artifact://sha256/{sha256}"))
     }
 
     #[test]
@@ -2057,13 +1740,28 @@ mod tests {
     }
 
     #[test]
+    fn generated_artifact_path_can_be_reused_directly_for_edit_input() {
+        let root = TempDir::new().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let bytes = png();
+        let (storage, artifact_path) = publish_generated_artifact(&canonical_root, &bytes);
+        let context = context(&canonical_root)
+            .with_runtime_services("run-image-edit".to_string(), Some(storage));
+
+        let input = load_authorized_image_input(&context, &artifact_path).unwrap();
+        assert_eq!(input.media_type().as_str(), "image/png");
+        assert!(input.data_url().starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
     fn external_input_requires_read_all_and_does_not_require_a_workspace() {
         let external = TempDir::new().unwrap();
-        let path = external.path().join("input.png");
+        let external_root = external.path().canonicalize().unwrap();
+        let path = external_root.join("input.png");
         fs::write(&path, png()).unwrap();
         let workspace = TempDir::new().unwrap();
         let workspace_only = context(workspace.path());
-        for unauthorized in [path.clone(), external.path().join("missing.png")] {
+        for unauthorized in [path.clone(), external_root.join("missing.png")] {
             let error =
                 load_authorized_image_input(&workspace_only, unauthorized.to_str().unwrap())
                     .unwrap_err();

@@ -939,26 +939,27 @@ mod tests {
     }
 
     #[test]
-    fn declarative_file_input_consumers_expose_the_shared_source_contract() {
+    fn declarative_file_input_consumers_expose_one_model_friendly_path() {
         let engine =
             crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
         let registry = ToolRegistry::defaults_with_search_and_office(None, Some(engine));
-        let expected = schema::agent_file_input_ref_schema();
-
-        assert_eq!(
-            registry.definition_for("run_command").unwrap().input_schema["properties"]["inputs"]
-                ["items"]["properties"]["source"],
-            expected
-        );
+        let command_inputs = &registry.definition_for("run_command").unwrap().input_schema
+            ["properties"]["inputs"]["items"];
+        assert_eq!(command_inputs["required"], json!(["path"]));
+        assert!(command_inputs["properties"]["path"].is_object());
+        assert!(command_inputs["properties"]["mountPath"].is_object());
+        assert!(command_inputs["properties"].get("source").is_none());
         for tool_name in [
             "office_document",
             "office_spreadsheet",
             "office_presentation",
         ] {
-            assert_eq!(
-                registry.definition_for(tool_name).unwrap().input_schema["properties"]["source"],
-                expected,
-                "{tool_name} drifted from the shared AgentFileInputRef schema"
+            let definition = registry.definition_for(tool_name).unwrap();
+            let properties = definition.input_schema["properties"].as_object().unwrap();
+            assert!(properties["imagePath"].is_object());
+            assert!(
+                !properties.contains_key("source"),
+                "{tool_name} exposed internal file-source routing"
             );
         }
     }

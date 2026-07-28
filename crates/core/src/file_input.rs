@@ -6,7 +6,7 @@
 //! only [`AGENT_FILE_INPUT_ROOT_ENV`] plus the stable relative `mountPath` values.
 
 use crate::protocol::{
-    AgentAttachmentLibraryContext, AgentFileInputBinding, AgentFileInputEvidence,
+    AgentAttachmentLibraryContext, AgentError, AgentFileInputBinding, AgentFileInputEvidence,
     AgentFileInputRef, AgentFileInputSourceKind, AgentFileInputSpec, AgentPermissions,
     AgentReadPermission, AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
 };
@@ -14,6 +14,7 @@ use crate::skills::{SkillResourceSession, SkillResourceUri};
 use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
 use crate::AgentCancellationToken;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -73,6 +74,20 @@ impl std::fmt::Display for AgentFileInputError {
 
 impl std::error::Error for AgentFileInputError {}
 
+impl From<AgentFileInputError> for AgentError {
+    fn from(error: AgentFileInputError) -> Self {
+        AgentError::structured(
+            error.code(),
+            error.message(),
+            json!({
+                "type": "agentFileInput",
+                "code": error.code(),
+                "recovery": error.recovery()
+            }),
+        )
+    }
+}
+
 /// One authority-checked immutable byte snapshot for a read-only Agent tool.
 ///
 /// Unlike prepared command inputs, this value never crosses an approval boundary and therefore
@@ -122,6 +137,151 @@ impl AgentFileInputExecutionContext {
         self.storage = storage;
         self
     }
+}
+
+/// Resolves the single model-facing file location into the richer internal authority reference.
+///
+/// Tool schemas deliberately expose only a path string. The trusted host keeps attachment,
+/// generated-artifact, Skill revision, workspace, and external-file authority as an internal
+/// concern so every consumer shares the same routing and integrity rules.
+pub(crate) fn agent_file_input_ref_from_model_path(
+    context: &AgentFileInputExecutionContext,
+    model_path: &str,
+) -> Result<AgentFileInputRef, AgentFileInputError> {
+    let model_path = required_model_path(model_path)?;
+    if model_path.starts_with("@attachments/") {
+        return Ok(AgentFileInputRef::Attachment {
+            read_path: model_path,
+        });
+    }
+    if model_path.starts_with("image-artifact://sha256/")
+        || model_path.starts_with("artifact://sha256/")
+    {
+        let digest = artifact_digest(&model_path)?;
+        let storage = context.storage.as_ref().ok_or_else(|| {
+            AgentFileInputError::new(
+                ERROR_SNAPSHOT_UNAVAILABLE,
+                "retry",
+                "生成物的权威 Artifact 注册表不可用。",
+            )
+        })?;
+        let artifact_id = format!("sha256:{digest}");
+        let registered = storage
+            .resolve_published_generated_artifact_input(&artifact_id)
+            .map_err(|_| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "无法读取生成物的权威 Artifact 发布记录。",
+                )
+            })?
+            .ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_NOT_FOUND,
+                    "regenerate",
+                    "权威 Artifact 注册表中不存在该已发布生成物。",
+                )
+            })?;
+        if registered.sha256 != digest {
+            return Err(AgentFileInputError::new(
+                ERROR_INTEGRITY_MISMATCH,
+                "regenerate",
+                "生成物 URI 与权威 Artifact 发布记录不一致。",
+            ));
+        }
+        return Ok(AgentFileInputRef::GeneratedArtifact {
+            uri: format!("image-artifact://sha256/{digest}"),
+            path: registered.path.to_string_lossy().into_owned(),
+        });
+    }
+    if model_path.starts_with("skill://") {
+        return Ok(AgentFileInputRef::SkillResource { uri: model_path });
+    }
+    let expanded = expand_system_path(&model_path).map_err(|_| {
+        AgentFileInputError::new(
+            ERROR_INVALID_REQUEST,
+            "changeRequest",
+            "文件路径包含无效的系统路径别名。",
+        )
+    })?;
+    if expanded.is_some() || Path::new(&model_path).is_absolute() {
+        Ok(AgentFileInputRef::External { path: model_path })
+    } else {
+        Ok(AgentFileInputRef::Workspace { path: model_path })
+    }
+}
+
+/// Compares an original model path with a source already frozen behind an approval boundary.
+///
+/// This intentionally needs no live storage or attachment session. The authoritative frozen
+/// source remains the execution input; the model path is accepted only when it names that source.
+pub(crate) fn agent_file_input_ref_matches_model_path(
+    source: &AgentFileInputRef,
+    model_path: &str,
+) -> Result<bool, AgentFileInputError> {
+    let model_path = required_model_path(model_path)?;
+    Ok(match source {
+        AgentFileInputRef::Attachment { read_path } => model_path == read_path.trim(),
+        AgentFileInputRef::Workspace { path } | AgentFileInputRef::External { path } => {
+            model_path == path.trim()
+        }
+        AgentFileInputRef::GeneratedArtifact { uri, .. } => {
+            artifact_digest(&model_path)? == artifact_digest(uri)?
+        }
+        AgentFileInputRef::SkillResource { uri } => model_path == uri.trim(),
+    })
+}
+
+/// Returns the one location string that model-facing tools should reuse.
+pub(crate) fn model_path_for_agent_file_input_ref(source: &AgentFileInputRef) -> &str {
+    match source {
+        AgentFileInputRef::Attachment { read_path } => read_path,
+        AgentFileInputRef::Workspace { path } | AgentFileInputRef::External { path } => path,
+        AgentFileInputRef::GeneratedArtifact { uri, .. }
+        | AgentFileInputRef::SkillResource { uri } => uri,
+    }
+}
+
+/// Derives a predictable private mount name when the model does not need to choose one.
+pub(crate) fn default_agent_file_input_mount_path(
+    source: &AgentFileInputRef,
+    index: usize,
+) -> String {
+    let source_name = match source {
+        AgentFileInputRef::Attachment { read_path: path }
+        | AgentFileInputRef::Workspace { path }
+        | AgentFileInputRef::External { path } => Path::new(path).file_name(),
+        AgentFileInputRef::GeneratedArtifact { path, .. } => Path::new(path).file_name(),
+        AgentFileInputRef::SkillResource { uri } => Path::new(
+            uri.split_once('?')
+                .map(|(path, _)| path)
+                .unwrap_or(uri.as_str()),
+        )
+        .file_name(),
+    }
+    .and_then(|name| name.to_str())
+    .map(str::trim)
+    .filter(|name| !name.is_empty() && *name != "." && *name != "..");
+    source_name
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("input-{}", index.saturating_add(1)))
+}
+
+fn required_model_path(value: &str) -> Result<String, AgentFileInputError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.contains('\0')
+        || value.contains('\n')
+        || value.contains('\r')
+        || value.chars().count() > 32 * 1024
+    {
+        return Err(AgentFileInputError::new(
+            ERROR_INVALID_REQUEST,
+            "changeRequest",
+            "文件路径必须是非空的单行路径字符串。",
+        ));
+    }
+    Ok(value.to_string())
 }
 
 impl std::fmt::Debug for AgentFileInputExecutionContext {

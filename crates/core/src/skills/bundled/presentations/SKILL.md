@@ -24,15 +24,11 @@ Bind templates, data, images, attachments, and earlier generated files through `
 ```json
 {
   "mountPath": "media/hero.png",
-  "source": {
-    "type": "generated_artifact",
-    "uri": "image-artifact://sha256/<exact-digest>",
-    "path": "/absolute/saved/path/to/hero.png"
-  }
+  "path": "image-artifact://sha256/<exact-digest>"
 }
 ```
 
-Use the exact attachment `readPath` returned by `attachments_list`. Use `type="workspace"`, `external`, `generated_artifact`, or `skill_resource` for those corresponding sources. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
+Use the exact path returned by the producing tool or supplied by the user. The Host automatically recognizes workspace, absolute/system, `@attachments/...`, `image-artifact://...`, and revision-bound `skill://...` paths. `mountPath` is optional and defaults to the source filename. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
 
 Every Builder command must declare its generated presentation with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
 

@@ -1,5 +1,5 @@
 {
-  "contractVersion": 7,
+  "contractVersion": 8,
   "engine": "officecli",
   "tool": "office_presentation",
   "extensions": [".pptx"],
@@ -32,9 +32,9 @@
         "resultField": "outputs",
         "role": "render",
         "kind": "image",
-        "sourceField": "source",
+        "pathField": "readPath",
         "consumerTool": "read_image",
-        "consumerField": "source",
+        "consumerField": "path",
         "readabilityField": "readableByAgent",
         "sizeField": "sizeBytes",
         "selectionField": "pageSelection",
@@ -71,14 +71,14 @@
       "inputs": {
         "field": "inputs",
         "mountPathField": "mountPath",
-        "sourceField": "source",
+        "pathField": "path",
         "rootEnvironment": "MYCOPILOT_INPUT_ROOT",
-        "sourceTypes": [
-          "attachment",
+        "pathKinds": [
           "workspace",
-          "external",
-          "generated_artifact",
-          "skill_resource"
+          "absolute_or_system",
+          "attachment_read_path",
+          "generated_artifact_uri",
+          "revision_bound_skill_uri"
         ]
       },
       "observation": {

@@ -1,19 +1,18 @@
 use super::{AgentTool, ToolExecutionContext};
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::file_input::{
-    read_verified_agent_file_input, AgentFileInputError, AgentFileInputExecutionContext,
+    agent_file_input_ref_from_model_path, model_path_for_agent_file_input_ref,
+    read_verified_agent_file_input, AgentFileInputExecutionContext,
 };
 use crate::protocol::{
     AgentError, AgentFileInputRef, AgentResult, AgentToolDefinition, AgentToolResult,
     AgentToolSafety,
 };
-use crate::system_paths::expand_system_path;
 use base64::Engine;
 use image::codecs::png::PngEncoder;
 use image::{DynamicImage, ImageEncoder, ImageFormat};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::Path;
 
 const MAX_READ_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const THUMBNAIL_MAX_EDGE: u32 = 160;
@@ -87,7 +86,7 @@ impl AgentTool for ReadImageTool {
             Some(&context.cancellation_token()),
             MAX_READ_IMAGE_BYTES,
         )
-        .map_err(agent_file_input_error)?;
+        .map_err(AgentError::from)?;
         context.check_cancelled()?;
         if snapshot.size_bytes == 0 {
             return Err(AgentError::new("图片文件为空。"));
@@ -280,115 +279,13 @@ impl ReadImageArgs {
                 ))
             }
         };
-        path_file_input_ref(context, legacy)
-    }
-}
-
-fn path_file_input_ref(
-    context: &ToolExecutionContext,
-    path: &str,
-) -> AgentResult<AgentFileInputRef> {
-    let path = path.trim();
-    if path.starts_with("@attachments/") {
-        return Ok(AgentFileInputRef::Attachment {
-            read_path: path.to_string(),
-        });
-    }
-    if path.starts_with("image-artifact://sha256/") || path.starts_with("artifact://sha256/") {
-        return generated_artifact_file_input_ref(context, path);
-    }
-    if path.starts_with("skill://") {
-        return Ok(AgentFileInputRef::SkillResource {
-            uri: path.to_string(),
-        });
-    }
-    let expanded = expand_system_path(path).map_err(|message| {
-        AgentError::structured(
-            "agent.fileInput.invalidRequest",
-            message,
-            json!({
-                "type": "agentFileInput",
-                "code": "agent.fileInput.invalidRequest",
-                "recovery": "changeRequest"
-            }),
+        let file_inputs = AgentFileInputExecutionContext::new(
+            context.attachment_library().cloned(),
+            context.skill_resources_optional(),
         )
-    })?;
-    if expanded.is_some() || Path::new(path).is_absolute() {
-        Ok(AgentFileInputRef::External {
-            path: path.to_string(),
-        })
-    } else {
-        Ok(AgentFileInputRef::Workspace {
-            path: path.to_string(),
-        })
+        .with_storage(context.storage_optional());
+        agent_file_input_ref_from_model_path(&file_inputs, legacy).map_err(AgentError::from)
     }
-}
-
-fn generated_artifact_file_input_ref(
-    context: &ToolExecutionContext,
-    uri: &str,
-) -> AgentResult<AgentFileInputRef> {
-    let uri = uri.trim();
-    let digest = uri
-        .strip_prefix("image-artifact://sha256/")
-        .or_else(|| uri.strip_prefix("artifact://sha256/"))
-        .filter(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-        .ok_or_else(|| {
-            AgentError::structured(
-                "agent.fileInput.invalidRequest",
-                "read_image.path 包含无效的生成图片 URI；请原样使用图片生成结果返回的 image-artifact:// 路径。",
-                json!({
-                    "type": "agentFileInput",
-                    "code": "agent.fileInput.invalidRequest",
-                    "recovery": "changeRequest"
-                }),
-            )
-        })?;
-    let storage = context.storage_optional().ok_or_else(|| {
-        AgentError::structured(
-            "agent.fileInput.snapshotUnavailable",
-            "生成物的权威 Artifact 注册表不可用。",
-            json!({
-                "type": "agentFileInput",
-                "code": "agent.fileInput.snapshotUnavailable",
-                "recovery": "retry"
-            }),
-        )
-    })?;
-    let artifact_id = format!("sha256:{digest}");
-    let registered = storage
-        .resolve_published_generated_artifact_input(&artifact_id)
-        .map_err(|_| {
-            AgentError::structured(
-                "agent.fileInput.snapshotUnavailable",
-                "无法读取生成物的权威 Artifact 发布记录。",
-                json!({
-                    "type": "agentFileInput",
-                    "code": "agent.fileInput.snapshotUnavailable",
-                    "recovery": "retry"
-                }),
-            )
-        })?
-        .ok_or_else(|| {
-            AgentError::structured(
-                "agent.fileInput.notFound",
-                "权威 Artifact 注册表中不存在该已发布生成物。",
-                json!({
-                    "type": "agentFileInput",
-                    "code": "agent.fileInput.notFound",
-                    "recovery": "regenerate"
-                }),
-            )
-        })?;
-    Ok(AgentFileInputRef::GeneratedArtifact {
-        uri: format!("image-artifact://sha256/{digest}"),
-        path: registered.path.to_string_lossy().into_owned(),
-    })
 }
 
 fn generated_artifact_receipt(
@@ -442,25 +339,8 @@ fn generated_artifact_receipt(
     })))
 }
 
-fn agent_file_input_error(error: AgentFileInputError) -> AgentError {
-    AgentError::structured(
-        error.code(),
-        error.message(),
-        json!({
-            "type": "agentFileInput",
-            "code": error.code(),
-            "recovery": error.recovery()
-        }),
-    )
-}
-
 fn display_source(source: &AgentFileInputRef) -> &str {
-    match source {
-        AgentFileInputRef::Attachment { read_path } => read_path,
-        AgentFileInputRef::Workspace { path } | AgentFileInputRef::External { path } => path,
-        AgentFileInputRef::GeneratedArtifact { uri, .. }
-        | AgentFileInputRef::SkillResource { uri } => uri,
-    }
+    model_path_for_agent_file_input_ref(source)
 }
 
 fn decode_supported_image(bytes: &[u8]) -> AgentResult<(DynamicImage, &'static str, &'static str)> {
