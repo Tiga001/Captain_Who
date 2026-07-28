@@ -9,6 +9,7 @@ import type {
   StorageChatConversationRecord,
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
+  StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
   StorageImageFileRecord,
   StorageModelConfigRecord,
@@ -175,6 +176,18 @@ export async function saveChatMessageState(
     conversationId,
     message: mapMessageStateToStorage(message)
   })
+}
+
+export async function saveChatMessageUiState(
+  conversationId: string,
+  messageId: string,
+  uiState: ChatMessageUiState | undefined
+): Promise<void> {
+  const message: StorageChatMessageUiStateRecord = {
+    id: messageId,
+    uiStateJson: stringifyJson(uiState)
+  }
+  await hostClient.storage.saveChatMessageUiState({ conversationId, message })
 }
 
 export async function deleteStoredConversation(conversationId: string): Promise<void> {

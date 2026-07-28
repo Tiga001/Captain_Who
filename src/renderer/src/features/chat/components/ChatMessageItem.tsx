@@ -32,7 +32,6 @@ import {
   getApplyPatchGroupItems,
   getAssistantFinalContent,
   getConversationHistoryGroupItems,
-  getLastMessageTimelineContent,
   getOfficeGroupItems,
   getPreviousSuccessfulTodoResult,
   getReadGroupItems,
@@ -427,6 +426,7 @@ function AgentTimelineItemView({
         result={result}
         run={run}
         settledStatus={settledStatus}
+        showImageGenerationPreview={!isRunSettled(run)}
         webActivity={webActivity}
       />
     )
@@ -456,9 +456,20 @@ function AgentRunView({
   const { t } = useFrontendConfig()
   const run = message.agentRun
   const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
+  const finalAnswerContent = getAssistantFinalContent(message)
+  const timelineWithoutFinalAnswer = useMemo(() => {
+    if (!run || !isRunSettled(run) || !hasDisplayableContent(finalAnswerContent)) return timeline
+
+    const normalizedFinalAnswer = finalAnswerContent.trim()
+    const finalMessageIndex = timeline.findLastIndex(
+      (item) => item.type === 'message' && item.content.trim() === normalizedFinalAnswer
+    )
+    if (finalMessageIndex < 0) return timeline
+    return timeline.filter((_, index) => index !== finalMessageIndex)
+  }, [finalAnswerContent, run, timeline])
   const displayTimeline = useMemo(
-    () => (run ? groupTimelineItems(run, timeline) : []),
-    [run, timeline]
+    () => (run ? groupTimelineItems(run, timelineWithoutFinalAnswer) : []),
+    [run, timelineWithoutFinalAnswer]
   )
   const runId = run?.runId
   const runIsSettled = !run || isRunSettled(run)
@@ -521,10 +532,8 @@ function AgentRunView({
     ? (message.uiState?.timelineCollapsed ?? !hasGuidance)
     : false
   const showTimeline = hasTimeline && !(canToggleTimeline && timelineCollapsed)
-  const finalAnswerContent = getLastMessageTimelineContent(timeline) || message.content
   const showFinalContent =
-    hasDisplayableContent(finalAnswerContent) &&
-    (!hasTimeline || (canToggleTimeline && timelineCollapsed))
+    hasDisplayableContent(finalAnswerContent) && (runIsSettled || !hasTimeline)
   const isStreamingAssistantText =
     !isRunSettled(run) &&
     Boolean(run.lastResponseAt) &&
@@ -560,7 +569,7 @@ function AgentRunView({
       {showFinalContent && (
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
       )}
-      {isRunSettled(run) && !showTimeline && (
+      {isRunSettled(run) && (
         <ImageGenerationArtifactsCard resolver={hostImageArtifactResolver} run={run} />
       )}
       {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}

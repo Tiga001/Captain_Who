@@ -78,12 +78,14 @@ export function ImageGenerationToolActivity({
   call,
   resolver = lazyHostImageArtifactResolver,
   result,
-  settledStatus
+  settledStatus,
+  showArtifactPreview = true
 }: {
   call: AgentToolCall
   resolver?: ImageArtifactResolver
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
+  showArtifactPreview?: boolean
 }) {
   const { t } = useFrontendConfig()
   const view = getImageGenerationActivityView(call, result, settledStatus)
@@ -93,12 +95,12 @@ export function ImageGenerationToolActivity({
   const details = [view.reason, view.failureMessage ?? safeFailure, view.failureRecovery].filter(
     (value, index, values): value is string => Boolean(value && values.indexOf(value) === index)
   )
-  const showPreview = view.status === 'running' || Boolean(artifactEntry)
+  const showPreview = showArtifactPreview && (view.status === 'running' || Boolean(artifactEntry))
 
   return (
     <AgentActivityDisclosure
       className="agent-activity--image-generation"
-      defaultOpen={showPreview}
+      defaultOpen={showPreview || Boolean(artifactEntry)}
       hasDetails={details.length > 0 || showPreview}
       icon={Icon}
       isPending={view.status === 'running'}

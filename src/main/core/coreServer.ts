@@ -80,6 +80,7 @@ import type {
   StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
+  StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
   StorageModelSettingsRecord,
   StorageProjectRecord,
@@ -177,6 +178,7 @@ const STORAGE_DELETE_CHAT_MESSAGES_METHOD = 'storage.deleteChatMessages'
 const STORAGE_FORK_CONVERSATION_METHOD = 'storage.forkConversation'
 const STORAGE_UPSERT_CHAT_MESSAGES_METHOD = 'storage.upsertChatMessages'
 const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD = 'storage.saveChatMessageState'
+const STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD = 'storage.saveChatMessageUiState'
 const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD = 'storage.loadComposerDrafts'
 const STORAGE_SAVE_COMPOSER_DRAFT_METHOD = 'storage.saveComposerDraft'
 const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
@@ -777,6 +779,13 @@ export class CoreServer {
     message: StorageChatMessageStateRecord
   }): Promise<void> {
     return this.rpc.request<void, typeof input>(STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, input)
+  }
+
+  saveChatMessageUiState(input: {
+    conversationId: string
+    message: StorageChatMessageUiStateRecord
+  }): Promise<void> {
+    return this.rpc.request<void, typeof input>(STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD, input)
   }
 
   loadComposerDrafts(): Promise<StorageComposerDraftRecord[]> {

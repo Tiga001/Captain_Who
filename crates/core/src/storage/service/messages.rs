@@ -279,6 +279,22 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn save_chat_message_ui_state(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        ui_state_json: Option<&str>,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        chat_repository::update_message_ui_state(
+            &connection,
+            conversation_id,
+            message_id,
+            ui_state_json,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn update_chat_message_status_and_content(
         &self,
         conversation_id: &str,

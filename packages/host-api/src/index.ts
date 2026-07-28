@@ -78,6 +78,7 @@ import type {
   StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
+  StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
   StorageImageFileRecord,
   StorageModelSettingsRecord,
@@ -136,6 +137,10 @@ export interface StorageHostApi {
   saveChatMessageState(input: {
     conversationId: string
     message: StorageChatMessageStateRecord
+  }): Promise<void>
+  saveChatMessageUiState(input: {
+    conversationId: string
+    message: StorageChatMessageUiStateRecord
   }): Promise<void>
   loadComposerDrafts(): Promise<StorageComposerDraftRecord[]>
   saveComposerDraft(draft: StorageComposerDraftRecord): Promise<StorageComposerDraftRecord>

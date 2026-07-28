@@ -230,6 +230,22 @@ pub(crate) fn handle_request(
                     .map(|_| json!(null)),
             )
         }
+        STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD => {
+            let input = match parse_params::<SaveChatMessageUiStateRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage
+                    .save_chat_message_ui_state(
+                        &input.conversation_id,
+                        &input.message.id,
+                        input.message.ui_state_json.as_deref(),
+                    )
+                    .map(|_| json!(null)),
+            )
+        }
         STORAGE_LOAD_COMPOSER_DRAFTS_METHOD => {
             storage_response(request.id, storage.load_composer_drafts())
         }
@@ -298,6 +314,20 @@ pub(crate) struct UpsertChatMessagesRequest {
 pub(crate) struct SaveChatMessageStateRequest {
     pub(crate) conversation_id: String,
     pub(crate) message: ChatMessageStateRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveChatMessageUiStateRequest {
+    pub(crate) conversation_id: String,
+    pub(crate) message: ChatMessageUiStateRecord,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatMessageUiStateRecord {
+    pub(crate) id: String,
+    pub(crate) ui_state_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

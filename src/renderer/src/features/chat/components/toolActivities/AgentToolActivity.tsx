@@ -30,6 +30,7 @@ interface AgentToolActivityProps {
   result?: AgentToolResult
   run: ChatAgentRunView
   settledStatus?: SettledToolStatus
+  showImageGenerationPreview: boolean
 }
 
 export function AgentToolActivity({
@@ -42,7 +43,8 @@ export function AgentToolActivity({
   previousTodoResult,
   result,
   run,
-  settledStatus
+  settledStatus,
+  showImageGenerationPreview
 }: AgentToolActivityProps): ReactElement {
   if (call.tool === 'attachments_list' || call.tool === 'attachments_list_project') {
     return (
@@ -166,7 +168,14 @@ export function AgentToolActivity({
   }
 
   if (call.tool === 'image_generation') {
-    return <ImageGenerationToolActivity call={call} result={result} settledStatus={settledStatus} />
+    return (
+      <ImageGenerationToolActivity
+        call={call}
+        result={result}
+        settledStatus={settledStatus}
+        showArtifactPreview={showImageGenerationPreview}
+      />
+    )
   }
 
   return (

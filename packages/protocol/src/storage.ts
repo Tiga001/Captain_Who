@@ -76,6 +76,11 @@ export interface StorageChatMessageStateRecord {
   uiStateJson?: string | null
 }
 
+export interface StorageChatMessageUiStateRecord {
+  id: string
+  uiStateJson?: string | null
+}
+
 export interface StorageChatConversationMetaRecord {
   id: string
   projectId?: string | null

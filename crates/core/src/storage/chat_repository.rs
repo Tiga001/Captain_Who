@@ -705,6 +705,23 @@ pub fn update_message_state(
     Ok(())
 }
 
+pub fn update_message_ui_state(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    ui_state_json: Option<&str>,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "
+        UPDATE messages
+        SET ui_state_json = ?1
+        WHERE conversation_id = ?2 AND id = ?3
+        ",
+        params![ui_state_json, conversation_id, message_id],
+    )?;
+    Ok(())
+}
+
 fn list_messages(
     connection: &Connection,
     conversation_id: &str,
@@ -1097,6 +1114,57 @@ mod tests {
         assert_eq!(run["usage"]["outputTokens"], 38_253);
         assert_eq!(run["usage"]["billableRequestCount"], 42);
         assert_eq!(run["timeline"][0]["id"], "still-preserved");
+    }
+
+    #[test]
+    fn ui_state_update_never_rewrites_canonical_message_or_agent_run() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let mut stored = conversation();
+        stored.messages[1].content = "canonical final answer".to_string();
+        stored.messages[1].status = Some("sent".to_string());
+        stored.messages[1].agent_run_json = Some(
+            serde_json::json!({
+                "runId": "run-1",
+                "status": "completed",
+                "timeline": [{ "id": "terminal-answer", "type": "message" }]
+            })
+            .to_string(),
+        );
+        save_conversation(&mut connection, stored).unwrap();
+
+        update_message_ui_state(
+            &connection,
+            "conversation-1",
+            "assistant-1",
+            Some(r#"{"timelineCollapsed":false}"#),
+        )
+        .unwrap();
+
+        let (content, status, agent_run_json, ui_state_json): (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = connection
+            .query_row(
+                "SELECT content, status, agent_run_json, ui_state_json
+                 FROM messages WHERE id = 'assistant-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "canonical final answer");
+        assert_eq!(status.as_deref(), Some("sent"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(agent_run_json.as_deref().unwrap()).unwrap()
+                ["timeline"][0]["id"],
+            "terminal-answer"
+        );
+        assert_eq!(
+            ui_state_json.as_deref(),
+            Some(r#"{"timelineCollapsed":false}"#)
+        );
     }
 
     #[test]

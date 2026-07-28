@@ -258,8 +258,11 @@ export function getLastMessageTimelineContent(timeline: ChatAgentTimelineItem[])
 
 export function getAssistantFinalContent(message: ChatMessage) {
   const timelineContent = getLastMessageTimelineContent(message.agentRun?.timeline ?? [])
-  const content = timelineContent || message.content
-  return isThinkingPlaceholder(content) ? '' : content
+  // The durable assistant message is the canonical final answer. Timeline messages are execution
+  // narration and may be rebuilt from Trace after a reload, where the terminal answer is
+  // intentionally not duplicated. Keep the timeline fallback only for legacy/in-progress records
+  // whose message content was never finalized.
+  return hasDisplayableContent(message.content) ? message.content : timelineContent
 }
 
 export function getUserVisibleContent(message: ChatMessage) {

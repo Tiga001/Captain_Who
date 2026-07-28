@@ -468,6 +468,9 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.saveChatMessageState', (_event, input) =>
     coreServer.saveChatMessageState(input)
   )
+  ipcMain.handle('host:storage.saveChatMessageUiState', (_event, input) =>
+    coreServer.saveChatMessageUiState(input)
+  )
   ipcMain.handle('host:storage.loadComposerDrafts', () => coreServer.loadComposerDrafts())
   ipcMain.handle('host:storage.saveComposerDraft', (_event, draft) =>
     coreServer.saveComposerDraft(draft)

@@ -1,5 +1,6 @@
 // Renderer browser regressions for persisted Skill/Office timeline activity and Office files.
 
+import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ChatMessage } from '../../features/chat/chatTypes'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -94,7 +95,128 @@ function assistantMessage(overrides: Partial<ChatMessage['agentRun']> = {}): Cha
   }
 }
 
+function imageGenerationCall(id: string, reason: string): AgentToolCall {
+  return {
+    id,
+    tool: 'image_generation',
+    approvalStatus: 'not_required',
+    args: {
+      request: { operation: 'generate', hasInputImage: false },
+      reason
+    }
+  }
+}
+
+function imageGenerationResult(id: string, hash: string): AgentToolResult {
+  return {
+    callId: id,
+    tool: 'image_generation',
+    ok: true,
+    result: {
+      schemaVersion: 1,
+      status: 'succeeded',
+      operation: 'generate',
+      artifact: {
+        artifactId: `sha256:${hash}`,
+        uri: `image-artifact://sha256/${hash}`,
+        kind: 'image',
+        format: 'jpeg',
+        mimeType: 'image/jpeg',
+        width: 1200,
+        height: 800,
+        sizeBytes: 4096,
+        sha256: hash
+      },
+      audit: {
+        executionId: `agent-v1:${'a'.repeat(64)}`,
+        requestFingerprint: `sha256:${'b'.repeat(64)}`,
+        providerProfileId: 'default',
+        adapterId: 'smartmlSeedream',
+        profileRevision: 1,
+        modelId: 'image-model',
+        createdAt: 1,
+        completedAt: 2,
+        durationMs: 1
+      }
+    }
+  }
+}
+
 describe('Skill and Office chat timeline', () => {
+  it('renders the durable final answer after a Trace-rebuilt expanded timeline', async () => {
+    const message = assistantMessage({
+      toolCalls: [
+        {
+          id: 'command-1',
+          tool: 'run_command',
+          approvalStatus: 'not_required',
+          args: { command: 'true', reason: '完成最后一次验证。' }
+        }
+      ],
+      toolResults: [
+        {
+          callId: 'command-1',
+          tool: 'run_command',
+          ok: true,
+          result: { exitCode: 0, stdout: '', stderr: '' }
+        }
+      ],
+      timeline: [
+        { id: 'trace-message-1', type: 'message', content: '这是过程旁白。' },
+        { id: 'tool-call-command-1', type: 'tool_call', callId: 'command-1' }
+      ]
+    })
+    message.content = '这是后端持久化的最终总结。'
+
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.textContent).toContain('这是过程旁白。')
+    expect(screen.container.textContent?.match(/这是后端持久化的最终总结。/g)).toHaveLength(1)
+  })
+
+  it('keeps the final image Artifact card visible after expanding the timeline', async () => {
+    const hash = 'f'.repeat(64)
+    const message = assistantMessage({
+      toolCalls: [imageGenerationCall('image-1', '生成校园照片。')],
+      toolResults: [imageGenerationResult('image-1', hash)],
+      timeline: [
+        { id: 'image-1', type: 'tool_call', callId: 'image-1' },
+        { id: 'final-stream', type: 'message', content: '图片任务已完成。' }
+      ]
+    })
+    message.content = '图片任务已完成。'
+
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.textContent?.match(/图片任务已完成。/g)).toHaveLength(1)
+    expect(screen.container.querySelectorAll('.image-generation-artifact-card')).toHaveLength(1)
+    expect(screen.container.querySelector('.image-generation-activity__preview')).toBeNull()
+    expect(screen.container.querySelector('.image-generation-artifact-preview')).not.toBeNull()
+    expect(screen.container.textContent).toContain('生成校园照片。')
+  })
+
+  it('keeps the generated image preview under its Tool status until the run settles', async () => {
+    const hash = 'e'.repeat(64)
+    const message = assistantMessage({
+      status: 'running',
+      completedAt: undefined,
+      toolCalls: [imageGenerationCall('image-running', '生成过程中的校园照片。')],
+      toolResults: [imageGenerationResult('image-running', hash)],
+      timeline: [{ id: 'image-running', type: 'tool_call', callId: 'image-running' }]
+    })
+
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.querySelector('.image-generation-activity__preview')).not.toBeNull()
+    expect(screen.container.querySelector('.image-generation-artifact-section')).toBeNull()
+  })
+
   it('renders one loaded-Skill activity and merges paged reads of one resource', async () => {
     const skill = {
       id: 'bundled:application:spreadsheets',
@@ -475,19 +597,17 @@ describe('Skill and Office chat timeline', () => {
       <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
     )
 
-    const imageActivityPreview = screen.container.querySelector(
-      '.image-generation-activity__preview'
-    )
+    const imageArtifacts = screen.container.querySelector('.image-generation-artifact-section')
     const officeArtifacts = screen.container.querySelector('.office-artifact-list')
 
-    expect(imageActivityPreview).not.toBeNull()
+    expect(screen.container.querySelector('.image-generation-activity__preview')).toBeNull()
+    expect(imageArtifacts).not.toBeNull()
     expect(officeArtifacts).not.toBeNull()
-    if (!imageActivityPreview || !officeArtifacts) {
-      throw new Error('Expected both image preview and Office artifact sections.')
+    if (!imageArtifacts || !officeArtifacts) {
+      throw new Error('Expected both final image and Office artifact sections.')
     }
     expect(
-      imageActivityPreview.compareDocumentPosition(officeArtifacts) &
-        Node.DOCUMENT_POSITION_FOLLOWING
+      imageArtifacts.compareDocumentPosition(officeArtifacts) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
   })
 

@@ -150,6 +150,25 @@ describe('image generation activity UI', () => {
     expect(resolver.resolve).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps only the image description in a settled Tool activity', async () => {
+    const imageCall = call()
+    const resolver = {
+      resolve: vi.fn(async () => ({ src: PREVIEW_DATA_URL }))
+    }
+    const screen = await render(
+      <ImageGenerationToolActivity
+        call={imageCall}
+        resolver={resolver}
+        result={succeededResult()}
+        showArtifactPreview={false}
+      />
+    )
+
+    await expect.element(screen.getByText('Create a poster')).toBeVisible()
+    expect(screen.container.querySelector('.image-generation-activity__preview')).toBeNull()
+    expect(resolver.resolve).not.toHaveBeenCalled()
+  })
+
   it('uses a safe fallback for preflight failures and never renders raw Tool fields', async () => {
     const privateCall = call({
       args: {

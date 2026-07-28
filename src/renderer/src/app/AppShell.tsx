@@ -193,6 +193,7 @@ export function AppShell() {
   const {
     enqueueChatMessagesUpsert,
     enqueueChatMessageStateSave,
+    enqueueChatMessageUiStateSave,
     enqueueConversationMetaSave,
     pendingConversationSavesRef,
     pendingMessageSavesRef,
@@ -2525,27 +2526,19 @@ export function AppShell() {
                 }
                 onOpenContinuationOrigin={openContinuationOrigin}
                 onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
-                  const currentMessage = activeConversation.messages.find(
-                    (message) => message.id === messageId
-                  )
-                  const messageToSave: ChatMessage | null = currentMessage
-                    ? { ...currentMessage, uiState }
-                    : null
                   setConversationsWithRef((currentConversations) =>
                     currentConversations.map((conversation) =>
                       conversation.id === activeConversation.id
                         ? {
                             ...conversation,
                             messages: conversation.messages.map((message) =>
-                              message.id === messageId ? (messageToSave ?? message) : message
+                              message.id === messageId ? { ...message, uiState } : message
                             )
                           }
                         : conversation
                     )
                   )
-                  if (messageToSave) {
-                    enqueueChatMessageStateSave(activeConversation.id, messageToSave)
-                  }
+                  enqueueChatMessageUiStateSave(activeConversation.id, messageId, uiState)
                 }}
                 onRejectAgentAction={handleRejectAgentAction}
                 onReviewLastTurn={openLastTurnReview}

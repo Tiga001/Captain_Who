@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react'
-import type { ChatConversation, ChatMessage } from '../features/chat/chatTypes'
+import type { ChatConversation, ChatMessage, ChatMessageUiState } from '../features/chat/chatTypes'
 import {
+  saveChatMessageUiState,
   saveChatMessageState,
   saveConversationMeta,
   upsertChatMessages
@@ -12,6 +13,12 @@ type PendingMessageUpsert = {
   positionOffset: number
 }
 
+type PendingMessageUiStateSave = {
+  conversationId: string
+  messageId: string
+  uiState: ChatMessageUiState | undefined
+}
+
 export function useConversationPersistence() {
   const conversationSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
   const pendingConversationSavesRef = useRef<Map<string, ChatConversation>>(new Map())
@@ -19,6 +26,8 @@ export function useConversationPersistence() {
   const pendingMessageUpsertsRef = useRef<Map<string, PendingMessageUpsert[]>>(new Map())
   const messageSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
   const pendingMessageSavesRef = useRef<Map<string, PendingMessageSave>>(new Map())
+  const messageUiStateSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
+  const pendingMessageUiStateSavesRef = useRef<Map<string, PendingMessageUiStateSave>>(new Map())
 
   const waitForConversationSaves = useCallback(async (conversationId: string) => {
     while (true) {
@@ -36,13 +45,24 @@ export function useConversationPersistence() {
     }
   }, [])
 
+  const waitForCanonicalMessageStateSave = useCallback(async (key: string) => {
+    while (true) {
+      const pendingSave = messageSaveQueuesRef.current.get(key)
+      if (!pendingSave) return
+      await pendingSave
+    }
+  }, [])
+
   const waitForMessageStateSaves = useCallback(async (conversationId: string) => {
     while (true) {
       const pendingSaves = [...messageSaveQueuesRef.current.entries()]
         .filter(([key]) => key.startsWith(`${conversationId}:`))
         .map(([, pendingSave]) => pendingSave)
-      if (pendingSaves.length === 0) return
-      await Promise.allSettled(pendingSaves)
+      const pendingUiStateSaves = [...messageUiStateSaveQueuesRef.current.entries()]
+        .filter(([key]) => key.startsWith(`${conversationId}:`))
+        .map(([, pendingSave]) => pendingSave)
+      if (pendingSaves.length === 0 && pendingUiStateSaves.length === 0) return
+      await Promise.allSettled([...pendingSaves, ...pendingUiStateSaves])
     }
   }, [])
 
@@ -151,9 +171,44 @@ export function useConversationPersistence() {
     [waitForConversationSaves, waitForMessageUpserts]
   )
 
+  const enqueueChatMessageUiStateSave = useCallback(
+    (conversationId: string, messageId: string, uiState: ChatMessageUiState | undefined) => {
+      const key = `${conversationId}:${messageId}`
+      pendingMessageUiStateSavesRef.current.set(key, { conversationId, messageId, uiState })
+
+      if (messageUiStateSaveQueuesRef.current.has(key)) {
+        return
+      }
+
+      const drainSaves = async () => {
+        while (true) {
+          const payload = pendingMessageUiStateSavesRef.current.get(key)
+          if (!payload) return
+
+          pendingMessageUiStateSavesRef.current.delete(key)
+          try {
+            await waitForConversationSaves(payload.conversationId)
+            await waitForMessageUpserts(payload.conversationId)
+            await waitForCanonicalMessageStateSave(key)
+            await saveChatMessageUiState(payload.conversationId, payload.messageId, payload.uiState)
+          } catch (error) {
+            console.error('Failed to save chat message UI state to SQLite', error)
+          }
+        }
+      }
+
+      const nextSave = drainSaves().finally(() => {
+        messageUiStateSaveQueuesRef.current.delete(key)
+      })
+      messageUiStateSaveQueuesRef.current.set(key, nextSave)
+    },
+    [waitForCanonicalMessageStateSave, waitForConversationSaves, waitForMessageUpserts]
+  )
+
   return {
     enqueueChatMessagesUpsert,
     enqueueChatMessageStateSave,
+    enqueueChatMessageUiStateSave,
     enqueueConversationMetaSave,
     pendingConversationSavesRef,
     pendingMessageSavesRef,

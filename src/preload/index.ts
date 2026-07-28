@@ -123,6 +123,8 @@ const host: HostApi = {
     deleteChatMessages: (input) => ipcRenderer.invoke('host:storage.deleteChatMessages', input),
     upsertChatMessages: (input) => ipcRenderer.invoke('host:storage.upsertChatMessages', input),
     saveChatMessageState: (input) => ipcRenderer.invoke('host:storage.saveChatMessageState', input),
+    saveChatMessageUiState: (input) =>
+      ipcRenderer.invoke('host:storage.saveChatMessageUiState', input),
     loadComposerDrafts: () => ipcRenderer.invoke('host:storage.loadComposerDrafts'),
     saveComposerDraft: (draft) => ipcRenderer.invoke('host:storage.saveComposerDraft', draft),
     loadUiPreferences: () => ipcRenderer.invoke('host:storage.loadUiPreferences'),
