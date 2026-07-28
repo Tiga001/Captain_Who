@@ -55,7 +55,12 @@ impl AgentTool for WebFetchTool {
                     "includeImages": { "type": "boolean" },
                     "includeFavicon": { "type": "boolean" },
                     "timeoutSeconds": { "type": "number", "minimum": 1, "maximum": MAX_TIMEOUT_SECONDS },
-                    "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_CONTENT_CHARS }
+                    "maxChars": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_CONTENT_CHARS,
+                        "description": "Compatibility limit for presentation/checkpoint consumers. It does not limit Exact History capture or replace the fixed 10K model-result budget."
+                    }
                 },
                 "required": ["url"]
             }),
@@ -83,12 +88,32 @@ impl AgentTool for WebFetchTool {
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         let projected = result.result.as_ref().and_then(|value| {
             let mut output = serde_json::Map::new();
-            for field in ["url", "content", "images", "failedResults", "truncated"] {
+            for field in [
+                "url",
+                "content",
+                "contentCoverage",
+                "images",
+                "imagesCoverage",
+                "failedResults",
+                "failedResultsCoverage",
+                "truncated",
+                "truncatedAtSource",
+                "omittedBytes",
+                "sourceStopReason",
+            ] {
                 super::model_projection::insert_field(&mut output, value, field);
             }
             (!output.is_empty()).then_some(Value::Object(output))
         });
         super::model_projection::compact_model_result(result, projected)
+    }
+
+    fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        web_fetch_bounded_consumer_projection(result)
+    }
+
+    fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        web_fetch_bounded_consumer_projection(result)
     }
 }
 
@@ -346,29 +371,35 @@ fn format_tavily_extract_response(
         .map(Vec::len)
         .unwrap_or(0);
 
-    let (content, content_truncated) = result
-        .and_then(extract_content)
-        .map(|content| truncate_chars(content, request.max_chars))
-        .map(|(content, truncated)| (Some(content), truncated))
-        .unwrap_or((None, false));
+    let mut source_completeness = provider_source_completeness(result, &response);
+    let content = result.and_then(extract_content).map(|content| {
+        let (captured, omitted_bytes) = crate::exact_capture::bounded_utf8_prefix(content);
+        if omitted_bytes > 0 {
+            source_completeness.record_capture_limit(omitted_bytes);
+        }
+        captured.to_string()
+    });
+    let content_coverage = content_byte_coverage(
+        content.as_deref().unwrap_or_default().len(),
+        &source_completeness,
+    );
 
-    let images = result
+    let all_images = result
         .and_then(|result| result.get("images"))
         .and_then(Value::as_array)
-        .map(|images| images.iter().take(MAX_IMAGES).cloned().collect::<Vec<_>>())
+        .cloned()
         .unwrap_or_default();
-    let images_truncated = result
-        .and_then(|result| result.get("images"))
-        .and_then(Value::as_array)
-        .map(|images| images.len() > MAX_IMAGES)
-        .unwrap_or(false);
+    let images = all_images
+        .iter()
+        .take(MAX_IMAGES)
+        .cloned()
+        .collect::<Vec<_>>();
+    let images_coverage = collection_coverage(all_images.len(), images.len());
+
+    let all_failed_results = raw_failed_results(&response);
     let failed_results = format_failed_results(&response);
-    let failed_results_truncated = response
-        .get("failed_results")
-        .or_else(|| response.get("failedResults"))
-        .and_then(Value::as_array)
-        .map(|failed_results| failed_results.len() > MAX_FAILED_RESULTS)
-        .unwrap_or(false);
+    let failed_results_coverage =
+        collection_coverage(all_failed_results.len(), failed_results.len());
     if content_is_empty(content.as_deref()) && !failed_results.is_empty() {
         return Err(AgentError::new(format_failed_extract_error(
             &request.url,
@@ -380,9 +411,10 @@ fn format_tavily_extract_response(
         .or_else(|| response.get("responseTime"))
         .cloned();
 
-    // Tavily calls the extracted body `raw_content`, but after normalization and truncation this
-    // is our canonical model-facing content. Do not duplicate it under a `rawContent` alias: every
-    // later tool iteration would otherwise resend the same page body twice.
+    // Tavily calls the extracted body `raw_content`. Keep the safely captured body once under the
+    // canonical `content` field so Exact History and the model projection see the same bytes before
+    // the central 10K Gate. Event/checkpoint compatibility limits are derived later and never
+    // rewrite this canonical result.
     Ok(json!({
         "url": url,
         "requestedUrl": request.url,
@@ -390,17 +422,230 @@ fn format_tavily_extract_response(
         "format": request.format,
         "extractDepth": request.extract_depth,
         "content": content,
+        "contentCoverage": content_coverage,
         "images": images,
+        "imagesCoverage": images_coverage,
         "favicon": result
             .and_then(|result| result.get("favicon"))
             .and_then(Value::as_str),
         "failedResults": failed_results,
+        "failedResultsCoverage": failed_results_coverage,
         "responseTime": response_time,
-        "truncated": content_truncated
-            || images_truncated
-            || failed_results_truncated
-            || raw_results_len > 1
+        "requestedMaxChars": request.max_chars,
+        "truncated": source_completeness.truncated
+            || all_images.len() > images.len()
+            || all_failed_results.len() > failed_results.len()
+            || raw_results_len > 1,
+        "truncatedAtSource": source_completeness.truncated,
+        "omittedBytes": source_completeness.omitted_bytes,
+        "sourceStopReason": source_completeness.stop_reason
     }))
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProviderSourceCompleteness {
+    truncated: bool,
+    total_bytes: Option<u64>,
+    omitted_bytes: Option<u64>,
+    stop_reason: Option<String>,
+}
+
+impl ProviderSourceCompleteness {
+    fn record_capture_limit(&mut self, omitted_bytes: u64) {
+        if omitted_bytes == 0 {
+            return;
+        }
+        self.truncated = true;
+        self.omitted_bytes = Some(
+            self.omitted_bytes
+                .unwrap_or(0)
+                .saturating_add(omitted_bytes),
+        );
+        self.stop_reason = Some(crate::exact_capture::EXACT_TEXT_CAPTURE_STOP_REASON.to_string());
+    }
+}
+
+fn provider_source_completeness(
+    result: Option<&Value>,
+    response: &Value,
+) -> ProviderSourceCompleteness {
+    let truncated = provider_metadata_bool(
+        result,
+        response,
+        &[
+            "truncatedAtSource",
+            "truncated_at_source",
+            "sourceTruncated",
+            "source_truncated",
+            "truncated",
+        ],
+    )
+    .unwrap_or(false);
+    let total_bytes = provider_metadata_u64(
+        result,
+        response,
+        &[
+            "totalContentBytes",
+            "total_content_bytes",
+            "originalBytes",
+            "original_bytes",
+            "totalBytes",
+            "total_bytes",
+        ],
+    );
+    let omitted_bytes = provider_metadata_u64(
+        result,
+        response,
+        &[
+            "omittedContentBytes",
+            "omitted_content_bytes",
+            "omittedBytes",
+            "omitted_bytes",
+        ],
+    );
+    let stop_reason = provider_metadata_string(
+        result,
+        response,
+        &[
+            "sourceStopReason",
+            "source_stop_reason",
+            "stopReason",
+            "stop_reason",
+            "truncationReason",
+            "truncation_reason",
+        ],
+    );
+    ProviderSourceCompleteness {
+        truncated: truncated || omitted_bytes.is_some_and(|bytes| bytes > 0),
+        total_bytes,
+        omitted_bytes,
+        stop_reason,
+    }
+}
+
+fn provider_metadata_bool(result: Option<&Value>, response: &Value, keys: &[&str]) -> Option<bool> {
+    result
+        .into_iter()
+        .chain(std::iter::once(response))
+        .find_map(|value| {
+            keys.iter()
+                .find_map(|key| value.get(*key).and_then(Value::as_bool))
+        })
+}
+
+fn provider_metadata_u64(result: Option<&Value>, response: &Value, keys: &[&str]) -> Option<u64> {
+    result
+        .into_iter()
+        .chain(std::iter::once(response))
+        .find_map(|value| {
+            keys.iter()
+                .find_map(|key| value.get(*key).and_then(Value::as_u64))
+        })
+}
+
+fn provider_metadata_string(
+    result: Option<&Value>,
+    response: &Value,
+    keys: &[&str],
+) -> Option<String> {
+    result
+        .into_iter()
+        .chain(std::iter::once(response))
+        .find_map(|value| {
+            keys.iter().find_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+            })
+        })
+}
+
+fn content_byte_coverage(returned_bytes: usize, source: &ProviderSourceCompleteness) -> Value {
+    let returned_bytes = u64::try_from(returned_bytes).unwrap_or(u64::MAX);
+    let omitted_bytes = if source.truncated {
+        source.omitted_bytes.or_else(|| {
+            source
+                .total_bytes
+                .map(|total| total.saturating_sub(returned_bytes))
+        })
+    } else {
+        Some(0)
+    };
+    let derived_total = omitted_bytes.and_then(|omitted| returned_bytes.checked_add(omitted));
+    let total_bytes = match (source.total_bytes, derived_total) {
+        (Some(reported), Some(derived)) => Some(reported.max(derived)),
+        (Some(reported), None) => Some(reported.max(returned_bytes)),
+        (None, Some(derived)) => Some(derived),
+        (None, None) => (!source.truncated).then_some(returned_bytes),
+    };
+    json!({
+        "unit": "bytes",
+        "total": total_bytes,
+        "returned": returned_bytes,
+        "omitted": omitted_bytes
+    })
+}
+
+fn collection_coverage(total: usize, returned: usize) -> Value {
+    json!({
+        "unit": "items",
+        "total": total,
+        "returned": returned,
+        "omitted": total.saturating_sub(returned)
+    })
+}
+
+fn web_fetch_bounded_consumer_projection(result: &AgentToolResult) -> AgentToolResult {
+    let mut projected = super::canonical_tool_result_for_context(result);
+    let Some(payload) = projected.result.as_mut().and_then(Value::as_object_mut) else {
+        return projected;
+    };
+    let max_chars = payload
+        .remove("requestedMaxChars")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(DEFAULT_MAX_CHARS)
+        .clamp(1, MAX_CONTENT_CHARS);
+    let Some(content) = payload.get("content").and_then(Value::as_str) else {
+        return projected;
+    };
+    let original_content = content.to_string();
+    let (content, consumer_truncated) = truncate_chars(&original_content, max_chars);
+    if !consumer_truncated {
+        return projected;
+    }
+
+    let returned_source = original_content.chars().take(max_chars).collect::<String>();
+    let returned_bytes = u64::try_from(returned_source.len()).unwrap_or(u64::MAX);
+    let consumer_omitted =
+        u64::try_from(original_content.len().saturating_sub(returned_source.len()))
+            .unwrap_or(u64::MAX);
+    let source_total = payload
+        .get("contentCoverage")
+        .and_then(|coverage| coverage.get("total"))
+        .and_then(Value::as_u64);
+    let source_omitted = payload
+        .get("contentCoverage")
+        .and_then(|coverage| coverage.get("omitted"))
+        .and_then(Value::as_u64);
+    let omitted_bytes = source_omitted.map(|omitted| omitted.saturating_add(consumer_omitted));
+    let total_bytes = source_total
+        .or_else(|| omitted_bytes.and_then(|omitted| returned_bytes.checked_add(omitted)));
+    payload.insert("content".to_string(), Value::String(content));
+    payload.insert(
+        "contentCoverage".to_string(),
+        json!({
+            "unit": "bytes",
+            "total": total_bytes,
+            "returned": returned_bytes,
+            "omitted": omitted_bytes
+        }),
+    );
+    payload.insert("truncated".to_string(), Value::Bool(true));
+    projected
 }
 
 fn extract_content(result: &Value) -> Option<&str> {
@@ -416,25 +661,27 @@ fn content_is_empty(content: Option<&str>) -> bool {
 }
 
 fn format_failed_results(response: &Value) -> Vec<Value> {
+    raw_failed_results(response)
+        .iter()
+        .take(MAX_FAILED_RESULTS)
+        .map(|result| {
+            json!({
+                "url": result.get("url").and_then(Value::as_str),
+                "error": result
+                    .get("error")
+                    .or_else(|| result.get("message"))
+                    .and_then(Value::as_str)
+            })
+        })
+        .collect::<Vec<_>>()
+}
+
+fn raw_failed_results(response: &Value) -> &[Value] {
     response
         .get("failed_results")
         .or_else(|| response.get("failedResults"))
         .and_then(Value::as_array)
-        .map(|failed_results| {
-            failed_results
-                .iter()
-                .take(MAX_FAILED_RESULTS)
-                .map(|result| {
-                    json!({
-                        "url": result.get("url").and_then(Value::as_str),
-                        "error": result
-                            .get("error")
-                            .or_else(|| result.get("message"))
-                            .and_then(Value::as_str)
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(Vec::as_slice)
         .unwrap_or_default()
 }
 
@@ -580,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_extract_response_with_truncation() {
+    fn max_chars_only_bounds_event_and_checkpoint_projections() {
         let request = TavilyExtractRequest::from_args(WebFetchArgs {
             url: "https://example.com/docs".to_string(),
             query: None,
@@ -609,11 +856,296 @@ mod tests {
                 .unwrap();
 
         assert_eq!(formatted["provider"], "tavily");
-        assert_eq!(formatted["content"], "hello\n...[truncated]");
+        assert_eq!(formatted["content"], "hello world");
+        assert_eq!(
+            formatted["contentCoverage"],
+            json!({
+                "unit": "bytes",
+                "total": 11,
+                "returned": 11,
+                "omitted": 0
+            })
+        );
         assert!(formatted.get("rawContent").is_none());
         assert_eq!(formatted["favicon"], "https://example.com/favicon.ico");
         assert!(formatted.get("faviconDataUrl").is_none());
         assert!(formatted.get("faviconMimeType").is_none());
+        assert_eq!(formatted["truncated"], false);
+        assert_eq!(formatted["truncatedAtSource"], false);
+
+        let raw = AgentToolResult {
+            call_id: "call-web-fetch".to_string(),
+            tool: "web_fetch".to_string(),
+            ok: true,
+            result: Some(formatted),
+            error: None,
+            exact_archive_file: None,
+        };
+        let tool = WebFetchTool::new(String::new());
+        let archive = tool.archive_projection(&raw);
+        assert_eq!(archive.result.as_ref().unwrap()["content"], "hello world");
+
+        let model = tool.model_projection(&raw);
+        let model = model.result.as_ref().unwrap();
+        assert_eq!(model["content"], "hello world");
+        assert!(model.get("requestedMaxChars").is_none());
+        assert!(model.get("favicon").is_none());
+
+        for bounded in [
+            tool.event_projection(&raw),
+            tool.checkpoint_projection(&raw),
+        ] {
+            let bounded = bounded.result.as_ref().unwrap();
+            assert_eq!(bounded["content"], "hello\n...[truncated]");
+            assert_eq!(
+                bounded["contentCoverage"],
+                json!({
+                    "unit": "bytes",
+                    "total": 11,
+                    "returned": 5,
+                    "omitted": 6
+                })
+            );
+            assert_eq!(bounded["truncated"], true);
+            assert_eq!(bounded["truncatedAtSource"], false);
+            assert!(bounded.get("requestedMaxChars").is_none());
+            assert_eq!(
+                bounded["favicon"], "https://example.com/favicon.ico",
+                "Renderer favicon contract must remain available"
+            );
+            assert!(
+                !super::super::tool_result_truncated_at_source(&AgentToolResult {
+                    call_id: raw.call_id.clone(),
+                    tool: raw.tool.clone(),
+                    ok: true,
+                    result: Some(bounded.clone()),
+                    error: None,
+                    exact_archive_file: None,
+                }),
+                "a bounded consumer projection is not source truncation"
+            );
+        }
+    }
+
+    #[test]
+    fn reports_independent_collection_coverage_without_losing_exact_body() {
+        let request = TavilyExtractRequest::from_args(WebFetchArgs {
+            url: "https://example.com/docs".to_string(),
+            query: None,
+            chunks_per_source: None,
+            extract_depth: None,
+            format: None,
+            include_images: Some(true),
+            include_favicon: None,
+            timeout_seconds: None,
+            max_chars: None,
+        })
+        .unwrap();
+        let images = (0..(MAX_IMAGES + 2))
+            .map(|index| format!("https://example.com/{index}.png"))
+            .collect::<Vec<_>>();
+        let failed_results = (0..(MAX_FAILED_RESULTS + 2))
+            .map(|index| {
+                json!({
+                    "url": format!("https://failed.example/{index}"),
+                    "error": "not fetched"
+                })
+            })
+            .collect::<Vec<_>>();
+        let response = json!({
+            "results": [{
+                "url": "https://example.com/docs",
+                "raw_content": "complete provider body",
+                "images": images
+            }],
+            "failed_results": failed_results
+        });
+
+        let formatted =
+            format_tavily_extract_response(request, response, &AgentCancellationToken::new())
+                .unwrap();
+
+        assert_eq!(formatted["content"], "complete provider body");
+        assert_eq!(formatted["images"].as_array().unwrap().len(), MAX_IMAGES);
+        assert_eq!(
+            formatted["imagesCoverage"],
+            json!({
+                "unit": "items",
+                "total": MAX_IMAGES + 2,
+                "returned": MAX_IMAGES,
+                "omitted": 2
+            })
+        );
+        assert_eq!(
+            formatted["failedResults"].as_array().unwrap().len(),
+            MAX_FAILED_RESULTS
+        );
+        assert_eq!(
+            formatted["failedResultsCoverage"],
+            json!({
+                "unit": "items",
+                "total": MAX_FAILED_RESULTS + 2,
+                "returned": MAX_FAILED_RESULTS,
+                "omitted": 2
+            })
+        );
         assert_eq!(formatted["truncated"], true);
+        assert_eq!(formatted["truncatedAtSource"], false);
+    }
+
+    #[test]
+    fn preserves_provider_source_truncation_separately_from_consumer_limits() {
+        let request = TavilyExtractRequest::from_args(WebFetchArgs {
+            url: "https://example.com/docs".to_string(),
+            query: None,
+            chunks_per_source: None,
+            extract_depth: None,
+            format: None,
+            include_images: None,
+            include_favicon: None,
+            timeout_seconds: None,
+            max_chars: None,
+        })
+        .unwrap();
+        let response = json!({
+            "results": [{
+                "url": "https://example.com/docs",
+                "raw_content": "partial",
+                "truncated": true,
+                "omitted_bytes": 123,
+                "stop_reason": "provider_capture_limit"
+            }]
+        });
+
+        let formatted =
+            format_tavily_extract_response(request, response, &AgentCancellationToken::new())
+                .unwrap();
+
+        assert_eq!(formatted["content"], "partial");
+        assert_eq!(formatted["truncated"], true);
+        assert_eq!(formatted["truncatedAtSource"], true);
+        assert_eq!(formatted["omittedBytes"], 123);
+        assert_eq!(formatted["sourceStopReason"], "provider_capture_limit");
+        assert_eq!(
+            formatted["contentCoverage"],
+            json!({
+                "unit": "bytes",
+                "total": 130,
+                "returned": 7,
+                "omitted": 123
+            })
+        );
+        assert!(super::super::tool_result_truncated_at_source(
+            &AgentToolResult {
+                call_id: "call-source-truncated".to_string(),
+                tool: "web_fetch".to_string(),
+                ok: true,
+                result: Some(formatted),
+                error: None,
+                exact_archive_file: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn shared_exact_capture_limit_adds_omission_without_hiding_provider_loss() {
+        let mut source = ProviderSourceCompleteness {
+            truncated: true,
+            total_bytes: None,
+            omitted_bytes: Some(3),
+            stop_reason: Some("provider_limit".to_string()),
+        };
+
+        source.record_capture_limit(5);
+
+        assert!(source.truncated);
+        assert_eq!(source.omitted_bytes, Some(8));
+        assert_eq!(
+            source.stop_reason.as_deref(),
+            Some(crate::exact_capture::EXACT_TEXT_CAPTURE_STOP_REASON)
+        );
+        assert_eq!(
+            content_byte_coverage(10, &source),
+            json!({
+                "unit": "bytes",
+                "total": 18,
+                "returned": 10,
+                "omitted": 8
+            })
+        );
+    }
+
+    #[test]
+    fn oversized_exact_body_reaches_the_central_gate_and_keeps_history_recovery() {
+        let raw = AgentToolResult {
+            call_id: "call-large-web-fetch".to_string(),
+            tool: "web_fetch".to_string(),
+            ok: true,
+            result: Some(json!({
+                "url": "https://example.com/large",
+                "content": "完整网页正文🙂".repeat(80_000),
+                "contentCoverage": {
+                    "unit": "bytes",
+                    "total": 1_600_000,
+                    "returned": 1_600_000,
+                    "omitted": 0
+                },
+                "images": [],
+                "imagesCoverage": {
+                    "unit": "items",
+                    "total": 0,
+                    "returned": 0,
+                    "omitted": 0
+                },
+                "failedResults": [],
+                "failedResultsCoverage": {
+                    "unit": "items",
+                    "total": 0,
+                    "returned": 0,
+                    "omitted": 0
+                },
+                "truncated": false,
+                "truncatedAtSource": false
+            })),
+            error: None,
+            exact_archive_file: None,
+        };
+        let model = WebFetchTool::new(String::new()).model_projection(&raw);
+        assert_eq!(
+            model.result.as_ref().unwrap()["content"],
+            raw.result.as_ref().unwrap()["content"],
+            "the Tool projection must not pre-truncate exact content"
+        );
+
+        let detector = crate::context::ContextCapacityDetector::for_model(
+            "test-model",
+            crate::protocol::AgentApiStyle::OpenAiCompatible,
+            &[],
+        );
+        let gate = detector.model_tool_result_gate();
+        let history_open = "hist_v1_web_fetch_archive".to_string();
+        let recovery = crate::context::ModelToolResultRecovery {
+            continue_with: Some(json!({
+                "tool": "conversation_history",
+                "args": { "open": history_open }
+            })),
+            history_open: Some(Value::String(history_open.clone())),
+            recovery: None,
+            truncated_at_source: Some(false),
+        };
+        let output = gate.project(&raw.call_id, false, &model, Some(&recovery));
+        let payload: Value = serde_json::from_str(&output.content).unwrap();
+
+        assert!(output.truncated);
+        assert!(
+            output.estimated_tokens
+                <= crate::context::model_tool_result_gate::MODEL_TOOL_RESULT_MAX_TOKENS
+        );
+        assert_eq!(payload["truncatedAtSource"], false);
+        assert_eq!(payload["historyOpen"], history_open);
+        assert_eq!(
+            payload["continueWith"]["tool"], "conversation_history",
+            "the only recovery Tool remains conversation_history"
+        );
     }
 }

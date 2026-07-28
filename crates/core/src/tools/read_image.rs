@@ -491,6 +491,7 @@ mod tests {
 
     fn image_result(thumbnail: String) -> AgentToolResult {
         AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-image".to_string(),
             tool: "read_image".to_string(),
             ok: true,

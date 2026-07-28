@@ -680,6 +680,7 @@ mod tests {
                 reason: None,
             },
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: pending.id,
                 tool: pending.name,
                 ok: true,
@@ -923,6 +924,7 @@ mod tests {
                 reason: None,
             },
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: pending.id,
                 tool: pending.name,
                 ok: true,
@@ -1282,6 +1284,7 @@ mod tests {
                 reason: None,
             },
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: pending.id,
                 tool: "write_file".to_string(),
                 ok: true,
@@ -1344,6 +1347,7 @@ mod tests {
                 reason: None,
             },
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: pending.id,
                 tool: pending.name,
                 ok: false,
@@ -1476,6 +1480,7 @@ mod tests {
                 reason: None,
             },
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: pending.id,
                 tool: pending.name,
                 ok: true,
@@ -1510,6 +1515,7 @@ mod tests {
             reason: None,
         };
         let completed_result = AgentToolResult {
+            exact_archive_file: None,
             call_id: completed_call.id.clone(),
             tool: completed_call.tool.clone(),
             ok: true,
@@ -1601,6 +1607,7 @@ mod tests {
                 ..pending_call
             },
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: pending_call_id,
                 tool: "write_file".to_string(),
                 ok: true,

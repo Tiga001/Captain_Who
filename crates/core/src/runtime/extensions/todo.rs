@@ -512,6 +512,7 @@ mod tests {
         let call = todo_call(args.clone());
         match tool.execute(&context, args) {
             Ok(value) => crate::protocol::AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id,
                 tool: call.tool,
                 ok: true,
@@ -519,6 +520,7 @@ mod tests {
                 error: None,
             },
             Err(error) => crate::protocol::AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id,
                 tool: call.tool,
                 ok: false,

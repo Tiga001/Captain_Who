@@ -113,6 +113,9 @@ fn manual_command_settlement(
         duration_ms: 12,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: Default::default(),
+        stdout_spool: Default::default(),
+        stderr_spool: Default::default(),
         error: None,
         policy_evaluation: None,
         artifact_observation: None,
@@ -120,6 +123,7 @@ fn manual_command_settlement(
         runtime: None,
     };
     let tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: "run_command".to_string(),
         ok: true,
@@ -440,6 +444,7 @@ fn manual_non_command_file_effect_settlement(
         decision_source: Some("manual".to_string()),
     };
     let tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: effect.tool_name().to_string(),
         ok: true,
@@ -1640,6 +1645,7 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
     .unwrap();
     let message = "The command finished, but its final action audit could not be persisted. Inspect the observed artifacts before retrying.";
     let fallback = AgentToolResult {
+        exact_archive_file: None,
         call_id: "audit-wrapper-command".to_string(),
         tool: "run_command".to_string(),
         ok: false,

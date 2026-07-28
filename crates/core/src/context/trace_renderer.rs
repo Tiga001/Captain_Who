@@ -172,6 +172,7 @@ impl ConversationTraceRenderer {
                         continue;
                     };
                     let result = AgentToolResult {
+                        exact_archive_file: None,
                         call_id: exchange.call_id.clone(),
                         tool: tool.clone(),
                         ok: *success,

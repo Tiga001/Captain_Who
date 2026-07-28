@@ -327,6 +327,16 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn archive_conversation_tool_result_file(
+        &self,
+        input: conversation_history_archive_repository::ConversationHistoryArchiveFileInput,
+    ) -> Result<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor, String>
+    {
+        let mut connection = self.state.connection()?;
+        conversation_history_archive_repository::store_archive_file(&mut connection, &input)
+            .map_err(storage_error)
+    }
+
     pub fn find_conversation_history_archive_for_trace_item(
         &self,
         conversation_id: &str,

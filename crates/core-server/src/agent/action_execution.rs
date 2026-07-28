@@ -88,6 +88,7 @@ fn proposed_action_failure_result(
     error: &AgentError,
 ) -> AgentToolResult {
     AgentToolResult {
+        exact_archive_file: None,
         call_id: action_id_for_action(action),
         tool: tool_name_for_action(action),
         ok: false,
@@ -145,6 +146,7 @@ fn office_audit_persistence_failure(
         "The Office operation was not started because its executing action audit could not be persisted."
     };
     AgentToolResult {
+        exact_archive_file: None,
         call_id: office_operation.id.clone(),
         tool: tool.to_string(),
         ok: false,
@@ -175,6 +177,7 @@ fn office_skill_resource_restore_failure(
     error: &str,
 ) -> AgentToolResult {
     AgentToolResult {
+        exact_archive_file: None,
         call_id: office_operation.id.clone(),
         tool: tool.to_string(),
         ok: false,
@@ -202,6 +205,7 @@ fn command_audit_persistence_failure(
         "The command was not started because its executing action audit could not be persisted."
     };
     AgentToolResult {
+        exact_archive_file: None,
         call_id: command.id.clone(),
         tool: "run_command".to_string(),
         ok: false,
@@ -229,6 +233,7 @@ fn command_audit_finalization_indeterminate(
     execution_result: &AgentCommandExecutionResult,
 ) -> AgentToolResult {
     AgentToolResult {
+        exact_archive_file: None,
         call_id: command.id.clone(),
         tool: "run_command".to_string(),
         ok: false,
@@ -556,6 +561,7 @@ fn file_effect_audit_persistence_failure(
 ) -> AgentToolResult {
     let execution_attempted = execution_result.is_some();
     AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: tool.to_string(),
         ok: false,
@@ -722,6 +728,7 @@ fn materialization_success_message(status: SkillMaterializationStatus, tree: boo
 fn skill_script_runtime_failure(call_id: &str, error: SkillScriptRuntimeError) -> AgentToolResult {
     let message = error.message().to_string();
     AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: "skills_run_script".to_string(),
         ok: false,
@@ -757,13 +764,27 @@ fn skill_script_tool_result(call_id: &str, result: AgentSkillScriptResult) -> Ag
             }
         })
     };
-    AgentToolResult {
+    let substitutions = result.output_spool_substitutions();
+    let mut tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: "skills_run_script".to_string(),
         ok: succeeded,
-        result: serde_json::to_value(result).ok(),
+        result: serde_json::to_value(&result).ok(),
         error,
+    };
+    if !substitutions.is_empty() {
+        match mycopilot_core::command::materialize_process_tool_result_archive(
+            &tool_result,
+            &substitutions,
+        ) {
+            Ok(file) => tool_result.exact_archive_file = file,
+            Err(error) => {
+                eprintln!("failed to materialize exact skills_run_script output archive: {error}");
+            }
+        }
     }
+    tool_result
 }
 
 fn office_engine_failure(
@@ -775,6 +796,7 @@ fn office_engine_failure(
     let error_code = error.code().stable_name();
     let message = error.message().to_string();
     AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: tool.to_string(),
         ok: false,
@@ -836,15 +858,29 @@ fn office_operation_tool_result(
             }
         })
     };
-    AgentToolResult {
+    let substitutions = result.output_spool_substitutions();
+    let mut tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: tool.to_string(),
         ok: succeeded,
         // Preserve the complete provider result, including exitCode, stdout,
         // stderr, truncation markers, timeout, cancellation, and duration.
-        result: serde_json::to_value(result).ok(),
+        result: serde_json::to_value(&result).ok(),
         error,
+    };
+    if !substitutions.is_empty() {
+        match mycopilot_core::command::materialize_process_tool_result_archive(
+            &tool_result,
+            &substitutions,
+        ) {
+            Ok(file) => tool_result.exact_archive_file = file,
+            Err(error) => {
+                eprintln!("failed to materialize exact OfficeCLI output archive: {error}");
+            }
+        }
     }
+    tool_result
 }
 
 impl AgentService {
@@ -1544,6 +1580,7 @@ impl AgentService {
                 Ok(execution.tool_result)
             }
             AgentProposedAction::ToolCall { call } => Ok(AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id,
                 tool: call.tool,
                 ok: false,
@@ -1865,6 +1902,7 @@ impl AgentService {
         let tool = office_tool_name(office_operation.prepared.request.document_kind);
         if office_operation.approval_status != AgentApprovalStatus::Approved {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: office_operation.id.clone(),
                 tool: tool.to_string(),
                 ok: false,
@@ -1884,6 +1922,7 @@ impl AgentService {
                 != mycopilot_core::office::OfficeOperationAccess::FileWrite
         {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: office_operation.id.clone(),
                 tool: tool.to_string(),
                 ok: false,
@@ -1901,6 +1940,7 @@ impl AgentService {
         if permissions_from_input(agent_input).write == mycopilot_core::AgentWritePermission::Denied
         {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: office_operation.id.clone(),
                 tool: tool.to_string(),
                 ok: false,
@@ -1966,6 +2006,7 @@ impl AgentService {
     ) -> AgentToolResult {
         if script.approval_status != AgentApprovalStatus::Approved {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: script.id.clone(),
                 tool: "skills_run_script".to_string(),
                 ok: false,
@@ -1986,6 +2027,7 @@ impl AgentService {
             };
         if !authorized {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: script.id.clone(),
                 tool: "skills_run_script".to_string(),
                 ok: false,
@@ -2002,6 +2044,7 @@ impl AgentService {
         }
         let Some(resources) = resources else {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: script.id.clone(),
                 tool: "skills_run_script".to_string(),
                 ok: false,
@@ -2015,6 +2058,7 @@ impl AgentService {
         };
         let Some(workspace_root) = workspace_root_optional(agent_input) else {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: script.id.clone(),
                 tool: "skills_run_script".to_string(),
                 ok: false,
@@ -2121,6 +2165,7 @@ impl AgentService {
 
         match execute() {
             Ok(result) => AgentToolResult {
+                exact_archive_file: None,
                 call_id: materialization.id.clone(),
                 tool: "skills_materialize_resource".to_string(),
                 ok: true,
@@ -2128,6 +2173,7 @@ impl AgentService {
                 error: None,
             },
             Err((error, structured)) => AgentToolResult {
+                exact_archive_file: None,
                 call_id: materialization.id.clone(),
                 tool: "skills_materialize_resource".to_string(),
                 ok: false,
@@ -2321,6 +2367,7 @@ impl AgentService {
         let mut tool_result = match task_result {
             Ok(result) => result,
             Err(error) => AgentToolResult {
+                exact_archive_file: None,
                 call_id: action_id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
@@ -2454,6 +2501,7 @@ impl AgentService {
             Err(error) => {
                 drop(guard);
                 AgentToolResult {
+                    exact_archive_file: None,
                     call_id: action_id.clone(),
                     tool: "skills_run_script".to_string(),
                     ok: false,
@@ -2484,6 +2532,7 @@ impl AgentService {
                 {
                     Ok(result) => result,
                     Err(error) => AgentToolResult {
+                        exact_archive_file: None,
                         call_id: action_id.clone(),
                         tool: "skills_run_script".to_string(),
                         ok: false,

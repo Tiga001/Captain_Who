@@ -685,6 +685,7 @@ fn activation_capacity_reservation(
     };
     let tool_call_id = context.tool_call_id()?;
     let tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: tool_call_id.to_string(),
         tool: SKILL_ACTIVATE_TOOL_NAME.to_string(),
         ok: true,
@@ -1562,6 +1563,7 @@ mod tests {
 
     fn successful_result(value: Value) -> AgentToolResult {
         AgentToolResult {
+            exact_archive_file: None,
             call_id: "activate-call-1".to_string(),
             tool: SKILL_ACTIVATE_TOOL_NAME.to_string(),
             ok: true,
@@ -2328,6 +2330,7 @@ mod tests {
             .sum::<u64>();
         let result = activation_result("activated", &record, &activation_revision, reason).unwrap();
         let canonical = canonical_tool_result_for_context(&AgentToolResult {
+            exact_archive_file: None,
             call_id: "activate-call-1".to_string(),
             tool: SKILL_ACTIVATE_TOOL_NAME.to_string(),
             ok: true,
@@ -2416,6 +2419,7 @@ mod tests {
         )
         .unwrap();
         let failed_result = AgentToolResult {
+            exact_archive_file: None,
             call_id: "failed-activate".to_string(),
             tool: SKILL_ACTIVATE_TOOL_NAME.to_string(),
             ok: false,

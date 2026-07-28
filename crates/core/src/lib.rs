@@ -6,6 +6,7 @@ mod context_compaction_receipt;
 mod conversation_trace;
 mod conversation_trace_projection;
 pub mod durable_fs;
+pub mod exact_capture;
 pub mod file_input;
 pub mod file_write;
 pub mod git_review;

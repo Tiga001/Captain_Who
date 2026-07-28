@@ -1,6 +1,6 @@
 use super::{
-    read_zip_xml_text_parts, resolve_document_path, sanitize_document_max_chars, truncate_chars,
-    AgentTool, NamedText, ToolExecutionContext, MAX_DOCUMENT_TEXT_CHARS,
+    complete_document_text_result, read_zip_xml_text_parts, resolve_document_path, AgentTool,
+    NamedText, ToolExecutionContext,
 };
 use crate::protocol::{
     AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
@@ -32,7 +32,7 @@ impl AgentTool for ReadPresentationTool {
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative .pptx path or @attachments/... readPath." },
                     "filePath": { "type": "string", "description": "Alias for path." },
-                    "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_DOCUMENT_TEXT_CHARS }
+                    "maxChars": { "type": "integer", "minimum": 1, "description": "Deprecated soft compatibility hint. Exact History capture is never limited by this value; model output uses the shared 10K gate." }
                 },
                 "required": ["path"]
             }),
@@ -47,8 +47,8 @@ impl AgentTool for ReadPresentationTool {
         context.check_cancelled()?;
         let args: ReadPresentationArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_presentation 参数无效：{error}")))?;
+        let _requested_max_chars = args.max_chars;
         let path = args.path()?;
-        let max_chars = sanitize_document_max_chars(args.max_chars);
         let resolved = resolve_document_path(context, path, &["pptx"])?;
         let cancellation_token = context.cancellation_token();
         let (text, slides, extractor) = match resolved.extension.as_str() {
@@ -70,23 +70,34 @@ impl AgentTool for ReadPresentationTool {
             _ => unreachable!("extension validated before dispatch"),
         };
         cancellation_token.check()?;
-        let (text, truncated) = truncate_chars(&text, max_chars);
 
-        Ok(json!({
-            "path": resolved.relative_path,
-            "format": resolved.extension,
-            "sizeBytes": resolved.size_bytes,
-            "extractor": extractor,
-            "slideCount": slides,
-            "truncated": truncated,
-            "text": text
-        }))
+        Ok(complete_document_text_result(
+            json!({
+                "path": resolved.relative_path,
+                "format": resolved.extension,
+                "sizeBytes": resolved.size_bytes,
+                "extractor": extractor,
+                "slideCount": slides
+            }),
+            text,
+        ))
     }
 
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         let projected = super::model_projection::retain_fields(
             result.result.as_ref(),
-            &["path", "format", "slideCount", "truncated", "text"],
+            &[
+                "path",
+                "format",
+                "slideCount",
+                "originalBytes",
+                "capturedBytes",
+                "omittedBytes",
+                "sourceStopReason",
+                "truncatedAtSource",
+                "truncated",
+                "text",
+            ],
         );
         super::model_projection::compact_model_result(result, projected)
     }
@@ -146,7 +157,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_presentation".to_string(),
-            args: json!({ "path": "deck.pptx" }),
+            args: json!({ "path": "deck.pptx", "maxChars": 1 }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         };
@@ -154,10 +165,10 @@ mod tests {
         let result = registry.execute(&context, &call);
 
         assert!(result.ok, "{:?}", result.error);
-        assert!(result.result.unwrap()["text"]
-            .as_str()
-            .unwrap()
-            .contains("Slide text"));
+        let value = result.result.unwrap();
+        assert!(value["text"].as_str().unwrap().contains("Slide text"));
+        assert_eq!(value["truncatedAtSource"], false);
+        assert_eq!(value["omittedBytes"], 0);
     }
 
     struct TestWorkspace {

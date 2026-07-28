@@ -349,6 +349,7 @@ pub(crate) fn tool_result_for_decision(
 ) -> AgentToolResult {
     match decision_status {
         AgentApprovalDecisionStatus::Approved => AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: false,
@@ -359,6 +360,7 @@ pub(crate) fn tool_result_for_decision(
             error: Some("不支持执行通用审批工具调用；未修改文件或运行命令。".to_string()),
         },
         AgentApprovalDecisionStatus::Rejected => AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: true,
@@ -395,6 +397,7 @@ pub(crate) fn action_execution_for_decision(
                 file_write_result: None,
                 file_change: None,
                 tool_result: AgentToolResult {
+                    exact_archive_file: None,
                     call_id: call.id.clone(),
                     tool: call.tool.clone(),
                     ok: false,
@@ -668,6 +671,7 @@ pub(crate) fn file_write_tool_result(
     result: &AgentFileWriteResult,
 ) -> AgentToolResult {
     AgentToolResult {
+        exact_archive_file: None,
         call_id: action_id.to_string(),
         tool: "write_file".to_string(),
         ok,
@@ -695,6 +699,7 @@ pub(crate) fn patch_tool_result(
     patch_result: &AgentPatchResult,
 ) -> AgentToolResult {
     AgentToolResult {
+        exact_archive_file: None,
         call_id: action_id.to_string(),
         tool: "apply_patch".to_string(),
         ok: observation_ok,
@@ -726,6 +731,9 @@ pub(crate) fn failed_command_result(
         duration_ms: 0,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: Default::default(),
+        stdout_spool: Default::default(),
+        stderr_spool: Default::default(),
         error: Some(error),
         policy_evaluation,
         artifact_observation: None,

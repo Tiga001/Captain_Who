@@ -304,6 +304,7 @@ pub(super) fn failed_tool_call_result(call: &AgentToolCall, error: AgentError) -
         details
     });
     AgentToolResult {
+        exact_archive_file: None,
         call_id: call.id.clone(),
         tool: call.tool.clone(),
         ok: false,
@@ -707,6 +708,7 @@ mod tests {
             }
             executor_finished.store(true, Ordering::SeqCst);
             Ok(AgentToolResult {
+                exact_archive_file: None,
                 call_id: "write-1".to_string(),
                 tool: "write_file".to_string(),
                 ok: false,
@@ -803,6 +805,7 @@ mod tests {
         };
         let executor: AgentHostActionExecutor = Arc::new(|_action, _cancellation| {
             Ok(AgentToolResult {
+                exact_archive_file: None,
                 call_id: "write-wrong".to_string(),
                 tool: "run_command".to_string(),
                 ok: true,
@@ -932,6 +935,7 @@ mod tests {
     #[test]
     fn authoritative_cancelled_result_is_published_before_the_run_stops() {
         let result = AgentToolResult {
+            exact_archive_file: None,
             call_id: "authoritative-1".to_string(),
             tool: "authoritative_cancellation_test".to_string(),
             ok: false,

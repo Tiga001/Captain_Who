@@ -84,8 +84,8 @@ use write_file::WriteFileTool;
 
 pub(super) use context::{GoalRuntimeState, GoalRuntimeStateReader, ToolExecutionContext};
 use document_text::{
-    extract_with_textutil, join_named_text, normalize_text_output, read_zip_xml_text_parts,
-    reserve_zip_xml_entry, resolve_document_path, sanitize_document_max_chars, NamedText,
+    complete_document_text_result, extract_with_textutil, join_named_text, normalize_text_output,
+    read_zip_xml_text_parts, reserve_zip_xml_entry, resolve_document_path, NamedText,
 };
 use filesystem::{
     block_on_tool_future, clean_relative_path, relative_display, sanitize_limit, truncate_chars,
@@ -190,12 +190,13 @@ pub(crate) fn value_contains_unrecoverable_source_truncation(value: &Value) -> b
         return true;
     }
 
-    // Dedicated capture flags describe bytes or observations the Tool already discarded. A
-    // cursor or Exact History route can recover the received payload, not the omitted source
-    // content, so these flags remain source truncation even when a recovery route is present.
-    if DEDICATED_SOURCE_TRUNCATION_FIELDS
-        .iter()
-        .any(|key| object.get(*key).is_some_and(value_contains_true))
+    // Legacy dedicated flags normally mean the Tool already discarded bytes or observations.
+    // New process receipts pair their preview-only legacy flag with an explicit
+    // `truncatedAtSource: false`, which authoritatively distinguishes a recoverable preview cut.
+    if declared_source_truncation != Some(false)
+        && DEDICATED_SOURCE_TRUNCATION_FIELDS
+            .iter()
+            .any(|key| object.get(*key).is_some_and(value_contains_true))
     {
         return true;
     }
@@ -454,6 +455,7 @@ impl ToolRegistry {
     pub fn execute(&self, context: &ToolExecutionContext, call: &AgentToolCall) -> AgentToolResult {
         if let Err(error) = context.check_cancelled() {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
@@ -464,6 +466,7 @@ impl ToolRegistry {
 
         let Some(tool) = self.tools.get(&call.tool) else {
             return AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
@@ -478,6 +481,7 @@ impl ToolRegistry {
             Ok(result) => match (cancellation_settlement, context.check_cancelled()) {
                 (AgentToolCancellationSettlement::Authoritative, _) | (_, Ok(())) => {
                     AgentToolResult {
+                        exact_archive_file: None,
                         call_id: call.id.clone(),
                         tool: call.tool.clone(),
                         ok: true,
@@ -486,6 +490,7 @@ impl ToolRegistry {
                     }
                 }
                 (_, Err(error)) => AgentToolResult {
+                    exact_archive_file: None,
                     call_id: call.id.clone(),
                     tool: call.tool.clone(),
                     ok: false,
@@ -494,6 +499,7 @@ impl ToolRegistry {
                 },
             },
             Err(error) => AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
@@ -1180,6 +1186,7 @@ mod tests {
         let registry = ToolRegistry::defaults_with_search(None);
         for result in [
             AgentToolResult {
+                exact_archive_file: None,
                 call_id: "command-1".to_string(),
                 tool: "run_command".to_string(),
                 ok: true,
@@ -1195,6 +1202,7 @@ mod tests {
                 error: None,
             },
             AgentToolResult {
+                exact_archive_file: None,
                 call_id: "write-1".to_string(),
                 tool: "write_file".to_string(),
                 ok: true,
@@ -1452,6 +1460,7 @@ mod tests {
     #[test]
     fn source_truncation_distinguishes_lossless_pages_from_unrecoverable_cuts() {
         let pageable = AgentToolResult {
+            exact_archive_file: None,
             call_id: "pageable".to_string(),
             tool: "read_file".to_string(),
             ok: true,
@@ -1463,6 +1472,7 @@ mod tests {
             error: None,
         };
         let unrecoverable = AgentToolResult {
+            exact_archive_file: None,
             call_id: "unrecoverable".to_string(),
             tool: "web_fetch".to_string(),
             ok: true,
@@ -1473,6 +1483,7 @@ mod tests {
             error: None,
         };
         let skill_page = AgentToolResult {
+            exact_archive_file: None,
             call_id: "skills-page".to_string(),
             tool: "skills_list_resources".to_string(),
             ok: true,
@@ -1484,6 +1495,7 @@ mod tests {
             error: None,
         };
         let explicitly_complete_source = AgentToolResult {
+            exact_archive_file: None,
             call_id: "explicit-source".to_string(),
             tool: "custom".to_string(),
             ok: true,
@@ -1534,6 +1546,7 @@ mod tests {
             ),
         ] {
             let result = AgentToolResult {
+                exact_archive_file: None,
                 call_id: call_id.to_string(),
                 tool: "custom".to_string(),
                 ok: true,
@@ -1569,6 +1582,7 @@ mod tests {
             let mut object = recovery.as_object().unwrap().clone();
             object.insert("truncated".to_string(), Value::Bool(true));
             let result = AgentToolResult {
+                exact_archive_file: None,
                 call_id: call_id.to_string(),
                 tool: "custom".to_string(),
                 ok: true,
@@ -1593,6 +1607,7 @@ mod tests {
             let mut object = recovery.as_object().unwrap().clone();
             object.insert("truncated".to_string(), Value::Bool(true));
             let result = AgentToolResult {
+                exact_archive_file: None,
                 call_id: call_id.to_string(),
                 tool: "custom".to_string(),
                 ok: true,
@@ -1609,6 +1624,7 @@ mod tests {
     #[test]
     fn explicit_source_declarations_are_scoped_and_authoritative() {
         let explicit_true_with_recovery = AgentToolResult {
+            exact_archive_file: None,
             call_id: "explicit-true".to_string(),
             tool: "custom".to_string(),
             ok: true,
@@ -1619,6 +1635,7 @@ mod tests {
             error: None,
         };
         let dedicated_cut_under_explicitly_complete_parent = AgentToolResult {
+            exact_archive_file: None,
             call_id: "explicit-false".to_string(),
             tool: "custom".to_string(),
             ok: true,
@@ -1629,6 +1646,7 @@ mod tests {
             error: None,
         };
         let nested_source_cut_under_explicitly_complete_parent = AgentToolResult {
+            exact_archive_file: None,
             call_id: "nested-source".to_string(),
             tool: "custom".to_string(),
             ok: true,
@@ -1641,6 +1659,7 @@ mod tests {
             error: None,
         };
         let dedicated_cut_with_history_recovery = AgentToolResult {
+            exact_archive_file: None,
             call_id: "dedicated-with-history".to_string(),
             tool: "custom".to_string(),
             ok: true,
@@ -1654,7 +1673,9 @@ mod tests {
         assert!(tool_result_truncated_at_source(
             &explicit_true_with_recovery
         ));
-        assert!(tool_result_truncated_at_source(
+        // Legacy stream flags continue to describe the 128KiB Event preview. An explicit source
+        // declaration on the same object disambiguates that recoverable preview cut.
+        assert!(!tool_result_truncated_at_source(
             &dedicated_cut_under_explicitly_complete_parent
         ));
         assert!(tool_result_truncated_at_source(

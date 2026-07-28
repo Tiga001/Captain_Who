@@ -187,9 +187,25 @@ pub(super) fn skills_run_script_model_projection(result: &AgentToolResult) -> Ag
             "cancelled",
             "stdoutTruncated",
             "stderrTruncated",
+            "stdoutPreviewTruncated",
+            "stderrPreviewTruncated",
         ] {
             if value.get(field).and_then(Value::as_bool) == Some(true) {
                 output.insert(field.to_string(), Value::Bool(true));
+            }
+        }
+        for field in [
+            "originalBytes",
+            "capturedBytes",
+            "omittedBytes",
+            "truncatedAtSource",
+            "stopReason",
+        ] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        for field in ["stdoutOmittedBytes", "stderrOmittedBytes"] {
+            if value.get(field).and_then(Value::as_u64).unwrap_or(0) > 0 {
+                super::model_projection::insert_field(&mut output, value, field);
             }
         }
         if !result.ok {
@@ -442,5 +458,41 @@ mod tests {
             "skills_run_script",
         )
         .is_err());
+    }
+
+    #[test]
+    fn run_projection_keeps_capture_recovery_semantics() {
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "skill-script-capture".to_string(),
+            tool: "skills_run_script".to_string(),
+            ok: true,
+            result: Some(json!({
+                "exitCode": 0,
+                "stdout": "preview",
+                "stderr": "",
+                "stdoutTruncated": true,
+                "stderrTruncated": false,
+                "stdoutPreviewTruncated": true,
+                "stderrPreviewTruncated": false,
+                "originalBytes": 80_000_000,
+                "capturedBytes": 67_108_864,
+                "omittedBytes": 12_891_136,
+                "truncatedAtSource": true,
+                "stopReason": "exact_text_capture_safety_limit",
+                "stdoutOmittedBytes": 12_891_136,
+                "stderrOmittedBytes": 0,
+            })),
+            error: None,
+        };
+
+        let projected = skills_run_script_model_projection(&raw);
+        let result = projected.result.unwrap();
+        assert_eq!(result["originalBytes"], 80_000_000);
+        assert_eq!(result["omittedBytes"], 12_891_136);
+        assert_eq!(result["truncatedAtSource"], true);
+        assert_eq!(result["stdoutOmittedBytes"], 12_891_136);
+        assert_eq!(result["stdoutPreviewTruncated"], true);
+        assert!(result.get("stderrPreviewTruncated").is_none());
     }
 }

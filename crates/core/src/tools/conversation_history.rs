@@ -282,6 +282,7 @@ fn history_result_estimated_tokens(
     value: &Value,
 ) -> AgentResult<u64> {
     let raw = AgentToolResult {
+        exact_archive_file: None,
         call_id: context.tool_call_id()?.to_string(),
         tool: "conversation_history".to_string(),
         ok: true,
@@ -2361,6 +2362,7 @@ mod tests {
             Arc::new(StorageService::open(&fixture.path().join("archive.sqlite")).unwrap());
         seed_conversation(&storage);
         let exact = serde_json::to_string(&AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-1".to_string(),
             tool: "web_fetch".to_string(),
             ok: true,
@@ -2406,6 +2408,7 @@ mod tests {
             .contains("UNIQUE_ARCHIVE_NEEDLE"));
 
         let raw = AgentToolResult {
+            exact_archive_file: None,
             call_id: "history-read".to_string(),
             tool: "conversation_history".to_string(),
             ok: true,

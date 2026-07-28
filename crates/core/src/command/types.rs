@@ -144,6 +144,15 @@ pub struct AgentCommandExecutionResult {
     pub duration_ms: u64,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    #[serde(flatten, default)]
+    pub output_capture: ProcessOutputCaptureMetadata,
+    /// Backend-only complete stdout capture. Never serialized into events, audit receipts, or
+    /// checkpoints; Exact History consumes it before those consumer projections are built.
+    #[serde(skip, default)]
+    pub stdout_spool: ProcessOutputSpool,
+    /// Backend-only complete stderr capture paired with `stdout_spool`.
+    #[serde(skip, default)]
+    pub stderr_spool: ProcessOutputSpool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +163,12 @@ pub struct AgentCommandExecutionResult {
     pub input_files: Vec<crate::AgentFileInputEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<AgentCommandRuntimeResolution>,
+}
+
+impl AgentCommandExecutionResult {
+    pub fn output_spool_substitutions(&self) -> Vec<ProcessOutputSpoolSubstitution> {
+        process_output_spool_substitutions(&self.stdout_spool, &self.stderr_spool)
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -204,6 +204,9 @@ pub(super) fn run_shell_command(
             duration_ms: 0,
             stdout_truncated: false,
             stderr_truncated: false,
+            output_capture: ProcessOutputCaptureMetadata::default(),
+            stdout_spool: ProcessOutputSpool::default(),
+            stderr_spool: ProcessOutputSpool::default(),
             error: None,
             policy_evaluation: None,
             artifact_observation: None,
@@ -227,17 +230,23 @@ pub(super) fn run_shell_command(
         .env("CI", "1")
         .spawn()
         .map_err(|error| format!("启动命令失败：{error}"))?;
-    let stdout_reader = spawn_bounded_output_reader(
+    let capture_policy = ProcessOutputCapturePolicy::process_default();
+    let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
+    let stdout_reader = spawn_process_output_capture(
         child
             .stdout
             .take()
             .ok_or_else(|| "无法读取命令 stdout。".to_string())?,
+        capture_budget.clone(),
+        capture_policy,
     );
-    let stderr_reader = spawn_bounded_output_reader(
+    let stderr_reader = spawn_process_output_capture(
         child
             .stderr
             .take()
             .ok_or_else(|| "无法读取命令 stderr。".to_string())?,
+        capture_budget,
+        capture_policy,
     );
 
     let deadline = Duration::from_millis(timeout_ms);
@@ -267,8 +276,16 @@ pub(super) fn run_shell_command(
         }
     };
 
-    let (stdout, stdout_truncated) = join_output_reader(stdout_reader, "stdout")?;
-    let (stderr, stderr_truncated) = join_output_reader(stderr_reader, "stderr")?;
+    let stdout_capture = join_process_output_capture(stdout_reader, "stdout")?;
+    let stderr_capture = join_process_output_capture(stderr_reader, "stderr")?;
+    let output_capture =
+        ProcessOutputCaptureMetadata::from_streams(&stdout_capture, &stderr_capture);
+    let stdout = stdout_capture.preview().to_string();
+    let stderr = stderr_capture.preview().to_string();
+    let stdout_truncated = stdout_capture.preview_truncated();
+    let stderr_truncated = stderr_capture.preview_truncated();
+    let stdout_spool = stdout_capture.spool();
+    let stderr_spool = stderr_capture.spool();
 
     Ok(AgentCommandExecutionResult {
         command: request.command.clone(),
@@ -281,6 +298,9 @@ pub(super) fn run_shell_command(
         duration_ms: started.elapsed().as_millis() as u64,
         stdout_truncated,
         stderr_truncated,
+        output_capture,
+        stdout_spool,
+        stderr_spool,
         error: None,
         policy_evaluation: None,
         artifact_observation: None,

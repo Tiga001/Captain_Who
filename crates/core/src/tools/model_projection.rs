@@ -12,6 +12,7 @@ pub(crate) fn compact_model_result(
         merge_failure_metadata(result.result.as_ref(), projected_result)
     };
     let mut projected = AgentToolResult {
+        exact_archive_file: None,
         call_id: result.call_id.clone(),
         tool: result.tool.clone(),
         ok: result.ok,
@@ -160,6 +161,7 @@ mod tests {
     #[test]
     fn compact_projection_removes_empty_values_and_duplicate_errors() {
         let raw = AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-1".to_string(),
             tool: "test".to_string(),
             ok: false,

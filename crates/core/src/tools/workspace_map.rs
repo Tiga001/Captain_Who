@@ -888,6 +888,7 @@ mod tests {
         assert_eq!(coverage["languages"]["truncated"], true);
 
         let raw = crate::protocol::AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-workspace-map-coverage".to_string(),
             tool: "workspace_map".to_string(),
             ok: true,

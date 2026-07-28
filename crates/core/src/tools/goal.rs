@@ -334,6 +334,7 @@ mod tests {
     #[test]
     fn durable_projection_does_not_copy_objective() {
         let result = crate::protocol::AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-1".to_string(),
             tool: "get_goal".to_string(),
             ok: true,

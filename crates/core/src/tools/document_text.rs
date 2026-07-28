@@ -1,10 +1,12 @@
 // Document path validation and text extraction helpers for Office-like files.
 use super::{
-    ToolExecutionContext, DEFAULT_DOCUMENT_MAX_CHARS, MAX_DOCUMENT_FILE_BYTES,
-    MAX_DOCUMENT_TEXT_CHARS, MAX_DOCUMENT_XML_ENTRY_BYTES, MAX_DOCUMENT_XML_TOTAL_BYTES,
+    ToolExecutionContext, MAX_DOCUMENT_FILE_BYTES, MAX_DOCUMENT_XML_ENTRY_BYTES,
+    MAX_DOCUMENT_XML_TOTAL_BYTES,
 };
 use crate::cancellation::AgentCancellationToken;
+use crate::exact_capture::{bounded_utf8_prefix, EXACT_TEXT_CAPTURE_STOP_REASON};
 use crate::protocol::{AgentError, AgentResult};
+use serde_json::{json, Value};
 use std::fs;
 use std::fs::File;
 use std::io::Read;
@@ -78,10 +80,42 @@ pub(super) fn resolve_document_path(
     })
 }
 
-pub(super) fn sanitize_document_max_chars(max_chars: Option<usize>) -> usize {
-    max_chars
-        .unwrap_or(DEFAULT_DOCUMENT_MAX_CHARS)
-        .clamp(1, MAX_DOCUMENT_TEXT_CHARS)
+/// Adds one completely extracted, security-sanitized document body to a Tool result.
+///
+/// Length limits that protect file parsing and archive capture must be enforced before this
+/// boundary. Model, event, trace, and checkpoint limits are consumer projections and must never
+/// change the body supplied here.
+pub(super) fn complete_document_text_result(mut metadata: Value, text: String) -> Value {
+    let original_bytes = text.len() as u64;
+    let original_chars = text.chars().count() as u64;
+    let (captured, omitted_bytes) = bounded_utf8_prefix(&text);
+    let captured_bytes = captured.len() as u64;
+    let captured_chars = captured.chars().count() as u64;
+    let truncated_at_source = omitted_bytes > 0;
+    let captured_end = captured.len();
+    let text = if truncated_at_source {
+        text[..captured_end].to_string()
+    } else {
+        text
+    };
+    let object = metadata
+        .as_object_mut()
+        .expect("document result metadata must be an object");
+    object.insert("text".to_string(), Value::String(text));
+    object.insert("originalBytes".to_string(), json!(original_bytes));
+    object.insert("originalChars".to_string(), json!(original_chars));
+    object.insert("capturedBytes".to_string(), json!(captured_bytes));
+    object.insert("capturedChars".to_string(), json!(captured_chars));
+    object.insert("omittedBytes".to_string(), json!(omitted_bytes));
+    object.insert(
+        "sourceStopReason".to_string(),
+        json!(truncated_at_source.then_some(EXACT_TEXT_CAPTURE_STOP_REASON)),
+    );
+    object.insert("truncatedAtSource".to_string(), json!(truncated_at_source));
+    // Keep the legacy field for Event/Trace consumers. It now describes source completeness only;
+    // the central Model Result Gate adds its own `truncated` marker when it bounds a projection.
+    object.insert("truncated".to_string(), json!(truncated_at_source));
+    metadata
 }
 
 pub(super) fn read_zip_xml_text_parts(
@@ -266,5 +300,69 @@ pub(super) fn normalize_text_output(value: &str) -> String {
 fn push_newline(output: &mut String) {
     if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::ToolRegistry;
+
+    #[test]
+    fn complete_document_text_result_never_applies_a_model_context_limit() {
+        let text = "正文".repeat(80_000);
+        let result = complete_document_text_result(json!({ "format": "test" }), text.clone());
+
+        assert_eq!(result["text"], text);
+        assert_eq!(result["originalBytes"], text.len() as u64);
+        assert_eq!(result["originalChars"], text.chars().count() as u64);
+        assert_eq!(result["capturedBytes"], text.len() as u64);
+        assert_eq!(result["capturedChars"], text.chars().count() as u64);
+        assert_eq!(result["omittedBytes"], 0);
+        assert!(result["sourceStopReason"].is_null());
+        assert_eq!(result["truncatedAtSource"], false);
+        assert_eq!(result["truncated"], false);
+    }
+
+    #[test]
+    fn document_tool_schemas_keep_only_an_unbounded_compatibility_hint() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        for tool in [
+            "read_pdf",
+            "read_word",
+            "read_spreadsheet",
+            "read_presentation",
+        ] {
+            let definition = registry
+                .definitions()
+                .into_iter()
+                .find(|definition| definition.name == tool)
+                .unwrap();
+            let max_chars = &definition.input_schema["properties"]["maxChars"];
+            assert!(
+                max_chars["maximum"].is_null(),
+                "{tool} must not turn the compatibility hint into a source limit"
+            );
+            assert!(max_chars["description"]
+                .as_str()
+                .unwrap()
+                .contains("shared 10K gate"));
+        }
+    }
+
+    #[test]
+    fn document_zip_safety_limits_remain_hard_parser_rejections() {
+        let mut total = MAX_DOCUMENT_XML_TOTAL_BYTES;
+        let error = reserve_zip_xml_entry("word/document.xml", 1, &mut total).unwrap_err();
+        assert!(error.to_string().contains("文档解压后的 XML 总量超过"));
+
+        let mut total = 0;
+        let error = reserve_zip_xml_entry(
+            "word/document.xml",
+            MAX_DOCUMENT_XML_ENTRY_BYTES + 1,
+            &mut total,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("文档 XML 条目过大"));
     }
 }

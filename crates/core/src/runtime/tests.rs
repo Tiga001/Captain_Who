@@ -74,6 +74,7 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
         reason: None,
     };
     let raw = AgentToolResult {
+        exact_archive_file: None,
         call_id: call.id.clone(),
         tool: call.tool.clone(),
         ok: true,
@@ -156,6 +157,136 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
     assert_eq!(
         restored.result.unwrap()["content"],
         raw.result.unwrap()["content"]
+    );
+}
+
+#[test]
+fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
+    use crate::command::{
+        join_process_output_capture, materialize_process_tool_result_archive,
+        process_output_spool_substitutions, spawn_process_output_capture,
+        ProcessOutputCaptureBudget, ProcessOutputCapturePolicy,
+    };
+    use crate::protocol::AgentToolResult;
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use std::io::Cursor;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let fixture = tempdir().unwrap();
+    let storage =
+        Arc::new(StorageService::open(&fixture.path().join("process-spool.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-process".to_string(),
+            project_id: None,
+            model_id: None,
+            title: "process".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-process".to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let full_stdout = "完整进程输出-".repeat(200);
+    let policy = ProcessOutputCapturePolicy::with_limits(16, 64 * 1024);
+    let budget = ProcessOutputCaptureBudget::new(policy.max_capture_bytes());
+    let stdout = join_process_output_capture(
+        spawn_process_output_capture(
+            Cursor::new(full_stdout.as_bytes().to_vec()),
+            budget.clone(),
+            policy,
+        ),
+        "stdout",
+    )
+    .unwrap();
+    let stderr = join_process_output_capture(
+        spawn_process_output_capture(Cursor::new(Vec::<u8>::new()), budget, policy),
+        "stderr",
+    )
+    .unwrap();
+    let mut raw = AgentToolResult {
+        exact_archive_file: None,
+        call_id: "call-process".to_string(),
+        tool: "run_command".to_string(),
+        ok: true,
+        result: Some(json!({
+            "exitCode": 0,
+            "stdout": stdout.preview(),
+            "stderr": stderr.preview(),
+            "stdoutTruncated": stdout.preview_truncated(),
+            "stderrTruncated": stderr.preview_truncated(),
+            "stdoutPreviewTruncated": stdout.preview_truncated(),
+            "stderrPreviewTruncated": stderr.preview_truncated(),
+            "originalBytes": stdout.original_bytes(),
+            "capturedBytes": stdout.captured_bytes(),
+            "omittedBytes": stdout.omitted_bytes(),
+            "truncatedAtSource": stdout.truncated_at_source()
+        })),
+        error: None,
+    };
+    raw.exact_archive_file = materialize_process_tool_result_archive(
+        &raw,
+        &process_output_spool_substitutions(&stdout.spool(), &stderr.spool()),
+    )
+    .unwrap();
+    let registry = ToolRegistry::defaults_with_search(None);
+    let archive_result = registry.archive_projection(&raw);
+    let model_result = registry.model_projection(&raw);
+    let gate = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    let metadata = super::archive_tool_result(super::ToolResultArchiveRequest {
+        storage: Some(&storage),
+        conversation_id: Some("conversation-process"),
+        assistant_message_id: Some("assistant-process"),
+        sequence: Some(1),
+        raw_result: &raw,
+        archive_result: &archive_result,
+        model_result: &model_result,
+        model_tool_result_gate: &gate,
+    });
+
+    assert_eq!(metadata.archived_completely, Some(true));
+    assert!(metadata.model_projection_truncated);
+    assert!(!metadata.truncated_at_source);
+    let observation =
+        finalize_model_tool_observation(&gate, &raw.call_id, false, &model_result, &metadata)
+            .unwrap();
+    let projected: Value = serde_json::from_str(&observation).unwrap();
+    assert_eq!(projected["truncated"], true);
+    assert_eq!(projected["continueWith"]["tool"], "conversation_history");
+
+    let page = storage
+        .read_conversation_history_archive_page(
+            "conversation-process",
+            metadata.archive_ref.as_deref().unwrap(),
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    let restored: AgentToolResult = serde_json::from_str(&page.content).unwrap();
+    assert_eq!(
+        restored.result.unwrap()["stdout"].as_str().unwrap(),
+        full_stdout
     );
 }
 
@@ -971,6 +1102,7 @@ fn activated_document_reader_can_read_the_same_authoritative_attachment_path() {
 #[test]
 fn read_image_tool_result_is_redacted_but_creates_visual_message() {
     let result = AgentToolResult {
+        exact_archive_file: None,
         call_id: "call-image".to_string(),
         tool: "read_image".to_string(),
         ok: true,
@@ -1009,6 +1141,7 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
 #[test]
 fn failed_read_image_capability_result_never_creates_visual_input() {
     let result = AgentToolResult {
+        exact_archive_file: None,
         call_id: "call-image-unsupported".to_string(),
         tool: "read_image".to_string(),
         ok: false,
@@ -1031,6 +1164,7 @@ fn failed_read_image_capability_result_never_creates_visual_input() {
 #[test]
 fn generated_image_visual_input_is_capability_gated() {
     let result = AgentToolResult {
+        exact_archive_file: None,
         call_id: "call-generated-image".to_string(),
         tool: "image_generation".to_string(),
         ok: true,
@@ -1067,6 +1201,7 @@ fn generated_image_visual_input_is_capability_gated() {
 #[test]
 fn file_write_tail_is_available_to_llm_but_not_persisted_in_events() {
     let result = AgentToolResult {
+        exact_archive_file: None,
         call_id: "call-write".to_string(),
         tool: "write_file".to_string(),
         ok: true,
@@ -5720,6 +5855,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             reason: None,
         },
         result: AgentToolResult {
+            exact_archive_file: None,
             call_id: pending_call_id.clone(),
             tool: "apply_patch".to_string(),
             ok: false,
@@ -6094,6 +6230,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             reason: None,
         },
         result: AgentToolResult {
+            exact_archive_file: None,
             call_id: pending_call_id.clone(),
             tool: "apply_patch".to_string(),
             ok: true,

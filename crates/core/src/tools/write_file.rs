@@ -837,6 +837,7 @@ mod tests {
         );
 
         let canonical = AgentToolResult {
+            exact_archive_file: None,
             call_id: "write-tail".to_string(),
             tool: "write_file".to_string(),
             ok: true,

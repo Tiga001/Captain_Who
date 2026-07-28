@@ -129,6 +129,9 @@ impl OfficeEngine for LifecycleTestOfficeEngine {
         }
         self.executions.fetch_add(1, Ordering::SeqCst);
         Ok(OfficeExecutionResult {
+            output_capture: Default::default(),
+            stdout_spool: Default::default(),
+            stderr_spool: Default::default(),
             provider_id: OFFICECLI_PROVIDER_ID.to_string(),
             engine_revision: self.revision.to_string(),
             document_kind: prepared.request.document_kind,
@@ -199,6 +202,9 @@ impl OfficeEngine for FailedOfficeEngine {
         _action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeExecutionResult, OfficeEngineError> {
         Ok(OfficeExecutionResult {
+            output_capture: Default::default(),
+            stdout_spool: Default::default(),
+            stderr_spool: Default::default(),
             provider_id: OFFICECLI_PROVIDER_ID.to_string(),
             engine_revision: prepared.engine_revision.clone(),
             document_kind: prepared.request.document_kind,
@@ -314,6 +320,9 @@ impl OfficeEngine for SuccessfulTrackingOfficeEngine {
     ) -> Result<OfficeExecutionResult, OfficeEngineError> {
         self.executions.fetch_add(1, Ordering::SeqCst);
         Ok(OfficeExecutionResult {
+            output_capture: Default::default(),
+            stdout_spool: Default::default(),
+            stderr_spool: Default::default(),
             provider_id: OFFICECLI_PROVIDER_ID.to_string(),
             engine_revision: prepared.engine_revision.clone(),
             document_kind: prepared.request.document_kind,
@@ -364,6 +373,9 @@ impl OfficeEngine for SkillSessionTrackingOfficeEngine {
                 .fetch_add(1, Ordering::SeqCst);
         }
         Ok(OfficeExecutionResult {
+            output_capture: Default::default(),
+            stdout_spool: Default::default(),
+            stderr_spool: Default::default(),
             provider_id: OFFICECLI_PROVIDER_ID.to_string(),
             engine_revision: prepared.engine_revision.clone(),
             document_kind: prepared.request.document_kind,
@@ -410,6 +422,9 @@ impl OfficeEngine for PublishedRenderOfficeEngine {
         _action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeExecutionResult, OfficeEngineError> {
         Ok(OfficeExecutionResult {
+            output_capture: Default::default(),
+            stdout_spool: Default::default(),
+            stderr_spool: Default::default(),
             provider_id: OFFICECLI_PROVIDER_ID.to_string(),
             engine_revision: prepared.engine_revision.clone(),
             document_kind: prepared.request.document_kind,
@@ -1468,6 +1483,7 @@ fn office_audit_path_scope_summarizes_every_frozen_path_purpose_and_scope() {
 fn rejected_office_action_publishes_exactly_one_paired_tool_result_event() {
     let action = prepared_office_action("office-rejected-event");
     let tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: "office-rejected-event".to_string(),
         tool: "office_spreadsheet".to_string(),
         ok: true,

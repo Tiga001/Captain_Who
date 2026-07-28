@@ -1282,7 +1282,40 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     assert_eq!(command_result.exit_code, Some(0));
     // A Host continuation can carry substantially more output than the model projection. Keep
     // the fixture deterministic while proving the approval boundary archives the exact result.
-    command_result.stdout = "approval-stdout-evidence\n".repeat(4_096);
+    let full_stdout = "approval-stdout-evidence\n".repeat(4_096);
+    let capture_policy = mycopilot_core::command::ProcessOutputCapturePolicy::process_default();
+    let capture_budget = mycopilot_core::command::ProcessOutputCaptureBudget::new(
+        capture_policy.max_capture_bytes(),
+    );
+    let stdout_capture = mycopilot_core::command::join_process_output_capture(
+        mycopilot_core::command::spawn_process_output_capture(
+            std::io::Cursor::new(full_stdout.as_bytes().to_vec()),
+            capture_budget.clone(),
+            capture_policy,
+        ),
+        "test stdout",
+    )
+    .unwrap();
+    let stderr_capture = mycopilot_core::command::join_process_output_capture(
+        mycopilot_core::command::spawn_process_output_capture(
+            std::io::Cursor::new(Vec::<u8>::new()),
+            capture_budget,
+            capture_policy,
+        ),
+        "test stderr",
+    )
+    .unwrap();
+    command_result.stdout = stdout_capture.preview().to_string();
+    command_result.stderr = stderr_capture.preview().to_string();
+    command_result.stdout_truncated = stdout_capture.preview_truncated();
+    command_result.stderr_truncated = stderr_capture.preview_truncated();
+    command_result.output_capture =
+        mycopilot_core::command::ProcessOutputCaptureMetadata::from_streams(
+            &stdout_capture,
+            &stderr_capture,
+        );
+    command_result.stdout_spool = stdout_capture.spool();
+    command_result.stderr_spool = stderr_capture.spool();
     let successful_tool_result = command_tool_result(call_id, &command_result);
     let mut continuation_input = record.agent_input.clone();
     continuation_input.approval_decision = Some(AgentApprovalDecision {

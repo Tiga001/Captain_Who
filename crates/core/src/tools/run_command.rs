@@ -177,9 +177,25 @@ fn project_command_execution(value: &Value) -> Option<Value> {
         "cancelled",
         "stdoutTruncated",
         "stderrTruncated",
+        "stdoutPreviewTruncated",
+        "stderrPreviewTruncated",
     ] {
         if value.get(field).and_then(Value::as_bool) == Some(true) {
             output.insert(field.to_string(), Value::Bool(true));
+        }
+    }
+    for field in [
+        "originalBytes",
+        "capturedBytes",
+        "omittedBytes",
+        "truncatedAtSource",
+        "stopReason",
+    ] {
+        super::model_projection::insert_field(&mut output, value, field);
+    }
+    for field in ["stdoutOmittedBytes", "stderrOmittedBytes"] {
+        if value.get(field).and_then(Value::as_u64).unwrap_or(0) > 0 {
+            super::model_projection::insert_field(&mut output, value, field);
         }
     }
     if let Some(policy) = value.get("policyEvaluation") {
@@ -1239,6 +1255,7 @@ mod tests {
             message: Some("created".to_string()),
         };
         let tool_result = AgentToolResult {
+            exact_archive_file: None,
             call_id: format!("materialize-{local_id}"),
             tool: "skills_materialize_resource".to_string(),
             ok: true,
@@ -1935,5 +1952,47 @@ mod tests {
             classify_command_risk("find . -delete"),
             AgentCommandRiskLevel::Destructive
         );
+    }
+
+    #[test]
+    fn model_projection_keeps_only_actionable_capture_safety_metadata() {
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "command-capture".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "exitCode": 0,
+                "stdout": "preview",
+                "stderr": "",
+                "stdoutTruncated": true,
+                "stderrTruncated": false,
+                "stdoutPreviewTruncated": true,
+                "stderrPreviewTruncated": false,
+                "originalBytes": 70_000_000,
+                "capturedBytes": 67_108_864,
+                "omittedBytes": 2_891_136,
+                "truncatedAtSource": true,
+                "stopReason": "exact_text_capture_safety_limit",
+                "stdoutOriginalBytes": 70_000_000,
+                "stdoutCapturedBytes": 67_108_864,
+                "stdoutOmittedBytes": 2_891_136,
+                "stderrOriginalBytes": 0,
+                "stderrCapturedBytes": 0,
+                "stderrOmittedBytes": 0,
+            })),
+            error: None,
+        };
+
+        let projected = run_command_model_projection(&raw);
+        let result = projected.result.unwrap();
+        assert_eq!(result["originalBytes"], 70_000_000);
+        assert_eq!(result["omittedBytes"], 2_891_136);
+        assert_eq!(result["truncatedAtSource"], true);
+        assert_eq!(result["stdoutOmittedBytes"], 2_891_136);
+        assert_eq!(result["stdoutPreviewTruncated"], true);
+        assert!(result.get("stderrPreviewTruncated").is_none());
+        assert!(result.get("stdoutOriginalBytes").is_none());
+        assert!(result.get("stderrOriginalBytes").is_none());
     }
 }

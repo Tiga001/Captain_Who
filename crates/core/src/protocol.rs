@@ -1210,6 +1210,13 @@ pub struct AgentToolResult {
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Backend-only exact projection materialized from streaming captures.
+    ///
+    /// This file never crosses Protocol, Event, Trace, Checkpoint, or audit serialization. The
+    /// generic Exact History boundary consumes it in preference to serializing the bounded
+    /// in-memory result.
+    #[serde(skip, default)]
+    pub exact_archive_file: Option<crate::exact_capture::ExactToolResultArchiveFile>,
 }
 
 /// Version of the presentation-safe image-generation result returned by the Agent Tool.
@@ -1891,10 +1898,26 @@ pub struct AgentSkillScriptResult {
     pub duration_ms: u64,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    #[serde(flatten, default)]
+    pub output_capture: crate::command::ProcessOutputCaptureMetadata,
+    /// Backend-only complete stdout capture consumed by Exact History.
+    #[serde(skip, default)]
+    pub stdout_spool: crate::command::ProcessOutputSpool,
+    /// Backend-only complete stderr capture consumed by Exact History.
+    #[serde(skip, default)]
+    pub stderr_spool: crate::command::ProcessOutputSpool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl AgentSkillScriptResult {
+    pub fn output_spool_substitutions(
+        &self,
+    ) -> Vec<crate::command::ProcessOutputSpoolSubstitution> {
+        crate::command::process_output_spool_substitutions(&self.stdout_spool, &self.stderr_spool)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

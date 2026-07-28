@@ -28,6 +28,14 @@ const PROTECTED_FIELDS: &[&str] = &[
     "source",
     "originalBytes",
     "original_bytes",
+    "capturedBytes",
+    "captured_bytes",
+    "omittedBytes",
+    "omitted_bytes",
+    "sourceStopReason",
+    "source_stop_reason",
+    "stopReason",
+    "stop_reason",
     "estimatedOriginalTokens",
     "estimated_original_tokens",
     "cursor",
@@ -115,6 +123,30 @@ impl ModelToolResultGate {
         model_result: &AgentToolResult,
         recovery: Option<&ModelToolResultRecovery>,
     ) -> ModelToolResultGateOutput {
+        self.project_internal(call_id, is_error, model_result, recovery, false)
+    }
+
+    /// Marks a bounded consumer preview as recoverably truncated even when it happens to fit under
+    /// 10K. Exact process capture may contain a longer suffix than the 128KiB Event preview; that
+    /// suffix must remain discoverable without relying on estimator behavior.
+    pub(crate) fn project_with_required_recovery(
+        &self,
+        call_id: &str,
+        is_error: bool,
+        model_result: &AgentToolResult,
+        recovery: Option<&ModelToolResultRecovery>,
+    ) -> ModelToolResultGateOutput {
+        self.project_internal(call_id, is_error, model_result, recovery, true)
+    }
+
+    fn project_internal(
+        &self,
+        call_id: &str,
+        is_error: bool,
+        model_result: &AgentToolResult,
+        recovery: Option<&ModelToolResultRecovery>,
+        require_recovery_marker: bool,
+    ) -> ModelToolResultGateOutput {
         let mut payload = semantic_payload(model_result, is_error);
         let truncated_at_source = recovery
             .and_then(|recovery| recovery.truncated_at_source)
@@ -125,7 +157,7 @@ impl ModelToolResultGate {
         let original_content = serialize_value(&payload).unwrap_or_else(|| "{}".to_string());
         let original_estimated_tokens = self.estimate_message(call_id, &original_content, is_error);
 
-        if original_estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS {
+        if original_estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS && !require_recovery_marker {
             return ModelToolResultGateOutput {
                 content: original_content,
                 estimated_tokens: original_estimated_tokens,
@@ -148,6 +180,7 @@ impl ModelToolResultGate {
             .unwrap_or(0)
             .saturating_mul(INITIAL_HEADROOM_PERCENT)
             / 100;
+        factor = factor.min(DETAIL_SCALE);
 
         for _ in 0..MAX_COMPACTION_ATTEMPTS {
             let candidate = compact_value(&marked_payload, factor, 0, false);
@@ -677,6 +710,7 @@ mod tests {
 
     fn successful_result(value: Value) -> AgentToolResult {
         AgentToolResult {
+            exact_archive_file: None,
             call_id: "semantic-call".to_string(),
             tool: "test_tool".to_string(),
             ok: true,
@@ -749,6 +783,39 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_preview_cut_gets_history_route_even_when_projection_fits() {
+        let gate = gate();
+        let result = successful_result(json!({
+            "stdout": "short preview",
+            "stdoutPreviewTruncated": true,
+            "originalBytes": 200_000,
+            "capturedBytes": 200_000,
+            "omittedBytes": 0,
+            "truncatedAtSource": false
+        }));
+        let recovery = ModelToolResultRecovery {
+            continue_with: Some(json!({
+                "tool": "conversation_history",
+                "open": "hist-v1-process-page"
+            })),
+            history_open: Some(json!("hist-v1-process-page")),
+            recovery: Some(json!({ "kind": "exact_history" })),
+            truncated_at_source: Some(false),
+        };
+
+        let output =
+            gate.project_with_required_recovery("process-call", false, &result, Some(&recovery));
+        let payload: Value = serde_json::from_str(&output.content).unwrap();
+
+        assert!(output.truncated);
+        assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
+        assert_eq!(payload["truncated"], true);
+        assert_eq!(payload["truncatedAtSource"], false);
+        assert_eq!(payload["historyOpen"], "hist-v1-process-page");
+        assert_eq!(payload["continueWith"]["tool"], "conversation_history");
+    }
+
+    #[test]
     fn unicode_and_long_single_line_remain_valid_and_keep_a_contiguous_prefix() {
         let gate = gate();
         for text in [
@@ -790,6 +857,9 @@ mod tests {
             "navigation": { "older": "older-1", "newer": "newer-1" },
             "continueWith": { "tool": "tool_specific", "cursor": "old" },
             "historyOpen": "hist-old",
+            "capturedBytes": 67_108_864,
+            "omittedBytes": 12_345,
+            "sourceStopReason": "exact_text_capture_safety_limit",
             "body": "x".repeat(100_000),
         }));
         let recovery = ModelToolResultRecovery {
@@ -814,6 +884,12 @@ mod tests {
         assert_eq!(payload["source"]["tool"], "web_fetch");
         assert_eq!(payload["cursor"], "cursor-1");
         assert_eq!(payload["next"], "cursor-2");
+        assert_eq!(payload["capturedBytes"], 67_108_864);
+        assert_eq!(payload["omittedBytes"], 12_345);
+        assert_eq!(
+            payload["sourceStopReason"],
+            "exact_text_capture_safety_limit"
+        );
         assert_eq!(payload["navigation"]["older"], "older-1");
         assert_eq!(payload["continueWith"]["tool"], "tool_specific");
         assert_eq!(payload["continueWith"]["cursor"], "old");
@@ -1051,6 +1127,7 @@ mod tests {
     fn error_field_is_preserved_and_compacted_as_valid_json() {
         let gate = gate();
         let result = AgentToolResult {
+            exact_archive_file: None,
             call_id: "semantic-error".to_string(),
             tool: "test_tool".to_string(),
             ok: false,

@@ -78,11 +78,31 @@
           "format": "markdown",
           "extractDepth": "advanced",
           "content": "# Article\n\nExact fetched body.",
+          "contentCoverage": {
+            "unit": "bytes",
+            "total": 30,
+            "returned": 30,
+            "omitted": 0
+          },
           "images": ["https://example.com/hero.png"],
+          "imagesCoverage": {
+            "unit": "items",
+            "total": 1,
+            "returned": 1,
+            "omitted": 0
+          },
           "favicon": "https://example.com/favicon.ico",
           "failedResults": [],
+          "failedResultsCoverage": {
+            "unit": "items",
+            "total": 0,
+            "returned": 0,
+            "omitted": 0
+          },
           "responseTime": 1.25,
-          "truncated": false
+          "requestedMaxChars": 40000,
+          "truncated": false,
+          "truncatedAtSource": false
         }
       },
       "stages": {
@@ -90,8 +110,18 @@
           "required": {
             "/result/url": "https://example.com/article",
             "/result/content": "# Article\n\nExact fetched body.",
+            "/result/contentCoverage/total": 30,
+            "/result/contentCoverage/returned": 30,
+            "/result/contentCoverage/omitted": 0,
             "/result/images/0": "https://example.com/hero.png",
-            "/result/truncated": false
+            "/result/imagesCoverage/total": 1,
+            "/result/imagesCoverage/returned": 1,
+            "/result/imagesCoverage/omitted": 0,
+            "/result/failedResultsCoverage/total": 0,
+            "/result/failedResultsCoverage/returned": 0,
+            "/result/failedResultsCoverage/omitted": 0,
+            "/result/truncated": false,
+            "/result/truncatedAtSource": false
           },
           "absent": [
             "/result/requestedUrl",
@@ -100,29 +130,43 @@
             "/result/extractDepth",
             "/result/favicon",
             "/result/failedResults",
-            "/result/responseTime"
+            "/result/responseTime",
+            "/result/requestedMaxChars"
           ]
         },
         "rendererEvent": {
-          "equalsRaw": true,
           "required": {
             "/result/url": "https://example.com/article",
             "/result/requestedUrl": "https://example.com/article",
             "/result/provider": "tavily",
             "/result/content": "# Article\n\nExact fetched body.",
+            "/result/contentCoverage/total": 30,
+            "/result/imagesCoverage/total": 1,
+            "/result/failedResultsCoverage/total": 0,
             "/result/favicon": "https://example.com/favicon.ico",
             "/result/responseTime": 1.25,
-            "/result/truncated": false
-          }
+            "/result/truncated": false,
+            "/result/truncatedAtSource": false
+          },
+          "absent": ["/result/requestedMaxChars"]
         },
         "durableTrace": { "equalsRaw": true },
         "exactArchive": {
           "equalsRaw": true,
           "required": {
-            "/result/content": "# Article\n\nExact fetched body."
+            "/result/content": "# Article\n\nExact fetched body.",
+            "/result/contentCoverage/returned": 30,
+            "/result/requestedMaxChars": 40000
           }
         },
-        "checkpoint": { "equalsRaw": true }
+        "checkpoint": {
+          "required": {
+            "/result/content": "# Article\n\nExact fetched body.",
+            "/result/contentCoverage/returned": 30,
+            "/result/favicon": "https://example.com/favicon.ico"
+          },
+          "absent": ["/result/requestedMaxChars"]
+        }
       }
     },
     {

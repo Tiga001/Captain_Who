@@ -702,10 +702,26 @@ pub struct OfficeExecutionResult {
     pub duration_ms: u64,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    #[serde(flatten, default)]
+    pub output_capture: crate::command::ProcessOutputCaptureMetadata,
+    /// Backend-only complete stdout capture consumed by Exact History.
+    #[serde(skip, default)]
+    pub stdout_spool: crate::command::ProcessOutputSpool,
+    /// Backend-only complete stderr capture consumed by Exact History.
+    #[serde(skip, default)]
+    pub stderr_spool: crate::command::ProcessOutputSpool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl OfficeExecutionResult {
+    pub fn output_spool_substitutions(
+        &self,
+    ) -> Vec<crate::command::ProcessOutputSpoolSubstitution> {
+        crate::command::process_output_spool_substitutions(&self.stdout_spool, &self.stderr_spool)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,8 +19,9 @@ use super::types::{
     OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
 use crate::command::{
-    configure_command_process_group, join_output_reader, spawn_bounded_output_reader,
-    terminate_command_process_group, try_wait_command_process_group,
+    configure_command_process_group, join_process_output_capture, spawn_process_output_capture,
+    terminate_command_process_group, try_wait_command_process_group, ProcessOutputCaptureBudget,
+    ProcessOutputCaptureMetadata, ProcessOutputCapturePolicy, ProcessOutputSpool,
 };
 use crate::file_input::{
     materialize_agent_file_inputs, normalize_agent_file_input_specs,
@@ -1449,6 +1450,7 @@ fn redact_private_render_paths<'a, const N: usize>(
     output: &mut ProcessOutput,
     replacements: [(&'a Path, &'a str); N],
 ) {
+    let mut spool_redactions = Vec::new();
     for (private_path, replacement) in replacements {
         let mut spellings = vec![private_path.to_string_lossy().into_owned()];
         if let Ok(canonical) = fs::canonicalize(private_path) {
@@ -1482,6 +1484,7 @@ fn redact_private_render_paths<'a, const N: usize>(
             if private_path.is_empty() {
                 continue;
             }
+            spool_redactions.push((private_path.clone(), replacement.to_string()));
             output.stdout = output.stdout.replace(&private_path, replacement);
             output.stderr = output.stderr.replace(&private_path, replacement);
             if let Some(failure) = output.render_failure.as_mut() {
@@ -1489,6 +1492,8 @@ fn redact_private_render_paths<'a, const N: usize>(
             }
         }
     }
+    output.stdout_spool = output.stdout_spool.with_redactions(&spool_redactions);
+    output.stderr_spool = output.stderr_spool.with_redactions(&spool_redactions);
 }
 
 fn process_result(
@@ -1517,6 +1522,9 @@ fn process_result(
         duration_ms: started.elapsed().as_millis() as u64,
         stdout_truncated: output.stdout_truncated,
         stderr_truncated: output.stderr_truncated,
+        output_capture: output.output_capture,
+        stdout_spool: output.stdout_spool,
+        stderr_spool: output.stderr_spool,
         error_code,
         error,
         outputs: Vec::new(),
@@ -3317,6 +3325,9 @@ struct ProcessOutput {
     cancelled: bool,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    output_capture: ProcessOutputCaptureMetadata,
+    stdout_spool: ProcessOutputSpool,
+    stderr_spool: ProcessOutputSpool,
     render_failure: Option<OfficeRenderFailureMarker>,
 }
 
@@ -3435,17 +3446,23 @@ fn run_process(
                 format!("Cannot start OfficeCLI: {error}"),
             )
         })?;
-    let stdout_reader = spawn_bounded_output_reader(
+    let capture_policy = ProcessOutputCapturePolicy::process_default();
+    let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
+    let stdout_reader = spawn_process_output_capture(
         child
             .stdout
             .take()
             .ok_or_else(|| process_error("Cannot capture OfficeCLI stdout."))?,
+        capture_budget.clone(),
+        capture_policy,
     );
-    let stderr_reader = spawn_bounded_output_reader(
+    let stderr_reader = spawn_process_output_capture(
         child
             .stderr
             .take()
             .ok_or_else(|| process_error("Cannot capture OfficeCLI stderr."))?,
+        capture_budget,
+        capture_policy,
     );
     let started = Instant::now();
     let mut timed_out = false;
@@ -3468,10 +3485,12 @@ fn run_process(
             None => thread::sleep(Duration::from_millis(25)),
         }
     };
-    let (stdout, stdout_truncated) =
-        join_output_reader(stdout_reader, "OfficeCLI stdout").map_err(process_error)?;
-    let (stderr, stderr_truncated) =
-        join_output_reader(stderr_reader, "OfficeCLI stderr").map_err(process_error)?;
+    let stdout_capture =
+        join_process_output_capture(stdout_reader, "OfficeCLI stdout").map_err(process_error)?;
+    let stderr_capture =
+        join_process_output_capture(stderr_reader, "OfficeCLI stderr").map_err(process_error)?;
+    let output_capture =
+        ProcessOutputCaptureMetadata::from_streams(&stdout_capture, &stderr_capture);
     let render_failure = browser_failure_marker
         .as_ref()
         .map(|expectation| {
@@ -3486,12 +3505,15 @@ fn run_process(
         .flatten();
     Ok(ProcessOutput {
         status,
-        stdout,
-        stderr,
+        stdout: stdout_capture.preview().to_string(),
+        stderr: stderr_capture.preview().to_string(),
         timed_out,
         cancelled,
-        stdout_truncated,
-        stderr_truncated,
+        stdout_truncated: stdout_capture.preview_truncated(),
+        stderr_truncated: stderr_capture.preview_truncated(),
+        output_capture,
+        stdout_spool: stdout_capture.spool(),
+        stderr_spool: stderr_capture.spool(),
         render_failure,
     })
 }
@@ -3703,6 +3725,9 @@ fn synthetic_cancelled_status() -> Result<ProcessOutput, OfficeEngineError> {
         cancelled: true,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: ProcessOutputCaptureMetadata::default(),
+        stdout_spool: ProcessOutputSpool::default(),
+        stderr_spool: ProcessOutputSpool::default(),
         render_failure: None,
     })
 }
@@ -3718,6 +3743,9 @@ fn synthetic_cancelled_status() -> Result<ProcessOutput, OfficeEngineError> {
         cancelled: true,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: ProcessOutputCaptureMetadata::default(),
+        stdout_spool: ProcessOutputSpool::default(),
+        stderr_spool: ProcessOutputSpool::default(),
         render_failure: None,
     })
 }
@@ -3776,6 +3804,9 @@ fn cancelled_result(
         duration_ms: 0,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: ProcessOutputCaptureMetadata::default(),
+        stdout_spool: ProcessOutputSpool::default(),
+        stderr_spool: ProcessOutputSpool::default(),
         error_code: Some("office.cancelled".to_string()),
         error: Some("OfficeCLI execution was cancelled before launch.".to_string()),
         outputs: Vec::new(),

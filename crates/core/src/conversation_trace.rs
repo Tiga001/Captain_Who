@@ -1790,6 +1790,7 @@ mod tests {
     #[test]
     fn model_observation_is_compact_and_does_not_expose_backend_history_metadata() {
         let result = AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-1".to_string(),
             tool: "read_file".to_string(),
             ok: true,
@@ -1814,6 +1815,7 @@ mod tests {
         recorder.record_tool_result(
             &first,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: first.id.clone(),
                 tool: first.tool.clone(),
                 ok: true,
@@ -1826,6 +1828,7 @@ mod tests {
         recorder.record_tool_result(
             &second,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: second.id.clone(),
                 tool: second.tool.clone(),
                 ok: false,
@@ -1868,6 +1871,7 @@ mod tests {
     #[test]
     fn binary_fields_are_removed_but_neighboring_text_is_preserved() {
         let result = canonical_tool_result_for_context(&AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-1".to_string(),
             tool: "read_image".to_string(),
             ok: true,
@@ -1895,6 +1899,7 @@ mod tests {
             reason: None,
         };
         let raw = AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: true,
@@ -1933,6 +1938,7 @@ mod tests {
     #[test]
     fn failed_tool_observation_preserves_sanitized_structured_result_for_model() {
         let result = canonical_tool_result_for_context(&AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-command".to_string(),
             tool: "run_command".to_string(),
             ok: false,
@@ -1964,6 +1970,7 @@ mod tests {
     #[test]
     fn failed_tool_observation_without_structured_result_is_still_well_formed() {
         let observation = render_tool_observation(&AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-failed-before-execution".to_string(),
             tool: "run_command".to_string(),
             ok: false,
@@ -2031,6 +2038,7 @@ mod tests {
             .snapshot()
             .in_progress_audit_trace("run", "conversation", "assistant");
         let result = AgentToolResult {
+            exact_archive_file: None,
             call_id: pending.id.clone(),
             tool: pending.tool.clone(),
             ok: false,
@@ -2125,6 +2133,7 @@ mod tests {
         recorder.record_tool_result(
             &write_call,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: write_call.id.clone(),
                 tool: write_call.tool.clone(),
                 ok: true,
@@ -2148,6 +2157,7 @@ mod tests {
         recorder.record_tool_result(
             &patch_call,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: patch_call.id.clone(),
                 tool: patch_call.tool.clone(),
                 ok: true,
@@ -2246,6 +2256,7 @@ mod tests {
         recorder.record_tool_result(
             &command_call,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: command_call.id.clone(),
                 tool: command_call.tool.clone(),
                 ok: false,
@@ -2268,6 +2279,7 @@ mod tests {
         recorder.record_tool_result(
             &read_call,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: read_call.id.clone(),
                 tool: read_call.tool.clone(),
                 ok: true,
@@ -2350,6 +2362,7 @@ mod tests {
         recorder.record_tool_result(
             &call,
             &AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: true,
@@ -2392,6 +2405,7 @@ mod tests {
             recorder.record_tool_result(
                 &call,
                 &AgentToolResult {
+                    exact_archive_file: None,
                     call_id: call.id.clone(),
                     tool: call.tool.clone(),
                     ok: false,

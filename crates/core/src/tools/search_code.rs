@@ -365,6 +365,7 @@ mod tests {
         assert_eq!(omissions["walk"]["omittedCountKnown"], false);
 
         let raw = crate::protocol::AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-walk-cap".to_string(),
             tool: "search_code".to_string(),
             ok: true,

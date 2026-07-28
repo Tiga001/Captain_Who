@@ -1,7 +1,6 @@
 use super::{
-    extract_with_textutil, join_named_text, read_zip_xml_text_parts, resolve_document_path,
-    sanitize_document_max_chars, truncate_chars, AgentTool, ToolExecutionContext,
-    MAX_DOCUMENT_TEXT_CHARS,
+    complete_document_text_result, extract_with_textutil, join_named_text, read_zip_xml_text_parts,
+    resolve_document_path, AgentTool, ToolExecutionContext,
 };
 use crate::protocol::{
     AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
@@ -33,7 +32,7 @@ impl AgentTool for ReadWordTool {
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative .docx path, legacy .doc path on macOS, or @attachments/... readPath." },
                     "filePath": { "type": "string", "description": "Alias for path." },
-                    "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_DOCUMENT_TEXT_CHARS }
+                    "maxChars": { "type": "integer", "minimum": 1, "description": "Deprecated soft compatibility hint. Exact History capture is never limited by this value; model output uses the shared 10K gate." }
                 },
                 "required": ["path"]
             }),
@@ -48,8 +47,8 @@ impl AgentTool for ReadWordTool {
         context.check_cancelled()?;
         let args: ReadWordArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_word 参数无效：{error}")))?;
+        let _requested_max_chars = args.max_chars;
         let path = args.path()?;
-        let max_chars = sanitize_document_max_chars(args.max_chars);
         let resolved = resolve_document_path(context, path, &["docx", "doc"])?;
         let cancellation_token = context.cancellation_token();
         let (text, part_count, extractor) = match resolved.extension.as_str() {
@@ -74,23 +73,34 @@ impl AgentTool for ReadWordTool {
             _ => unreachable!("extension validated before dispatch"),
         };
         cancellation_token.check()?;
-        let (text, truncated) = truncate_chars(&text, max_chars);
 
-        Ok(json!({
-            "path": resolved.relative_path,
-            "format": resolved.extension,
-            "sizeBytes": resolved.size_bytes,
-            "extractor": extractor,
-            "partCount": part_count,
-            "truncated": truncated,
-            "text": text
-        }))
+        Ok(complete_document_text_result(
+            json!({
+                "path": resolved.relative_path,
+                "format": resolved.extension,
+                "sizeBytes": resolved.size_bytes,
+                "extractor": extractor,
+                "partCount": part_count
+            }),
+            text,
+        ))
     }
 
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         let projected = super::model_projection::retain_fields(
             result.result.as_ref(),
-            &["path", "format", "partCount", "truncated", "text"],
+            &[
+                "path",
+                "format",
+                "partCount",
+                "originalBytes",
+                "capturedBytes",
+                "omittedBytes",
+                "sourceStopReason",
+                "truncatedAtSource",
+                "truncated",
+                "text",
+            ],
         );
         super::model_projection::compact_model_result(result, projected)
     }
@@ -139,7 +149,7 @@ mod tests {
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_word".to_string(),
-            args: json!({ "path": "sample.docx" }),
+            args: json!({ "path": "sample.docx", "maxChars": 1 }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         };
@@ -147,10 +157,25 @@ mod tests {
         let result = registry.execute(&context, &call);
 
         assert!(result.ok, "{:?}", result.error);
-        assert!(result.result.unwrap()["text"]
-            .as_str()
-            .unwrap()
-            .contains("Hello from docx"));
+        for projection in [
+            registry.archive_projection(&result),
+            registry.event_projection(&result),
+            registry.trace_projection(&result),
+            registry.checkpoint_projection(&result),
+            registry.model_projection(&result),
+        ] {
+            assert!(
+                projection.result.as_ref().unwrap()["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Hello from docx"),
+                "every consumer projection must retain the document body at its own boundary"
+            );
+        }
+        let value = result.result.unwrap();
+        assert!(value["text"].as_str().unwrap().contains("Hello from docx"));
+        assert_eq!(value["truncatedAtSource"], false);
+        assert_eq!(value["omittedBytes"], 0);
     }
 
     struct TestWorkspace {

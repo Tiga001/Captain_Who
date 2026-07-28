@@ -57,7 +57,9 @@ use crate::protocol::{
     AgentToolCall, AgentToolDefinition, AgentToolResult, AgentWritePermission,
 };
 use crate::revision::content_revision;
-use crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput;
+use crate::storage::conversation_history_archive_repository::{
+    ConversationHistoryArchiveFileInput, ConversationHistoryArchiveInput,
+};
 use crate::storage::now_ms;
 use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
@@ -1164,6 +1166,7 @@ impl AgentRuntime {
                             call.tool
                         );
                         policy_preflight_failure = Some(AgentToolResult {
+            exact_archive_file: None,
                             call_id: call.id.clone(),
                             tool: call.tool.clone(),
                             ok: false,
@@ -2095,12 +2098,19 @@ fn archive_tool_result(
         request.model_result,
         truncated_at_source,
     );
+    let exact_preview_truncated = request.raw_result.exact_archive_file.is_some()
+        && request
+            .raw_result
+            .result
+            .as_ref()
+            .is_some_and(crate::exact_capture::value_has_recoverable_preview_truncation);
     let mut metadata = ConversationHistoryArchiveTraceMetadata {
         truncated_at_source,
         model_projection_truncated: projection_differs(
             request.archive_result,
             request.model_result,
-        ) || gate_truncates,
+        ) || gate_truncates
+            || exact_preview_truncated,
         archive_projection_truncated: projection_differs(
             request.raw_result,
             request.archive_result,
@@ -2115,27 +2125,48 @@ fn archive_tool_result(
     ) else {
         return metadata;
     };
-    let content = match serde_json::to_string(request.archive_result) {
-        Ok(content) => content,
-        Err(error) => {
-            eprintln!("failed to serialize exact history tool result: {error}");
-            return metadata;
-        }
+    let archive = if let Some(exact_file) = request
+        .raw_result
+        .exact_archive_file
+        .as_ref()
+        .or(request.archive_result.exact_archive_file.as_ref())
+    {
+        storage.archive_conversation_tool_result_file(ConversationHistoryArchiveFileInput {
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            sequence,
+            call_id: request.archive_result.call_id.clone(),
+            tool: request.archive_result.tool.clone(),
+            content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+            content_path: exact_file.path().to_path_buf(),
+            truncated_at_source: metadata.truncated_at_source,
+            model_projection_truncated: metadata.model_projection_truncated,
+            archive_projection_truncated: metadata.archive_projection_truncated,
+            created_at: now_ms(),
+        })
+    } else {
+        let content = match serde_json::to_string(request.archive_result) {
+            Ok(content) => content,
+            Err(error) => {
+                eprintln!("failed to serialize exact history tool result: {error}");
+                return metadata;
+            }
+        };
+        storage.archive_conversation_tool_result(ConversationHistoryArchiveInput {
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            sequence,
+            call_id: request.archive_result.call_id.clone(),
+            tool: request.archive_result.tool.clone(),
+            content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+            content,
+            truncated_at_source: metadata.truncated_at_source,
+            model_projection_truncated: metadata.model_projection_truncated,
+            archive_projection_truncated: metadata.archive_projection_truncated,
+            created_at: now_ms(),
+        })
     };
-    let input = ConversationHistoryArchiveInput {
-        conversation_id: conversation_id.to_string(),
-        assistant_message_id: assistant_message_id.to_string(),
-        sequence,
-        call_id: request.archive_result.call_id.clone(),
-        tool: request.archive_result.tool.clone(),
-        content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
-        content,
-        truncated_at_source: metadata.truncated_at_source,
-        model_projection_truncated: metadata.model_projection_truncated,
-        archive_projection_truncated: metadata.archive_projection_truncated,
-        created_at: now_ms(),
-    };
-    match storage.archive_conversation_tool_result(input) {
+    match archive {
         Ok(archive) => {
             metadata.archive_ref = Some(archive.archive_ref);
             metadata.content_hash = Some(archive.content_hash);
@@ -2160,7 +2191,16 @@ pub(crate) fn finalize_model_tool_observation(
     archive: &ConversationHistoryArchiveTraceMetadata,
 ) -> AgentResult<String> {
     let recovery = model_tool_result_recovery(archive)?;
-    let output = gate.project(call_id, is_error, model_result, recovery.as_ref());
+    let requires_exact_recovery = archive.model_projection_truncated
+        && model_result
+            .result
+            .as_ref()
+            .is_some_and(crate::exact_capture::value_has_recoverable_preview_truncation);
+    let output = if requires_exact_recovery {
+        gate.project_with_required_recovery(call_id, is_error, model_result, recovery.as_ref())
+    } else {
+        gate.project(call_id, is_error, model_result, recovery.as_ref())
+    };
     if output.truncated && !model_observation_has_recovery(&output.content) {
         return Err(AgentError::new(format!(
             "工具 `{}` 的模型结果超过 10K token，但没有可用的分页游标或 Exact History 恢复位置。",

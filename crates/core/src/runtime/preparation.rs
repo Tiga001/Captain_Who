@@ -235,6 +235,7 @@ pub(super) fn hydrate_legacy_model_history(
                     ..
                 } => {
                     let fallback = AgentToolResult {
+                        exact_archive_file: None,
                         call_id: call_id.clone(),
                         tool: tool.clone(),
                         ok: *success,
@@ -430,6 +431,7 @@ fn enforce_existing_model_tool_result_budget(
         let existing_payload = serde_json::from_str::<Value>(&item.content)
             .unwrap_or_else(|_| Value::String(item.content.clone()));
         let existing = AgentToolResult {
+            exact_archive_file: None,
             call_id: call_id.clone(),
             tool: tool.clone(),
             ok: *success,
@@ -870,6 +872,7 @@ mod legacy_model_history_tests {
             })
             .unwrap();
         let archived_result = AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-legacy".to_string(),
             tool: "read_file".to_string(),
             ok: true,

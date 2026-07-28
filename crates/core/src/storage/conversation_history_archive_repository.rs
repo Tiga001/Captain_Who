@@ -6,7 +6,9 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
-use std::io::{Error as IoError, ErrorKind};
+use std::fs::File;
+use std::io::{Error as IoError, ErrorKind, Read};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 const ARCHIVE_REF_PREFIX: &str = "history-archive-";
@@ -23,6 +25,26 @@ pub struct ConversationHistoryArchiveInput {
     pub tool: String,
     pub content_type: String,
     pub content: String,
+    pub truncated_at_source: bool,
+    pub model_projection_truncated: bool,
+    pub archive_projection_truncated: bool,
+    pub created_at: i64,
+}
+
+/// File-backed variant used by streaming tool captures.
+///
+/// `content_path` must contain the complete, security-sanitized UTF-8 archive projection. The
+/// repository reads and compresses it incrementally; callers retain ownership of the temporary
+/// file and may remove it after this call returns.
+#[derive(Debug, Clone)]
+pub struct ConversationHistoryArchiveFileInput {
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub sequence: u64,
+    pub call_id: String,
+    pub tool: String,
+    pub content_type: String,
+    pub content_path: PathBuf,
     pub truncated_at_source: bool,
     pub model_projection_truncated: bool,
     pub archive_projection_truncated: bool,
@@ -198,6 +220,158 @@ pub fn store_archive(
 
     find_archive_by_ref(connection, &input.conversation_id, &archive_ref)?
         .ok_or_else(|| invalid_data("stored history archive cannot be reloaded"))
+}
+
+/// Stores one already-materialized UTF-8 Tool Result without loading its complete body into the
+/// archive compressor.
+///
+/// FTS5 still requires one transient contiguous string when the search row is inserted. That
+/// allocation happens only after the immutable zstd chunks have committed and is bounded by the
+/// shared capture safety quota at the process-capture layer.
+pub fn store_archive_file(
+    connection: &mut Connection,
+    input: &ConversationHistoryArchiveFileInput,
+) -> rusqlite::Result<ConversationHistoryArchiveDescriptor> {
+    validate_file_input(input)?;
+    let stats = scan_utf8_file(&input.content_path)?;
+    if let Some(existing) = find_archive_for_trace_item(
+        connection,
+        &input.conversation_id,
+        &input.assistant_message_id,
+        input.sequence,
+    )? {
+        if existing.call_id != input.call_id
+            || existing.tool != input.tool
+            || existing.content_type != input.content_type
+            || existing.content_hash != stats.content_hash
+            || existing.total_bytes != stats.total_bytes
+            || existing.total_chars != stats.total_chars
+            || existing.truncated_at_source != input.truncated_at_source
+            || existing.model_projection_truncated != input.model_projection_truncated
+            || existing.archive_projection_truncated != input.archive_projection_truncated
+        {
+            return Err(invalid_data(
+                "history archive identity was reused for different file-backed tool-result content",
+            ));
+        }
+        let content = std::fs::read_to_string(&input.content_path).map_err(|error| {
+            invalid_data(format!(
+                "cannot read file-backed history archive for FTS indexing: {error}"
+            ))
+        })?;
+        index_archive_content(connection, &existing, &content)?;
+        return Ok(existing);
+    }
+
+    let archive_ref = format!("{ARCHIVE_REF_PREFIX}{}", Uuid::new_v4());
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "
+        INSERT INTO conversation_history_blobs (
+            archive_ref, conversation_id, assistant_message_id, sequence,
+            call_id, tool, content_type, content_hash,
+            uncompressed_bytes, uncompressed_chars, chunk_count, compression,
+            truncated_at_source, archived_completely,
+            model_projection_truncated, archive_projection_truncated, created_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+            ?9, ?10, ?11, 'zstd', ?12, 1, ?13, ?14, ?15
+        )
+        ",
+        params![
+            &archive_ref,
+            &input.conversation_id,
+            &input.assistant_message_id,
+            sqlite_integer(input.sequence)?,
+            &input.call_id,
+            &input.tool,
+            &input.content_type,
+            &stats.content_hash,
+            sqlite_integer(stats.total_bytes)?,
+            sqlite_integer(stats.total_chars)?,
+            sqlite_integer(stats.chunk_count)?,
+            input.truncated_at_source,
+            input.model_projection_truncated,
+            input.archive_projection_truncated,
+            input.created_at,
+        ],
+    )?;
+
+    let mut file = File::open(&input.content_path).map_err(|error| {
+        invalid_data(format!(
+            "cannot open file-backed history archive for compression: {error}"
+        ))
+    })?;
+    let mut chunk_index = 0_u64;
+    let mut byte_offset = 0_u64;
+    let mut char_offset = 0_u64;
+    for_each_utf8_chunk(&mut file, |chunk| {
+        let compressed = zstd::stream::encode_all(chunk.as_bytes(), ZSTD_LEVEL)
+            .map_err(|error| invalid_data(format!("cannot compress history archive: {error}")))?;
+        let chunk_bytes = chunk.len() as u64;
+        let chunk_chars = chunk.chars().count() as u64;
+        transaction.execute(
+            "
+            INSERT INTO conversation_history_blob_chunks (
+                archive_ref, chunk_index,
+                uncompressed_start_byte, uncompressed_start_char,
+                uncompressed_bytes, uncompressed_chars, compressed_bytes, payload
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ",
+            params![
+                &archive_ref,
+                sqlite_integer(chunk_index)?,
+                sqlite_integer(byte_offset)?,
+                sqlite_integer(char_offset)?,
+                sqlite_integer(chunk_bytes)?,
+                sqlite_integer(chunk_chars)?,
+                sqlite_integer(compressed.len() as u64)?,
+                compressed,
+            ],
+        )?;
+        chunk_index = chunk_index.saturating_add(1);
+        byte_offset = byte_offset.saturating_add(chunk_bytes);
+        char_offset = char_offset.saturating_add(chunk_chars);
+        Ok(())
+    })?;
+    if chunk_index != stats.chunk_count
+        || byte_offset != stats.total_bytes
+        || char_offset != stats.total_chars
+    {
+        return Err(invalid_data(
+            "file-backed history archive changed while it was being stored",
+        ));
+    }
+
+    let descriptor = ConversationHistoryArchiveDescriptor {
+        archive_ref: archive_ref.clone(),
+        conversation_id: input.conversation_id.clone(),
+        assistant_message_id: input.assistant_message_id.clone(),
+        sequence: input.sequence,
+        call_id: input.call_id.clone(),
+        tool: input.tool.clone(),
+        content_type: input.content_type.clone(),
+        content_hash: stats.content_hash,
+        total_bytes: stats.total_bytes,
+        total_chars: stats.total_chars,
+        chunk_count: stats.chunk_count,
+        compression: "zstd".to_string(),
+        truncated_at_source: input.truncated_at_source,
+        archived_completely: true,
+        model_projection_truncated: input.model_projection_truncated,
+        archive_projection_truncated: input.archive_projection_truncated,
+        created_at: input.created_at,
+    };
+    let content = std::fs::read_to_string(&input.content_path).map_err(|error| {
+        invalid_data(format!(
+            "cannot read file-backed history archive for FTS indexing: {error}"
+        ))
+    })?;
+    index_archive_content(&transaction, &descriptor, &content)?;
+    transaction.commit()?;
+
+    find_archive_by_ref(connection, &input.conversation_id, &archive_ref)?
+        .ok_or_else(|| invalid_data("stored file-backed history archive cannot be reloaded"))
 }
 
 pub fn find_archive_for_trace_item(
@@ -656,6 +830,119 @@ fn validate_input(input: &ConversationHistoryArchiveInput) -> rusqlite::Result<(
     Ok(())
 }
 
+fn validate_file_input(input: &ConversationHistoryArchiveFileInput) -> rusqlite::Result<()> {
+    for (label, value) in [
+        ("conversation id", input.conversation_id.as_str()),
+        ("assistant message id", input.assistant_message_id.as_str()),
+        ("call id", input.call_id.as_str()),
+        ("tool", input.tool.as_str()),
+        ("content type", input.content_type.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(invalid_data(format!("history archive {label} is empty")));
+        }
+    }
+    if input.created_at < 0 {
+        return Err(invalid_data(
+            "history archive created_at must be non-negative",
+        ));
+    }
+    if !input.content_path.is_file() {
+        return Err(invalid_data(
+            "file-backed history archive content does not exist",
+        ));
+    }
+    Ok(())
+}
+
+struct ArchiveFileStats {
+    content_hash: String,
+    total_bytes: u64,
+    total_chars: u64,
+    chunk_count: u64,
+}
+
+fn scan_utf8_file(path: &std::path::Path) -> rusqlite::Result<ArchiveFileStats> {
+    let mut file = File::open(path).map_err(|error| {
+        invalid_data(format!(
+            "cannot open file-backed history archive for validation: {error}"
+        ))
+    })?;
+    let mut digest = Sha256::new();
+    let mut total_bytes = 0_u64;
+    let mut total_chars = 0_u64;
+    let mut chunk_count = 0_u64;
+    for_each_utf8_chunk(&mut file, |chunk| {
+        digest.update(chunk.as_bytes());
+        total_bytes = total_bytes.saturating_add(chunk.len() as u64);
+        total_chars = total_chars.saturating_add(chunk.chars().count() as u64);
+        chunk_count = chunk_count.saturating_add(1);
+        Ok(())
+    })?;
+    Ok(ArchiveFileStats {
+        content_hash: format!("{CONTENT_HASH_PREFIX}{:x}", digest.finalize()),
+        total_bytes,
+        total_chars,
+        chunk_count,
+    })
+}
+
+fn for_each_utf8_chunk(
+    reader: &mut impl Read,
+    mut consume: impl FnMut(&str) -> rusqlite::Result<()>,
+) -> rusqlite::Result<()> {
+    const READ_BYTES: usize = 64 * 1024;
+    let mut read_buffer = [0_u8; READ_BYTES];
+    let mut pending = Vec::<u8>::with_capacity(CHUNK_TARGET_BYTES + READ_BYTES);
+    let mut emitted = false;
+    loop {
+        let read = reader.read(&mut read_buffer).map_err(|error| {
+            invalid_data(format!("cannot read file-backed history archive: {error}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        pending.extend_from_slice(&read_buffer[..read]);
+        while pending.len() >= CHUNK_TARGET_BYTES {
+            let mut end = CHUNK_TARGET_BYTES;
+            while end > 0 && std::str::from_utf8(&pending[..end]).is_err() {
+                end -= 1;
+                if CHUNK_TARGET_BYTES.saturating_sub(end) > 4 {
+                    return Err(invalid_data(
+                        "file-backed history archive contains invalid UTF-8",
+                    ));
+                }
+            }
+            if end == 0 {
+                return Err(invalid_data(
+                    "file-backed history archive contains invalid UTF-8",
+                ));
+            }
+            let chunk = std::str::from_utf8(&pending[..end]).map_err(|error| {
+                invalid_data(format!(
+                    "file-backed history archive contains invalid UTF-8: {error}"
+                ))
+            })?;
+            consume(chunk)?;
+            emitted = true;
+            pending.drain(..end);
+        }
+    }
+    if !pending.is_empty() {
+        let chunk = std::str::from_utf8(&pending).map_err(|error| {
+            invalid_data(format!(
+                "file-backed history archive contains invalid UTF-8: {error}"
+            ))
+        })?;
+        consume(chunk)?;
+        emitted = true;
+    }
+    if !emitted {
+        consume("")?;
+    }
+    Ok(())
+}
+
 fn split_utf8_chunks(content: &str) -> Vec<&str> {
     if content.is_empty() {
         return vec![""];
@@ -731,7 +1018,8 @@ struct StoredChunk {
 mod tests {
     use super::*;
     use crate::storage::migrations::run_migrations;
-    use tempfile::tempdir;
+    use std::io::Write;
+    use tempfile::{tempdir, NamedTempFile};
 
     fn seed_conversation(connection: &Connection, conversation_id: &str, message_id: &str) {
         connection
@@ -824,6 +1112,46 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn file_backed_archive_streams_chunks_and_restores_the_exact_hash() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        seed_conversation(&connection, "conversation-file", "assistant-file");
+        let content = format!(
+            "{{\"stdout\":\"{}\",\"stderr\":\"尾部\"}}",
+            "streamed-正文-".repeat(180_000)
+        );
+        let expected_hash = content_hash(content.as_bytes());
+        let mut source = NamedTempFile::new().unwrap();
+        source.write_all(content.as_bytes()).unwrap();
+        source.flush().unwrap();
+
+        let descriptor = store_archive_file(
+            &mut connection,
+            &ConversationHistoryArchiveFileInput {
+                conversation_id: "conversation-file".to_string(),
+                assistant_message_id: "assistant-file".to_string(),
+                sequence: 3,
+                call_id: "call-file".to_string(),
+                tool: "run_command".to_string(),
+                content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+                content_path: source.path().to_path_buf(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(descriptor.content_hash, expected_hash);
+        assert_eq!(descriptor.total_bytes, content.len() as u64);
+        assert!(descriptor.chunk_count > 1);
+        let restored = read_complete_archive_content(&connection, &descriptor).unwrap();
+        assert_eq!(restored, content);
+        assert_eq!(content_hash(restored.as_bytes()), expected_hash);
     }
 
     #[test]

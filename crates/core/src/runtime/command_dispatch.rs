@@ -35,6 +35,7 @@ pub(super) fn prepare_command_dispatch(
     );
     match evaluation.decision {
         CommandPolicyDecision::Deny => CommandDispatch::Reject(AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: false,
@@ -76,6 +77,7 @@ pub(super) fn prepare_skill_script_dispatch(
     };
     if workspace_root.is_none() || permissions.write == AgentWritePermission::Denied {
         return CommandDispatch::Reject(AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: false,
@@ -93,6 +95,7 @@ pub(super) fn prepare_skill_script_dispatch(
         || script.preflight.runtime_fingerprint.trim().is_empty()
     {
         return CommandDispatch::Reject(AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: false,
@@ -105,6 +108,7 @@ pub(super) fn prepare_skill_script_dispatch(
         || permissions.write != AgentWritePermission::All
     {
         return CommandDispatch::Reject(AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: false,

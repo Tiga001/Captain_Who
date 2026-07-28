@@ -459,6 +459,7 @@ fn clone_result_without_fields(result: &AgentToolResult, omitted: &[&str]) -> Ag
         value => value.clone(),
     });
     AgentToolResult {
+        exact_archive_file: None,
         call_id: result.call_id.clone(),
         tool: result.tool.clone(),
         ok: result.ok,
@@ -843,6 +844,7 @@ pub fn agent_image_generation_tool_result_from_execution(
     let published = result.managed_artifact.clone();
     match execution_result(operation, reason, execution_id, result) {
         Ok(result) => AgentToolResult {
+            exact_archive_file: None,
             call_id: call_id.to_string(),
             tool: TOOL_NAME.to_string(),
             ok: true,
@@ -853,6 +855,7 @@ pub fn agent_image_generation_tool_result_from_execution(
         // Do not decorate it with the generic top-level `errorCode`: strict protocol consumers
         // would correctly reject that extra field and lose the authoritative failure semantics.
         Err(error) => AgentToolResult {
+            exact_archive_file: None,
             call_id: call_id.to_string(),
             tool: TOOL_NAME.to_string(),
             ok: false,
@@ -916,6 +919,7 @@ fn image_generation_error_tool_result(call_id: &str, error: AgentError) -> Agent
         details
     });
     AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: TOOL_NAME.to_string(),
         ok: false,
@@ -2278,6 +2282,7 @@ mod tests {
         );
 
         let raw = AgentToolResult {
+            exact_archive_file: None,
             call_id: "call-1".to_string(),
             tool: TOOL_NAME.to_string(),
             ok: true,

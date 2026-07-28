@@ -276,6 +276,7 @@ fn resource_page_fits_model_budget(
     source: &Value,
 ) -> AgentResult<bool> {
     let raw = AgentToolResult {
+        exact_archive_file: None,
         call_id: context.tool_call_id()?.to_string(),
         tool: "skills_read_resource".to_string(),
         ok: true,
@@ -316,6 +317,7 @@ mod tests {
     #[test]
     fn history_projection_omits_disclosed_resource_text() {
         let canonical = AgentToolResult {
+            exact_archive_file: None,
             call_id: "read-1".to_string(),
             tool: "skills_read_resource".to_string(),
             ok: true,

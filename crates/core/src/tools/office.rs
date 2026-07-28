@@ -168,9 +168,25 @@ fn project_office_execution(value: &Value) -> Option<Value> {
         "cancelled",
         "stdoutTruncated",
         "stderrTruncated",
+        "stdoutPreviewTruncated",
+        "stderrPreviewTruncated",
     ] {
         if value.get(field).and_then(Value::as_bool) == Some(true) {
             output.insert(field.to_string(), Value::Bool(true));
+        }
+    }
+    for field in [
+        "originalBytes",
+        "capturedBytes",
+        "omittedBytes",
+        "truncatedAtSource",
+        "stopReason",
+    ] {
+        super::model_projection::insert_field(&mut output, value, field);
+    }
+    for field in ["stdoutOmittedBytes", "stderrOmittedBytes"] {
+        if value.get(field).and_then(Value::as_u64).unwrap_or(0) > 0 {
+            super::model_projection::insert_field(&mut output, value, field);
         }
     }
     if let Some(outputs) = value.get("outputs").and_then(Value::as_array) {
@@ -2286,6 +2302,9 @@ mod tests {
                 duration_ms: 0,
                 stdout_truncated: false,
                 stderr_truncated: false,
+                output_capture: Default::default(),
+                stdout_spool: Default::default(),
+                stderr_spool: Default::default(),
                 error_code: None,
                 error: None,
                 outputs: Vec::new(),
@@ -2840,6 +2859,7 @@ mod tests {
     #[test]
     fn office_model_projection_keeps_actionable_outputs_without_provider_audit() {
         let raw = AgentToolResult {
+            exact_archive_file: None,
             call_id: "office-1".to_string(),
             tool: "office_document".to_string(),
             ok: true,
@@ -2871,7 +2891,13 @@ mod tests {
                 "timedOut": false,
                 "cancelled": false,
                 "stdoutTruncated": false,
-                "stderrTruncated": false
+                "stderrTruncated": false,
+                "stdoutPreviewTruncated": true,
+                "stderrPreviewTruncated": false,
+                "originalBytes": 200000,
+                "capturedBytes": 200000,
+                "omittedBytes": 0,
+                "truncatedAtSource": false
             })),
             error: None,
         };
@@ -2886,6 +2912,10 @@ mod tests {
         assert!(model.get("cwd").is_none());
         assert!(model["outputs"][0].get("source").is_none());
         assert!(model["outputs"][0].get("sha256").is_none());
+        assert_eq!(model["originalBytes"], 200000);
+        assert_eq!(model["truncatedAtSource"], false);
+        assert_eq!(model["stdoutPreviewTruncated"], true);
+        assert!(model.get("stderrPreviewTruncated").is_none());
         assert!(raw.result.as_ref().unwrap().get("providerId").is_some());
         assert!(raw.result.as_ref().unwrap()["outputs"][0]
             .get("sha256")

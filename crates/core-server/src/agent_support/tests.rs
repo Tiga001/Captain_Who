@@ -219,6 +219,9 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
 #[test]
 fn failed_command_tool_result_keeps_the_complete_execution_observation() {
     let execution = AgentCommandExecutionResult {
+        output_capture: Default::default(),
+        stdout_spool: Default::default(),
+        stderr_spool: Default::default(),
         command: "python3 -c 'import openpyxl'".to_string(),
         cwd: ".".to_string(),
         exit_code: Some(1),

@@ -443,8 +443,27 @@ fn project_web_fetch_result(value: &Value) -> (Value, bool) {
             "responseTime",
             DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
         ),
+        (
+            "sourceStopReason",
+            DurableTraceProjectionLimits::TITLE_CHARS,
+        ),
     ] {
         copy_bounded_field(input, &mut output, key, limit, &mut truncated);
+    }
+    for key in [
+        "contentCoverage",
+        "imagesCoverage",
+        "failedResultsCoverage",
+        "truncatedAtSource",
+        "omittedBytes",
+    ] {
+        copy_bounded_field(
+            input,
+            &mut output,
+            key,
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            &mut truncated,
+        );
     }
     if let Some(content) = input
         .get("summary")
@@ -1264,6 +1283,52 @@ mod tests {
             .unwrap()
             .starts_with(EARLIER_OUTPUT_OMITTED_PREFIX));
         assert_eq!(projected["stderrTail"], "important failure at the end");
+    }
+
+    #[test]
+    fn web_fetch_trace_keeps_completeness_metadata_while_bounding_the_body() {
+        let result = json!({
+            "url": "https://example.com/large",
+            "content": "正文".repeat(10_000),
+            "contentCoverage": {
+                "unit": "bytes",
+                "total": 60_000,
+                "returned": 60_000,
+                "omitted": 0
+            },
+            "imagesCoverage": {
+                "unit": "items",
+                "total": 42,
+                "returned": 30,
+                "omitted": 12
+            },
+            "failedResultsCoverage": {
+                "unit": "items",
+                "total": 0,
+                "returned": 0,
+                "omitted": 0
+            },
+            "truncated": true,
+            "truncatedAtSource": false
+        });
+
+        let (projected, trace_projection_truncated) = project_web_fetch_result(&result);
+
+        assert!(trace_projection_truncated);
+        assert!(
+            projected["summary"].as_str().unwrap().chars().count()
+                <= DurableTraceProjectionLimits::SUMMARY_CHARS + 100
+        );
+        assert_eq!(
+            projected["contentCoverage"], result["contentCoverage"],
+            "durable audit must retain exact capture coverage"
+        );
+        assert_eq!(projected["imagesCoverage"], result["imagesCoverage"]);
+        assert_eq!(
+            projected["failedResultsCoverage"],
+            result["failedResultsCoverage"]
+        );
+        assert_eq!(projected["truncatedAtSource"], false);
     }
 
     #[test]

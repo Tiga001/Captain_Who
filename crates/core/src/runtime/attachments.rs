@@ -13,6 +13,12 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
+// Attachment preprocessing is a direct context consumer rather than an ordinary Tool-result
+// exchange, so it cannot rely on the central 10K Model Result Gate. Keep its legacy 40K ceiling
+// here as an explicit Consumer Projection Limit; document Tools themselves must still return the
+// complete extracted text so Exact History can archive it.
+const ATTACHMENT_CONTEXT_TEXT_MAX_CHARS: usize = 40_000;
+
 pub(super) struct AttachmentContext {
     pub(super) text: String,
     pub(super) images: Vec<LlmImage>,
@@ -139,7 +145,6 @@ fn build_attachment_context_in_workspace(
             tool: tool_name.to_string(),
             args: json!({
                 "path": safe_name,
-                "maxChars": 40_000,
                 "maxLines": 1_200
             }),
             approval_status: AgentApprovalStatus::NotRequired,
@@ -153,22 +158,27 @@ fn build_attachment_context_in_workspace(
                 .as_ref()
                 .and_then(extracted_text_from_tool_result)
                 .unwrap_or_default();
-            let truncated = result
+            let projection = attachment_text_projection(extracted);
+            let tool_truncated = result
                 .result
                 .as_ref()
                 .and_then(|value| value.get("truncated"))
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || attachment.truncated.unwrap_or(false);
+                .unwrap_or(false);
+            let truncated =
+                tool_truncated || projection.truncated || attachment.truncated.unwrap_or(false);
             sections.push(format!(
-                "### {}\nMIME：{}\n大小：{} bytes\n{}\n读取工具：{}\n截断：{}\n\n{}",
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n读取工具：{}\n截断：{}\n正文投影：returned={} chars，total={} chars，omitted={} chars\n\n{}",
                 attachment.name,
                 mime_type,
                 attachment.size_bytes,
                 read_path_line(read_path),
                 tool_name,
                 truncated,
-                extracted
+                projection.returned_chars,
+                projection.total_chars,
+                projection.omitted_chars,
+                projection.text
             ));
         } else {
             sections.push(format!(
@@ -419,6 +429,34 @@ fn extracted_text_from_tool_result(value: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+struct AttachmentTextProjection {
+    text: String,
+    total_chars: usize,
+    returned_chars: usize,
+    omitted_chars: usize,
+    truncated: bool,
+}
+
+fn attachment_text_projection(text: String) -> AttachmentTextProjection {
+    let total_chars = text.chars().count();
+    let returned_chars = total_chars.min(ATTACHMENT_CONTEXT_TEXT_MAX_CHARS);
+    let truncated = returned_chars < total_chars;
+    let text = if truncated {
+        text.chars()
+            .take(ATTACHMENT_CONTEXT_TEXT_MAX_CHARS)
+            .collect()
+    } else {
+        text
+    };
+    AttachmentTextProjection {
+        text,
+        total_chars,
+        returned_chars,
+        omitted_chars: total_chars.saturating_sub(returned_chars),
+        truncated,
+    }
+}
+
 fn sanitize_attachment_file_name(name: &str, fallback_id: &str) -> String {
     let file_name = Path::new(name)
         .file_name()
@@ -448,4 +486,27 @@ fn attachment_extension(name: &str) -> String {
         .and_then(|extension| extension.to_str())
         .map(|extension| extension.to_ascii_lowercase())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_text_limit_is_explicit_and_utf8_safe() {
+        let projection =
+            attachment_text_projection("你".repeat(ATTACHMENT_CONTEXT_TEXT_MAX_CHARS + 7));
+
+        assert_eq!(
+            projection.text.chars().count(),
+            ATTACHMENT_CONTEXT_TEXT_MAX_CHARS
+        );
+        assert_eq!(
+            projection.total_chars,
+            ATTACHMENT_CONTEXT_TEXT_MAX_CHARS + 7
+        );
+        assert_eq!(projection.returned_chars, ATTACHMENT_CONTEXT_TEXT_MAX_CHARS);
+        assert_eq!(projection.omitted_chars, 7);
+        assert!(projection.truncated);
+    }
 }

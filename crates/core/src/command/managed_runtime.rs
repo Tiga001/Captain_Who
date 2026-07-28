@@ -941,6 +941,9 @@ fn run_managed_process(
             duration_ms: 0,
             stdout_truncated: false,
             stderr_truncated: false,
+            output_capture: ProcessOutputCaptureMetadata::default(),
+            stdout_spool: ProcessOutputSpool::default(),
+            stderr_spool: ProcessOutputSpool::default(),
             error: None,
             policy_evaluation: None,
             artifact_observation: None,
@@ -1018,8 +1021,11 @@ fn run_managed_process(
             started.elapsed().as_millis() as u64,
         );
     };
-    let stdout_reader = spawn_bounded_output_reader(stdout);
-    let stderr_reader = spawn_bounded_output_reader(stderr);
+    let capture_policy = ProcessOutputCapturePolicy::process_default();
+    let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
+    let stdout_reader =
+        spawn_process_output_capture(stdout, capture_budget.clone(), capture_policy);
+    let stderr_reader = spawn_process_output_capture(stderr, capture_budget, capture_policy);
 
     let deadline = Duration::from_millis(timeout_ms);
     let mut timed_out = false;
@@ -1042,21 +1048,26 @@ fn run_managed_process(
         }
     };
 
-    let stdout = join_output_reader(stdout_reader, "stdout");
-    let stderr = join_output_reader(stderr_reader, "stderr");
+    let stdout = join_process_output_capture(stdout_reader, "stdout");
+    let stderr = join_process_output_capture(stderr_reader, "stderr");
     match (exit_status, stdout, stderr) {
-        (Ok(exit_status), Ok((stdout, stdout_truncated)), Ok((stderr, stderr_truncated))) => {
+        (Ok(exit_status), Ok(stdout_capture), Ok(stderr_capture)) => {
+            let output_capture =
+                ProcessOutputCaptureMetadata::from_streams(&stdout_capture, &stderr_capture);
             AgentCommandExecutionResult {
                 command: request.command.clone(),
                 cwd: relative_cwd(root, cwd),
                 exit_code: exit_status.code(),
-                stdout,
-                stderr,
+                stdout: stdout_capture.preview().to_string(),
+                stderr: stderr_capture.preview().to_string(),
                 timed_out,
                 cancelled,
                 duration_ms: started.elapsed().as_millis() as u64,
-                stdout_truncated,
-                stderr_truncated,
+                stdout_truncated: stdout_capture.preview_truncated(),
+                stderr_truncated: stderr_capture.preview_truncated(),
+                output_capture,
+                stdout_spool: stdout_capture.spool(),
+                stderr_spool: stderr_capture.spool(),
                 error: None,
                 policy_evaluation: None,
                 artifact_observation: None,
@@ -1342,6 +1353,9 @@ fn runtime_cancelled_result(
         duration_ms: 0,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: ProcessOutputCaptureMetadata::default(),
+        stdout_spool: ProcessOutputSpool::default(),
+        stderr_spool: ProcessOutputSpool::default(),
         error: None,
         policy_evaluation: None,
         artifact_observation: None,
@@ -1368,6 +1382,9 @@ fn runtime_failure_result(
         duration_ms,
         stdout_truncated: false,
         stderr_truncated: false,
+        output_capture: ProcessOutputCaptureMetadata::default(),
+        stdout_spool: ProcessOutputSpool::default(),
+        stderr_spool: ProcessOutputSpool::default(),
         error: runtime.message.clone(),
         policy_evaluation: None,
         artifact_observation: None,

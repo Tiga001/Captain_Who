@@ -114,6 +114,7 @@ impl ToolFailureGuard {
         };
         Some(ToolFailureGuardBlock {
             result: AgentToolResult {
+                exact_archive_file: None,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
@@ -304,6 +305,7 @@ mod tests {
 
     fn failure(call: &AgentToolCall, code: &str) -> AgentToolResult {
         AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: false,
@@ -314,6 +316,7 @@ mod tests {
 
     fn success(call: &AgentToolCall) -> AgentToolResult {
         AgentToolResult {
+            exact_archive_file: None,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             ok: true,

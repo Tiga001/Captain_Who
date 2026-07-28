@@ -257,8 +257,57 @@ fn drains_and_bounds_large_stdout_and_stderr_without_deadlock() {
     assert_eq!(result.exit_code, Some(0));
     assert!(result.stdout_truncated);
     assert!(result.stderr_truncated);
-    assert!(result.stdout.len() <= MAX_OUTPUT_BYTES + 32);
-    assert!(result.stderr.len() <= MAX_OUTPUT_BYTES + 32);
+    assert!(result.stdout.len() <= MAX_OUTPUT_BYTES);
+    assert!(result.stderr.len() <= MAX_OUTPUT_BYTES);
+    assert_eq!(result.output_capture.original_bytes, 400_000);
+    assert_eq!(result.output_capture.captured_bytes, 400_000);
+    assert_eq!(result.output_capture.omitted_bytes, 0);
+    assert!(!result.output_capture.truncated_at_source);
+    assert!(result.output_capture.stdout_preview_truncated);
+    assert!(result.output_capture.stderr_preview_truncated);
+    assert_eq!(result.output_spool_substitutions().len(), 2);
+    assert_eq!(
+        result
+            .stdout_spool
+            .reopen()
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len(),
+        200_000
+    );
+    assert_eq!(
+        result
+            .stderr_spool
+            .reopen()
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .len(),
+        200_000
+    );
+    let tool_result = command_tool_result("call-large-output", &result);
+    assert_eq!(
+        tool_result.result.as_ref().unwrap()["truncatedAtSource"],
+        false
+    );
+    assert_eq!(
+        tool_result.result.as_ref().unwrap()["originalBytes"],
+        400_000
+    );
+    let exact = tool_result
+        .exact_archive_file
+        .as_ref()
+        .expect("complete process output should have an exact archive sidecar");
+    let archived: serde_json::Value = serde_json::from_reader(exact.reopen().unwrap()).unwrap();
+    assert_eq!(
+        archived["result"]["stdout"].as_str().unwrap().len(),
+        200_000
+    );
+    assert_eq!(
+        archived["result"]["stderr"].as_str().unwrap().len(),
+        200_000
+    );
 }
 
 #[test]

@@ -35,6 +35,7 @@ mod artifact_observer;
 mod execution;
 mod lexer;
 mod managed_runtime;
+mod output_capture;
 mod policy;
 mod risk;
 mod runtime_profile;
@@ -56,6 +57,12 @@ pub(crate) use managed_runtime::{
 pub use managed_runtime::{
     run_authorized_command_with_artifact_runtime,
     run_authorized_command_with_artifact_runtime_and_inputs,
+};
+pub use output_capture::{
+    join_process_output_capture, materialize_process_tool_result_archive,
+    process_output_spool_substitutions, spawn_process_output_capture, CapturedProcessOutput,
+    ProcessOutputCaptureBudget, ProcessOutputCaptureHandle, ProcessOutputCaptureMetadata,
+    ProcessOutputCapturePolicy, ProcessOutputSpool, ProcessOutputSpoolSubstitution,
 };
 pub use policy::*;
 use risk::*;
@@ -85,7 +92,8 @@ pub fn command_tool_result(
         && !command_result.timed_out
         && !command_result.cancelled
         && command_result.error.is_none();
-    AgentToolResult {
+    let mut tool_result = AgentToolResult {
+        exact_archive_file: None,
         call_id: call_id.to_string(),
         tool: "run_command".to_string(),
         ok,
@@ -103,7 +111,17 @@ pub fn command_tool_result(
                 })
             })
         },
+    };
+    let substitutions = command_result.output_spool_substitutions();
+    if !substitutions.is_empty() {
+        match materialize_process_tool_result_archive(&tool_result, &substitutions) {
+            Ok(file) => tool_result.exact_archive_file = file,
+            Err(error) => {
+                eprintln!("failed to materialize exact run_command output archive: {error}");
+            }
+        }
     }
+    tool_result
 }
 
 #[cfg(all(test, not(windows)))]

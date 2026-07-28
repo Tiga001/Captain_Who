@@ -507,6 +507,7 @@ impl AgentService {
                         )
                     }
                     Err(error) => AgentToolResult {
+                        exact_archive_file: None,
                         call_id: materialization.id.clone(),
                         tool: "skills_materialize_resource".to_string(),
                         ok: false,
