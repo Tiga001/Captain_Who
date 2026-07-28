@@ -1,0 +1,431 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "web_search_renderer_and_model_contract",
+      "toolResult": {
+        "callId": "call-web-search",
+        "tool": "web_search",
+        "ok": true,
+        "result": {
+          "query": "Rust projection contracts",
+          "provider": "tavily",
+          "answer": "A projection separates consumer-specific views.",
+          "results": [
+            {
+              "title": "Projection contracts",
+              "url": "https://example.com/contracts",
+              "content": "A concise source excerpt.",
+              "score": 0.92,
+              "publishedDate": "2026-07-28",
+              "favicon": "https://example.com/favicon.ico"
+            }
+          ],
+          "images": ["https://example.com/diagram.png"],
+          "responseTime": 0.42,
+          "truncated": false
+        }
+      },
+      "stages": {
+        "model": { "equalsRaw": true },
+        "rendererEvent": {
+          "equalsRaw": true,
+          "required": {
+            "/result/query": "Rust projection contracts",
+            "/result/provider": "tavily",
+            "/result/answer": "A projection separates consumer-specific views.",
+            "/result/results/0/title": "Projection contracts",
+            "/result/results/0/url": "https://example.com/contracts",
+            "/result/results/0/content": "A concise source excerpt.",
+            "/result/results/0/score": 0.92,
+            "/result/results/0/publishedDate": "2026-07-28",
+            "/result/results/0/favicon": "https://example.com/favicon.ico",
+            "/result/responseTime": 0.42,
+            "/result/truncated": false
+          }
+        },
+        "durableTrace": { "equalsRaw": true },
+        "exactArchive": { "equalsRaw": true },
+        "checkpoint": { "equalsRaw": true }
+      }
+    },
+    {
+      "name": "web_fetch_renderer_and_exact_body_contract",
+      "toolResult": {
+        "callId": "call-web-fetch",
+        "tool": "web_fetch",
+        "ok": true,
+        "result": {
+          "url": "https://example.com/article",
+          "requestedUrl": "https://example.com/article",
+          "provider": "tavily",
+          "format": "markdown",
+          "extractDepth": "advanced",
+          "content": "# Article\n\nExact fetched body.",
+          "images": ["https://example.com/hero.png"],
+          "favicon": "https://example.com/favicon.ico",
+          "failedResults": [],
+          "responseTime": 1.25,
+          "truncated": false
+        }
+      },
+      "stages": {
+        "model": { "equalsRaw": true },
+        "rendererEvent": {
+          "equalsRaw": true,
+          "required": {
+            "/result/url": "https://example.com/article",
+            "/result/requestedUrl": "https://example.com/article",
+            "/result/provider": "tavily",
+            "/result/content": "# Article\n\nExact fetched body.",
+            "/result/favicon": "https://example.com/favicon.ico",
+            "/result/responseTime": 1.25,
+            "/result/truncated": false
+          }
+        },
+        "durableTrace": { "equalsRaw": true },
+        "exactArchive": {
+          "equalsRaw": true,
+          "required": {
+            "/result/content": "# Article\n\nExact fetched body."
+          }
+        },
+        "checkpoint": { "equalsRaw": true }
+      }
+    },
+    {
+      "name": "attachment_identity_and_read_route_contract",
+      "toolResult": {
+        "callId": "call-attachments",
+        "tool": "attachments_list",
+        "ok": true,
+        "result": {
+          "scope": "conversation",
+          "scopeNote": "Current conversation attachments.",
+          "library": {
+            "path": "@attachments",
+            "note": "Use the exact readPath."
+          },
+          "total": 1,
+          "truncated": false,
+          "attachments": [
+            {
+              "id": "attachment-1",
+              "conversationId": "conversation-1",
+              "messageId": "message-1",
+              "projectId": "project-1",
+              "kind": "image",
+              "name": "diagram.png",
+              "mimeType": "image/png",
+              "sizeBytes": 128,
+              "readPath": "@attachments/attachment-1/diagram.png",
+              "createdAt": 1785200000000
+            }
+          ]
+        }
+      },
+      "stages": {
+        "model": {
+          "equalsRaw": true,
+          "required": {
+            "/result/attachments/0/readPath": "@attachments/attachment-1/diagram.png"
+          }
+        },
+        "rendererEvent": {
+          "equalsRaw": true,
+          "required": {
+            "/result/total": 1,
+            "/result/attachments/0/id": "attachment-1",
+            "/result/attachments/0/messageId": "message-1",
+            "/result/attachments/0/name": "diagram.png"
+          }
+        },
+        "durableTrace": { "equalsRaw": true },
+        "exactArchive": { "equalsRaw": true },
+        "checkpoint": {
+          "equalsRaw": true,
+          "required": {
+            "/result/attachments/0/id": "attachment-1",
+            "/result/attachments/0/readPath": "@attachments/attachment-1/diagram.png"
+          }
+        }
+      }
+    },
+    {
+      "name": "workspace_map_structured_and_text_views_contract",
+      "toolResult": {
+        "callId": "call-workspace-map",
+        "tool": "workspace_map",
+        "ok": true,
+        "result": {
+          "workspace": {
+            "focusPath": ".",
+            "maxDepth": 2,
+            "maxEntries": 20,
+            "includeFiles": true
+          },
+          "summary": {
+            "fileCount": 1,
+            "directoryCount": 1,
+            "totalFileBytes": 12,
+            "languages": [],
+            "topDirectories": [],
+            "importantFiles": [],
+            "entrypointCandidates": [],
+            "testCandidates": [],
+            "documentationFiles": []
+          },
+          "tree": [
+            {
+              "path": "src/main.rs",
+              "name": "main.rs",
+              "kind": "file",
+              "depth": 2,
+              "sizeBytes": 12
+            }
+          ],
+          "treeText": "src/\n  main.rs",
+          "truncated": {
+            "walk": false,
+            "tree": false
+          }
+        }
+      },
+      "stages": {
+        "model": {
+          "equalsRaw": true,
+          "required": {
+            "/result/tree/0/path": "src/main.rs",
+            "/result/treeText": "src/\n  main.rs"
+          }
+        },
+        "rendererEvent": { "equalsRaw": true },
+        "durableTrace": { "equalsRaw": true },
+        "exactArchive": { "equalsRaw": true },
+        "checkpoint": { "equalsRaw": true }
+      }
+    },
+    {
+      "name": "command_artifact_observation_and_audit_contract",
+      "toolResult": {
+        "callId": "call-command",
+        "tool": "run_command",
+        "ok": true,
+        "result": {
+          "command": "node build-report.mjs",
+          "cwd": "/workspace",
+          "exitCode": 0,
+          "stdout": "created report.xlsx",
+          "stderr": "",
+          "timedOut": false,
+          "cancelled": false,
+          "durationMs": 17,
+          "stdoutTruncated": false,
+          "stderrTruncated": false,
+          "policyEvaluation": {
+            "decision": "allow",
+            "code": "allowed",
+            "findings": []
+          },
+          "artifactObservation": {
+            "schemaVersion": 1,
+            "status": "complete",
+            "coverage": {
+              "workspaceIncluded": true
+            },
+            "expectedOutputs": [
+              {
+                "path": "report.xlsx",
+                "outcome": "created"
+              }
+            ],
+            "changes": [
+              {
+                "kind": "created",
+                "artifactKind": "spreadsheet",
+                "path": "report.xlsx",
+                "scope": "workspace",
+                "after": {
+                  "validation": {
+                    "status": "valid"
+                  }
+                }
+              }
+            ]
+          },
+          "inputFiles": [
+            {
+              "mountPath": "inputs/source.csv",
+              "sourceKind": "workspace",
+              "sizeBytes": 64,
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          ]
+        }
+      },
+      "stages": {
+        "model": {
+          "equalsRaw": true,
+          "required": {
+            "/result/exitCode": 0,
+            "/result/command": "node build-report.mjs",
+            "/result/cwd": "/workspace",
+            "/result/stdout": "created report.xlsx",
+            "/result/artifactObservation/changes/0/path": "report.xlsx"
+          }
+        },
+        "rendererEvent": {
+          "equalsRaw": true,
+          "required": {
+            "/result/artifactObservation/status": "complete",
+            "/result/artifactObservation/changes/0/kind": "created",
+            "/result/artifactObservation/changes/0/artifactKind": "spreadsheet",
+            "/result/artifactObservation/changes/0/path": "report.xlsx",
+            "/result/artifactObservation/changes/0/scope": "workspace",
+            "/result/artifactObservation/changes/0/after/validation/status": "valid"
+          }
+        },
+        "durableTrace": {
+          "equalsRaw": true,
+          "required": {
+            "/result/policyEvaluation/decision": "allow",
+            "/result/artifactObservation/coverage/workspaceIncluded": true,
+            "/result/inputFiles/0/mountPath": "inputs/source.csv",
+            "/result/inputFiles/0/sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        "exactArchive": { "equalsRaw": true },
+        "checkpoint": {
+          "equalsRaw": true,
+          "required": {
+            "/result/artifactObservation/expectedOutputs/0/outcome": "created"
+          }
+        }
+      }
+    },
+    {
+      "name": "file_draft_runtime_and_presentation_contract",
+      "toolResult": {
+        "callId": "call-write-file",
+        "tool": "write_file",
+        "ok": true,
+        "result": {
+          "draft": {
+            "draftId": "draft-1",
+            "conversationId": "conversation-1",
+            "projectId": "project-1",
+            "filePath": "report.md",
+            "mode": "create",
+            "status": "drafting",
+            "additions": 2,
+            "deletions": 0,
+            "lineCount": 2,
+            "byteCount": 20,
+            "chunkCount": 1,
+            "nextChunkIndex": 1,
+            "statsFinal": false,
+            "summary": "Draft report",
+            "createdAt": 1785200000000,
+            "updatedAt": 1785200000100
+          },
+          "tail": "private generated content",
+          "maxDraftBytes": 8388608,
+          "transactionState": "dirty",
+          "requiresFinishBeforeResponse": true,
+          "nextAction": "append_or_finish"
+        }
+      },
+      "stages": {
+        "model": {
+          "equalsRaw": true,
+          "required": {
+            "/result/tail": "private generated content",
+            "/result/draft/draftId": "draft-1",
+            "/result/nextAction": "append_or_finish"
+          }
+        },
+        "rendererEvent": {
+          "required": {
+            "/result/draft/draftId": "draft-1",
+            "/result/draft/status": "drafting",
+            "/result/draft/additions": 2,
+            "/result/draft/deletions": 0,
+            "/result/draft/lineCount": 2,
+            "/result/draft/byteCount": 20
+          },
+          "absent": ["/result/tail"]
+        },
+        "durableTrace": {
+          "equalsRaw": true,
+          "required": {
+            "/result/tail": "private generated content"
+          }
+        },
+        "exactArchive": {
+          "equalsRaw": true,
+          "required": {
+            "/result/tail": "private generated content"
+          }
+        },
+        "checkpoint": {
+          "equalsRaw": true,
+          "required": {
+            "/result/draft/draftId": "draft-1",
+            "/result/tail": "private generated content"
+          }
+        }
+      }
+    },
+    {
+      "name": "skill_resource_content_lifetime_contract",
+      "toolResult": {
+        "callId": "call-skill-read",
+        "tool": "skills_read_resource",
+        "ok": true,
+        "result": {
+          "uri": "skill://package/bundled%3Aapplication%3Adocuments/revision-1/references/workflow.md",
+          "startByte": 0,
+          "endByteExclusive": 20,
+          "totalBytes": 20,
+          "returnedBytes": 20,
+          "truncated": false,
+          "nextStartByte": null,
+          "content": "Exact skill resource"
+        }
+      },
+      "stages": {
+        "model": {
+          "equalsRaw": true,
+          "required": {
+            "/result/content": "Exact skill resource"
+          }
+        },
+        "rendererEvent": {
+          "required": {
+            "/result/uri": "skill://package/bundled%3Aapplication%3Adocuments/revision-1/references/workflow.md",
+            "/result/contentOmittedFromHistory": true
+          },
+          "absent": ["/result/content"]
+        },
+        "durableTrace": {
+          "required": {
+            "/result/contentOmittedFromHistory": true
+          },
+          "absent": ["/result/content"]
+        },
+        "exactArchive": {
+          "equalsRaw": true,
+          "required": {
+            "/result/content": "Exact skill resource"
+          }
+        },
+        "checkpoint": {
+          "equalsRaw": true,
+          "required": {
+            "/result/content": "Exact skill resource"
+          }
+        }
+      }
+    }
+  ]
+}

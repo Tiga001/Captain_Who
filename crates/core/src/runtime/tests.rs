@@ -5,7 +5,8 @@ use crate::llm::LlmToolCall;
 use crate::protocol::{
     AgentActivatedSkill, AgentAttachmentLibraryContext, AgentAttachmentReference,
     AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind,
-    AgentPatchPermission, AgentRunContext, AgentSkillActivation, AgentWorkspaceContext,
+    AgentPatchPermission, AgentRunContext, AgentSearchConfig, AgentSearchMode,
+    AgentSkillActivation, AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
 use crate::tools::{EffectiveToolSet, ToolCapabilityId, OFFICE_DOCUMENTS_CAPABILITY};
@@ -145,6 +146,81 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
         restored.result.unwrap()["content"],
         raw.result.unwrap()["content"]
     );
+}
+
+#[test]
+fn major_tool_result_projections_match_consumer_contract_fixture() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/tool_result_projection_contract_v1.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["schemaVersion"], 1);
+
+    let registry = ToolRegistry::defaults_with_search(Some(&AgentSearchConfig {
+        mode: AgentSearchMode::Tavily,
+        tavily_api_key: Some("tvly-contract-fixture".to_string()),
+    }));
+    let cases = fixture["cases"].as_array().expect("contract cases");
+
+    for case in cases {
+        let name = case["name"].as_str().expect("contract case name");
+        let raw: AgentToolResult = serde_json::from_value(case["toolResult"].clone())
+            .unwrap_or_else(|error| {
+                panic!("invalid raw ToolResult in consumer contract `{name}`: {error}")
+            });
+        assert!(
+            registry.contains_tool(&raw.tool),
+            "consumer contract `{name}` names an unregistered Tool `{}`",
+            raw.tool
+        );
+
+        let projections = [
+            ("model", registry.model_projection(&raw)),
+            (
+                "rendererEvent",
+                redact_tool_result_for_event(&registry.event_projection(&raw)),
+            ),
+            ("durableTrace", registry.trace_projection(&raw)),
+            ("exactArchive", registry.archive_projection(&raw)),
+            ("checkpoint", registry.checkpoint_projection(&raw)),
+        ];
+        let raw_value = serde_json::to_value(&raw).unwrap();
+        let stages = case["stages"]
+            .as_object()
+            .expect("consumer contract stages");
+
+        for (stage_name, projection) in projections {
+            let stage = stages
+                .get(stage_name)
+                .unwrap_or_else(|| panic!("`{name}` is missing stage `{stage_name}`"));
+            let projection_value = serde_json::to_value(&projection).unwrap();
+
+            if stage["equalsRaw"].as_bool() == Some(true) {
+                assert_eq!(
+                    projection_value, raw_value,
+                    "`{name}` changed the `{stage_name}` snapshot"
+                );
+            }
+            if let Some(required) = stage.get("required").and_then(Value::as_object) {
+                for (pointer, expected) in required {
+                    assert_eq!(
+                        projection_value.pointer(pointer),
+                        Some(expected),
+                        "`{name}` lost `{pointer}` from `{stage_name}`"
+                    );
+                }
+            }
+            if let Some(absent) = stage.get("absent").and_then(Value::as_array) {
+                for pointer in absent {
+                    let pointer = pointer.as_str().expect("absent JSON pointer");
+                    assert!(
+                        projection_value.pointer(pointer).is_none(),
+                        "`{name}` unexpectedly exposed `{pointer}` through `{stage_name}`"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn empty_attachment_context() -> AttachmentContext {

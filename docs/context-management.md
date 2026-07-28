@@ -2,6 +2,9 @@
 
 本文说明 MyCopilot 当前的上下文事实来源、模型请求组装、运行中 Agent 轨迹、统一计量、自动压缩和前端上下文圆环。
 
+Tool 结果的 Model、Renderer、Runtime Extension、Durable Trace、Exact Archive 与审批
+Checkpoint 消费边界，见 [Tool Result 消费者矩阵与投影契约](tool-result-consumer-matrix.md)。
+
 ## 核心原则
 
 系统只维护一份逻辑上的原始上下文日志：

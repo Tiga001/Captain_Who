@@ -523,16 +523,33 @@ mod tests {
         );
 
         assert!(result.ok, "{:?}", result.error);
+        let result_state: AgentTodoState =
+            serde_json::from_value(result.result.clone().expect("todo result state")).unwrap();
+        assert_eq!(result_state.revision, 1);
+        assert_eq!(result_state.items.len(), 2);
+        assert!(!result_state.items[0].id.is_empty());
+        assert_eq!(result_state.items[0].title, "Inspect runtime loop");
+        assert_eq!(result_state.items[0].status, AgentTodoStatus::Completed);
+        assert!(result_state.items[0].created_at > 0);
+        assert!(result_state.items[0].updated_at > 0);
         assert_eq!(handle.state().revision, 1);
         assert_eq!(handle.state().items.len(), 2);
         let effects = extension
             .on_event(&RuntimeExtensionEvent::ToolCompleted { result: &result })
             .unwrap();
-        assert!(matches!(
-            effects.as_slice(),
-            [RuntimeEffect::EmitEvent(event)]
-                if matches!(event.as_ref(), AgentEvent::TodoUpdated { run_id, todo } if run_id == "run-1" && todo.revision == 1)
-        ));
+        let [RuntimeEffect::EmitEvent(event)] = effects.as_slice() else {
+            panic!("todo_update must emit one renderer event");
+        };
+        let AgentEvent::TodoUpdated { run_id, todo } = event.as_ref() else {
+            panic!("todo_update must emit TodoUpdated");
+        };
+        assert_eq!(run_id, "run-1");
+        assert_eq!(todo.revision, result_state.revision);
+        assert_eq!(todo.items[0].id, result_state.items[0].id);
+        assert_eq!(todo.items[0].title, result_state.items[0].title);
+        assert_eq!(todo.items[0].status, result_state.items[0].status);
+        assert_eq!(todo.items[0].created_at, result_state.items[0].created_at);
+        assert_eq!(todo.items[0].updated_at, result_state.items[0].updated_at);
     }
 
     #[test]
