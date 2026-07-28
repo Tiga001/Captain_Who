@@ -1,6 +1,8 @@
 use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use reqwest::Url;
@@ -76,6 +78,17 @@ impl AgentTool for WebFetchTool {
         )?;
 
         format_tavily_extract_response(request, response, &cancellation_token)
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.as_ref().and_then(|value| {
+            let mut output = serde_json::Map::new();
+            for field in ["url", "content", "images", "failedResults", "truncated"] {
+                super::model_projection::insert_field(&mut output, value, field);
+            }
+            (!output.is_empty()).then_some(Value::Object(output))
+        });
+        super::model_projection::compact_model_result(result, projected)
     }
 }
 

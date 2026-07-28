@@ -371,8 +371,8 @@ mod tests {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')));
         assert_eq!(messages[2].tool_call_id.as_deref(), Some(call_id.as_str()));
         assert_eq!(messages[1].tool_calls[0].args["path"], "src/lib.rs");
-        assert!(messages[2].content.contains("\"ok\": true"));
-        assert!(messages[2].content.contains("\"endLine\": 20"));
+        assert!(!messages[2].content.contains("\"ok\""));
+        assert!(messages[2].content.contains("\"endLine\":20"));
         assert!(messages[3]
             .content
             .contains("historical_agent_activity_terminal"));
@@ -587,8 +587,8 @@ mod tests {
         assert!(messages[2].content.contains("command failed"));
         assert!(messages[2].content.contains("permission denied"));
         assert!(messages[2].content.contains("partial output"));
-        assert!(messages[2].content.contains("\"exitCode\": 1"));
-        assert!(messages[2].content.contains("\"ok\": false"));
+        assert!(messages[2].content.contains("\"exitCode\":1"));
+        assert!(!messages[2].content.contains("\"ok\""));
         assert!(messages[3]
             .content
             .contains("\"terminalStatus\":\"failed\""));

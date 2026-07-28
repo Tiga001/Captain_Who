@@ -8,7 +8,7 @@ use crate::content_revision;
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentFileDraftSnapshot, AgentFileDraftStatus,
     AgentFileWriteMode, AgentFileWriteProposal, AgentProposedAction, AgentResult, AgentToolCall,
-    AgentToolDefinition, AgentToolSafety,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::storage::models::{
     AgentFileDraftChunkRecord, AgentFileDraftOperationRecord, AgentFileDraftRecord,
@@ -103,6 +103,61 @@ impl AgentTool for WriteFileTool {
         }
         projection
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        write_file_model_projection(result)
+    }
+}
+
+pub(super) fn write_file_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(|value| {
+        if let Some(draft) = value.get("draft") {
+            let mut output = serde_json::Map::new();
+            if let Some(draft) = super::model_projection::retain_object_fields(
+                draft,
+                &[
+                    "draftId",
+                    "filePath",
+                    "mode",
+                    "status",
+                    "lineCount",
+                    "byteCount",
+                    "chunkCount",
+                    "nextChunkIndex",
+                    "statsFinal",
+                    "summary",
+                ],
+            ) {
+                output.insert("draft".to_string(), draft);
+            }
+            for field in [
+                "tail",
+                "transactionState",
+                "requiresFinishBeforeResponse",
+                "nextAction",
+            ] {
+                super::model_projection::insert_field(&mut output, value, field);
+            }
+            return (!output.is_empty()).then_some(Value::Object(output));
+        }
+
+        super::model_projection::retain_object_fields(
+            value,
+            &[
+                "status",
+                "draftId",
+                "filePath",
+                "mode",
+                "additions",
+                "deletions",
+                "lineCount",
+                "byteCount",
+                "error",
+                "message",
+            ],
+        )
+    });
+    super::model_projection::compact_model_result(result, projected)
 }
 
 fn input_schema() -> Value {

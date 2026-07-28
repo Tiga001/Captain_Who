@@ -295,7 +295,9 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
         name: continuation.call.tool.clone(),
         args: continuation.call.args.clone(),
     };
-    let llm_result = canonical_tool_result_for_context(&continuation.result);
+    let durable_result = canonical_tool_result_for_context(&continuation.result);
+    let llm_result =
+        crate::tools::model_projection_for_persisted_continuation(&continuation.result);
     let history_ref = assistant_message_id.map(|assistant_message_id| {
         crate::ContextHistoryRef::trace_item(assistant_message_id, continuation_result_sequence)
     });
@@ -318,7 +320,9 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
             &crate::llm::LlmMessage::assistant("", vec![continuation_call.clone()]),
         );
     }
-    if let Some(sequence) = conversation_trace.record_tool_result(&continuation.call, &llm_result) {
+    if let Some(sequence) =
+        conversation_trace.record_tool_result(&continuation.call, &durable_result)
+    {
         conversation_trace.record_model_message(
             sequence,
             0,
@@ -713,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_restore_exposes_the_durable_result_history_ref_to_the_model() {
+    fn approval_restore_keeps_backend_history_metadata_out_of_the_model_result() {
         let (checkpoint, continuation) = restorable_checkpoint_fixture();
         let restored = restore_run_checkpoint_with_history_ref(
             checkpoint,
@@ -725,9 +729,9 @@ mod tests {
         let messages = restored.context.to_messages();
         let observation = &messages.last().unwrap().content;
 
-        assert!(observation.contains("\"historyRef\""));
-        assert!(observation.contains("\"assistantMessageId\": \"assistant-approval\""));
-        assert!(observation.contains("\"sequence\": 1"));
+        assert!(!observation.contains("historyRef"));
+        assert!(!observation.contains("assistantMessageId"));
+        assert!(!observation.contains("\"callId\""));
     }
 
     #[test]
@@ -1323,11 +1327,11 @@ mod tests {
         let observation = messages.last().expect("restored tool observation");
         assert_eq!(observation.role, LlmMessageRole::Tool);
         assert!(observation.is_error);
-        assert!(observation.content.contains("\"exitCode\": 1"));
+        assert!(observation.content.contains("\"exitCode\":1"));
         assert!(observation.content.contains("dependency check started"));
         assert!(observation.content.contains("ModuleNotFoundError"));
-        assert!(observation.content.contains("\"stdoutTruncated\": false"));
-        assert!(observation.content.contains("\"stderrTruncated\": false"));
+        assert!(!observation.content.contains("\"stdoutTruncated\""));
+        assert!(!observation.content.contains("\"stderrTruncated\""));
     }
 
     #[test]

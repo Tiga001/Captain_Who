@@ -386,8 +386,54 @@ fn remove_runtime_image(result: &AgentToolResult, mark_history_omission: bool) -
     canonical_tool_result_for_context(&projected)
 }
 
-fn image_generation_model_projection(result: &AgentToolResult) -> AgentToolResult {
-    remove_runtime_image(result, false)
+pub(super) fn image_generation_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(|value| {
+        let mut output = serde_json::Map::new();
+        for field in [
+            "schemaVersion",
+            "status",
+            "operation",
+            "savedPath",
+            "visualInputStatus",
+        ] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        if let Some(artifact) = value.get("artifact").and_then(|artifact| {
+            super::model_projection::retain_object_fields(
+                artifact,
+                &[
+                    "uri",
+                    "kind",
+                    "format",
+                    "mimeType",
+                    "width",
+                    "height",
+                    "sizeBytes",
+                ],
+            )
+        }) {
+            output.insert("artifact".to_string(), artifact);
+        }
+        if let Some(failure) = value.get("failure").and_then(|failure| {
+            super::model_projection::retain_object_fields(
+                failure,
+                &[
+                    "code",
+                    "phase",
+                    "message",
+                    "recovery",
+                    "retryable",
+                    "generationMayHaveSucceeded",
+                    "providerSucceeded",
+                    "artifactCommitMayHaveSucceeded",
+                ],
+            )
+        }) {
+            output.insert("failure".to_string(), failure);
+        }
+        (!output.is_empty()).then_some(Value::Object(output))
+    });
+    super::model_projection::compact_model_result(result, projected)
 }
 
 fn image_generation_history_projection(result: &AgentToolResult) -> AgentToolResult {

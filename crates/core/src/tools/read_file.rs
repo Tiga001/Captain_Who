@@ -1,5 +1,7 @@
 use super::{AgentTool, ToolExecutionContext};
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use crate::revision::{compose_content_revision, ContentRevisionHasher};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -108,6 +110,25 @@ impl AgentTool for ReadFileTool {
             "nextStartColumn": truncated.then_some(positions.next_column),
             "content": fragment.content
         }))
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = super::model_projection::retain_fields(
+            result.result.as_ref(),
+            &[
+                "path",
+                "startLine",
+                "endLine",
+                "totalLines",
+                "totalBytes",
+                "content",
+                "truncated",
+                "truncatedReason",
+                "nextStartByte",
+                "nextStartLine",
+            ],
+        );
+        super::model_projection::compact_model_result(result, projected)
     }
 }
 

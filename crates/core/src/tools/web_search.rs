@@ -1,6 +1,8 @@
 use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde::Deserialize;
@@ -69,6 +71,31 @@ impl AgentTool for WebSearchTool {
         )?;
 
         format_tavily_response(request, response, &cancellation_token)
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.as_ref().and_then(|value| {
+            let mut output = serde_json::Map::new();
+            super::model_projection::insert_field(&mut output, value, "answer");
+            if let Some(results) = value.get("results").and_then(Value::as_array) {
+                let results = results
+                    .iter()
+                    .filter_map(|item| {
+                        super::model_projection::retain_object_fields(
+                            item,
+                            &["title", "url", "content", "publishedDate"],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if !results.is_empty() {
+                    output.insert("results".to_string(), Value::Array(results));
+                }
+            }
+            super::model_projection::insert_field(&mut output, value, "images");
+            super::model_projection::insert_field(&mut output, value, "truncated");
+            (!output.is_empty()).then_some(Value::Object(output))
+        });
+        super::model_projection::compact_model_result(result, projected)
     }
 }
 

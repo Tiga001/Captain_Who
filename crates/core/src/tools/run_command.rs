@@ -17,7 +17,7 @@ use crate::protocol::{
     AgentCommandArtifactObservationRequest, AgentCommandRequest, AgentCommandRuntimeProfile,
     AgentCommandRuntimeRequest, AgentError, AgentFileInputSpec, AgentProposedAction, AgentResult,
     AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus, AgentToolCall,
-    AgentToolDefinition, AgentToolSafety,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::skills::{
     SkillResourceUri, APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID,
@@ -25,7 +25,7 @@ use crate::skills::{
 };
 use crate::system_paths::expand_system_path;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
@@ -130,6 +130,132 @@ impl AgentTool for RunCommandTool {
             command: command_request_from_call(context, call)?,
         })
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        run_command_model_projection(result)
+    }
+}
+
+pub(super) fn run_command_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result
+        .result
+        .as_ref()
+        .and_then(project_command_result_value);
+    super::model_projection::compact_model_result(result, projected)
+}
+
+fn project_command_result_value(value: &Value) -> Option<Value> {
+    if let Some(execution) = value.get("execution") {
+        let mut output = Map::new();
+        for field in [
+            "type",
+            "code",
+            "recovery",
+            "phase",
+            "executionAttempted",
+            "effectsMayHaveOccurred",
+            "commitMayHaveSucceeded",
+            "auditError",
+        ] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        if let Some(execution) = project_command_execution(execution) {
+            output.insert("execution".to_string(), execution);
+        }
+        return (!output.is_empty()).then_some(Value::Object(output));
+    }
+    project_command_execution(value)
+}
+
+fn project_command_execution(value: &Value) -> Option<Value> {
+    let mut output = Map::new();
+    for field in ["exitCode", "stdout", "stderr", "error"] {
+        super::model_projection::insert_field(&mut output, value, field);
+    }
+    for field in [
+        "timedOut",
+        "cancelled",
+        "stdoutTruncated",
+        "stderrTruncated",
+    ] {
+        if value.get(field).and_then(Value::as_bool) == Some(true) {
+            output.insert(field.to_string(), Value::Bool(true));
+        }
+    }
+    if let Some(policy) = value.get("policyEvaluation") {
+        if let Some(policy) =
+            super::model_projection::retain_object_fields(policy, &["decision", "code", "reason"])
+        {
+            output.insert("policy".to_string(), policy);
+        }
+    }
+    if let Some(observation) = value
+        .get("artifactObservation")
+        .and_then(project_artifact_observation)
+    {
+        output.insert("artifacts".to_string(), observation);
+    }
+    (!output.is_empty()).then_some(Value::Object(output))
+}
+
+fn project_artifact_observation(value: &Value) -> Option<Value> {
+    let mut output = Map::new();
+    for field in ["status", "changesTruncated", "changesOmitted"] {
+        super::model_projection::insert_field(&mut output, value, field);
+    }
+    if let Some(changes) = value.get("changes").and_then(Value::as_array) {
+        let changes = changes
+            .iter()
+            .filter_map(|change| {
+                let mut item = Map::new();
+                for field in ["kind", "artifactKind", "path", "scope", "previousPath"] {
+                    super::model_projection::insert_field(&mut item, change, field);
+                }
+                if let Some(validation) = change
+                    .get("after")
+                    .and_then(|after| after.get("validation"))
+                    .and_then(|validation| {
+                        super::model_projection::retain_object_fields(
+                            validation,
+                            &["status", "code", "message"],
+                        )
+                    })
+                {
+                    item.insert("validation".to_string(), validation);
+                }
+                (!item.is_empty()).then_some(Value::Object(item))
+            })
+            .collect::<Vec<_>>();
+        if !changes.is_empty() {
+            output.insert("changes".to_string(), Value::Array(changes));
+        }
+    }
+    if let Some(expected) = value.get("expectedOutputs").and_then(Value::as_array) {
+        let expected = expected
+            .iter()
+            .filter_map(|item| {
+                super::model_projection::retain_object_fields(
+                    item,
+                    &["requestedPath", "outcome", "path", "scope", "artifactKind"],
+                )
+            })
+            .collect::<Vec<_>>();
+        if !expected.is_empty() {
+            output.insert("expectedOutputs".to_string(), Value::Array(expected));
+        }
+    }
+    if let Some(warnings) = value.get("warnings").and_then(Value::as_array) {
+        let warnings = warnings
+            .iter()
+            .filter_map(|item| {
+                super::model_projection::retain_object_fields(item, &["code", "path", "message"])
+            })
+            .collect::<Vec<_>>();
+        if !warnings.is_empty() {
+            output.insert("warnings".to_string(), Value::Array(warnings));
+        }
+    }
+    (!output.is_empty()).then_some(Value::Object(output))
 }
 
 #[derive(Debug, Deserialize)]

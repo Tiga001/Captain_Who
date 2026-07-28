@@ -1,10 +1,10 @@
 use super::{AgentTool, ToolExecutionContext};
 use crate::protocol::{
     AgentAttachmentReference, AgentError, AgentInputAttachmentKind, AgentResult,
-    AgentToolDefinition, AgentToolSafety,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 const DEFAULT_ATTACHMENT_LIST_LIMIT: usize = 100;
 const MAX_ATTACHMENT_LIST_LIMIT: usize = 500;
@@ -41,6 +41,10 @@ impl AgentTool for AttachmentsListTool {
             args,
         )
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        attachment_list_model_projection(result)
+    }
 }
 
 impl AgentTool for AttachmentsListProjectTool {
@@ -71,6 +75,10 @@ impl AgentTool for AttachmentsListProjectTool {
             context.project_attachments(),
             args,
         )
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        attachment_list_model_projection(result)
     }
 }
 
@@ -153,4 +161,38 @@ fn attachment_json(attachment: &AgentAttachmentReference) -> Value {
         "readPath": attachment.read_path,
         "createdAt": attachment.created_at
     })
+}
+
+fn attachment_list_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(|value| {
+        let source = value.as_object()?;
+        let mut output = Map::new();
+        for field in ["scope", "total", "truncated"] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        let attachments = source
+            .get("attachments")
+            .and_then(Value::as_array)
+            .map(|attachments| {
+                attachments
+                    .iter()
+                    .filter_map(|attachment| {
+                        super::model_projection::retain_object_fields(
+                            attachment,
+                            &["name", "kind", "mimeType", "sizeBytes", "readPath"],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        output.insert(
+            "returned".to_string(),
+            Value::from(u64::try_from(attachments.len()).unwrap_or(u64::MAX)),
+        );
+        if !attachments.is_empty() {
+            output.insert("attachments".to_string(), Value::Array(attachments));
+        }
+        Some(Value::Object(output))
+    });
+    super::model_projection::compact_model_result(result, projected)
 }

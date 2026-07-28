@@ -1191,10 +1191,10 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
     assert_eq!(openai["messages"][3]["content"], Value::Null);
     assert_eq!(openai["messages"][4]["role"], "tool");
     assert_eq!(openai["messages"][4]["tool_call_id"], openai_call_id);
-    assert!(openai["messages"][4]["content"]
+    assert!(!openai["messages"][4]["content"]
         .as_str()
         .unwrap()
-        .contains("\"ok\": true"));
+        .contains("\"ok\""));
     assert_eq!(openai["messages"][5]["content"], "The file is valid.");
     assert!(openai["messages"][6]["content"]
         .as_str()

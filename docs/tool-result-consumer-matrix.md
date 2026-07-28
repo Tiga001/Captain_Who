@@ -1,8 +1,10 @@
 # Tool Result 消费者矩阵与投影契约
 
-状态：Round 1 基线  
-日期：2026-07-28  
-约束：本轮只确认消费者、建立契约与测试，不改变 Tool 的执行、模型输入、事件、持久化或恢复行为。
+状态：Round 2 已实施
+
+日期：2026-07-28
+
+约束：原始结果及 E/R/T/A/C 契约保持不变；M 使用专属语义投影。
 
 ## 1. 范围和术语
 
@@ -29,9 +31,9 @@
 
 | 字段     | 消费者      | 信息归属             |
 | -------- | ----------- | -------------------- |
-| `callId` | M/E/R/T/A/C | 恢复、幂等、调用关联 |
-| `tool`   | M/E/R/T/A/C | 路由、展示、审计     |
-| `ok`     | M/E/R/T/A/C | 行动、UI、审计、恢复 |
+| `callId` | 协议/E/R/T/A/C | 恢复、幂等、调用关联；模型 provider 协议携带，不重复写入 observation |
+| `tool`   | 协议/E/R/T/A/C | 路由、展示、审计；模型 provider 协议携带，不重复写入 observation     |
+| `ok`     | 协议/E/R/T/A/C | 行动、UI、审计、恢复；模型失败语义由 provider error 标记和精简负载表达 |
 | `error`  | M/E/R/T/A/C | 行动、UI、审计、恢复 |
 | `result` | 见下方矩阵  | Tool 自有负载        |
 
@@ -49,16 +51,16 @@ Raw AgentToolResult
 └─ trace_projection ─────────────────→ Runtime Extension on_event
 ```
 
-多数 Tool 目前仍使用 canonical clone。已有专属投影：
+Round 2 已为高成本和多消费者 Tool 增加专属 Model Projection：
 
-- `read_image`：二进制仅用于原生多模态输入；缩略图仅进入事件；历史去除图片正文。
-- `image_generation`：模型、事件和历史分别去除不同的运行时图片字段。
-- `skills_read_resource`：Trace/Event 去除 `content`，Model/Archive/Checkpoint 保留。
-- `conversation_history`：Trace/Event 只保存查询、引用、范围、hash 和状态，避免递归保存历史正文。
-- Goal Tool：Trace 只保存持久化确认，结果不进入 Exact Archive。
-- `write_file`：发布事件前额外移除私有 `tail`。
+- Command、Office、Web、Workspace、附件、文件/文档读取和代码搜索只向模型保留行动字段、正文、状态与分页路由。
+- Todo 和 Skill 激活结果只确认接受状态与必要摘要；完整状态由 Runtime Extension 和专用事件消费。
+- `read_image`/`image_generation` 的二进制、多媒体展示、Artifact 审计继续走各自既有投影。
+- `conversation_history` 保留 `open`/`navigation` 和历史正文，移除固定说明、统计重复值、后端 ID/hash/时间戳。
+- `write_file` 保留下一步所需的 draft ID、路径、状态、游标和 tail，移除会话身份、时间戳与预算常量。
+- 审批恢复使用与正常执行相同的纯 Model Projection；Checkpoint 仍保存完整 Canonical Result。
 
-后续精简应只改变相应 projection，不直接修改原始 Host 结果。
+Tool observation 文本现在只序列化精简后的 `result`/`error`，不再重复 `type/tool/callId/ok`、固定英文前言或 Markdown JSON 代码块。
 
 ## 3. 完整 Tool 清单
 
@@ -264,6 +266,31 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 若后续有意修改投影，必须先更新本矩阵，再只修改对应 stage 的夹具断言。未同步更新契约的字段删除应由测试阻止。
 
-## 7. 结论
+## 7. Round 2 模型语义投影
 
-当前系统不缺投影架构；问题是多数 Tool 尚未声明专属投影，默认 clone 把 UI、审计、恢复和模型行动信息混在一起。下一轮应在统一预算下逐 Tool 实现 Model Projection，而 E/R/T/A/C 依据本矩阵独立保持。
+第 4 节记录 Raw Result 的完整消费者归属；下表是当前实际送入 M 的白名单。未列出的同组字段仍只属于 E/R/T/A/C。
+
+| Tool | 当前 M 投影 |
+| --- | --- |
+| `attachments_list*` | scope/total/truncated、returned、附件 name/kind/mimeType/sizeBytes/readPath |
+| `read_file` | path、行/总量、content、truncated/reason、next cursor |
+| `read_pdf/word/presentation/spreadsheet` | path/format、页/部件/幻灯片/工作表计数、text、truncated |
+| `read_image` | path/format/mimeType/sizeBytes；像素另走原生多模态消息 |
+| `workspace_map` | summary、treeText、truncated；不重复发送 tree/workspace 参数 |
+| `search_code` | matchCount、matches、truncated；不重复发送 query |
+| `web_search` | answer、title/url/content/publishedDate、images、truncated |
+| `web_fetch` | url、content、images、失败摘要、truncated |
+| `write_file` | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误 |
+| `run_command` | exit/stdout/stderr/真实截断与失败状态、精简 policy、精简 Artifact changes/expected outputs/warnings |
+| 三个 Office Tool | documentKind/operation、可复用 outputs、进程结果与失败不确定性 |
+| Skill 资源/脚本 Tool | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint |
+| `skills_activate` | status、Skill name/hasResources；完整激活记录由 Extension 消费 |
+| `image_generation` | status/operation、可复用 Artifact、failure、savedPath/visualInputStatus；去除 audit/hash/后端 ID |
+| `conversation_history` | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳 |
+| `todo_update` | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费 |
+
+所有失败投影还会统一保留 `code/errorCode/recovery/phase`、权限/能力要求和副作用不确定性；重复的 `message/error` 只保留一份。
+
+## 8. 结论
+
+模型语义投影已经与 UI、审计、精确归档和审批恢复解耦。模型只承担完成下一步所需的内容成本；Renderer 仍获得 favicon、Todo、附件身份和展示统计，Trace/Archive/Checkpoint 仍保存原有审计与恢复字段。契约夹具会阻止后续精简误删非模型消费者依赖。

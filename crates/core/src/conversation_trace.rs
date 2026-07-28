@@ -775,8 +775,8 @@ pub fn conversation_trace_snapshot_from_checkpoint_and_continuation(
     )
 }
 
-/// Builds an approval-continuation snapshot using the same backend-generated history reference
-/// that runtime checkpoint restoration will place in the model-visible ToolResult.
+/// Builds an approval-continuation snapshot using the same model-only projection that runtime
+/// checkpoint restoration will place in the model-visible ToolResult.
 ///
 /// Settlement and runtime resume must persist byte-identical model projections. Otherwise the
 /// append-only model log would correctly reject the resumed request as a rewrite.
@@ -816,7 +816,8 @@ fn record_model_tool_exchange(
     result: &AgentToolResult,
     history_ref: Option<&crate::ContextHistoryRef>,
 ) {
-    let llm_result = canonical_tool_result_for_context(result);
+    let durable_result = canonical_tool_result_for_context(result);
+    let llm_result = crate::tools::model_projection_for_persisted_continuation(result);
     if let Some(sequence) = recorder.record_tool_call(call) {
         recorder.record_model_message(
             sequence,
@@ -831,7 +832,7 @@ fn record_model_tool_exchange(
             ),
         );
     }
-    if let Some(sequence) = recorder.record_tool_result(call, &llm_result) {
+    if let Some(sequence) = recorder.record_tool_result(call, &durable_result) {
         recorder.record_model_message(
             sequence,
             0,
@@ -1636,59 +1637,52 @@ pub(crate) fn render_tool_observation_with_history_ref(
 
 pub(crate) fn render_tool_observation_with_projection(
     result: &AgentToolResult,
-    history_ref: Option<&crate::ContextHistoryRef>,
-    archive: Option<&ConversationHistoryArchiveTraceMetadata>,
+    _history_ref: Option<&crate::ContextHistoryRef>,
+    _archive: Option<&ConversationHistoryArchiveTraceMetadata>,
 ) -> String {
-    let mut payload = if result.ok {
-        json!({
-            "type": "tool_result",
-            "tool": result.tool,
-            "callId": result.call_id,
-            "ok": true,
-            "result": result.result,
-        })
-    } else {
-        json!({
-            "type": "tool_result",
-            "tool": result.tool,
-            "callId": result.call_id,
-            "ok": false,
-            "result": result.result,
-            "error": result.error,
-        })
-    };
-    if let (Some(history_ref), Some(object)) = (history_ref, payload.as_object_mut()) {
-        object.insert(
-            "historyRef".to_string(),
-            serde_json::to_value(history_ref).unwrap_or(Value::Null),
-        );
-    }
-    if let (Some(archive), Some(object)) = (archive, payload.as_object_mut()) {
-        let truncated = archive.truncated_at_source
-            || archive.model_projection_truncated
-            || archive.archive_projection_truncated;
-        if truncated {
-            let original_bytes = (!archive.archive_projection_truncated)
-                .then_some(archive.archived_bytes)
-                .flatten();
-            object.insert(
-                "projection".to_string(),
-                json!({
-                    "truncated": true,
-                    "truncatedAtSource": archive.truncated_at_source,
-                    "modelProjectionTruncated": archive.model_projection_truncated,
-                    "archiveProjectionTruncated": archive.archive_projection_truncated,
-                    "originalBytes": original_bytes,
-                    "archivedBytes": archive.archived_bytes,
-                    "archivedCompletely": archive.archived_completely.unwrap_or(false),
-                }),
-            );
+    let mut payload = result
+        .result
+        .clone()
+        .unwrap_or_else(|| json!({ "status": if result.ok { "completed" } else { "failed" } }));
+    if !result.ok {
+        if let Some(error) = result
+            .error
+            .as_deref()
+            .map(str::trim)
+            .filter(|error| !error.is_empty())
+        {
+            match payload.as_object_mut() {
+                Some(object)
+                    if !object
+                        .values()
+                        .any(|value| value_contains_text(value, error)) =>
+                {
+                    object.insert("error".to_string(), Value::String(error.to_string()));
+                }
+                Some(_) => {}
+                None => {
+                    payload = json!({
+                        "result": payload,
+                        "error": error,
+                    });
+                }
+            }
         }
     }
-    let payload = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        "Tool result observation. Use this result to continue. Do not repeat the same tool call unless more information is needed.\n```json\n{payload}\n```"
-    )
+    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn value_contains_text(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::String(value) => value.trim() == expected,
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_text(value, expected)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| value_contains_text(value, expected)),
+        _ => false,
+    }
 }
 
 fn result_status(result: &AgentToolResult) -> ConversationTraceToolResultStatus {
@@ -1774,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn model_observation_exposes_backend_generated_history_ref_outside_tool_result() {
+    fn model_observation_is_compact_and_does_not_expose_backend_history_metadata() {
         let result = AgentToolResult {
             call_id: "call-1".to_string(),
             tool: "read_file".to_string(),
@@ -1785,10 +1779,10 @@ mod tests {
         let history_ref = crate::ContextHistoryRef::trace_item("assistant-1", 7);
         let rendered = render_tool_observation_with_history_ref(&result, Some(&history_ref));
 
-        assert!(rendered.contains("\"historyRef\""));
-        assert!(rendered.contains("\"assistantMessageId\": \"assistant-1\""));
-        assert!(rendered.contains("\"sequence\": 7"));
-        assert!(rendered.contains("\"result\""));
+        assert_eq!(rendered, "{\"content\":\"bounded body\"}");
+        assert!(!rendered.contains("historyRef"));
+        assert!(!rendered.contains("assistantMessageId"));
+        assert!(!rendered.contains("```"));
     }
 
     #[test]
@@ -1935,12 +1929,13 @@ mod tests {
 
         let observation = render_tool_observation(&result);
 
-        assert!(observation.contains("\"ok\": false"));
-        assert!(observation.contains("\"exitCode\": 1"));
+        assert!(!observation.contains("\"ok\""));
+        assert!(!observation.contains("\"callId\""));
+        assert!(observation.contains("\"exitCode\":1"));
         assert!(observation.contains("partial output\\n"));
         assert!(observation.contains("ModuleNotFoundError"));
-        assert!(observation.contains("\"timedOut\": false"));
-        assert!(observation.contains("\"cancelled\": false"));
+        assert!(observation.contains("\"timedOut\":false"));
+        assert!(observation.contains("\"cancelled\":false"));
         assert!(observation.contains("[binary/base64 omitted]"));
         assert!(!observation.contains("c2VjcmV0"));
         assert!(observation.contains("命令执行失败。"));
@@ -1956,9 +1951,9 @@ mod tests {
             error: Some("命令未执行。".to_string()),
         });
 
-        assert!(observation.contains("\"ok\": false"));
-        assert!(observation.contains("\"result\": null"));
-        assert!(observation.contains("命令未执行。"));
+        let observation: Value = serde_json::from_str(&observation).unwrap();
+        assert_eq!(observation["status"], "failed");
+        assert_eq!(observation["error"], "命令未执行。");
     }
 
     #[test]

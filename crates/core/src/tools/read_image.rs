@@ -161,12 +161,11 @@ impl AgentTool for ReadImageTool {
 }
 
 fn read_image_model_projection(result: &AgentToolResult) -> AgentToolResult {
-    let mut projected = result.clone();
-    if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
-        object.remove("image");
-        object.remove("thumbnailDataUrl");
-    }
-    canonical_tool_result_for_context(&projected)
+    let projected = super::model_projection::retain_fields(
+        result.result.as_ref(),
+        &["path", "format", "mimeType", "sizeBytes"],
+    );
+    super::model_projection::compact_model_result(result, projected)
 }
 
 fn read_image_history_projection(result: &AgentToolResult) -> AgentToolResult {
@@ -497,9 +496,11 @@ mod tests {
             ok: true,
             result: Some(json!({
                 "path": "preview.png",
+                "source": { "type": "workspace", "path": "preview.png" },
                 "format": "png",
                 "mimeType": "image/png",
                 "sizeBytes": 3,
+                "sha256": "private-image-digest",
                 "thumbnailDataUrl": thumbnail,
                 "image": {
                     "mimeType": "image/png",
@@ -532,6 +533,8 @@ mod tests {
         let event = ReadImageTool.event_projection(&result);
         let event_value = event.result.as_ref().unwrap();
         assert_eq!(event_value["thumbnailDataUrl"], thumbnail);
+        assert_eq!(event_value["sha256"], "private-image-digest");
+        assert_eq!(event_value["source"]["type"], "workspace");
         assert!(event_value.get("image").is_none());
         assert!(!serde_json::to_string(&event)
             .unwrap()
@@ -541,6 +544,8 @@ mod tests {
         let model_value = model.result.as_ref().unwrap();
         assert!(model_value.get("image").is_none());
         assert!(model_value.get("thumbnailDataUrl").is_none());
+        assert!(model_value.get("source").is_none());
+        assert!(model_value.get("sha256").is_none());
         assert!(!serde_json::to_string(&model).unwrap().contains("base64"));
 
         // Projection must never mutate or replace the runtime observation used to build the

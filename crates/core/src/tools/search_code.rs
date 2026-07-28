@@ -2,7 +2,9 @@ use super::{
     sanitize_limit, walk_workspace_with_cancellation, AgentTool, ToolExecutionContext, WalkEntry,
     WalkResult, MAX_SEARCH_FILE_BYTES, MAX_SEARCH_LIMIT,
 };
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -128,6 +130,27 @@ impl AgentTool for SearchCodeTool {
             "truncated": walk.truncated || matches.len() >= limit
         }))
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.as_ref().map(|value| {
+            let mut output = serde_json::Map::new();
+            let matches = value
+                .get("matches")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            output.insert(
+                "matchCount".to_string(),
+                Value::from(u64::try_from(matches.len()).unwrap_or(u64::MAX)),
+            );
+            if !matches.is_empty() {
+                output.insert("matches".to_string(), Value::Array(matches));
+            }
+            super::model_projection::insert_field(&mut output, value, "truncated");
+            Value::Object(output)
+        });
+        super::model_projection::compact_model_result(result, projected)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,7 +192,19 @@ mod tests {
         let result = registry.execute(&context, &call);
 
         assert!(result.ok, "{:?}", result.error);
-        assert_eq!(result.result.unwrap()["matches"][0]["lineNumber"], 1);
+        assert_eq!(
+            result.result.as_ref().unwrap()["matches"][0]["lineNumber"],
+            1
+        );
+        let model = registry.model_projection(&result);
+        assert_eq!(model.result.as_ref().unwrap()["matchCount"], 1);
+        assert_eq!(
+            model.result.as_ref().unwrap()["matches"][0]["lineNumber"],
+            1
+        );
+        assert!(model.result.as_ref().unwrap().get("query").is_none());
+        let event = registry.event_projection(&result);
+        assert_eq!(event.result.as_ref().unwrap()["query"], "target_symbol");
     }
 
     struct TestWorkspace {

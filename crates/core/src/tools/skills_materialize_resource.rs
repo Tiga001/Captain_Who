@@ -4,7 +4,7 @@ use super::{
 };
 use crate::protocol::{
     AgentError, AgentProposedAction, AgentResult, AgentSkillMaterializationRequest, AgentToolCall,
-    AgentToolDefinition, AgentToolSafety,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::skills::{
     SkillPackageUri, SkillResourceKind, SkillResourceListOptions, SkillResourcePath,
@@ -96,6 +96,25 @@ impl AgentTool for SkillsMaterializeResourceTool {
             },
         })
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        skills_materialize_model_projection(result)
+    }
+}
+
+pub(super) fn skills_materialize_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = super::model_projection::retain_fields(
+        result.result.as_ref(),
+        &[
+            "status",
+            "destination",
+            "fileCount",
+            "byteCount",
+            "error",
+            "message",
+        ],
+    );
+    super::model_projection::compact_model_result(result, projected)
 }
 
 #[derive(Debug, Deserialize)]

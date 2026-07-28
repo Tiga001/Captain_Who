@@ -2,7 +2,7 @@ use super::{AgentTool, ToolExecutionContext};
 use crate::protocol::{
     AgentCommandSafetyPolicy, AgentError, AgentProposedAction, AgentReadPermission, AgentResult,
     AgentSkillScriptInterpreter, AgentSkillScriptRequest, AgentSkillScriptRequirements,
-    AgentToolCall, AgentToolDefinition, AgentToolSafety, AgentWritePermission,
+    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentWritePermission,
 };
 use crate::skills::{
     preflight_skill_python_script, SkillResourceUri, SkillScriptPreflightOutcome,
@@ -60,6 +60,10 @@ impl AgentTool for SkillsPreflightScriptTool {
             "resourceDigest": outcome.ready_plan().map(|plan| plan.resource_digest()),
             "preflight": outcome.report(),
         }))
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        skills_preflight_model_projection(result)
     }
 }
 
@@ -152,6 +156,72 @@ impl AgentTool for SkillsRunScriptTool {
             }),
         })
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        skills_run_script_model_projection(result)
+    }
+}
+
+fn skills_preflight_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(|value| {
+        let mut output = serde_json::Map::new();
+        for field in ["scriptUri", "ready"] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        if let Some(preflight) = value.get("preflight").and_then(project_preflight) {
+            output.insert("preflight".to_string(), preflight);
+        }
+        (!output.is_empty()).then_some(Value::Object(output))
+    });
+    super::model_projection::compact_model_result(result, projected)
+}
+
+pub(super) fn skills_run_script_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(|value| {
+        let mut output = serde_json::Map::new();
+        for field in ["exitCode", "stdout", "stderr", "errorCode", "error"] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        for field in [
+            "timedOut",
+            "cancelled",
+            "stdoutTruncated",
+            "stderrTruncated",
+        ] {
+            if value.get(field).and_then(Value::as_bool) == Some(true) {
+                output.insert(field.to_string(), Value::Bool(true));
+            }
+        }
+        if !result.ok {
+            if let Some(preflight) = value.get("preflight").and_then(project_preflight) {
+                output.insert("preflight".to_string(), preflight);
+            }
+        }
+        (!output.is_empty()).then_some(Value::Object(output))
+    });
+    super::model_projection::compact_model_result(result, projected)
+}
+
+fn project_preflight(value: &Value) -> Option<Value> {
+    let mut output = serde_json::Map::new();
+    for field in ["status", "interpreter", "errorCode", "message"] {
+        super::model_projection::insert_field(&mut output, value, field);
+    }
+    if let Some(dependencies) = value.get("dependencies").and_then(Value::as_array) {
+        let dependencies = dependencies
+            .iter()
+            .filter_map(|dependency| {
+                super::model_projection::retain_object_fields(
+                    dependency,
+                    &["kind", "name", "status"],
+                )
+            })
+            .collect::<Vec<_>>();
+        if !dependencies.is_empty() {
+            output.insert("dependencies".to_string(), Value::Array(dependencies));
+        }
+    }
+    (!output.is_empty()).then_some(Value::Object(output))
 }
 
 #[derive(Debug, Deserialize)]

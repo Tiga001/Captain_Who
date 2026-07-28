@@ -1,5 +1,7 @@
 use super::{AgentTool, ToolExecutionContext};
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use crate::skills::{
     SkillPackageUri, SkillResourceError, SkillResourceKind, SkillResourceListOptions,
     SkillResourcePath, DEFAULT_SKILL_RESOURCE_LIST_PAGE_SIZE,
@@ -102,6 +104,32 @@ impl AgentTool for SkillsListResourcesTool {
             "truncated": page.has_more(),
             "nextAfterPath": page.next_after().map(SkillResourcePath::as_str),
         }))
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.as_ref().and_then(|value| {
+            let mut output = serde_json::Map::new();
+            super::model_projection::insert_field(&mut output, value, "rootUri");
+            if let Some(resources) = value.get("resources").and_then(Value::as_array) {
+                let resources = resources
+                    .iter()
+                    .filter_map(|item| {
+                        super::model_projection::retain_object_fields(
+                            item,
+                            &["uri", "path", "kind"],
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if !resources.is_empty() {
+                    output.insert("resources".to_string(), Value::Array(resources));
+                }
+            }
+            for field in ["truncated", "nextAfterPath"] {
+                super::model_projection::insert_field(&mut output, value, field);
+            }
+            (!output.is_empty()).then_some(Value::Object(output))
+        });
+        super::model_projection::compact_model_result(result, projected)
     }
 }
 

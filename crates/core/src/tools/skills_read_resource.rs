@@ -94,6 +94,22 @@ impl AgentTool for SkillsReadResourceTool {
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         canonical_tool_result_for_context(result)
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = super::model_projection::retain_fields(
+            result.result.as_ref(),
+            &[
+                "uri",
+                "startByte",
+                "endByteExclusive",
+                "totalBytes",
+                "truncated",
+                "nextStartByte",
+                "content",
+            ],
+        );
+        super::model_projection::compact_model_result(result, projected)
+    }
 }
 
 #[derive(Debug, Deserialize)]

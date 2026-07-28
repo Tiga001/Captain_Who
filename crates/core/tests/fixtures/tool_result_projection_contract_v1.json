@@ -27,7 +27,23 @@
         }
       },
       "stages": {
-        "model": { "equalsRaw": true },
+        "model": {
+          "required": {
+            "/result/answer": "A projection separates consumer-specific views.",
+            "/result/results/0/title": "Projection contracts",
+            "/result/results/0/url": "https://example.com/contracts",
+            "/result/results/0/content": "A concise source excerpt.",
+            "/result/results/0/publishedDate": "2026-07-28",
+            "/result/truncated": false
+          },
+          "absent": [
+            "/result/query",
+            "/result/provider",
+            "/result/responseTime",
+            "/result/results/0/score",
+            "/result/results/0/favicon"
+          ]
+        },
         "rendererEvent": {
           "equalsRaw": true,
           "required": {
@@ -70,7 +86,23 @@
         }
       },
       "stages": {
-        "model": { "equalsRaw": true },
+        "model": {
+          "required": {
+            "/result/url": "https://example.com/article",
+            "/result/content": "# Article\n\nExact fetched body.",
+            "/result/images/0": "https://example.com/hero.png",
+            "/result/truncated": false
+          },
+          "absent": [
+            "/result/requestedUrl",
+            "/result/provider",
+            "/result/format",
+            "/result/extractDepth",
+            "/result/favicon",
+            "/result/failedResults",
+            "/result/responseTime"
+          ]
+        },
         "rendererEvent": {
           "equalsRaw": true,
           "required": {
@@ -126,10 +158,20 @@
       },
       "stages": {
         "model": {
-          "equalsRaw": true,
           "required": {
+            "/result/total": 1,
+            "/result/attachments/0/name": "diagram.png",
             "/result/attachments/0/readPath": "@attachments/attachment-1/diagram.png"
-          }
+          },
+          "absent": [
+            "/result/scopeNote",
+            "/result/library",
+            "/result/attachments/0/id",
+            "/result/attachments/0/conversationId",
+            "/result/attachments/0/messageId",
+            "/result/attachments/0/projectId",
+            "/result/attachments/0/createdAt"
+          ]
         },
         "rendererEvent": {
           "equalsRaw": true,
@@ -193,11 +235,11 @@
       },
       "stages": {
         "model": {
-          "equalsRaw": true,
           "required": {
-            "/result/tree/0/path": "src/main.rs",
+            "/result/summary/fileCount": 1,
             "/result/treeText": "src/\n  main.rs"
-          }
+          },
+          "absent": ["/result/workspace", "/result/tree"]
         },
         "rendererEvent": { "equalsRaw": true },
         "durableTrace": { "equalsRaw": true },
@@ -265,14 +307,22 @@
       },
       "stages": {
         "model": {
-          "equalsRaw": true,
           "required": {
             "/result/exitCode": 0,
-            "/result/command": "node build-report.mjs",
-            "/result/cwd": "/workspace",
             "/result/stdout": "created report.xlsx",
-            "/result/artifactObservation/changes/0/path": "report.xlsx"
-          }
+            "/result/policy/decision": "allow",
+            "/result/artifacts/status": "complete",
+            "/result/artifacts/changes/0/path": "report.xlsx",
+            "/result/artifacts/changes/0/validation/status": "valid"
+          },
+          "absent": [
+            "/result/command",
+            "/result/cwd",
+            "/result/durationMs",
+            "/result/policyEvaluation",
+            "/result/artifactObservation",
+            "/result/inputFiles"
+          ]
         },
         "rendererEvent": {
           "equalsRaw": true,
@@ -337,12 +387,20 @@
       },
       "stages": {
         "model": {
-          "equalsRaw": true,
           "required": {
             "/result/tail": "private generated content",
             "/result/draft/draftId": "draft-1",
             "/result/nextAction": "append_or_finish"
-          }
+          },
+          "absent": [
+            "/result/maxDraftBytes",
+            "/result/draft/conversationId",
+            "/result/draft/projectId",
+            "/result/draft/createdAt",
+            "/result/draft/updatedAt",
+            "/result/draft/additions",
+            "/result/draft/deletions"
+          ]
         },
         "rendererEvent": {
           "required": {
@@ -395,10 +453,11 @@
       },
       "stages": {
         "model": {
-          "equalsRaw": true,
           "required": {
+            "/result/uri": "skill://package/bundled%3Aapplication%3Adocuments/revision-1/references/workflow.md",
             "/result/content": "Exact skill resource"
-          }
+          },
+          "absent": ["/result/returnedBytes"]
         },
         "rendererEvent": {
           "required": {

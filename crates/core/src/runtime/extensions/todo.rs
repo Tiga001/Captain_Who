@@ -6,7 +6,7 @@ use crate::context::{ContextItem, ContextRetention, ContextScope, ContextSource}
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
     AgentError, AgentEvent, AgentResult, AgentTodoItem, AgentTodoState, AgentTodoStatus,
-    AgentToolApprovalMode, AgentToolDefinition, AgentToolSafety,
+    AgentToolApprovalMode, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::tools::{AgentTool, ToolExecutionContext};
 use crate::tools::{GoalRuntimeState, GoalRuntimeStateReader};
@@ -322,6 +322,26 @@ impl AgentTool for TodoTool {
         serde_json::to_value(state)
             .map_err(|error| AgentError::new(format!("无法序列化 todo_update 结果：{error}")))
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.as_ref().map(|value| {
+            let items = value
+                .get("items")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            json!({
+                "accepted": result.ok,
+                "revision": value.get("revision"),
+                "itemCount": items.len(),
+                "completedCount": items
+                    .iter()
+                    .filter(|item| item.get("status").and_then(Value::as_str) == Some("completed"))
+                    .count()
+            })
+        });
+        crate::tools::model_projection::compact_model_result(result, projected)
+    }
 }
 
 fn todo_tool_definition() -> AgentToolDefinition {
@@ -534,6 +554,22 @@ mod tests {
         assert!(result_state.items[0].updated_at > 0);
         assert_eq!(handle.state().revision, 1);
         assert_eq!(handle.state().items.len(), 2);
+        let model = tool.model_projection(&result);
+        let model = model.result.as_ref().expect("compact todo model result");
+        assert_eq!(model["accepted"], true);
+        assert_eq!(model["revision"], 1);
+        assert_eq!(model["itemCount"], 2);
+        assert_eq!(model["completedCount"], 1);
+        assert!(model.get("items").is_none());
+        let renderer = tool.event_projection(&result);
+        assert_eq!(
+            renderer.result.as_ref().unwrap()["items"][0]["title"],
+            "Inspect runtime loop"
+        );
+        assert_eq!(
+            renderer.result.as_ref().unwrap()["items"][0]["createdAt"],
+            result_state.items[0].created_at
+        );
         let effects = extension
             .on_event(&RuntimeExtensionEvent::ToolCompleted { result: &result })
             .unwrap();

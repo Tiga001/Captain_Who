@@ -1,6 +1,8 @@
 use super::{relative_display, walk_workspace_with_cancellation, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::cmp::Reverse;
@@ -127,6 +129,16 @@ impl AgentTool for WorkspaceMapTool {
                 "tree": tree.truncated
             }
         }))
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.as_ref().and_then(|value| {
+            super::model_projection::retain_object_fields(
+                value,
+                &["summary", "treeText", "truncated"],
+            )
+        });
+        super::model_projection::compact_model_result(result, projected)
     }
 }
 

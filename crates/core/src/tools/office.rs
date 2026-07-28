@@ -23,7 +23,7 @@ use crate::office::{
 use crate::protocol::{
     has_unsafe_agent_office_reason_character, normalize_agent_office_reason, AgentError,
     AgentOfficeOperationRequest, AgentProposedAction, AgentResult, AgentToolCall,
-    AgentToolDefinition, AgentToolSafety, AgentWritePermission,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentWritePermission,
     AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
 };
 use crate::{file_input::AgentFileInputExecutionContext, AgentFileInputRef};
@@ -93,6 +93,10 @@ macro_rules! impl_office_tool {
             fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
                 self.0.event_call_projection(call)
             }
+
+            fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+                office_model_projection(result)
+            }
         }
     };
 }
@@ -103,6 +107,99 @@ impl_office_tool!(
     OfficePresentationTool,
     super::OFFICE_PRESENTATIONS_CAPABILITY
 );
+
+pub(super) fn office_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(project_office_result_value);
+    super::model_projection::compact_model_result(result, projected)
+}
+
+fn project_office_result_value(value: &Value) -> Option<Value> {
+    if let Some(execution) = value.get("execution") {
+        let mut output = Map::new();
+        for field in [
+            "type",
+            "code",
+            "recovery",
+            "phase",
+            "executionAttempted",
+            "effectsMayHaveOccurred",
+            "commitMayHaveSucceeded",
+            "auditError",
+        ] {
+            super::model_projection::insert_field(&mut output, value, field);
+        }
+        if let Some(execution) = project_office_execution(execution) {
+            output.insert("execution".to_string(), execution);
+        }
+        return (!output.is_empty()).then_some(Value::Object(output));
+    }
+
+    if value.get("documentKind").is_none() {
+        return super::model_projection::retain_object_fields(
+            value,
+            &[
+                "status",
+                "available",
+                "code",
+                "recovery",
+                "reason",
+                "message",
+            ],
+        );
+    }
+    project_office_execution(value)
+}
+
+fn project_office_execution(value: &Value) -> Option<Value> {
+    let mut output = Map::new();
+    for field in [
+        "documentKind",
+        "operation",
+        "exitCode",
+        "stdout",
+        "stderr",
+        "errorCode",
+        "error",
+    ] {
+        super::model_projection::insert_field(&mut output, value, field);
+    }
+    for field in [
+        "timedOut",
+        "cancelled",
+        "stdoutTruncated",
+        "stderrTruncated",
+    ] {
+        if value.get(field).and_then(Value::as_bool) == Some(true) {
+            output.insert(field.to_string(), Value::Bool(true));
+        }
+    }
+    if let Some(outputs) = value.get("outputs").and_then(Value::as_array) {
+        let outputs = outputs
+            .iter()
+            .filter_map(|item| {
+                super::model_projection::retain_object_fields(
+                    item,
+                    &[
+                        "role",
+                        "kind",
+                        "mimeType",
+                        "readPath",
+                        "scope",
+                        "readableByAgent",
+                        "sizeBytes",
+                        "width",
+                        "height",
+                        "pageSelection",
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        if !outputs.is_empty() {
+            output.insert("outputs".to_string(), Value::Array(outputs));
+        }
+    }
+    (!output.is_empty()).then_some(Value::Object(output))
+}
 
 struct OfficeTool {
     document_kind: OfficeDocumentKind,
@@ -2738,6 +2835,61 @@ mod tests {
                 format!("__mycopilot_agent_input__/{}", request.inputs[0].mount_path)
             );
         }
+    }
+
+    #[test]
+    fn office_model_projection_keeps_actionable_outputs_without_provider_audit() {
+        let raw = AgentToolResult {
+            call_id: "office-1".to_string(),
+            tool: "office_document".to_string(),
+            ok: true,
+            result: Some(json!({
+                "providerId": "officecli",
+                "engineRevision": "sha256:private",
+                "documentKind": "document",
+                "operation": "render",
+                "outputs": [{
+                    "role": "render",
+                    "kind": "image",
+                    "mimeType": "image/png",
+                    "source": { "type": "workspace", "path": "private-stage.png" },
+                    "readPath": "report.png",
+                    "scope": "workspace",
+                    "readableByAgent": true,
+                    "sizeBytes": 42,
+                    "sha256": "private",
+                    "width": 800,
+                    "height": 600,
+                    "pageSelection": { "type": "all" }
+                }],
+                "argv": ["render", "report.docx"],
+                "cwd": "/workspace",
+                "exitCode": 0,
+                "stdout": "rendered",
+                "stderr": "",
+                "durationMs": 31,
+                "timedOut": false,
+                "cancelled": false,
+                "stdoutTruncated": false,
+                "stderrTruncated": false
+            })),
+            error: None,
+        };
+
+        let model = office_model_projection(&raw);
+        let model = model.result.as_ref().unwrap();
+        assert_eq!(model["outputs"][0]["readPath"], "report.png");
+        assert_eq!(model["outputs"][0]["width"], 800);
+        assert!(model.get("providerId").is_none());
+        assert!(model.get("engineRevision").is_none());
+        assert!(model.get("argv").is_none());
+        assert!(model.get("cwd").is_none());
+        assert!(model["outputs"][0].get("source").is_none());
+        assert!(model["outputs"][0].get("sha256").is_none());
+        assert!(raw.result.as_ref().unwrap().get("providerId").is_some());
+        assert!(raw.result.as_ref().unwrap()["outputs"][0]
+            .get("sha256")
+            .is_some());
     }
 
     fn contains_object_key(value: &Value, key: &str) -> bool {

@@ -96,15 +96,15 @@ terminal record
 
 `ConversationTurnTrace` 是后端生成、provider-neutral、append-only 的 Agent 活动日志，不保存隐藏 reasoning。
 
-Trace 保存主模型实际使用的文本上下文：
+Trace 保存 provider-neutral 的活动与审计投影；并行的 model-context projection 保存主模型实际观察过的精简结果：
 
 - narration 保存公开过程说明；
 - tool call 保存模型生成的完整文本参数；
-- tool result 保存主模型收到的完整文本结果或错误；
+- tool result 的 Durable Trace 保存有界审计负载，model-context projection 保存当时模型收到的语义投影；
 - Base64、data URL 等二进制内容在统一边界移除；
 - 不按工具类型制作另一份长期摘要，不做语义去重，不因长度静默丢弃文本。
 
-同一次工具执行只产生一份规范化的模型结果。当前 tool loop 和后续历史重建使用同一份结果；前端事件可以移除 `write_file.tail` 等纯展示不需要的字段，但不能反向成为模型上下文。
+同一次工具执行只产生一份规范化的模型语义结果。当前 tool loop、审批恢复和后续精确 model-context 重建使用同一份结果；前端事件、Durable Trace 和 Exact Archive 独立投影，不能反向成为模型上下文。
 
 运行中提交规则：
 
@@ -439,7 +439,7 @@ fixed + durable + run_transient + request_only <= available_input
 - tool call/result 闭环不可拆；
 - 规划结果只有一个面向统一目标的最旧闭合日志前缀，不区分历史 turn 和当前 Agent Loop。
 
-单个工具结果仍受 Model Projection 动态预算限制，并明确返回截断状态、原始长度、历史引用和可用 cursor。无法一次放入窗口的结果通过分页或 Exact Archive 继续读取，不会静默丢失。
+单个工具结果仍受 Model Projection 动态预算限制，并在可行动时明确返回截断状态、源长度和可用 cursor。模型 observation 不携带后端 archive ID/hash；无法一次放入窗口的结果通过工具分页或 `conversation_history` 的后端路由读取 Exact Archive，不会静默丢失。
 
 ## 会话状态、缓存和圆环
 

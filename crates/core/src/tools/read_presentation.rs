@@ -2,7 +2,9 @@ use super::{
     read_zip_xml_text_parts, resolve_document_path, sanitize_document_max_chars, truncate_chars,
     AgentTool, NamedText, ToolExecutionContext, MAX_DOCUMENT_TEXT_CHARS,
 };
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -79,6 +81,14 @@ impl AgentTool for ReadPresentationTool {
             "truncated": truncated,
             "text": text
         }))
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = super::model_projection::retain_fields(
+            result.result.as_ref(),
+            &["path", "format", "slideCount", "truncated", "text"],
+        );
+        super::model_projection::compact_model_result(result, projected)
     }
 }
 

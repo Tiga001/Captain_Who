@@ -612,6 +612,24 @@ impl AgentTool for SkillsActivateTool {
             .insert(record.id.clone(), pending_context);
         Ok(result)
     }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        skill_activation_model_projection(result)
+    }
+}
+
+fn skill_activation_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let projected = result.result.as_ref().and_then(|value| {
+        let mut output = serde_json::Map::new();
+        crate::tools::model_projection::insert_field(&mut output, value, "status");
+        if let Some(skill) = value.get("skill").and_then(|skill| {
+            crate::tools::model_projection::retain_object_fields(skill, &["name", "hasResources"])
+        }) {
+            output.insert("skill".to_string(), skill);
+        }
+        (!output.is_empty()).then_some(Value::Object(output))
+    });
+    crate::tools::model_projection::compact_model_result(result, projected)
 }
 
 impl SkillActivationStateHandle {
@@ -676,7 +694,7 @@ fn activation_capacity_reservation(
     // Measure the same canonical projection the runtime will actually retain. The current
     // activation result is already bounded, but keeping this projection boundary shared prevents
     // future result-schema additions from silently drifting away from capacity accounting.
-    let canonical = canonical_tool_result_for_context(&tool_result);
+    let canonical = skill_activation_model_projection(&tool_result);
     let result_message = LlmMessage::tool_result(
         &canonical.call_id,
         render_tool_observation(&canonical),

@@ -11,6 +11,7 @@ mod goal;
 mod image_generation;
 mod input_stream;
 mod limits;
+pub(crate) mod model_projection;
 mod office;
 mod read_file;
 mod read_image;
@@ -91,6 +92,29 @@ use filesystem::{
     walk_workspace_with_cancellation, WalkEntry, WalkResult,
 };
 use limits::*;
+
+/// Rebuilds the model-only projection for a host result restored after approval.
+///
+/// Approval checkpoints persist the rich canonical result for recovery. The live registry is not
+/// available while the checkpoint is reconstructed, so approval-capable built-ins share these
+/// pure projection functions with their normal `AgentTool::model_projection` hooks.
+pub(crate) fn model_projection_for_persisted_continuation(
+    result: &AgentToolResult,
+) -> AgentToolResult {
+    match result.tool.as_str() {
+        "run_command" => run_command::run_command_model_projection(result),
+        "write_file" => write_file::write_file_model_projection(result),
+        "office_document" | "office_spreadsheet" | "office_presentation" => {
+            office::office_model_projection(result)
+        }
+        "skills_materialize_resource" => {
+            skills_materialize_resource::skills_materialize_model_projection(result)
+        }
+        "skills_run_script" => skills_script::skills_run_script_model_projection(result),
+        "image_generation" => image_generation::image_generation_model_projection(result),
+        _ => canonical_tool_result_for_context(result),
+    }
+}
 
 pub struct ToolRegistry {
     tools: BTreeMap<String, Box<dyn AgentTool>>,
@@ -1024,6 +1048,48 @@ mod tests {
         );
         assert!(!registry.requires_approval_for_call("write_file", &json!({ "phase": "append" })));
         assert!(registry.requires_approval_for_call("write_file", &json!({ "phase": "finish" })));
+    }
+
+    #[test]
+    fn approval_restore_reuses_the_live_model_projection_contract() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        for result in [
+            AgentToolResult {
+                call_id: "command-1".to_string(),
+                tool: "run_command".to_string(),
+                ok: true,
+                result: Some(json!({
+                    "command": "printf done",
+                    "cwd": "/workspace",
+                    "exitCode": 0,
+                    "stdout": "done",
+                    "stderr": "",
+                    "durationMs": 12,
+                    "runtime": { "provider": "managed" }
+                })),
+                error: None,
+            },
+            AgentToolResult {
+                call_id: "write-1".to_string(),
+                tool: "write_file".to_string(),
+                ok: true,
+                result: Some(json!({
+                    "status": "applied",
+                    "draftId": "draft-1",
+                    "filePath": "report.md",
+                    "mode": "create",
+                    "lineCount": 2,
+                    "byteCount": 20,
+                    "revision": "sha256:private"
+                })),
+                error: None,
+            },
+        ] {
+            assert_eq!(
+                serde_json::to_value(registry.model_projection(&result)).unwrap(),
+                serde_json::to_value(model_projection_for_persisted_continuation(&result)).unwrap()
+            );
+        }
     }
 
     #[test]

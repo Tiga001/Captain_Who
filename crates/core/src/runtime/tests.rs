@@ -106,10 +106,10 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
         )),
         &metadata,
     );
-    assert!(observation.contains("\"truncated\": true"));
-    assert!(observation.contains("\"truncatedAtSource\": true"));
-    assert!(observation.contains("\"originalBytes\":"));
-    assert!(observation.contains("\"historyRef\":"));
+    assert!(observation.contains("\"truncated\":true"));
+    assert!(!observation.contains("truncatedAtSource"));
+    assert!(!observation.contains("originalBytes"));
+    assert!(!observation.contains("historyRef"));
     recorder.record_tool_result_with_archive(&call, &raw, metadata.clone());
     let trace = recorder.finish(
         "run-archive",

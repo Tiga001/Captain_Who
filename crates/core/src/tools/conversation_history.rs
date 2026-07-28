@@ -4,7 +4,8 @@ use crate::conversation_trace::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
 };
 use crate::protocol::{
-    AgentApprovalStatus, AgentError, AgentResult, AgentToolDefinition, AgentToolSafety,
+    AgentApprovalStatus, AgentError, AgentResult, AgentToolDefinition, AgentToolResult,
+    AgentToolSafety,
 };
 use crate::storage::conversation_history_archive_repository::{
     ConversationHistoryArchivePage, ConversationHistoryArchivePageUnit,
@@ -107,6 +108,53 @@ impl AgentTool for ConversationHistoryTool {
                 crate::conversation_trace_projection::project_conversation_history_result(value).0;
         }
         crate::conversation_trace::canonical_tool_result_for_context(&projected)
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        let projected = result.result.clone().and_then(project_history_value);
+        super::model_projection::compact_model_result(result, projected)
+    }
+}
+
+fn project_history_value(value: Value) -> Option<Value> {
+    match value {
+        Value::Array(values) => {
+            let values = values
+                .into_iter()
+                .filter_map(project_history_value)
+                .collect::<Vec<_>>();
+            (!values.is_empty()).then_some(Value::Array(values))
+        }
+        Value::Object(values) => {
+            let values = values
+                .into_iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "instruction"
+                            | "untrustedHistoricalData"
+                            | "searchedVariants"
+                            | "returnedTurns"
+                            | "returnedMatches"
+                            | "returnedRecords"
+                            | "createdAt"
+                            | "runId"
+                            | "callId"
+                            | "turnId"
+                            | "userMessageId"
+                            | "assistantMessageId"
+                            | "contentHash"
+                            | "compression"
+                            | "modelProjectionTruncated"
+                            | "archiveProjectionTruncated"
+                            | "archiveRef"
+                    )
+                })
+                .filter_map(|(key, value)| project_history_value(value).map(|value| (key, value)))
+                .collect::<serde_json::Map<_, _>>();
+            (!values.is_empty()).then_some(Value::Object(values))
+        }
+        value => super::model_projection::prune_model_value(value),
     }
 }
 
@@ -1334,6 +1382,27 @@ mod tests {
 
         let listed = registry.execute(&context, &call(json!({})));
         assert!(listed.ok, "{:?}", listed.error);
+        let model = registry.model_projection(&listed);
+        let model = model.result.as_ref().unwrap();
+        assert_eq!(model["view"], "turn_list");
+        assert!(model["turns"][0]["open"]
+            .as_str()
+            .unwrap()
+            .starts_with(OPEN_PREFIX));
+        assert!(model.get("instruction").is_none());
+        assert!(model.get("untrustedHistoricalData").is_none());
+        assert!(model.get("returnedTurns").is_none());
+        let renderer = registry.event_projection(&listed);
+        assert!(renderer
+            .result
+            .as_ref()
+            .unwrap()
+            .get("instruction")
+            .is_some());
+        assert_eq!(
+            renderer.result.as_ref().unwrap()["untrustedHistoricalData"],
+            true
+        );
         let listed = listed.result.unwrap();
         assert_eq!(listed["view"], "turn_list");
         assert_eq!(listed["returnedTurns"], 2);
