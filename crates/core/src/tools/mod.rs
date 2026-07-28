@@ -939,16 +939,12 @@ mod tests {
     }
 
     #[test]
-    fn every_file_input_consumer_exposes_the_same_discriminated_source_contract() {
+    fn declarative_file_input_consumers_expose_the_shared_source_contract() {
         let engine =
             crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
         let registry = ToolRegistry::defaults_with_search_and_office(None, Some(engine));
         let expected = schema::agent_file_input_ref_schema();
 
-        assert_eq!(
-            registry.definition_for("read_image").unwrap().input_schema["properties"]["source"],
-            expected
-        );
         assert_eq!(
             registry.definition_for("run_command").unwrap().input_schema["properties"]["inputs"]
                 ["items"]["properties"]["source"],
@@ -965,6 +961,22 @@ mod tests {
                 "{tool_name} drifted from the shared AgentFileInputRef schema"
             );
         }
+    }
+
+    #[test]
+    fn read_image_exposes_one_required_model_friendly_path() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        let schema = &registry.definition_for("read_image").unwrap().input_schema;
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["path"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties["path"]["type"], "string");
+        assert_eq!(properties["path"]["minLength"], 1);
+        assert!(!properties.contains_key("source"));
+        assert!(!properties.contains_key("filePath"));
     }
 
     #[test]

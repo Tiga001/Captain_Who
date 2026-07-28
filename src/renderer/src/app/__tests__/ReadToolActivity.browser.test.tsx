@@ -1,8 +1,9 @@
-import type { AgentToolCall } from '@mycopilot/protocol'
+import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { ChatReadActivity } from '../../features/chat/chatTypes'
 import { ReadToolActivity } from '../../features/chat/components/toolActivities/ReadToolActivity'
+import type { ImageArtifactResolver } from '../../features/imageGeneration/artifacts/ImageArtifactResolver'
 
 const mocks = vi.hoisted(() => ({
   loadImageFile: vi.fn(),
@@ -25,6 +26,8 @@ vi.mock('../../features/chat/components/ImagePreview', () => ({
 
 const THUMBNAIL_DATA_URL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+const ARTIFACT_SHA256 = 'a'.repeat(64)
+const ARTIFACT_URI = `image-artifact://sha256/${ARTIFACT_SHA256}`
 
 const call: AgentToolCall = {
   id: 'read-image-call',
@@ -103,6 +106,68 @@ describe('ReadToolActivity image presentation', () => {
         alt: 'preview.png',
         fileName: 'preview.png',
         src: 'data:image/png;base64,ZnJlc2g='
+      })
+    })
+  })
+
+  it('resolves a generated Artifact through the Host Artifact boundary', async () => {
+    const release = vi.fn()
+    const retainedRelease = vi.fn()
+    const artifactResolver: ImageArtifactResolver = {
+      resolve: vi.fn().mockResolvedValue({
+        src: 'blob:generated-image',
+        release,
+        retain: () => retainedRelease
+      })
+    }
+    const artifact = {
+      artifactId: `sha256:${ARTIFACT_SHA256}`,
+      uri: ARTIFACT_URI,
+      kind: 'image' as const,
+      format: 'png' as const,
+      mimeType: 'image/png',
+      width: 1024,
+      height: 1024,
+      sizeBytes: 2048,
+      sha256: ARTIFACT_SHA256
+    }
+    const result: AgentToolResult = {
+      callId: call.id,
+      tool: call.tool,
+      ok: true,
+      result: {
+        path: ARTIFACT_URI,
+        artifact,
+        thumbnailDataUrl: THUMBNAIL_DATA_URL
+      }
+    }
+    const generatedCall: AgentToolCall = {
+      ...call,
+      args: { path: ARTIFACT_URI }
+    }
+    const screen = await render(
+      <ReadToolActivity
+        activity={activity({
+          path: ARTIFACT_URI,
+          fileName: 'generated.png',
+          thumbnailDataUrl: THUMBNAIL_DATA_URL
+        })}
+        artifactResolver={artifactResolver}
+        call={generatedCall}
+        result={result}
+      />
+    )
+
+    screen.container.querySelector<HTMLButtonElement>('.read-activity__image')?.click()
+    await vi.waitFor(() => {
+      expect(artifactResolver.resolve).toHaveBeenCalledWith(artifact)
+      expect(mocks.loadImageFile).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledTimes(1)
+      expect(mocks.openImagePreview).toHaveBeenCalledWith({
+        alt: 'generated-image-aaaaaaaaaaaa.png',
+        fileName: 'generated-image-aaaaaaaaaaaa.png',
+        src: 'blob:generated-image',
+        release: retainedRelease
       })
     })
   })

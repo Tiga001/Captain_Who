@@ -87,8 +87,8 @@ pub(super) fn tool_calls_from_response(
         .enumerate()
         .map(|(tool_index, call)| LlmToolCall {
             id: model_response_tool_call_id(run_id, iteration, tool_index, &call.id),
+            args: normalize_tool_arguments(&call.name, call.args),
             name: call.name,
-            args: normalize_tool_arguments(call.args),
         })
         .collect()
 }
@@ -99,7 +99,15 @@ pub(super) fn tool_calls_from_response(
 /// serialize that object one additional time and return it as a JSON string. Decode at most two
 /// such layers, and only accept an object at each repair boundary. Arbitrary strings, arrays, and
 /// malformed JSON remain untouched so the Tool's typed validator can reject them normally.
-fn normalize_tool_arguments(value: Value) -> Value {
+fn normalize_tool_arguments(tool: &str, value: Value) -> Value {
+    let value = normalize_stringified_object(value);
+    if tool == "image_generation" {
+        return normalize_image_generation_request(value);
+    }
+    value
+}
+
+fn normalize_stringified_object(value: Value) -> Value {
     let Value::String(encoded) = &value else {
         return value;
     };
@@ -111,6 +119,25 @@ fn normalize_tool_arguments(value: Value) -> Value {
             _ => return value,
         }
     }
+    value
+}
+
+/// Repairs a bounded model compatibility defect observed with otherwise valid image requests.
+///
+/// Some models preserve the outer Tool object but serialize the typed `request` union once more.
+/// Decode exactly one layer and only when it yields an object. The image Tool's existing strict
+/// deserializer remains authoritative for operations, fields, enums, and all validation.
+fn normalize_image_generation_request(mut value: Value) -> Value {
+    let Value::Object(arguments) = &mut value else {
+        return value;
+    };
+    let Some(Value::String(encoded)) = arguments.get("request") else {
+        return value;
+    };
+    let Ok(decoded @ Value::Object(_)) = serde_json::from_str::<Value>(encoded.trim()) else {
+        return value;
+    };
+    arguments.insert("request".to_string(), decoded);
     value
 }
 
@@ -623,6 +650,76 @@ mod tests {
 
         assert_eq!(calls[0].args["operation"], "status");
         assert_eq!(calls[0].args["reason"], "Check the engine");
+    }
+
+    #[test]
+    fn image_generation_stringified_request_object_is_normalized_before_validation() {
+        let generate = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-image-generate".to_string(),
+                name: "image_generation".to_string(),
+                args: json!({
+                    "request": r#"{"operation":"generate","prompt":"A lighthouse","sizePreset":"2K"}"#,
+                    "reason": "Create the requested illustration."
+                }),
+            }],
+            "",
+            "run-image-generate",
+            0,
+        );
+        assert_eq!(generate[0].args["request"]["operation"], "generate");
+        assert_eq!(generate[0].args["request"]["prompt"], "A lighthouse");
+        assert_eq!(generate[0].args["request"]["sizePreset"], "2K");
+
+        let edit = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-image-edit".to_string(),
+                name: "image_generation".to_string(),
+                args: json!({
+                    "request": r#"{"operation":"edit","prompt":"Make it dusk","inputPath":"@attachments/a/image.png"}"#,
+                    "reason": "Apply the requested visual edit."
+                }),
+            }],
+            "",
+            "run-image-edit",
+            0,
+        );
+        assert_eq!(edit[0].args["request"]["operation"], "edit");
+        assert_eq!(
+            edit[0].args["request"]["inputPath"],
+            "@attachments/a/image.png"
+        );
+    }
+
+    #[test]
+    fn image_generation_nested_request_repair_is_strict_and_single_layer() {
+        for encoded in [
+            "not json".to_string(),
+            "[1,2,3]".to_string(),
+            "\"generate\"".to_string(),
+            serde_json::to_string(
+                r#"{"operation":"generate","prompt":"A double encoded request"}"#,
+            )
+            .unwrap(),
+        ] {
+            let original = json!({
+                "request": encoded,
+                "reason": "Generate an image."
+            });
+            assert_eq!(
+                normalize_tool_arguments("image_generation", original.clone()),
+                original
+            );
+        }
+
+        let unrelated = json!({
+            "request": r#"{"operation":"generate","prompt":"Do not reinterpret me"}"#,
+            "reason": "An unrelated Tool contract."
+        });
+        assert_eq!(
+            normalize_tool_arguments("unrelated_tool", unrelated.clone()),
+            unrelated
+        );
     }
 
     #[test]

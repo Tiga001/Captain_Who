@@ -83,18 +83,25 @@ export function getImageGenerationArtifactEntries(
   const seenArtifactIds = new Set<string>()
 
   for (const call of run.toolCalls) {
-    if (call.tool !== 'image_generation') continue
     const result = run.toolResults.find((candidate) => candidate.callId === call.id)
-    if (!result?.ok) continue
-    const parsed = parseResult(result)
-    if (!parsed || parsed.status !== 'succeeded') continue
-    if (seenArtifactIds.has(parsed.artifact.artifactId)) continue
+    const entry = getImageGenerationArtifactEntry(call, result)
+    if (!entry || seenArtifactIds.has(entry.artifact.artifactId)) continue
 
-    seenArtifactIds.add(parsed.artifact.artifactId)
-    entries.push({ artifact: parsed.artifact, callId: call.id, operation: parsed.operation })
+    seenArtifactIds.add(entry.artifact.artifactId)
+    entries.push(entry)
   }
 
   return entries
+}
+
+export function getImageGenerationArtifactEntry(
+  call: AgentToolCall,
+  result?: AgentToolResult
+): ImageGenerationArtifactEntry | undefined {
+  if (call.tool !== 'image_generation' || !result?.ok) return undefined
+  const parsed = parseResult(result)
+  if (!parsed || parsed.status !== 'succeeded') return undefined
+  return { artifact: parsed.artifact, callId: call.id, operation: parsed.operation }
 }
 
 function parseResult(result?: AgentToolResult): AgentImageGenerationResult | undefined {

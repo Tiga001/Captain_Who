@@ -1,8 +1,17 @@
 import { FileSpreadsheet, FileText, FileType, ImageIcon, Presentation } from 'lucide-react'
-import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import {
+  parseAgentImageGenerationArtifact,
+  type AgentImageGenerationArtifact,
+  type AgentToolCall,
+  type AgentToolResult
+} from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
+import type {
+  ImageArtifactResolver,
+  ResolvedImageArtifact
+} from '../../../imageGeneration/artifacts/ImageArtifactResolver'
 import { loadImageFile } from '../../../storage/storageClient'
 import { normalizeReadImageThumbnailDataUrl } from '../../agentReadActivities'
 import type { ChatReadActivity, ChatReadActivityKind } from '../../chatTypes'
@@ -12,6 +21,7 @@ import type { SettledToolStatus } from './toolActivityUtils'
 
 interface ReadToolActivityProps {
   activity?: ChatReadActivity
+  artifactResolver?: ImageArtifactResolver
   call: AgentToolCall
   projectId?: string | null
   result?: AgentToolResult
@@ -23,6 +33,14 @@ export interface ReadToolActivityGroupItem extends ReadToolActivityProps {}
 interface ReadToolActivityGroupProps {
   items: ReadToolActivityGroupItem[]
   projectId?: string | null
+}
+
+const lazyHostImageArtifactResolver: ImageArtifactResolver = {
+  async resolve(artifact, options) {
+    const { hostImageArtifactResolver } =
+      await import('../../../imageGeneration/artifacts/hostImageArtifactResolver')
+    return hostImageArtifactResolver.resolve(artifact, options)
+  }
 }
 
 const TOOL_KINDS: Partial<Record<string, ChatReadActivityKind>> = {
@@ -108,6 +126,51 @@ function getPathFromCall(call: AgentToolCall) {
 function getFileName(path: string) {
   const normalized = path.replace(/\\/g, '/').replace(/\/$/, '')
   return normalized.split('/').filter(Boolean).pop() || normalized
+}
+
+function generatedArtifactFromResult(
+  sourcePath: string,
+  result: AgentToolResult | undefined
+): AgentImageGenerationArtifact | undefined {
+  if (
+    !sourcePath.startsWith('image-artifact://sha256/') &&
+    !sourcePath.startsWith('artifact://sha256/')
+  ) {
+    return undefined
+  }
+  if (!result?.ok || !result.result || typeof result.result !== 'object') return undefined
+  const artifact = (result.result as Record<string, unknown>).artifact
+  try {
+    const parsed = parseAgentImageGenerationArtifact(artifact, 'read_image result.artifact')
+    return parsed.uri === sourcePath ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function artifactFileName(artifact: AgentImageGenerationArtifact): string {
+  const extension = artifact.format === 'jpeg' ? 'jpg' : artifact.format
+  return `generated-image-${artifact.sha256.slice(0, 12)}.${extension}`
+}
+
+function openResolvedArtifact(
+  artifact: AgentImageGenerationArtifact,
+  value: ResolvedImageArtifact,
+  openImagePreview: ReturnType<typeof useImagePreview>
+) {
+  const retainedRelease = value.retain?.()
+  if (retainedRelease) value.release?.()
+  const fileName = artifactFileName(artifact)
+  openImagePreview({
+    alt: fileName,
+    fileName,
+    src: value.src,
+    ...(retainedRelease
+      ? { release: retainedRelease }
+      : value.release
+        ? { release: value.release }
+        : {})
+  })
 }
 
 function getDisplayName(activity: ChatReadActivity | undefined, call: AgentToolCall, t: Translate) {
@@ -225,7 +288,13 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
   )
 }
 
-function ReadActivityCard({ activity, call, projectId, result }: ReadToolActivityProps) {
+function ReadActivityCard({
+  activity,
+  artifactResolver = lazyHostImageArtifactResolver,
+  call,
+  projectId,
+  result
+}: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const openImagePreview = useImagePreview()
   const showImagePreviewNotice = useImagePreviewNotice()
@@ -243,6 +312,12 @@ function ReadActivityCard({ activity, call, projectId, result }: ReadToolActivit
     }
 
     try {
+      const generatedArtifact = generatedArtifactFromResult(sourcePath, result)
+      if (generatedArtifact) {
+        const resolved = await artifactResolver.resolve(generatedArtifact)
+        openResolvedArtifact(generatedArtifact, resolved, openImagePreview)
+        return
+      }
       const image = await loadImageFile({ projectId, filePath: sourcePath })
       if (!image?.mimeType.startsWith('image/') || !image.data) {
         showImagePreviewNotice(t('imagePreview.originalMissing'))
@@ -278,6 +353,7 @@ function ReadActivityCard({ activity, call, projectId, result }: ReadToolActivit
 
 function ReadActivityDetails({
   activity,
+  artifactResolver,
   call,
   projectId,
   result,
@@ -291,6 +367,7 @@ function ReadActivityDetails({
       <div className="read-activity__items" data-kind={getKind(call, activity)}>
         <ReadActivityCard
           activity={activity}
+          artifactResolver={artifactResolver}
           call={call}
           projectId={projectId}
           result={result}
@@ -303,6 +380,7 @@ function ReadActivityDetails({
 
 export function ReadToolActivity({
   activity,
+  artifactResolver,
   call,
   projectId,
   result,
@@ -326,6 +404,7 @@ export function ReadToolActivity({
     >
       <ReadActivityDetails
         activity={activity}
+        artifactResolver={artifactResolver}
         call={call}
         projectId={projectId}
         result={result}
@@ -343,6 +422,7 @@ export function ReadToolActivityGroup({ items, projectId }: ReadToolActivityGrou
     return (
       <ReadToolActivity
         activity={firstItem.activity}
+        artifactResolver={firstItem.artifactResolver}
         call={firstItem.call}
         projectId={projectId}
         result={firstItem.result}
@@ -374,6 +454,7 @@ export function ReadToolActivityGroup({ items, projectId }: ReadToolActivityGrou
           {items.map((item) => (
             <ReadActivityCard
               activity={item.activity}
+              artifactResolver={item.artifactResolver}
               call={item.call}
               key={item.call.id}
               projectId={projectId}

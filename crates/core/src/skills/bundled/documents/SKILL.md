@@ -41,7 +41,7 @@ Every Builder command must declare its generated document with exactly one stati
 2. Generate or edit the document.
 3. Confirm the expected file effect in the native result or `artifactObservation`.
 4. Inspect document structure and validate the final package.
-5. Render all relevant pages in one contact-sheet request. On success, pass the exact returned `outputs[].source` to `read_image`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect every page, patch the same Builder or semantic request when needed, then render again.
+5. Render all relevant pages in one contact-sheet request. On success, pass the exact returned `outputs[].readPath` as `read_image.path`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect every page, patch the same Builder or semantic request when needed, then render again.
 6. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
 
 Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and Word-specific quality checks.

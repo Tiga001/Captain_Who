@@ -155,6 +155,12 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     if has_tool(tool_definitions, "read_file") {
         rules.push("- read_file 未指定范围时会在输出预算允许的情况下返回完整文本。若结果标记 truncated=true，任务确实需要后续内容时，优先原样执行 continueWith；兼容旧结果时使用返回的 nextStartByte 继续读取。不能把截断片段说成完整文件。对明显超大、压缩、生成或日志文件，优先搜索定位相关区域，再读取必要片段。".to_string());
     }
+    if has_tool(tool_definitions, "read_image") {
+        rules.push("- read_image 只需要一个 path。查看附件时把 attachments_list 返回的 readPath 原样放进 path；查看生成图片时把 image_generation 返回的 path 原样放进 path；工作区或绝对图片直接使用其路径。不要自行拼 source 对象、URI、附件 ID 或内部文件位置。".to_string());
+        if has_tool(tool_definitions, "image_generation") {
+            rules.push("- image_generation 成功结果中的 path 可直接交给 read_image。用户要求检查刚生成的图片时应读取这个 path，不要重新生成，也不要到附件库中寻找生成物。visualInputDelivery 只描述生成发生时的视觉投递，不能证明后续请求仍携带图片像素。".to_string());
+        }
+    }
     if has_tool(tool_definitions, "workspace_map") {
         rules.push("- 用户询问项目结构、技术栈、入口或整体架构时，先用 workspace_map 建立有边界的概览，再通过 search_files、search_code 或 read_* 深入。".to_string());
     }
@@ -414,6 +420,26 @@ mod tests {
         assert!(prompt.contains("定位和比较来源"));
         assert!(prompt.contains("少量关键页面"));
         assert!(prompt.contains("不要猜测 URL"));
+    }
+
+    #[test]
+    fn generated_image_inspection_uses_one_copyable_path() {
+        let prompt = build_system_prompt(
+            None,
+            &[
+                tool_definition("image_generation"),
+                tool_definition("read_image"),
+                tool_definition("attachments_list"),
+            ],
+        );
+
+        assert!(prompt.contains("read_image 只需要一个 path"));
+        assert!(prompt.contains("image_generation 成功结果中的 path 可直接交给 read_image"));
+        assert!(prompt.contains("不要重新生成"));
+        assert!(prompt.contains("不要到附件库中寻找生成物"));
+        assert!(prompt.contains("只描述生成发生时的视觉投递"));
+        assert!(prompt.contains("visualInputDelivery"));
+        assert!(prompt.contains("不要自行拼 source 对象"));
     }
 
     #[test]

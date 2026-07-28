@@ -560,7 +560,7 @@ function AgentRunView({
       {showFinalContent && (
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
       )}
-      {isRunSettled(run) && (
+      {isRunSettled(run) && !showTimeline && (
         <ImageGenerationArtifactsCard resolver={hostImageArtifactResolver} run={run} />
       )}
       {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}

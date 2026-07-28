@@ -675,8 +675,8 @@ mod tests {
             assert!(package.instructions().contains("MYCOPILOT_INPUT_ROOT"));
             assert!(package.instructions().contains("static `--output`"));
             assert!(package.instructions().contains("artifactObservation"));
-            assert!(package.instructions().contains("outputs[].source"));
-            assert!(package.instructions().contains("read_image"));
+            assert!(package.instructions().contains("outputs[].readPath"));
+            assert!(package.instructions().contains("read_image.path"));
 
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();

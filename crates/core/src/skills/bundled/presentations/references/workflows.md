@@ -183,22 +183,19 @@ Render every slide to an explicit contact-sheet image:
 }
 ```
 
-After a successful render, take the exact image reference from `outputs[].source` and pass it
-unchanged to `read_image`:
+After a successful render, take the exact path from `outputs[].readPath` and pass it as
+`read_image.path`:
 
 ```json
 {
-  "source": {
-    "type": "workspace",
-    "path": "outputs/product-intro-preview.png"
-  }
+  "path": "outputs/product-intro-preview.png"
 }
 ```
 
 Treat the returned output as authoritative:
 
 - Select the output whose `role` is `render` and whose `kind` is `image`.
-- Use only its `source`; never reconstruct a path from the render request, `readPath`, `argv`,
+- Use only its `readPath`; never reconstruct a path from the render request, `source`, `argv`,
   `cwd`, `stdout`, or a file search.
 - Never rerender merely to discover where the first render was published.
 - `pageSelection` records the requested selection (`all` or explicit slide numbers); it is not an

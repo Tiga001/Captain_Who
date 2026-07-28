@@ -475,16 +475,19 @@ describe('Skill and Office chat timeline', () => {
       <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
     )
 
-    const imageArtifacts = screen.container.querySelector('.image-generation-artifact-section')
+    const imageActivityPreview = screen.container.querySelector(
+      '.image-generation-activity__preview'
+    )
     const officeArtifacts = screen.container.querySelector('.office-artifact-list')
 
-    expect(imageArtifacts).not.toBeNull()
+    expect(imageActivityPreview).not.toBeNull()
     expect(officeArtifacts).not.toBeNull()
-    if (!imageArtifacts || !officeArtifacts) {
-      throw new Error('Expected both image and Office artifact sections.')
+    if (!imageActivityPreview || !officeArtifacts) {
+      throw new Error('Expected both image preview and Office artifact sections.')
     }
     expect(
-      imageArtifacts.compareDocumentPosition(officeArtifacts) & Node.DOCUMENT_POSITION_FOLLOWING
+      imageActivityPreview.compareDocumentPosition(officeArtifacts) &
+        Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
   })
 

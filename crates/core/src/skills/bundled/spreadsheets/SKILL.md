@@ -41,7 +41,7 @@ Every Builder command must declare its generated workbook with exactly one stati
 2. Generate or edit the workbook while keeping numbers, dates, booleans, and formulas typed.
 3. Confirm the expected file effect in the native result or `artifactObservation`.
 4. Inspect required sheets, representative values, exact formula text, formats, tables, and chart ranges; validate the final package.
-5. Render every final worksheet in one combined request when supported. On success, pass the exact returned `outputs[].source` to `read_image`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect clipping and chart placement, patch the same Builder or semantic request when needed, then render again.
+5. Render every final worksheet in one combined request when supported. On success, pass the exact returned `outputs[].readPath` as `read_image.path`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect clipping and chart placement, patch the same Builder or semantic request when needed, then render again.
 6. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable calculation or visual verification.
 
 Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and spreadsheet-specific quality checks.

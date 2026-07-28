@@ -95,6 +95,61 @@ describe('image generation activity UI', () => {
     vi.clearAllMocks()
   })
 
+  it('shows a stable animated thumbnail placeholder while generation is running', async () => {
+    const resolver = { resolve: vi.fn() }
+    const screen = await render(<ImageGenerationToolActivity call={call()} resolver={resolver} />)
+
+    await expect.element(screen.getByText('agent.imageGeneration.generate.running')).toBeVisible()
+    expect(
+      screen.container
+        .querySelector('.image-generation-activity__preview')
+        ?.getAttribute('data-status')
+    ).toBe('loading')
+    expect(screen.container.querySelectorAll('.image-generation-activity__wave i')).toHaveLength(3)
+    expect(screen.container.querySelector('details')?.open).toBe(true)
+    expect(screen.container.querySelector('img')).toBeNull()
+    expect(resolver.resolve).not.toHaveBeenCalled()
+  })
+
+  it('replaces the placeholder with a thumbnail and opens the shared viewer', async () => {
+    const imageCall = call()
+    const resolver = {
+      resolve: vi.fn(async () => ({ src: PREVIEW_DATA_URL }))
+    }
+    const screen = await render(
+      <ImageGenerationToolActivity call={imageCall} resolver={resolver} />
+    )
+
+    expect(
+      screen.container
+        .querySelector('.image-generation-activity__preview')
+        ?.getAttribute('data-status')
+    ).toBe('loading')
+    await screen.rerender(
+      <ImageGenerationToolActivity
+        call={imageCall}
+        resolver={resolver}
+        result={succeededResult()}
+      />
+    )
+
+    await expect.poll(() => screen.container.querySelector('img')).not.toBeNull()
+    expect(
+      screen.container
+        .querySelector('.image-generation-activity__preview')
+        ?.getAttribute('data-status')
+    ).toBe('ready')
+    screen.container
+      .querySelector<HTMLButtonElement>('.image-generation-activity__preview > button')
+      ?.click()
+    expect(mocks.openImagePreview).toHaveBeenCalledWith({
+      alt: 'agent.imageGeneration.artifact',
+      fileName: `generated-image-${HASH.slice(0, 12)}.webp`,
+      src: PREVIEW_DATA_URL
+    })
+    expect(resolver.resolve).toHaveBeenCalledTimes(1)
+  })
+
   it('uses a safe fallback for preflight failures and never renders raw Tool fields', async () => {
     const privateCall = call({
       args: {
@@ -126,6 +181,7 @@ describe('image generation activity UI', () => {
     expect(screen.container.textContent).not.toContain('/Users/example/private.png')
     expect(screen.container.textContent).not.toContain('provider.private')
     expect(screen.container.textContent).not.toContain('secret-value')
+    expect(screen.container.querySelector('.image-generation-activity__preview')).toBeNull()
   })
 
   it('shows deduplicated metadata without fabricating preview or export controls', async () => {

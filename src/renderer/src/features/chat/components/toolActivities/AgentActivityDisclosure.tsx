@@ -1,9 +1,10 @@
 import { ChevronDown, type LucideIcon } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 interface AgentActivityDisclosureProps {
   children?: ReactNode
   className?: string
+  defaultOpen?: boolean
   hasDetails: boolean
   icon: LucideIcon
   iconBadge?: ReactNode
@@ -15,6 +16,7 @@ interface AgentActivityDisclosureProps {
 export function AgentActivityDisclosure({
   children,
   className,
+  defaultOpen = false,
   hasDetails,
   icon: Icon,
   iconBadge,
@@ -22,6 +24,7 @@ export function AgentActivityDisclosure({
   isPending = false,
   label
 }: AgentActivityDisclosureProps) {
+  const [isOpen, setIsOpen] = useState(defaultOpen)
   const activityClassName = ['agent-activity', className].filter(Boolean).join(' ')
   const labelClassName = ['agent-activity__label', isPending ? 'agent-running-text' : '']
     .filter(Boolean)
@@ -50,7 +53,11 @@ export function AgentActivityDisclosure({
   }
 
   return (
-    <details className={activityClassName}>
+    <details
+      className={activityClassName}
+      onToggle={(event) => setIsOpen(event.currentTarget.open)}
+      open={isOpen}
+    >
       <summary>
         {iconNode}
         {labelNode}

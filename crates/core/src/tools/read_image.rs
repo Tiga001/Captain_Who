@@ -1,4 +1,4 @@
-use super::{schema::agent_file_input_ref_schema, AgentTool, ToolExecutionContext};
+use super::{AgentTool, ToolExecutionContext};
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::file_input::{
     read_verified_agent_file_input, AgentFileInputError, AgentFileInputExecutionContext,
@@ -33,22 +33,17 @@ impl AgentTool for ReadImageTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_image".to_string(),
-            description: "Read one authorized image and return it as visual input for the model. Prefer source with the unified AgentFileInputRef returned by attachments, generated-image, and Skill tools. Legacy path/filePath remains supported for workspace-relative, absolute, system-alias, and @attachments paths.".to_string(),
+            description: "Read one image and return it as visual input for the model. Pass exactly one path copied from a tool result or supplied by the user. Supported values include workspace-relative paths, absolute paths, system aliases, @attachments/... paths, image-artifact://... URIs, and revision-bound skill://... URIs. Authorization and integrity checks are enforced by the host.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "source": agent_file_input_ref_schema(),
                     "path": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Legacy compatibility input: workspace-relative path, absolute path, supported system alias, or exact @attachments/... readPath. Prefer source for generated Artifacts and Skill resources."
-                    },
-                    "filePath": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Legacy alias for path."
+                        "description": "The image location exactly as returned or provided: a workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI."
                     }
                 },
+                "required": ["path"],
                 "additionalProperties": false
             }),
             safety: AgentToolSafety::ReadOnly,
@@ -77,7 +72,7 @@ impl AgentTool for ReadImageTool {
         }
         let args: ReadImageArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_image 参数无效：{error}")))?;
-        let source = args.source()?;
+        let source = args.source(context)?;
         let file_inputs = AgentFileInputExecutionContext::new(
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
@@ -116,6 +111,15 @@ impl AgentTool for ReadImageTool {
         let _preparation_permit = context.acquire_model_image_preparation()?;
 
         let (decoded, format, mime_type) = decode_supported_image(&snapshot.bytes)?;
+        let artifact = generated_artifact_receipt(
+            &snapshot.source,
+            format,
+            mime_type,
+            decoded.width(),
+            decoded.height(),
+            snapshot.size_bytes,
+            &snapshot.sha256,
+        )?;
         let thumbnail_data_url = image_thumbnail_data_url(&decoded);
         context.check_cancelled()?;
         let data_base64 =
@@ -124,7 +128,7 @@ impl AgentTool for ReadImageTool {
         let display_path = display_source(&snapshot.source);
         reservation.commit();
 
-        Ok(json!({
+        let mut result = json!({
             "path": display_path,
             "source": snapshot.source,
             "format": format,
@@ -136,7 +140,14 @@ impl AgentTool for ReadImageTool {
                 "mimeType": mime_type,
                 "dataBase64": data_base64
             }
-        }))
+        });
+        if let Some(artifact) = artifact {
+            result
+                .as_object_mut()
+                .expect("read_image result is an object")
+                .insert("artifact".to_string(), artifact);
+        }
+        Ok(result)
     }
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
@@ -235,7 +246,7 @@ struct ReadImageArgs {
 }
 
 impl ReadImageArgs {
-    fn source(&self) -> AgentResult<AgentFileInputRef> {
+    fn source(&self, context: &ToolExecutionContext) -> AgentResult<AgentFileInputRef> {
         let path = self
             .path
             .as_deref()
@@ -269,15 +280,26 @@ impl ReadImageArgs {
                 ))
             }
         };
-        legacy_file_input_ref(legacy)
+        path_file_input_ref(context, legacy)
     }
 }
 
-fn legacy_file_input_ref(path: &str) -> AgentResult<AgentFileInputRef> {
+fn path_file_input_ref(
+    context: &ToolExecutionContext,
+    path: &str,
+) -> AgentResult<AgentFileInputRef> {
     let path = path.trim();
     if path.starts_with("@attachments/") {
         return Ok(AgentFileInputRef::Attachment {
             read_path: path.to_string(),
+        });
+    }
+    if path.starts_with("image-artifact://sha256/") || path.starts_with("artifact://sha256/") {
+        return generated_artifact_file_input_ref(context, path);
+    }
+    if path.starts_with("skill://") {
+        return Ok(AgentFileInputRef::SkillResource {
+            uri: path.to_string(),
         });
     }
     let expanded = expand_system_path(path).map_err(|message| {
@@ -300,6 +322,124 @@ fn legacy_file_input_ref(path: &str) -> AgentResult<AgentFileInputRef> {
             path: path.to_string(),
         })
     }
+}
+
+fn generated_artifact_file_input_ref(
+    context: &ToolExecutionContext,
+    uri: &str,
+) -> AgentResult<AgentFileInputRef> {
+    let uri = uri.trim();
+    let digest = uri
+        .strip_prefix("image-artifact://sha256/")
+        .or_else(|| uri.strip_prefix("artifact://sha256/"))
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            AgentError::structured(
+                "agent.fileInput.invalidRequest",
+                "read_image.path 包含无效的生成图片 URI；请原样使用图片生成结果返回的 image-artifact:// 路径。",
+                json!({
+                    "type": "agentFileInput",
+                    "code": "agent.fileInput.invalidRequest",
+                    "recovery": "changeRequest"
+                }),
+            )
+        })?;
+    let storage = context.storage_optional().ok_or_else(|| {
+        AgentError::structured(
+            "agent.fileInput.snapshotUnavailable",
+            "生成物的权威 Artifact 注册表不可用。",
+            json!({
+                "type": "agentFileInput",
+                "code": "agent.fileInput.snapshotUnavailable",
+                "recovery": "retry"
+            }),
+        )
+    })?;
+    let artifact_id = format!("sha256:{digest}");
+    let registered = storage
+        .resolve_published_generated_artifact_input(&artifact_id)
+        .map_err(|_| {
+            AgentError::structured(
+                "agent.fileInput.snapshotUnavailable",
+                "无法读取生成物的权威 Artifact 发布记录。",
+                json!({
+                    "type": "agentFileInput",
+                    "code": "agent.fileInput.snapshotUnavailable",
+                    "recovery": "retry"
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            AgentError::structured(
+                "agent.fileInput.notFound",
+                "权威 Artifact 注册表中不存在该已发布生成物。",
+                json!({
+                    "type": "agentFileInput",
+                    "code": "agent.fileInput.notFound",
+                    "recovery": "regenerate"
+                }),
+            )
+        })?;
+    Ok(AgentFileInputRef::GeneratedArtifact {
+        uri: format!("image-artifact://sha256/{digest}"),
+        path: registered.path.to_string_lossy().into_owned(),
+    })
+}
+
+fn generated_artifact_receipt(
+    source: &AgentFileInputRef,
+    format: &str,
+    mime_type: &str,
+    width: u32,
+    height: u32,
+    size_bytes: u64,
+    sha256: &str,
+) -> AgentResult<Option<Value>> {
+    let AgentFileInputRef::GeneratedArtifact { uri, .. } = source else {
+        return Ok(None);
+    };
+    let expected = uri
+        .strip_prefix("image-artifact://sha256/")
+        .or_else(|| uri.strip_prefix("artifact://sha256/"));
+    if expected != Some(sha256) {
+        return Err(AgentError::structured(
+            "agent.fileInput.integrityMismatch",
+            "生成图片 URI 与读取后复验的内容哈希不一致。",
+            json!({
+                "type": "agentFileInput",
+                "code": "agent.fileInput.integrityMismatch",
+                "recovery": "regenerate"
+            }),
+        ));
+    }
+    if !matches!(format, "png" | "jpeg" | "webp") {
+        return Err(AgentError::structured(
+            "agent.fileInput.integrityMismatch",
+            "生成图片的格式不符合 Artifact 发布契约。",
+            json!({
+                "type": "agentFileInput",
+                "code": "agent.fileInput.integrityMismatch",
+                "recovery": "regenerate"
+            }),
+        ));
+    }
+    let uri = format!("image-artifact://sha256/{sha256}");
+    Ok(Some(json!({
+        "artifactId": format!("sha256:{sha256}"),
+        "uri": uri,
+        "kind": "image",
+        "format": format,
+        "mimeType": mime_type,
+        "width": width,
+        "height": height,
+        "sizeBytes": size_bytes,
+        "sha256": sha256
+    })))
 }
 
 fn agent_file_input_error(error: AgentFileInputError) -> AgentError {
@@ -576,47 +716,17 @@ mod tests {
     }
 
     #[test]
-    fn schema_prefers_unified_source_but_keeps_legacy_paths() {
+    fn schema_exposes_one_required_path_and_hides_compatibility_inputs() {
         let definition = ReadImageTool.definition();
         let properties = definition.input_schema["properties"].as_object().unwrap();
-        assert!(properties.contains_key("source"));
-        assert!(properties.contains_key("path"));
-        assert!(properties.contains_key("filePath"));
+        assert_eq!(properties.len(), 1);
+        assert_eq!(properties["path"]["type"], "string");
+        assert_eq!(definition.input_schema["required"], json!(["path"]));
+        assert_eq!(definition.input_schema["additionalProperties"], false);
+        assert!(!properties.contains_key("source"));
+        assert!(!properties.contains_key("filePath"));
         assert!(definition.input_schema.get("oneOf").is_none());
         assert!(definition.input_schema.get("anyOf").is_none());
-
-        let variants = properties["source"]["oneOf"].as_array().unwrap();
-        assert_eq!(variants.len(), 5);
-        for (kind, required) in [
-            ("attachment", vec!["type", "readPath"]),
-            ("workspace", vec!["type", "path"]),
-            ("external", vec!["type", "path"]),
-            ("generated_artifact", vec!["type", "uri", "path"]),
-            ("skill_resource", vec!["type", "uri"]),
-        ] {
-            let variant = variants
-                .iter()
-                .find(|variant| {
-                    variant["properties"]["type"]["enum"]
-                        .as_array()
-                        .is_some_and(|values| values == &[json!(kind)])
-                })
-                .unwrap_or_else(|| panic!("missing `{kind}` source schema"));
-            assert_eq!(variant["additionalProperties"], false);
-            assert_eq!(variant["required"], json!(required));
-            let declared = variant["properties"].as_object().unwrap();
-            assert_eq!(
-                declared.len(),
-                required.len(),
-                "`{kind}` must expose only its discriminator and required fields"
-            );
-            for field in required {
-                assert!(
-                    declared.contains_key(field),
-                    "`{kind}` must declare required field `{field}`"
-                );
-            }
-        }
     }
 
     #[test]
@@ -642,6 +752,24 @@ mod tests {
         assert_eq!(result["sizeBytes"], bytes.len() as u64);
         assert_eq!(result["sha256"], sha256_hex(&bytes));
         assert!(result["image"]["dataBase64"].as_str().unwrap().len() > 10);
+    }
+
+    #[test]
+    fn reads_workspace_image_with_one_model_visible_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let bytes = valid_test_png();
+        fs::write(workspace.path().join("preview.png"), &bytes).unwrap();
+
+        let result = execute(
+            &context(Some(workspace.path()), AgentPermissions::default()),
+            json!({ "path": "preview.png" }),
+        )
+        .unwrap();
+
+        assert_eq!(result["path"], "preview.png");
+        assert_eq!(result["source"]["type"], "workspace");
+        assert_eq!(result["sha256"], sha256_hex(&bytes));
+        assert!(result.get("artifact").is_none());
     }
 
     #[test]
@@ -685,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_absolute_path_inside_workspace_is_scoped_as_workspace() {
+    fn absolute_path_inside_workspace_is_scoped_as_workspace() {
         let workspace = tempfile::tempdir().unwrap();
         let workspace_root = workspace.path().canonicalize().unwrap();
         let image_path = workspace_root.join("absolute.png");
@@ -693,13 +821,26 @@ mod tests {
 
         let result = execute(
             &context(Some(&workspace_root), AgentPermissions::default()),
-            json!({ "filePath": image_path }),
+            json!({ "path": image_path }),
         )
         .unwrap();
 
         assert_eq!(result["path"], "absolute.png");
         assert_eq!(result["source"]["type"], "workspace");
         assert_eq!(result["source"]["path"], "absolute.png");
+    }
+
+    #[test]
+    fn hidden_legacy_file_path_alias_remains_executable() {
+        let args: ReadImageArgs =
+            serde_json::from_value(json!({ "filePath": "legacy.png" })).unwrap();
+        assert_eq!(
+            args.source(&context(None, AgentPermissions::default()))
+                .unwrap(),
+            AgentFileInputRef::Workspace {
+                path: "legacy.png".to_string()
+            }
+        );
     }
 
     #[test]
@@ -723,37 +864,18 @@ mod tests {
     }
 
     #[test]
-    fn typed_external_path_is_permission_checked_after_workspace_scope_resolution() {
+    fn model_visible_external_path_requires_read_all_and_succeeds_when_granted() {
         let workspace = tempfile::tempdir().unwrap();
         let workspace_root = workspace.path().canonicalize().unwrap();
-        let inside = workspace_root.join("inside.png");
-        fs::write(&inside, valid_test_png()).unwrap();
         let outside = tempfile::tempdir().unwrap();
         let outside_root = outside.path().canonicalize().unwrap();
         let outside_path = outside_root.join("outside.png");
-        fs::write(&outside_path, valid_test_png()).unwrap();
-
-        let inside_result = execute(
-            &context(Some(&workspace_root), AgentPermissions::default()),
-            json!({
-                "source": {
-                    "type": "external",
-                    "path": inside
-                }
-            }),
-        )
-        .unwrap();
-        assert_eq!(inside_result["source"]["type"], "workspace");
-        assert_eq!(inside_result["source"]["path"], "inside.png");
+        let bytes = valid_test_png();
+        fs::write(&outside_path, &bytes).unwrap();
 
         let denied = execute(
             &context(Some(&workspace_root), AgentPermissions::default()),
-            json!({
-                "source": {
-                    "type": "external",
-                    "path": outside_path
-                }
-            }),
+            json!({ "path": outside_path }),
         )
         .unwrap_err();
         assert_eq!(denied.code(), Some("agent.fileInput.authorizationDenied"));
@@ -768,15 +890,24 @@ mod tests {
         };
         let allowed = execute(
             &context(Some(&workspace_root), all_permissions),
-            json!({
-                "source": {
-                    "type": "external",
-                    "path": outside_root.join("outside.png")
-                }
-            }),
+            json!({ "path": outside_root.join("outside.png") }),
         )
         .unwrap();
         assert_eq!(allowed["source"]["type"], "external");
+        assert_eq!(allowed["sha256"], sha256_hex(&bytes));
+    }
+
+    #[test]
+    fn model_visible_relative_path_cannot_escape_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let error = execute(
+            &context(Some(workspace.path()), AgentPermissions::default()),
+            json!({ "path": "../outside.png" }),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), Some("agent.fileInput.invalidRequest"));
+        assert_eq!(error.details().unwrap()["recovery"], json!("changeRequest"));
     }
 
     #[test]
@@ -819,12 +950,7 @@ mod tests {
 
         let result = execute(
             &context,
-            json!({
-                "source": {
-                    "type": "attachment",
-                    "readPath": "@attachments/image-1/pixel.png"
-                }
-            }),
+            json!({ "path": "@attachments/image-1/pixel.png" }),
         )
         .unwrap();
         assert_eq!(result["source"]["type"], "attachment");
@@ -852,16 +978,52 @@ mod tests {
         let (storage, path, sha256) = publish_generated_artifact(&root, &bytes);
         let context = context(None, AgentPermissions::default())
             .with_runtime_services("run-generated-image".to_string(), Some(storage));
+        let uri = format!("image-artifact://sha256/{sha256}");
         let source = json!({
             "type": "generated_artifact",
-            "uri": format!("image-artifact://sha256/{sha256}"),
+            "uri": uri,
             "path": path.clone()
         });
 
-        let result = execute(&context, json!({ "source": source.clone() })).unwrap();
+        let result = execute(&context, json!({ "path": uri })).unwrap();
         assert_eq!(result["source"]["type"], "generated_artifact");
         assert_eq!(result["path"], format!("image-artifact://sha256/{sha256}"));
         assert_eq!(result["sha256"], sha256);
+        assert_eq!(
+            result["artifact"],
+            json!({
+                "artifactId": format!("sha256:{sha256}"),
+                "uri": format!("image-artifact://sha256/{sha256}"),
+                "kind": "image",
+                "format": "png",
+                "mimeType": "image/png",
+                "width": 1,
+                "height": 1,
+                "sizeBytes": bytes.len() as u64,
+                "sha256": sha256
+            })
+        );
+
+        let tool_result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "call-read-generated".to_string(),
+            tool: "read_image".to_string(),
+            ok: true,
+            result: Some(result.clone()),
+            error: None,
+        };
+        let event = ReadImageTool.event_projection(&tool_result);
+        assert_eq!(
+            event.result.as_ref().unwrap()["artifact"],
+            result["artifact"]
+        );
+        assert!(event.result.as_ref().unwrap().get("image").is_none());
+        let model = ReadImageTool.model_projection(&tool_result);
+        assert!(model.result.as_ref().unwrap().get("artifact").is_none());
+        assert_eq!(
+            model.result.as_ref().unwrap()["path"],
+            format!("image-artifact://sha256/{sha256}")
+        );
 
         let forged = root.join("forged.png");
         fs::write(&forged, &bytes).unwrap();
@@ -875,6 +1037,27 @@ mod tests {
         fs::write(&path, tampered).unwrap();
         let error = execute(&context, json!({ "source": source })).unwrap_err();
         assert_eq!(error.code(), Some("agent.fileInput.integrityMismatch"));
+    }
+
+    #[test]
+    fn generated_artifact_uri_survives_storage_service_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let bytes = valid_test_png();
+        let (storage, _path, sha256) = publish_generated_artifact(&root, &bytes);
+        drop(storage);
+
+        let reopened = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        let context = context(None, AgentPermissions::default())
+            .with_runtime_services("run-generated-after-restart".to_string(), Some(reopened));
+        let uri = format!("image-artifact://sha256/{sha256}");
+
+        let result = execute(&context, json!({ "path": uri })).unwrap();
+
+        assert_eq!(result["path"], uri);
+        assert_eq!(result["sha256"], sha256);
+        assert_eq!(result["artifact"]["artifactId"], format!("sha256:{sha256}"));
+        assert_eq!(result["source"]["type"], "generated_artifact");
     }
 
     #[test]
@@ -901,27 +1084,13 @@ mod tests {
         let active_context = context(None, AgentPermissions::default())
             .with_skill_resources(Some(Arc::new(session)));
 
-        let result = execute(
-            &active_context,
-            json!({
-                "source": {
-                    "type": "skill_resource",
-                    "uri": uri
-                }
-            }),
-        )
-        .unwrap();
+        let result = execute(&active_context, json!({ "path": uri })).unwrap();
         assert_eq!(result["source"]["type"], "skill_resource");
         assert_eq!(result["path"], uri);
 
         let inactive = execute(
             &context(None, AgentPermissions::default()),
-            json!({
-                "source": {
-                    "type": "skill_resource",
-                    "uri": uri
-                }
-            }),
+            json!({ "path": uri }),
         )
         .unwrap_err();
         assert_eq!(inactive.code(), Some("agent.fileInput.snapshotUnavailable"));

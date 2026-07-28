@@ -115,9 +115,15 @@ Tool observation 文本现在只序列化精简后的 `result`/`error`，不再�
 | 文档读取            | `text`                                                                                     | M/E/T/A/C    | 行动、正文；超限后由 Archive `historyOpen` 恢复                     |
 | `read_image`        | `path`、`format`、`mimeType`、`sizeBytes`                                                  | M/E/T/A/C    | 行动、UI、审计、恢复                                                |
 | `read_image`        | `source.*`、`sha256`                                                                       | E/T/A/C      | 来源身份与审计；不重复进入模型文本                                  |
+| `read_image`        | 生成物 `artifact.*`                                                                        | E/T/A/C      | Host Artifact 原图预览、内容身份与恢复；不进入模型文本              |
 | `read_image`        | `image.mimeType`、`image.dataBase64`                                                       | 原始 Runtime | 原生多模态输入；不进入文本、事件、Trace、Archive、Checkpoint        |
 | `read_image`        | `thumbnailDataUrl`                                                                         | E            | 有界 UI 缩略图                                                      |
 | `read_image`        | `binaryOmittedFromHistory`、`thumbnailOmittedFromEvent`                                    | T/A/C 或 E   | 审计；明确二进制投影省略                                            |
+
+`read_image` 的模型输入契约只暴露一个必填 `path`。工作区相对/绝对路径、系统别名、
+`@attachments/...`、`image-artifact://...` 和 revision-bound `skill://...` 均由后端自动路由；
+旧 `source`/`filePath` 只保留执行兼容，不再进入模型 Tool Schema。简单输入不会扩大权限：
+外部绝对路径仍要求 `read=all`，附件、Skill 和生成物仍分别复验其权威记录。
 
 ### 4.2 工作区检索
 
@@ -218,15 +224,20 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 ### 4.8 图片生成
 
-| 字段                                                                                                                                                     | 消费者       | 归属和约束                       |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | -------------------------------- |
-| `schemaVersion`、`status`、`operation`                                                                                                                   | M/E/T/A/C    | 行动、UI、审计、恢复             |
-| `artifact.artifactId/uri/kind/format/mimeType/width/height/sizeBytes/sha256`                                                                             | M/E/T/A/C    | 行动、UI、审计、恢复             |
-| `audit.executionId/requestFingerprint/providerProfileId/adapterId/profileRevision/modelId/providerRequestId/httpStatus/createdAt/completedAt/durationMs` | E/T/A/C      | UI、审计、恢复、幂等             |
-| `failure.code/phase/message/recovery/retryable` 与三个不确定性布尔值                                                                                     | M/E/T/A/C    | 行动、UI、审计、恢复             |
-| `savedPath`、`visualInputStatus`                                                                                                                         | M/T/A/C      | 当前 Run 投递状态；E 明确去除    |
-| `image.mimeType/dataBase64`                                                                                                                              | 原始 Runtime | 原生多模态输入；所有文本投影去除 |
-| `binaryOmittedFromHistory`                                                                                                                               | T/A/C        | 二进制历史省略审计               |
+| 字段                                                                                                                                                     | 消费者       | 归属和约束                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------- |
+| `schemaVersion`、`status`、`operation`                                                                                                                   | M/E/T/A/C    | 行动、UI、审计、恢复                                 |
+| 派生的 `path`（`artifact.uri` 的模型友好副本）                                                                                                           | M/T/A/C      | 可直接作为 `read_image.path`，历史恢复时保持同一语义 |
+| `artifact.kind/format/mimeType/width/height/sizeBytes`                                                                                                   | M/E/T/A/C    | 行动、UI、审计、恢复                                 |
+| `artifact.uri`                                                                                                                                           | M/E/T/A/C    | Artifact 身份及兼容消费                              |
+| `artifact.artifactId/sha256`                                                                                                                             | E/T/A/C      | 内容身份、UI、审计、恢复                             |
+| `audit.executionId/requestFingerprint/providerProfileId/adapterId/profileRevision/modelId/providerRequestId/httpStatus/createdAt/completedAt/durationMs` | E/T/A/C      | UI、审计、恢复、幂等                                 |
+| `failure.code/phase/message/recovery/retryable` 与三个不确定性布尔值                                                                                     | M/E/T/A/C    | 行动、UI、审计、恢复                                 |
+| 派生的 `visualInputDelivery`                                                                                                                             | M            | 仅描述生成当时的视觉投递                             |
+| `savedPath`                                                                                                                                              | M/T/A/C      | 复制/导出与后端恢复；E 明确去除                      |
+| 原始 `visualInputStatus`                                                                                                                                 | T/A/C        | 原始运行审计；E 和模型投影去除                       |
+| `image.mimeType/dataBase64`                                                                                                                              | 原始 Runtime | 原生多模态输入；所有文本投影去除                     |
+| `binaryOmittedFromHistory`                                                                                                                               | T/A/C        | 二进制历史省略审计                                   |
 
 图片 audit 被 Core Server action audit、启动恢复和 Renderer 图片活动共同消费，不能从原始/持久结果删除。
 
@@ -275,24 +286,24 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 第 4 节记录 Raw Result 的完整消费者归属；下表是当前实际送入 M 的白名单。未列出的同组字段仍只属于 E/R/T/A/C。
 
-| Tool                                     | 当前 M 投影                                                                                                                        |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `attachments_list*`                      | scope、total/returned/omitted、truncated/nextCursor、附件 name/kind/mimeType/sizeBytes/readPath                                    |
-| `read_file`                              | path、行/总量、content、truncated/reason、next cursor                                                                              |
-| `read_pdf/word/presentation/spreadsheet` | path/format、页/部件/幻灯片/工作表计数、text、truncated                                                                            |
-| `read_image`                             | path/format/mimeType/sizeBytes；像素另走原生多模态消息                                                                             |
-| `workspace_map`                          | summary、treeText、coverage/refine、truncated；不重复发送 tree/workspace 参数                                                      |
-| `search_files/search_code`               | total/returned/omitted、matches、truncated/nextCursor、来源遗漏说明；不重复发送 query                                              |
-| `web_search`                             | Provider answer/snippets、title/url/publishedDate、images、contentKind/fullContentTool 和 Provider 恢复字段                        |
-| `web_fetch`                              | url、content、images、失败摘要、truncated                                                                                          |
-| `write_file`                             | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误                          |
-| `run_command`                            | exit/stdout/stderr/真实截断与失败状态、精简 policy、Artifact partial/stopReasons/scanned/returned/omitted/changes/expected outputs |
-| 三个 Office Tool                         | documentKind/operation、可复用 outputs、进程结果与失败不确定性                                                                     |
-| Skill 资源/脚本 Tool                     | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint                                                  |
-| `skills_activate`                        | status、Skill name/hasResources；完整激活记录由 Extension 消费                                                                     |
-| `image_generation`                       | status/operation、可复用 Artifact、failure、savedPath/visualInputStatus；去除 audit/hash/后端 ID                                   |
-| `conversation_history`                   | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳                                      |
-| `todo_update`                            | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费                            |
+| Tool                                     | 当前 M 投影                                                                                                                             |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `attachments_list*`                      | scope、total/returned/omitted、truncated/nextCursor、附件 name/kind/mimeType/sizeBytes/readPath                                         |
+| `read_file`                              | path、行/总量、content、truncated/reason、next cursor                                                                                   |
+| `read_pdf/word/presentation/spreadsheet` | path/format、页/部件/幻灯片/工作表计数、text、truncated                                                                                 |
+| `read_image`                             | path/format/mimeType/sizeBytes；像素另走原生多模态消息                                                                                  |
+| `workspace_map`                          | summary、treeText、coverage/refine、truncated；不重复发送 tree/workspace 参数                                                           |
+| `search_files/search_code`               | total/returned/omitted、matches、truncated/nextCursor、来源遗漏说明；不重复发送 query                                                   |
+| `web_search`                             | Provider answer/snippets、title/url/publishedDate、images、contentKind/fullContentTool 和 Provider 恢复字段                             |
+| `web_fetch`                              | url、content、images、失败摘要、truncated                                                                                               |
+| `write_file`                             | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误                               |
+| `run_command`                            | exit/stdout/stderr/真实截断与失败状态、精简 policy、Artifact partial/stopReasons/scanned/returned/omitted/changes/expected outputs      |
+| 三个 Office Tool                         | documentKind/operation、可复用 outputs、进程结果与失败不确定性                                                                          |
+| Skill 资源/脚本 Tool                     | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint                                                       |
+| `skills_activate`                        | status、Skill name/hasResources；完整激活记录由 Extension 消费                                                                          |
+| `image_generation`                       | status/operation、可直接交给 `read_image` 的 path、Artifact 展示元数据、savedPath、failure/visualInputDelivery；去除 audit/hash/后端 ID |
+| `conversation_history`                   | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳                                           |
+| `todo_update`                            | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费                                 |
 
 所有失败投影还会统一保留 `code/errorCode/recovery/phase`、权限/能力要求和副作用不确定性；重复的 `message/error` 只保留一份。
 

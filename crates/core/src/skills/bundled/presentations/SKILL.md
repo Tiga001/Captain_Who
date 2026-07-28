@@ -42,7 +42,7 @@ Every Builder command must declare its generated presentation with exactly one s
 2. Establish the audience, slide count, narrative, aspect ratio, and visual direction before building.
 3. Confirm the expected file effect in the native result or `artifactObservation`.
 4. Inspect slide order and content, then validate the final package.
-5. Render all changed slides in one contact sheet. On success, pass the exact returned `outputs[].source` to `read_image`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect every slide for overflow, overlap, broken media, alignment, and contrast, patch the same Builder or semantic request when needed, then render again.
+5. Render all changed slides in one contact sheet. On success, pass the exact returned `outputs[].readPath` as `read_image.path`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect every slide for overflow, overlap, broken media, alignment, and contrast, patch the same Builder or semantic request when needed, then render again.
 6. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
 
 Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and presentation-specific quality checks.

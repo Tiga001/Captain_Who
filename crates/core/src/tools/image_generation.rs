@@ -258,8 +258,9 @@ fn attach_model_artifact_delivery(
     context: &ToolExecutionContext,
 ) -> Value {
     // `execution_result` above is the closed public v1 contract. These fields are a runtime-only
-    // extension for the model loop: event_projection removes them before Renderer transport,
-    // while model/history projections retain only the stable path and textual delivery status.
+    // extension for the model loop: event_projection removes them before Renderer transport.
+    // History retains the managed filesystem path for audit/compatibility; the model projection
+    // additionally exposes the Artifact URI as its single read_image-oriented `path`.
     let Some(object) = public_result.as_object_mut() else {
         return public_result;
     };
@@ -389,14 +390,27 @@ fn remove_runtime_image(result: &AgentToolResult, mark_history_omission: bool) -
 pub(super) fn image_generation_model_projection(result: &AgentToolResult) -> AgentToolResult {
     let projected = result.result.as_ref().and_then(|value| {
         let mut output = serde_json::Map::new();
-        for field in [
-            "schemaVersion",
-            "status",
-            "operation",
-            "savedPath",
-            "visualInputStatus",
-        ] {
+        for field in ["schemaVersion", "status", "operation", "savedPath"] {
             super::model_projection::insert_field(&mut output, value, field);
+        }
+        if let Some(path) = generated_artifact_read_path(value) {
+            // `read_image` accepts the application-owned Artifact URI directly. Give the model
+            // one copyable path instead of requiring it to reconstruct an internal source object
+            // from the Artifact URI plus the managed filesystem path.
+            output.insert("path".to_string(), Value::String(path.to_string()));
+        }
+        if let Some(status) = value
+            .get("visualInputStatus")
+            .and_then(Value::as_str)
+            .map(stable_model_visual_delivery)
+        {
+            // Use a time-stable description. In particular, never persist `attachedThisRun` in
+            // model history where "this run" would refer to a different request after restart or
+            // on a later user turn.
+            output.insert(
+                "visualInputDelivery".to_string(),
+                Value::String(status.to_string()),
+            );
         }
         if let Some(artifact) = value.get("artifact").and_then(|artifact| {
             super::model_projection::retain_object_fields(
@@ -437,7 +451,44 @@ pub(super) fn image_generation_model_projection(result: &AgentToolResult) -> Age
 }
 
 pub(super) fn image_generation_history_projection(result: &AgentToolResult) -> AgentToolResult {
-    remove_runtime_image(result, true)
+    let mut projected = remove_runtime_image(result, true);
+    if let Some(value) = projected.result.as_mut() {
+        if value.get("path").is_none() {
+            if let Some(path) = generated_artifact_read_path(value).map(str::to_string) {
+                if let Some(object) = value.as_object_mut() {
+                    // Persist the same simple read reference as the model projection. After
+                    // compaction, conversation_history can therefore recover a generated image
+                    // result whose `path` is directly reusable by read_image without rebuilding
+                    // the legacy URI + savedPath source object.
+                    object.insert("path".to_string(), Value::String(path));
+                }
+            }
+        }
+    }
+    canonical_tool_result_for_context(&projected)
+}
+
+fn generated_artifact_read_path(value: &Value) -> Option<&str> {
+    value
+        .get("artifact")?
+        .get("uri")?
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+fn stable_model_visual_delivery(status: &str) -> &'static str {
+    match status {
+        "attachedThisRun" => "attachedDuringGeneration",
+        "unsupportedByCurrentModel" => "notAttachedUnsupportedAtGeneration",
+        "omittedTooLarge" => "notAttachedArtifactTooLarge",
+        "omittedRunBudgetExceeded" => "notAttachedRunBudgetExceeded",
+        "omittedCancelled" => "notAttachedCancelled",
+        "unavailable" => "notAttachedUnavailable",
+        "notRestoredAfterRestart" => "notAttachedAfterRestart",
+        "pathUnavailable" => "pathUnavailable",
+        _ => "unknown",
+    }
 }
 
 fn image_generation_event_projection(result: &AgentToolResult) -> AgentToolResult {
@@ -2270,6 +2321,10 @@ mod tests {
             .with_model_capabilities(ModelCapabilities { image_input: true });
         let vision_result = vision_tool.execute(&vision_context, args).unwrap();
         assert_eq!(vision_result["visualInputStatus"], "attachedThisRun");
+        let artifact_uri = vision_result["artifact"]["uri"]
+            .as_str()
+            .expect("successful Artifact has a URI")
+            .to_string();
         let encoded = vision_result["image"]["dataBase64"]
             .as_str()
             .unwrap()
@@ -2291,16 +2346,29 @@ mod tests {
         };
         let model = vision_tool.model_projection(&raw);
         let model_value = model.result.as_ref().unwrap();
+        assert_eq!(model_value["path"], artifact_uri);
         assert_eq!(model_value["savedPath"], path.to_str().unwrap());
+        assert_eq!(
+            model_value["visualInputDelivery"],
+            "attachedDuringGeneration"
+        );
+        assert!(model_value.get("visualInputStatus").is_none());
+        assert!(!serde_json::to_string(model_value)
+            .unwrap()
+            .contains("attachedThisRun"));
+        assert_eq!(model_value["artifact"]["uri"], artifact_uri);
         assert!(model_value.get("image").is_none());
         assert!(!serde_json::to_string(&model).unwrap().contains(&encoded));
 
         for durable in [
             vision_tool.trace_projection(&raw),
+            vision_tool.archive_projection(&raw),
             vision_tool.checkpoint_projection(&raw),
         ] {
             let durable_value = durable.result.as_ref().unwrap();
+            assert_eq!(durable_value["path"], artifact_uri);
             assert_eq!(durable_value["savedPath"], path.to_str().unwrap());
+            assert_eq!(durable_value["visualInputStatus"], "attachedThisRun");
             assert_eq!(durable_value["binaryOmittedFromHistory"], true);
             let serialized = serde_json::to_string(&durable).unwrap();
             assert!(!serialized.contains(&encoded));
@@ -2460,7 +2528,35 @@ mod tests {
             .unwrap()
             .contains("dataBase64"));
 
+        let model = image_generation_model_projection(&result);
+        let model_value = model.result.as_ref().unwrap();
+        assert_eq!(
+            model_value["path"],
+            result.result.as_ref().unwrap()["artifact"]["uri"]
+        );
+        assert_eq!(
+            model_value["visualInputDelivery"],
+            "notAttachedAfterRestart"
+        );
+        assert!(model_value.get("visualInputStatus").is_none());
+
+        let durable = image_generation_history_projection(&result);
+        let durable_value = durable.result.as_ref().unwrap();
+        assert_eq!(
+            durable_value["path"],
+            result.result.as_ref().unwrap()["artifact"]["uri"]
+        );
+        assert_eq!(durable_value["savedPath"], path.to_str().unwrap());
+        assert_eq!(
+            durable_value["visualInputStatus"],
+            "notRestoredAfterRestart"
+        );
+
         let event = image_generation_event_projection(&result);
+        assert!(event
+            .result
+            .as_ref()
+            .is_some_and(|value| value.get("path").is_none()));
         serde_json::from_value::<AgentImageGenerationResult>(event.result.unwrap())
             .expect("public event projection remains strict v1");
     }

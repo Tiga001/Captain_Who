@@ -426,12 +426,108 @@
 
 .image-generation-activity__details {
   display: grid;
-  gap: 4px;
+  gap: 8px;
 }
 
 .image-generation-activity__details p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.image-generation-activity__preview {
+  position: relative;
+  display: grid;
+  width: clamp(180px, 33.333%, 280px);
+  min-width: 0;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  place-items: center;
+  color: var(--mc-color-text-muted);
+  background: color-mix(in srgb, var(--mc-color-surface-muted) 92%, var(--mc-color-focus-ring) 8%);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-lg);
+}
+
+.image-generation-activity__preview > button {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  cursor: zoom-in;
+}
+
+.image-generation-activity__preview > button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: -3px;
+}
+
+.image-generation-activity__preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.image-generation-activity__preview > svg {
+  width: 28px;
+  height: 28px;
+}
+
+.image-generation-activity__wave {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.image-generation-activity__wave i {
+  position: absolute;
+  left: -18%;
+  width: 136%;
+  height: 58%;
+  border-top: 2px solid color-mix(in srgb, var(--mc-color-focus-ring) 74%, transparent);
+  border-radius: 50%;
+  animation: image-generation-wave 2.4s ease-in-out infinite;
+}
+
+.image-generation-activity__wave i:nth-child(1) {
+  top: 25%;
+}
+
+.image-generation-activity__wave i:nth-child(2) {
+  top: 43%;
+  opacity: 0.68;
+  animation-delay: -0.8s;
+}
+
+.image-generation-activity__wave i:nth-child(3) {
+  top: 61%;
+  opacity: 0.4;
+  animation-delay: -1.6s;
+}
+
+@keyframes image-generation-wave {
+  0%,
+  100% {
+    transform: translate3d(-3%, 5%, 0) scaleY(0.84);
+  }
+
+  50% {
+    transform: translate3d(3%, -5%, 0) scaleY(1.08);
+  }
+}
+
+@media (max-width: 620px) {
+  .image-generation-activity__preview {
+    width: min(100%, 240px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-generation-activity__wave i {
+    animation: none;
+  }
 }
 
 .office-artifact-card {
