@@ -1,12 +1,13 @@
 import type { IpcRenderer } from 'electron'
-import type { ImageGenerationHostApi } from '@mycopilot/host-api'
+import { HOST_CHANNELS, type ImageGenerationHostApi } from '@mycopilot/host-api'
 
-export const IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL = 'host:imageGeneration.getConfiguration'
+export const IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL =
+  HOST_CHANNELS.imageGeneration.getConfiguration
 export const IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL =
-  'host:imageGeneration.updateConfiguration'
-export const IMAGE_GENERATION_SET_ENABLED_CHANNEL = 'host:imageGeneration.setEnabled'
-export const IMAGE_GENERATION_GET_STATUS_CHANNEL = 'host:imageGeneration.getStatus'
-export const IMAGE_GENERATION_READ_ARTIFACT_CHANNEL = 'host:imageGeneration.readArtifact'
+  HOST_CHANNELS.imageGeneration.updateConfiguration
+export const IMAGE_GENERATION_SET_ENABLED_CHANNEL = HOST_CHANNELS.imageGeneration.setEnabled
+export const IMAGE_GENERATION_GET_STATUS_CHANNEL = HOST_CHANNELS.imageGeneration.getStatus
+export const IMAGE_GENERATION_READ_ARTIFACT_CHANNEL = HOST_CHANNELS.imageGeneration.readArtifact
 
 type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke'>
 

@@ -2283,7 +2283,7 @@ mod tests {
     use crate::image_generation::{
         ImageArtifactFormat, ImageGenerationExecutionFailureCode, ImageGenerationExecutionPhase,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn image_generation_audit() -> AgentImageGenerationAudit {
         AgentImageGenerationAudit {
@@ -2299,6 +2299,62 @@ mod tests {
             completed_at: 20,
             duration_ms: 10,
         }
+    }
+
+    #[test]
+    fn agent_events_match_the_cross_language_golden_contract() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../packages/protocol/fixtures/agent-contract-v1.json"
+        ))
+        .unwrap();
+        let events = &fixture["events"];
+
+        let message_delta = AgentEvent::MessageDelta {
+            run_id: "run-contract-v1".to_string(),
+            stream_id: Some("stream-contract-v1".to_string()),
+            delta: "hello".to_string(),
+        };
+        let tool_call = AgentEvent::ToolCall {
+            run_id: "run-contract-v1".to_string(),
+            call: AgentToolCall {
+                id: "call-contract-v1".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "path": "README.md" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: Some("Inspect project documentation.".to_string()),
+            },
+        };
+        let tool_result = AgentEvent::ToolResult {
+            run_id: "run-contract-v1".to_string(),
+            result: AgentToolResult {
+                exact_archive_file: None,
+                call_id: "call-contract-v1".to_string(),
+                tool: "read_file".to_string(),
+                ok: true,
+                result: Some(json!({ "content": "MyCopilot Next" })),
+                error: None,
+            },
+        };
+        let done = AgentEvent::Done {
+            run_id: "run-contract-v1".to_string(),
+            success: true,
+            status: Some(AgentRunStatus::Completed),
+            content: Some("done".to_string()),
+            usage: None,
+            finish_reason: None,
+            proposed_actions: Vec::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(message_delta).unwrap(),
+            events["messageDelta"]
+        );
+        assert_eq!(serde_json::to_value(tool_call).unwrap(), events["toolCall"]);
+        assert_eq!(
+            serde_json::to_value(tool_result).unwrap(),
+            events["toolResult"]
+        );
+        assert_eq!(serde_json::to_value(done).unwrap(), events["done"]);
     }
 
     #[test]

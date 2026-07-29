@@ -3,6 +3,42 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[test]
+fn agent_method_names_match_the_cross_language_golden_contract() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/agent-contract-v1.json"
+    ))
+    .unwrap();
+    let methods = &fixture["methods"];
+
+    for (key, expected) in [
+        ("cancelRun", AGENT_CANCEL_RUN_METHOD),
+        ("steerRun", AGENT_STEER_RUN_METHOD),
+        (
+            "startConversationTurn",
+            AGENT_START_CONVERSATION_TURN_METHOD,
+        ),
+        (
+            "getContextWindowSnapshot",
+            AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
+        ),
+        ("listPendingActions", AGENT_LIST_PENDING_ACTIONS_METHOD),
+        ("approveAction", AGENT_APPROVE_ACTION_METHOD),
+        ("rejectAction", AGENT_REJECT_ACTION_METHOD),
+        ("cancelAction", AGENT_CANCEL_ACTION_METHOD),
+        ("getUsageSummary", AGENT_GET_USAGE_SUMMARY_METHOD),
+        ("clearUsageRecords", AGENT_CLEAR_USAGE_RECORDS_METHOD),
+        ("readFileDraft", AGENT_READ_FILE_DRAFT_METHOD),
+        ("getFileWriteDiff", AGENT_GET_FILE_WRITE_DIFF_METHOD),
+        ("eventNotification", AGENT_EVENT_NOTIFICATION_METHOD),
+    ] {
+        assert_eq!(
+            methods[key], expected,
+            "Agent method fixture drifted at {key}"
+        );
+    }
+}
+
+#[test]
 fn image_generation_configuration_contract_is_strict_and_text_to_image_is_explicit() {
     assert_eq!(
         IMAGE_GENERATION_GET_CONFIGURATION_METHOD,

@@ -35,5 +35,52 @@ export default defineConfig(
       'react-refresh/only-export-components': 'off'
     }
   },
+  {
+    files: ['src/renderer/src/features/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/app/**'],
+              message:
+                'Feature modules must not depend on the application composition layer. Move shared domain code into a feature or shared module.'
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    files: ['src/renderer/src/components/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/app/**', '**/features/**'],
+              message:
+                'Shared UI components must remain independent of application and feature modules.'
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    files: ['src/main/**/*.ts', 'src/preload/**/*.ts'],
+    ignores: ['**/*.test.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'Literal[value=/^host:/]',
+          message: 'Host IPC channel names must come from HOST_CHANNELS in @mycopilot/host-api.'
+        }
+      ]
+    }
+  },
   eslintConfigPrettier
 )

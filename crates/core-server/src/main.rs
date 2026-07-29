@@ -1,15 +1,6 @@
-mod agent;
-mod agent_support;
-mod git_dispatcher;
-mod image_generation_dispatcher;
-mod skill_installation_workflow_adapter;
-mod skill_source_resolution_adapter;
-mod skills_adapter;
-mod skills_dispatcher;
-#[cfg(test)]
-mod skills_installation_tests;
-#[cfg(test)]
-mod skills_test_support;
+mod adapters;
+mod application;
+mod transport;
 
 #[cfg(test)]
 fn test_tool_set_checkpoint() -> mycopilot_core::AgentRunToolSetCheckpoint {
@@ -40,11 +31,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
-use git_dispatcher::{GitDispatcher, GitJobPriority};
-use image_generation_dispatcher::{
+use adapters::git_dispatcher::{GitDispatcher, GitJobPriority};
+use adapters::image_generation_dispatcher::{
     ImageGenerationConfigurationDispatcher, ImageGenerationConfigurationJobKind,
 };
+use adapters::skill_installation_workflow_adapter::{
+    absent_cancellation_response, cancellation_preparation_id, cancellation_response,
+    commit_request, commit_response, dispatch_failure, is_missing_preparation, preparation_request,
+    preview_response, workflow_failure, SkillInspectionFailure,
+};
+use adapters::skill_source_resolution_adapter::{
+    cancellation_resolution_id, resolution_dispatch_failure, resolution_failure,
+    resolution_request, resolution_response, source_resolution_cancellation_response,
+    SkillSourceResolutionFailure,
+};
+use adapters::skills_adapter::{
+    enabled_catalog_response, installation_failure, management_response, mutation_response,
+    set_enabled_response, SkillManagementFailure,
+};
+use adapters::skills_dispatcher::{
+    mutation_admission_error_response, SkillMutationTarget, SkillsDispatcher,
+};
+use application::agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 #[cfg(test)]
 use mycopilot_core::image_generation::InMemoryCredentialStore;
@@ -120,26 +128,10 @@ use mycopilot_protocol_rs::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use skill_installation_workflow_adapter::{
-    absent_cancellation_response, cancellation_preparation_id, cancellation_response,
-    commit_request, commit_response, dispatch_failure, is_missing_preparation, preparation_request,
-    preview_response, workflow_failure, SkillInspectionFailure,
-};
-use skill_source_resolution_adapter::{
-    cancellation_resolution_id, resolution_dispatch_failure, resolution_failure,
-    resolution_request, resolution_response, source_resolution_cancellation_response,
-    SkillSourceResolutionFailure,
-};
-use skills_adapter::{
-    enabled_catalog_response, installation_failure, management_response, mutation_response,
-    set_enabled_response, SkillManagementFailure,
-};
-use skills_dispatcher::{mutation_admission_error_response, SkillMutationTarget, SkillsDispatcher};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 
-mod server;
-use server::*;
+use transport::*;
 
 fn main() -> io::Result<()> {
     if mycopilot_core::office::office_browser_proxy_mode_requested() {
@@ -188,6 +180,3 @@ fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServic
         storage,
     }
 }
-
-#[cfg(test)]
-mod server_tests;

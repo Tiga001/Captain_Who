@@ -1,6 +1,6 @@
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { describe, expect, it } from 'vitest'
-import { applyAgentEventToChatMessage } from '../../../app/agentEventReducer'
+import { applyAgentEventToChatMessage } from '../../agentRun/agentEventReducer'
 import type { ChatMessage } from '../chatTypes'
 import { normalizeReadActivities, normalizeReadImageThumbnailDataUrl } from '../agentReadActivities'
 

@@ -2,8 +2,8 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
-import { ConversationRow } from '../../components/sidebar/LeftSidebarConversationRow'
-import '../../components/sidebar/LeftSidebar.css'
+import { ConversationRow } from '../shell/sidebar/LeftSidebarConversationRow'
+import '../shell/sidebar/LeftSidebar.css'
 
 describe('ConversationRow', () => {
   it('portals the archive tooltip outside an overflow-clipped sidebar', async () => {

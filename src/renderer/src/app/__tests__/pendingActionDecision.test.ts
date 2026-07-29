@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyAuthoritativePendingActionDecision } from '../pendingActionDecision'
+import { applyAuthoritativePendingActionDecision } from '../../features/agentRun/pendingActionDecision'
 
 function deferred<TResult>() {
   let resolve!: (result: TResult) => void

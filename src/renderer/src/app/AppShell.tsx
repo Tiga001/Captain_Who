@@ -8,22 +8,15 @@ import {
   type SetStateAction
 } from 'react'
 import { createPortal } from 'react-dom'
-import type { AppWindowState } from '@mycopilot/host-api'
-import type {
-  AgentContextWindowSnapshot,
-  AgentEvent,
-  AgentProposedAction,
-  SkillSelection
-} from '@mycopilot/protocol'
+import type { AgentEvent, SkillSelection } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
-import { LeftSidebar } from '../components/sidebar/LeftSidebar'
-import { RightSidebar } from '../components/sidebar/RightSidebar'
+import { LeftSidebar } from './shell/sidebar/LeftSidebar'
+import { RightSidebar } from '../features/rightSidebar/RightSidebar'
 import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { featureFlags } from '../config/featureFlags'
-import { hostClient } from '../host/hostClient'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import type {
@@ -32,11 +25,9 @@ import type {
 } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
-import type { SettingsPageId } from '../features/settings/SettingsPage'
 import type {
   ChatComposerDraft,
   ChatConversation,
-  ChatConversationContinuationOrigin,
   ChatGuidanceTimelineItem,
   ChatPermissionMode,
   ChatMessage,
@@ -45,13 +36,9 @@ import type {
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
 import {
-  approveAgentAction,
-  cancelAgentAction,
   cancelAgentRun,
-  getContextWindowSnapshot,
   listPendingAgentActions,
   onAgentEvent,
-  rejectAgentAction,
   startConversationTurn,
   steerAgentRun
 } from '../features/agent/agentClient'
@@ -66,31 +53,25 @@ import { mergeSkillSelections } from '../features/skills/skillSelection'
 import {
   defaultUiPreferences,
   deleteChatMessages,
-  forkConversation,
-  loadComposerDrafts,
   loadConversation,
-  loadConversationMetas,
   loadInputAttachments,
-  loadUiPreferences,
   saveComposerDraft,
   saveConversationMeta,
   saveUiPreferences,
   upsertChatMessages
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
-import { NEW_CONVERSATION_DRAFT_ID, THINKING_PLACEHOLDER } from './appConstants'
+import { DEFAULT_AGENT_MAX_TOKENS, THINKING_PLACEHOLDER } from '../features/agentRun/constants'
+import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import type { ActiveRunBinding } from './appTypes'
-import { getAgentActionApprovalStatus, getAgentActionId } from './agentActionUtils'
 import {
-  applyAgentActionDecisionToChatMessage,
-  applyAgentActionExecutionToChatMessage,
   applyAgentEventToChatMessage,
   applyOptimisticGuidanceToChatMessage,
   ensureAgentRun,
   removeGuidanceFromChatMessage,
   settleAgentRunToolActivities,
   shouldTouchConversationForAgentEvent
-} from './agentEventReducer'
+} from '../features/agentRun/agentEventReducer'
 import {
   createAssistantMessage,
   createComposerDraft,
@@ -102,18 +83,19 @@ import {
 } from './chatMessageFactory'
 import {
   buildMessageContentWithAttachments,
-  DEFAULT_APP_WINDOW_STATE,
   getActiveRunModelId,
   getActiveRunSkillSelections,
-  getContextWindowSnapshotKey,
   getEditableLastTurn
 } from './appShellConversationUtils'
 import { useConversationPersistence } from './useConversationPersistence'
 import { useShellLayout } from './useShellLayout'
+import { useConversationNavigation } from './useConversationNavigation'
+import { usePersistedShellHydration } from './usePersistedShellHydration'
+import { useProjectRemoval } from './useProjectRemoval'
+import { useAppWindowSettings } from './useAppWindowSettings'
 import { AppShellSettingsView } from './AppShellSettingsView'
 import { AppShellWorkspace } from './AppShellWorkspace'
 import {
-  DEFAULT_AGENT_MAX_TOKENS,
   getAppShellPanelStyle,
   getPermissionModeAvailability,
   MainPanelToolbar,
@@ -123,7 +105,8 @@ import {
   SUPPORTS_NATIVE_FONT_SMOOTHING
 } from './AppShellSupport'
 import type { PendingMessageDelta } from './AppShellSupport'
-import { applyAuthoritativePendingActionDecision } from './pendingActionDecision'
+import { useAgentActionDecisionHandlers } from '../features/agentRun/useAgentActionDecisionHandlers'
+import { useContextWindowSnapshots } from '../features/agentRun/useContextWindowSnapshots'
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -162,13 +145,17 @@ export function AppShell() {
     toggleRightSidebar,
     toggleRightSidebarMaximized
   } = useShellLayout()
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
     useState<RightSidebarReviewNavigationRequest | null>(null)
   const rightSidebarReviewNavigationRequestIdRef = useRef(0)
-  const workspaceFocusBeforeSettingsRef = useRef<HTMLElement | null>(null)
-  const [appWindowState, setAppWindowState] = useState<AppWindowState>(DEFAULT_APP_WINDOW_STATE)
-  const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId>('general')
+  const {
+    appWindowMaximized,
+    closeSettings,
+    openSettings,
+    setSettingsOpen,
+    settingsInitialPage,
+    settingsOpen
+  } = useAppWindowSettings(shellRef)
   const [uiPreferences, setUiPreferences] = useState<UiPreferencesSnapshot>(() =>
     defaultUiPreferences()
   )
@@ -221,11 +208,6 @@ export function AppShell() {
   const recoveredGuidanceKeysRef = useRef<Set<string>>(new Set())
   const autoSubmitQueuedMessageRef = useRef<(conversationId: string) => void>(() => undefined)
   const editSubmissionSeqRef = useRef(0)
-  const contextWindowRequestSeqRef = useRef(0)
-  const contextWindowEventSeqRef = useRef<Map<string, number>>(new Map())
-  const [contextWindowSnapshots, setContextWindowSnapshots] = useState<
-    Record<string, AgentContextWindowSnapshot>
-  >({})
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
     [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft()
   })
@@ -266,15 +248,21 @@ export function AppShell() {
   )
   const activeContextWindowKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
   const contextWindowModelId = contextWindowModel?.id ?? null
-  const activeContextWindowSnapshotKey = contextWindowModelId
-    ? getContextWindowSnapshotKey(activeContextWindowKey, contextWindowModelId)
-    : null
   const contextWindowIndicatorEnabled =
     featureFlags.contextWindowIndicator && uiPreferences.showContextWindowUsage
-  const activeContextWindowSnapshot =
-    contextWindowIndicatorEnabled && activeContextWindowSnapshotKey
-      ? contextWindowSnapshots[activeContextWindowSnapshotKey]
-      : undefined
+  const {
+    activeSnapshot: activeContextWindowSnapshot,
+    recordSnapshot: recordContextWindowSnapshot
+  } = useContextWindowSnapshots({
+    conversationId: activeConversation?.id,
+    customPermissions: uiPreferences.customPermissions,
+    enabled: contextWindowIndicatorEnabled,
+    modelId: contextWindowModelId,
+    permissionMode: activeDraft.permissionMode,
+    projectId: activeConversation?.projectId ?? activeDraft.projectId,
+    scopeId: activeContextWindowKey,
+    skills: contextWindowSkills
+  })
   const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
@@ -368,6 +356,30 @@ export function AppShell() {
     []
   )
 
+  usePersistedShellHydration({
+    composerDraftsStage: {
+      attempt: composerDraftsStartupAttempt,
+      markFailed: markComposerDraftsStartupFailed,
+      markPending: markComposerDraftsStartupPending,
+      markReady: markComposerDraftsStartupReady
+    },
+    conversationMetasStage: {
+      attempt: conversationMetasStartupAttempt,
+      markFailed: markConversationMetasStartupFailed,
+      markPending: markConversationMetasStartupPending,
+      markReady: markConversationMetasStartupReady
+    },
+    setConversations: setConversationsWithRef,
+    setDrafts: setDraftsWithRef,
+    setUiPreferences,
+    uiPreferencesStage: {
+      attempt: uiPreferencesStartupAttempt,
+      markFailed: markUiPreferencesStartupFailed,
+      markPending: markUiPreferencesStartupPending,
+      markReady: markUiPreferencesStartupReady
+    }
+  })
+
   useLayoutEffect(() => {
     setDrafts((renderedDrafts) =>
       synchronizeComposerDraftForScope(renderedDrafts, draftsRef.current, activeDraftId)
@@ -452,178 +464,6 @@ export function AppShell() {
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
-
-  useEffect(() => {
-    if (!contextWindowIndicatorEnabled || !contextWindowModel || !contextWindowModelId) {
-      return undefined
-    }
-
-    const requestSequence = contextWindowRequestSeqRef.current + 1
-    contextWindowRequestSeqRef.current = requestSequence
-    const scopeKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
-    const snapshotKey = getContextWindowSnapshotKey(scopeKey, contextWindowModelId)
-    const eventSequenceAtRequest = contextWindowEventSeqRef.current.get(snapshotKey) ?? 0
-    let cancelled = false
-
-    void getContextWindowSnapshot({
-      conversationId: activeConversation?.id,
-      projectId: activeConversation?.projectId ?? activeDraft.projectId,
-      modelId: contextWindowModel.id,
-      maxTokens: DEFAULT_AGENT_MAX_TOKENS,
-      skills: contextWindowSkills.length > 0 ? contextWindowSkills : undefined,
-      permissions: resolveChatPermissions(
-        activeDraft.permissionMode,
-        uiPreferences.customPermissions
-      )
-    })
-      .then(({ snapshot }) => {
-        if (cancelled || contextWindowRequestSeqRef.current !== requestSequence) return
-        if ((contextWindowEventSeqRef.current.get(snapshotKey) ?? 0) !== eventSequenceAtRequest) {
-          return
-        }
-        setContextWindowSnapshots((current) => {
-          if (snapshot?.model === contextWindowModelId) {
-            return { ...current, [snapshotKey]: snapshot }
-          }
-          if (!(snapshotKey in current)) return current
-          const next = { ...current }
-          delete next[snapshotKey]
-          return next
-        })
-      })
-      .catch((error) => {
-        if (!cancelled) console.error('Failed to inspect context window', error)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [
-    activeConversation?.id,
-    activeConversation?.projectId,
-    activeDraft.permissionMode,
-    activeDraft.projectId,
-    contextWindowSkills,
-    contextWindowModel,
-    contextWindowModelId,
-    contextWindowIndicatorEnabled,
-    uiPreferences.customPermissions
-  ])
-
-  useEffect(() => {
-    let cancelled = false
-    const unsubscribe = hostClient.app.onWindowStateChange(setAppWindowState)
-
-    void hostClient.app
-      .getWindowState()
-      .then((state) => {
-        if (!cancelled) {
-          setAppWindowState(state)
-        }
-      })
-      .catch((error) => {
-        console.error('Failed to load app window state', error)
-      })
-
-    return () => {
-      cancelled = true
-      unsubscribe()
-    }
-  }, [])
-
-  useEffect(() => {
-    let cancelled = false
-    markUiPreferencesStartupPending()
-    void loadUiPreferences()
-      .then((preferences) => {
-        if (!cancelled) {
-          setUiPreferences(preferences)
-          markUiPreferencesStartupReady()
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          markUiPreferencesStartupFailed(error)
-          console.error('Failed to load UI preferences', error)
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [
-    markUiPreferencesStartupFailed,
-    markUiPreferencesStartupPending,
-    markUiPreferencesStartupReady,
-    uiPreferencesStartupAttempt
-  ])
-
-  useEffect(() => {
-    let cancelled = false
-    markComposerDraftsStartupPending()
-    void loadComposerDrafts()
-      .then((storedDrafts) => {
-        if (cancelled) return
-        setDraftsWithRef({
-          [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft(),
-          ...storedDrafts
-        })
-        markComposerDraftsStartupReady()
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          markComposerDraftsStartupFailed(error)
-          console.error('Failed to load composer drafts', error)
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [
-    composerDraftsStartupAttempt,
-    markComposerDraftsStartupFailed,
-    markComposerDraftsStartupPending,
-    markComposerDraftsStartupReady,
-    setDraftsWithRef
-  ])
-
-  useEffect(() => {
-    let cancelled = false
-    markConversationMetasStartupPending()
-    void loadConversationMetas()
-      .then((storedConversations) => {
-        if (cancelled) return
-
-        setConversationsWithRef((currentConversations) => {
-          const currentById = new Map(
-            currentConversations.map((conversation) => [conversation.id, conversation])
-          )
-          const storedIds = new Set(storedConversations.map((conversation) => conversation.id))
-          return [
-            ...storedConversations.map((conversation) => {
-              const current = currentById.get(conversation.id)
-              return current && current.messagesLoaded !== false ? current : conversation
-            }),
-            ...currentConversations.filter((conversation) => !storedIds.has(conversation.id))
-          ]
-        })
-        markConversationMetasStartupReady()
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          markConversationMetasStartupFailed(error)
-          console.error('Failed to load conversation metadata', error)
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [
-    conversationMetasStartupAttempt,
-    markConversationMetasStartupFailed,
-    markConversationMetasStartupPending,
-    markConversationMetasStartupReady,
-    setConversationsWithRef
-  ])
 
   const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
     setUiPreferences((currentPreferences) => {
@@ -1211,17 +1051,7 @@ export function AppShell() {
     return onAgentEvent((agentEvent) => {
       if (agentEvent.type === 'context_window_updated') {
         const conversationId = agentEvent.conversationId
-        if (contextWindowIndicatorEnabled && conversationId) {
-          const snapshotKey = getContextWindowSnapshotKey(conversationId, agentEvent.snapshot.model)
-          contextWindowEventSeqRef.current.set(
-            snapshotKey,
-            (contextWindowEventSeqRef.current.get(snapshotKey) ?? 0) + 1
-          )
-          setContextWindowSnapshots((current) => ({
-            ...current,
-            [snapshotKey]: agentEvent.snapshot
-          }))
-        }
+        if (conversationId) recordContextWindowSnapshot(conversationId, agentEvent.snapshot)
         return
       }
 
@@ -1238,7 +1068,7 @@ export function AppShell() {
 
       handleBoundAgentEvent(binding.conversationId, binding.pendingMessageId, agentEvent)
     })
-  }, [contextWindowIndicatorEnabled, handleBoundAgentEvent])
+  }, [handleBoundAgentEvent, recordContextWindowSnapshot])
 
   useEffect(() => {
     const pendingMessageDeltas = pendingMessageDeltasRef.current
@@ -1779,335 +1609,61 @@ export function AppShell() {
     ]
   )
 
-  const selectConversation = useCallback(
-    (conversationId: string, messageId?: string | null, loadedConversation?: ChatConversation) => {
-      activeConversationIdRef.current = conversationId
-      const selectedConversation =
-        loadedConversation ??
-        conversationsRef.current.find((conversation) => conversation.id === conversationId)
-      const shouldRestoreRememberedPosition = !messageId && !selectedConversation?.unreadAt
-
-      setScrollTargetMessageId(messageId ?? null)
-      setActiveConversationInitialScrollTop(
-        shouldRestoreRememberedPosition
-          ? (conversationScrollPositionsRef.current.get(conversationId) ?? null)
-          : null
-      )
-
-      let conversationToSave: ChatConversation | null = null
-      let loadedConversationFound = false
-      const nextConversations = conversationsRef.current.map((conversation) => {
-        if (conversation.id !== conversationId) return conversation
-        loadedConversationFound = true
-        const selected = loadedConversation ?? conversation
-        if (!selected.unreadAt) return selected
-
-        conversationToSave = {
-          ...selected,
-          unreadAt: null
-        }
-        return conversationToSave
-      })
-      if (loadedConversation && !loadedConversationFound) {
-        const selected = loadedConversation.unreadAt
-          ? { ...loadedConversation, unreadAt: null }
-          : loadedConversation
-        if (loadedConversation.unreadAt) conversationToSave = selected
-        nextConversations.unshift(selected)
-      }
-
-      if (loadedConversation || conversationToSave) {
-        setConversationsWithRef(nextConversations)
-      }
-      if (conversationToSave) {
-        void saveConversationMeta(conversationToSave)
-      }
-
-      setActiveConversationId(conversationId)
-      if (!loadedConversation) {
-        void hydrateConversation(conversationId)
-      }
+  const {
+    archiveConversations,
+    continueInNewTask,
+    openContinuationOrigin,
+    patchConversation,
+    rememberConversationScrollPosition,
+    selectConversation
+  } = useConversationNavigation({
+    activeConversationIdRef,
+    conversationScrollPositionsRef,
+    conversationsRef,
+    drafts,
+    hydrateConversation,
+    messages: {
+      continueInNewTaskFailed: t('chat.continueInNewTaskFailed'),
+      originArchived: t('chat.continuationOriginArchived'),
+      originMissing: t('chat.continuationOriginMissing'),
+      originOpenFailed: t('chat.continuationOriginOpenFailed')
     },
-    [hydrateConversation, setConversationsWithRef]
-  )
+    setActiveConversationId,
+    setActiveConversationInitialScrollTop,
+    setConversationScrollToBottomSignal,
+    setConversationsWithRef,
+    setDraftsWithRef,
+    setScrollTargetMessageId,
+    setSettingsOpen,
+    showToast
+  })
 
-  const continueInNewTask = useCallback(
-    async (sourceConversationId: string, throughAssistantMessageId: string) => {
-      try {
-        const newConversation = await forkConversation(
-          sourceConversationId,
-          throughAssistantMessageId,
-          createId('conversation-fork-request')
-        )
-        const sourceDraft =
-          drafts[sourceConversationId] ??
-          createComposerDraft({
-            modelId: newConversation.modelId ?? undefined,
-            projectId: newConversation.projectId
-          })
-        const newDraft = createComposerDraft({
-          modelId: newConversation.modelId ?? sourceDraft.modelId,
-          permissionMode: sourceDraft.permissionMode,
-          projectId: newConversation.projectId
-        })
-
-        setConversationsWithRef((currentConversations) => [
-          newConversation,
-          ...currentConversations.filter((conversation) => conversation.id !== newConversation.id)
-        ])
-        setDraftsWithRef((currentDrafts) => ({
-          ...currentDrafts,
-          [newConversation.id]: newDraft
-        }))
-        void saveComposerDraft(newConversation.id, newDraft)
-        conversationScrollPositionsRef.current.delete(newConversation.id)
-        activeConversationIdRef.current = newConversation.id
-        setScrollTargetMessageId(null)
-        setActiveConversationInitialScrollTop(null)
-        setConversationScrollToBottomSignal((signal) => signal + 1)
-        setActiveConversationId(newConversation.id)
-        setSettingsOpen(false)
-      } catch (error) {
-        console.error('Failed to continue conversation in a new task', error)
-        const message = error instanceof Error ? error.message.trim() : ''
-        showToast(message || t('chat.continueInNewTaskFailed'))
-      }
-    },
-    [drafts, setConversationsWithRef, setDraftsWithRef, showToast, t]
-  )
-
-  const openContinuationOrigin = useCallback(
-    async (origin: ChatConversationContinuationOrigin) => {
-      try {
-        const sourceConversation = await loadConversation(origin.sourceConversationId)
-        if (!sourceConversation) {
-          showToast(t('chat.continuationOriginMissing'))
-          return
-        }
-        if (sourceConversation.archivedAt !== null && sourceConversation.archivedAt !== undefined) {
-          showToast(t('chat.continuationOriginArchived'))
-          return
-        }
-        selectConversation(origin.sourceConversationId, origin.sourceMessageId, sourceConversation)
-      } catch (error) {
-        console.error('Failed to open continuation origin', error)
-        showToast(t('chat.continuationOriginOpenFailed'))
-      }
-    },
-    [selectConversation, showToast, t]
-  )
-
-  const rememberConversationScrollPosition = useCallback(
-    (conversationId: string, scrollTop: number) => {
-      conversationScrollPositionsRef.current.set(conversationId, scrollTop)
-    },
-    []
-  )
-
-  const patchConversation = useCallback(
-    (conversationId: string, patch: Partial<ChatConversation>) => {
-      let nextConversation: ChatConversation | null = null
-      const nextConversations = conversationsRef.current.map((conversation) => {
-        if (conversation.id !== conversationId) return conversation
-
-        nextConversation = { ...conversation, ...patch }
-        return nextConversation
-      })
-
-      if (nextConversation) {
-        setConversationsWithRef(nextConversations)
-        void saveConversationMeta(nextConversation)
-      }
-    },
-    [setConversationsWithRef]
-  )
-
-  const archiveConversations = useCallback(
-    (predicate: (conversation: ChatConversation) => boolean) => {
-      const archivedAt = Date.now()
-      setConversationsWithRef((currentConversations) =>
-        currentConversations.map((conversation) => {
-          if (conversation.archivedAt || !predicate(conversation)) return conversation
-
-          const nextConversation = {
-            ...conversation,
-            archivedAt,
-            unreadAt: null
-          }
-          void saveConversationMeta(nextConversation)
-          return nextConversation
-        })
-      )
-    },
-    [setConversationsWithRef]
-  )
-
-  const removeProject = useCallback(
-    async (projectId: string): Promise<boolean> => {
-      const projectConversations = conversationsRef.current.filter(
-        (conversation) => conversation.projectId === projectId
-      )
-      const conversationIds = new Set(projectConversations.map((conversation) => conversation.id))
-      const runIds = new Set<string>()
-      const pendingActions = new Map<string, { runId: string; actionId: string }>()
-
-      editSubmissionSeqRef.current += 1
-      for (const conversation of projectConversations) {
-        for (const message of conversation.messages) {
-          if (message.role !== 'assistant' || message.status !== 'pending') continue
-
-          cancelledPendingMessageIdsRef.current.add(message.id)
-          const pendingRunId = message.agentRun?.runId
-          if (pendingRunId) runIds.add(pendingRunId)
-          for (const action of message.agentRun?.approvals ?? []) {
-            if (pendingRunId && getAgentActionApprovalStatus(action) === 'required') {
-              const actionId = getAgentActionId(action)
-              pendingActions.set(`${pendingRunId}\u0000${actionId}`, {
-                runId: pendingRunId,
-                actionId
-              })
-            }
-          }
-        }
-      }
-      for (const [runId, binding] of activeRunBindingsRef.current) {
-        if (conversationIds.has(binding.conversationId)) runIds.add(runId)
-      }
-
-      runIds.forEach((runId) => {
-        cancelledRunIdsRef.current.add(runId)
-        cleanupRunBinding(runId)
-      })
-      await Promise.allSettled([
-        ...[...runIds].map((runId) => cancelAgentRun(runId)),
-        ...[...pendingActions.values()].map(({ runId, actionId }) =>
-          cancelAgentAction(runId, actionId)
-        ),
-        ...[...conversationIds].map(async (conversationId) => {
-          await waitForConversationSaves(conversationId)
-          await waitForMessageUpserts(conversationId)
-          await waitForMessageStateSaves(conversationId)
-        })
-      ])
-
-      try {
-        await deleteProject(projectId)
-      } catch (error) {
-        console.error('Failed to remove project', error)
-        const cancelledAt = Date.now()
-        const reconciledConversations = conversationsRef.current.map((conversation) => {
-          if (conversation.projectId !== projectId) return conversation
-
-          return {
-            ...conversation,
-            messages: conversation.messages.map((message) => {
-              if (message.role !== 'assistant' || message.status !== 'pending') return message
-
-              const currentRun = ensureAgentRun(
-                message.agentRun,
-                message.agentRun?.runId ?? null,
-                'cancelled'
-              )
-              const cancelledMessage: ChatMessage = {
-                ...message,
-                content:
-                  message.content && message.content !== THINKING_PLACEHOLDER
-                    ? message.content
-                    : '',
-                status: 'sent',
-                agentRun: settleAgentRunToolActivities(
-                  {
-                    ...currentRun,
-                    completedAt: cancelledAt,
-                    todo: undefined
-                  },
-                  'cancelled',
-                  cancelledAt
-                )
-              }
-              enqueueChatMessageStateSave(conversation.id, cancelledMessage)
-              return cancelledMessage
-            })
-          }
-        })
-        setConversationsWithRef(reconciledConversations)
-        showToast(t('project.removeFailed'))
-        return false
-      }
-
-      const removedConversationIds = new Set(
-        conversationsRef.current
-          .filter((conversation) => conversation.projectId === projectId)
-          .map((conversation) => conversation.id)
-      )
-      for (const conversationId of removedConversationIds) {
-        conversationScrollPositionsRef.current.delete(conversationId)
-        pendingConversationSavesRef.current.delete(conversationId)
-        pendingMessageUpsertsRef.current.delete(conversationId)
-      }
-      for (const [key, pendingSave] of pendingMessageSavesRef.current) {
-        if (removedConversationIds.has(pendingSave.conversationId)) {
-          pendingMessageSavesRef.current.delete(key)
-        }
-      }
-
-      setConversationsWithRef((currentConversations) =>
-        currentConversations.filter((conversation) => !removedConversationIds.has(conversation.id))
-      )
-      setDraftsWithRef((currentDrafts) =>
-        Object.fromEntries(
-          Object.entries(currentDrafts)
-            .filter(([scopeId]) => !removedConversationIds.has(scopeId))
-            .map(([scopeId, draft]) => [
-              scopeId,
-              draft.projectId === projectId ? createComposerDraft() : draft
-            ])
-        )
-      )
-      setUiPreferences((currentPreferences) => {
-        const sidebarProjectOrder = currentPreferences.sidebarProjectOrder.filter(
-          (orderedProjectId) => orderedProjectId !== projectId
-        )
-        if (sidebarProjectOrder.length === currentPreferences.sidebarProjectOrder.length) {
-          return currentPreferences
-        }
-
-        const nextPreferences = {
-          ...currentPreferences,
-          sidebarProjectOrder,
-          updatedAt: Date.now()
-        }
-        void saveUiPreferences(nextPreferences)
-        return nextPreferences
-      })
-
-      if (
-        activeConversationIdRef.current &&
-        removedConversationIds.has(activeConversationIdRef.current)
-      ) {
-        activeConversationIdRef.current = null
-        setActiveConversationId(null)
-        setScrollTargetMessageId(null)
-        setActiveConversationInitialScrollTop(null)
-      }
-      return true
-    },
-    [
-      cleanupRunBinding,
-      deleteProject,
-      enqueueChatMessageStateSave,
-      pendingConversationSavesRef,
-      pendingMessageSavesRef,
-      pendingMessageUpsertsRef,
-      setConversationsWithRef,
-      setDraftsWithRef,
-      showToast,
-      t,
-      waitForConversationSaves,
-      waitForMessageStateSaves,
-      waitForMessageUpserts
-    ]
-  )
+  const removeProject = useProjectRemoval({
+    activeConversationIdRef,
+    activeRunBindingsRef,
+    cancelledPendingMessageIdsRef,
+    cancelledRunIdsRef,
+    cleanupRunBinding,
+    conversationScrollPositionsRef,
+    conversationsRef,
+    deleteProject,
+    editSubmissionSeqRef,
+    enqueueChatMessageStateSave,
+    pendingConversationSavesRef,
+    pendingMessageSavesRef,
+    pendingMessageUpsertsRef,
+    removeFailedMessage: t('project.removeFailed'),
+    setActiveConversationId,
+    setActiveConversationInitialScrollTop,
+    setConversationsWithRef,
+    setDraftsWithRef,
+    setScrollTargetMessageId,
+    setUiPreferences,
+    showToast,
+    waitForConversationSaves,
+    waitForMessageStateSaves,
+    waitForMessageUpserts
+  })
 
   const stopActiveGeneration = useCallback(() => {
     if (!activeConversationId) return
@@ -2274,124 +1830,12 @@ export function AppShell() {
     [mutateDraft, removeQueuedMessageByClientId, restoreRejectedGuidance, t, updateAssistantMessage]
   )
 
-  const handleApproveAgentAction = useCallback(
-    (messageId: string, action: AgentProposedAction) => {
-      if (!activeConversationId) return
-      const conversationId = activeConversationId
-      const actionId = getAgentActionId(action)
-      const runId = conversationsRef.current
-        .find((conversation) => conversation.id === conversationId)
-        ?.messages.find((message) => message.id === messageId)?.agentRun?.runId
-      void applyAuthoritativePendingActionDecision({
-        runId,
-        invoke: (authoritativeRunId) => approveAgentAction(authoritativeRunId, actionId),
-        apply: (execution) => {
-          updateAssistantMessage(
-            conversationId,
-            messageId,
-            (message) => applyAgentActionExecutionToChatMessage(message, execution),
-            { touchConversation: true }
-          )
-        },
-        onError: (error) => {
-          console.error('Failed to approve agent action', error)
-        },
-        onMissingRunId: () => {
-          console.warn('Cannot approve agent action without a run id', { actionId, messageId })
-        }
-      })
-    },
-    [activeConversationId, updateAssistantMessage]
-  )
-
-  const handleRejectAgentAction = useCallback(
-    (messageId: string, action: AgentProposedAction, message?: string) => {
-      if (!activeConversationId) return
-      const conversationId = activeConversationId
-      const actionId = getAgentActionId(action)
-      const runId = conversationsRef.current
-        .find((conversation) => conversation.id === conversationId)
-        ?.messages.find((currentMessage) => currentMessage.id === messageId)?.agentRun?.runId
-      void applyAuthoritativePendingActionDecision({
-        runId,
-        invoke: (authoritativeRunId) => rejectAgentAction(authoritativeRunId, actionId, message),
-        apply: (execution) => {
-          updateAssistantMessage(
-            conversationId,
-            messageId,
-            (currentMessage) => applyAgentActionExecutionToChatMessage(currentMessage, execution),
-            { touchConversation: true }
-          )
-        },
-        onError: (error) => {
-          console.error('Failed to reject agent action', error)
-        },
-        onMissingRunId: () => {
-          console.warn('Cannot reject agent action without a run id', { actionId, messageId })
-        }
-      })
-    },
-    [activeConversationId, updateAssistantMessage]
-  )
-
-  const handleCancelAgentAction = useCallback(
-    (messageId: string, action: AgentProposedAction) => {
-      if (!activeConversationId) return
-      const conversationId = activeConversationId
-      const actionId = getAgentActionId(action)
-      const runId = conversationsRef.current
-        .find((conversation) => conversation.id === conversationId)
-        ?.messages.find((message) => message.id === messageId)?.agentRun?.runId
-      void applyAuthoritativePendingActionDecision({
-        runId,
-        invoke: (authoritativeRunId) => cancelAgentAction(authoritativeRunId, actionId),
-        isAccepted: (cancelled) => cancelled,
-        apply: () => {
-          updateAssistantMessage(
-            conversationId,
-            messageId,
-            (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
-            { touchConversation: true }
-          )
-        },
-        onError: (error) => {
-          console.error('Failed to cancel agent action', error)
-        },
-        onMissingRunId: () => {
-          console.warn('Cannot cancel agent action without a run id', { actionId, messageId })
-        },
-        onNotAccepted: () => {
-          console.warn('Agent action cancellation was not accepted', { actionId, runId })
-        }
-      })
-    },
-    [activeConversationId, updateAssistantMessage]
-  )
-
-  const openSettings = useCallback(
-    (initialPage: SettingsPageId = 'general') => {
-      const activeElement = document.activeElement
-      workspaceFocusBeforeSettingsRef.current =
-        activeElement instanceof HTMLElement && shellRef.current?.contains(activeElement)
-          ? activeElement
-          : null
-      setSettingsInitialPage(initialPage)
-      setSettingsOpen(true)
-    },
-    [shellRef]
-  )
-  const closeSettings = useCallback(() => {
-    const previousWorkspaceFocus = workspaceFocusBeforeSettingsRef.current
-    workspaceFocusBeforeSettingsRef.current = null
-    setSettingsOpen(false)
-
-    window.requestAnimationFrame(() => {
-      if (previousWorkspaceFocus?.isConnected) {
-        previousWorkspaceFocus.focus({ preventScroll: true })
-      }
+  const { handleApproveAgentAction, handleCancelAgentAction, handleRejectAgentAction } =
+    useAgentActionDecisionHandlers({
+      activeConversationId,
+      conversationsRef,
+      updateAssistantMessage
     })
-  }, [])
-  const appWindowMaximized = appWindowState.isFullScreen || appWindowState.isMaximized
 
   return (
     <AppShellWorkspace

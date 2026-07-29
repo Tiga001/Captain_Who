@@ -1,0 +1,1717 @@
+use super::*;
+
+impl AgentService {
+    pub(in crate::application::agent) fn execute_office_operation(
+        &self,
+        agent_input: &AgentChatInput,
+        office_operation: &mycopilot_core::AgentOfficeOperationRequest,
+        skill_resources: Option<Arc<SkillResourceSession>>,
+        cancellation_token: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> AgentToolResult {
+        let tool = office_tool_name(office_operation.prepared.request.document_kind);
+        if office_operation.approval_status != AgentApprovalStatus::Approved {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: office_operation.id.clone(),
+                tool: tool.to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "office_operation_policy",
+                    "code": "notAuthorized",
+                })),
+                error: Some("Office operation has not been authorized.".to_string()),
+            };
+        }
+        if office_operation.schema_version != mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION
+            || !mycopilot_core::is_valid_agent_office_reason(&office_operation.reason)
+            || mycopilot_core::validate_frozen_agent_office_semantic_args(office_operation).is_err()
+            || office_operation.prepared.access
+                != mycopilot_core::office::OfficeOperationAccess::FileWrite
+            || office_operation.prepared.request.access()
+                != mycopilot_core::office::OfficeOperationAccess::FileWrite
+        {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: office_operation.id.clone(),
+                tool: tool.to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "office_operation_policy",
+                    "code": "invalidApprovedSnapshot",
+                    "recovery": "retry",
+                })),
+                error: Some(
+                    "The approved Office action is not a supported file-write snapshot."
+                        .to_string(),
+                ),
+            };
+        }
+        if permissions_from_input(agent_input).write == mycopilot_core::AgentWritePermission::Denied
+        {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: office_operation.id.clone(),
+                tool: tool.to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "office_operation_policy",
+                    "code": "writePermissionDenied",
+                    "recovery": "changePermissions",
+                })),
+                error: Some(
+                    "The current permission policy does not allow Office file changes.".to_string(),
+                ),
+            };
+        }
+        // Rebuild the Host-owned execution context at the last responsible moment. The Office
+        // engine re-resolves every frozen path against these current run-scoped permissions and
+        // attachment capabilities before it creates staging or invokes the provider.
+        let skill_resources = match skill_resources {
+            Some(resources) => Some(resources),
+            None => match self.restore_skill_resource_session(agent_input) {
+                Ok(resources) => resources,
+                Err(error) => {
+                    return office_skill_resource_restore_failure(
+                        office_operation,
+                        tool,
+                        &error.to_string(),
+                    );
+                }
+            },
+        };
+        let file_inputs = agent_file_input_execution_context(
+            agent_input,
+            skill_resources,
+            Arc::clone(&self.storage),
+        );
+        let execution_context = mycopilot_core::office::OfficeExecutionContext::from_run_context(
+            agent_input.context.as_ref(),
+        )
+        .with_file_inputs(file_inputs);
+        match self.office_engine.execute_prepared(
+            &execution_context,
+            &office_operation.prepared,
+            cancellation_token,
+            action_cancel_flag,
+        ) {
+            Ok(result) => office_operation_tool_result(&office_operation.id, tool, result),
+            Err(error) => office_engine_failure(
+                &office_operation.id,
+                tool,
+                &office_operation.prepared,
+                error,
+            ),
+        }
+    }
+
+    pub(in crate::application::agent) fn execute_skill_script(
+        &self,
+        agent_input: &AgentChatInput,
+        script: &AgentSkillScriptRequest,
+        resources: Option<&SkillResourceSession>,
+        authorization_source: CommandAuthorizationSource,
+        cancellation_token: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> AgentToolResult {
+        if script.approval_status != AgentApprovalStatus::Approved {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: script.id.clone(),
+                tool: "skills_run_script".to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "skill_script_policy",
+                    "code": "notAuthorized",
+                })),
+                error: Some("Skill script execution has not been authorized.".to_string()),
+            };
+        }
+        let permissions = permissions_from_input(agent_input);
+        let authorized = permissions.read == mycopilot_core::AgentReadPermission::All
+            && permissions.write == mycopilot_core::AgentWritePermission::All
+            && permissions.command_safety == mycopilot_core::AgentCommandSafetyPolicy::FullAccess
+            && match authorization_source {
+                CommandAuthorizationSource::Automatic => false,
+                CommandAuthorizationSource::ExplicitUser => true,
+            };
+        if !authorized {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: script.id.clone(),
+                tool: "skills_run_script".to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "skill_script_policy",
+                    "code": "authorizationDenied",
+                    "authorizationSource": authorization_source,
+                })),
+                error: Some(
+                    "The current permission policy does not authorize this Skill script."
+                        .to_string(),
+                ),
+            };
+        }
+        let Some(resources) = resources else {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: script.id.clone(),
+                tool: "skills_run_script".to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "skill_script",
+                    "code": "snapshotUnavailable",
+                    "recovery": "reactivateSkill",
+                })),
+                error: Some("The activated Skill resource snapshot is unavailable.".to_string()),
+            };
+        };
+        let Some(workspace_root) = workspace_root_optional(agent_input) else {
+            return AgentToolResult {
+                exact_archive_file: None,
+                call_id: script.id.clone(),
+                tool: "skills_run_script".to_string(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "skill_script",
+                    "code": "workspaceUnavailable",
+                    "recovery": "selectWorkspace",
+                })),
+                error: Some("Skill script execution requires a workspace.".to_string()),
+            };
+        };
+        match execute_skill_python_script(
+            resources,
+            &workspace_root,
+            script,
+            cancellation_token,
+            action_cancel_flag,
+        ) {
+            Ok(result) => skill_script_tool_result(&script.id, result),
+            Err(error) => skill_script_runtime_failure(&script.id, error),
+        }
+    }
+
+    pub(in crate::application::agent) fn execute_skill_materialization(
+        &self,
+        agent_input: &AgentChatInput,
+        materialization: &AgentSkillMaterializationRequest,
+        resources: Option<&SkillResourceSession>,
+    ) -> AgentToolResult {
+        let execute = || -> Result<AgentSkillMaterializationResult, (String, Option<Value>)> {
+            let plain_error = |message: &str| (message.to_string(), None);
+            if materialization.approval_status != AgentApprovalStatus::Approved {
+                return Err(plain_error(
+                    "Skill resource materialization has not been authorized.",
+                ));
+            }
+            if permissions_from_input(agent_input).write
+                == mycopilot_core::AgentWritePermission::Denied
+            {
+                return Err(plain_error(
+                    "Skill resource materialization requires workspace write permission.",
+                ));
+            }
+            let resources = resources.ok_or_else(|| {
+                plain_error("The activated Skill resource snapshot is unavailable.")
+            })?;
+            let workspace_root = workspace_root_optional(agent_input).ok_or_else(|| {
+                plain_error("Skill resource materialization requires a workspace.")
+            })?;
+            let destination =
+                SkillMaterializationDestination::parse(materialization.destination.clone())
+                    .map_err(materialization_failure)?;
+            let materializer = SkillResourceMaterializer::new();
+            let result = if let Some(source_prefix) = materialization.source_prefix.as_deref() {
+                let source = SkillPackageUri::parse(&materialization.source_uri)
+                    .map_err(|error| plain_error(&error.to_string()))?;
+                let source_prefix = SkillResourcePath::parse(source_prefix.to_string())
+                    .map_err(|error| plain_error(&error.to_string()))?;
+                let request = SkillTemplateTreeMaterializationRequest::new(
+                    source,
+                    source_prefix,
+                    workspace_root,
+                    destination,
+                )
+                .map_err(materialization_failure)?;
+                let outcome = materializer
+                    .materialize_template_tree(resources, &request)
+                    .map_err(materialization_failure)?;
+                AgentSkillMaterializationResult {
+                    status: materialization_result_status(outcome.status()),
+                    source_uri: outcome.source().to_string(),
+                    source_prefix: Some(outcome.source_prefix().to_string()),
+                    destination: outcome.destination().to_string(),
+                    source_revision: outcome.source().revision().as_str().to_string(),
+                    file_count: u64::try_from(outcome.file_count()).unwrap_or(u64::MAX),
+                    byte_count: outcome.byte_length(),
+                    plan_digest: Some(outcome.plan_digest().to_string()),
+                    error: None,
+                    message: Some(materialization_success_message(outcome.status(), true)),
+                }
+            } else {
+                let source = SkillResourceUri::parse(&materialization.source_uri)
+                    .map_err(|error| plain_error(&error.to_string()))?;
+                let request = SkillMaterializationRequest::new(source, workspace_root, destination)
+                    .map_err(materialization_failure)?;
+                let outcome = materializer
+                    .materialize(resources, &request)
+                    .map_err(materialization_failure)?;
+                AgentSkillMaterializationResult {
+                    status: materialization_result_status(outcome.status()),
+                    source_uri: outcome.source().to_string(),
+                    source_prefix: None,
+                    destination: outcome.destination().to_string(),
+                    source_revision: outcome.source().package().revision().as_str().to_string(),
+                    file_count: 1,
+                    byte_count: outcome.byte_length(),
+                    plan_digest: Some(outcome.content_digest().to_string()),
+                    error: None,
+                    message: Some(materialization_success_message(outcome.status(), false)),
+                }
+            };
+            Ok(result)
+        };
+
+        match execute() {
+            Ok(result) => AgentToolResult {
+                exact_archive_file: None,
+                call_id: materialization.id.clone(),
+                tool: "skills_materialize_resource".to_string(),
+                ok: true,
+                result: serde_json::to_value(result).ok(),
+                error: None,
+            },
+            Err((error, structured)) => AgentToolResult {
+                exact_archive_file: None,
+                call_id: materialization.id.clone(),
+                tool: "skills_materialize_resource".to_string(),
+                ok: false,
+                result: structured,
+                error: Some(error),
+            },
+        }
+    }
+
+    pub(in crate::application::agent) fn queue_command_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentActionExecutionOutput, String> {
+        let run_id = record.snapshot.run_id.clone();
+        let service = self.clone();
+        let command_record = record.clone();
+        tokio::spawn(async move {
+            service
+                .run_command_execution(command_record, call, guard, notifications)
+                .await;
+        });
+
+        Ok(AgentActionExecutionOutput {
+            action_id: record.snapshot.action_id,
+            action_type: record.snapshot.action_type,
+            tool_name: record.snapshot.tool_name,
+            status: "approved".to_string(),
+            patch_result: None,
+            file_write_result: None,
+            command_result: None,
+            tool_result: None,
+            agent_output: AgentChatOutput {
+                content: String::new(),
+                status: AgentRunStatus::Running,
+                run_id,
+                events: Vec::new(),
+                tool_definitions: Vec::new(),
+                todo: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: Vec::new(),
+                conversation_turn_trace: None,
+            },
+        })
+    }
+
+    pub(in crate::application::agent) fn queue_skill_script_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentActionExecutionOutput, String> {
+        let run_id = record.snapshot.run_id.clone();
+        let service = self.clone();
+        let execution_record = record.clone();
+        tokio::spawn(async move {
+            service
+                .run_skill_script_execution(execution_record, call, guard, notifications)
+                .await;
+        });
+
+        Ok(AgentActionExecutionOutput {
+            action_id: record.snapshot.action_id,
+            action_type: record.snapshot.action_type,
+            tool_name: record.snapshot.tool_name,
+            status: "approved".to_string(),
+            patch_result: None,
+            file_write_result: None,
+            command_result: None,
+            tool_result: None,
+            agent_output: AgentChatOutput {
+                content: String::new(),
+                status: AgentRunStatus::Running,
+                run_id,
+                events: Vec::new(),
+                tool_definitions: Vec::new(),
+                todo: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: Vec::new(),
+                conversation_turn_trace: None,
+            },
+        })
+    }
+
+    pub(in crate::application::agent) fn queue_office_operation_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentActionExecutionOutput, String> {
+        let run_id = record.snapshot.run_id.clone();
+        let service = self.clone();
+        let execution_record = record.clone();
+        tokio::spawn(async move {
+            service
+                .run_office_operation_execution(execution_record, call, guard, notifications)
+                .await;
+        });
+
+        Ok(AgentActionExecutionOutput {
+            action_id: record.snapshot.action_id,
+            action_type: record.snapshot.action_type,
+            tool_name: record.snapshot.tool_name,
+            status: "approved".to_string(),
+            patch_result: None,
+            file_write_result: None,
+            command_result: None,
+            tool_result: None,
+            agent_output: AgentChatOutput {
+                content: String::new(),
+                status: AgentRunStatus::Running,
+                run_id,
+                events: Vec::new(),
+                tool_definitions: Vec::new(),
+                todo: None,
+                usage: None,
+                finish_reason: None,
+                proposed_actions: Vec::new(),
+                conversation_turn_trace: None,
+            },
+        })
+    }
+
+    pub(in crate::application::agent) async fn run_office_operation_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        let action_id = record.snapshot.action_id.clone();
+        self.seed_trace_snapshot_from_checkpoint(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+        );
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            return;
+        }
+        let AgentProposedAction::OfficeOperation {
+            mut office_operation,
+        } = record.snapshot.action.clone()
+        else {
+            let _ = self.persist_pending_target_status(&record, PendingActionStatus::Failed);
+            let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
+            return;
+        };
+        office_operation.approval_status = AgentApprovalStatus::Approved;
+
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+            };
+
+        let cancellation_token = AgentCancellationToken::new();
+        self.register_cancellation(&run_id, cancellation_token.clone());
+        let run_cancellation_token = cancellation_token.clone();
+        let cancel_flag = guard.cancel_flag();
+        let service = self.clone();
+        let agent_input = record.agent_input.clone();
+        file_effect_guard.mark_effects_started();
+        let task_result = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            match service.restore_skill_resource_session(&agent_input) {
+                Ok(skill_resources) => service.execute_office_operation(
+                    &agent_input,
+                    &office_operation,
+                    skill_resources,
+                    cancellation_token,
+                    Some(cancel_flag),
+                ),
+                Err(error) => office_skill_resource_restore_failure(
+                    &office_operation,
+                    office_tool_name(office_operation.prepared.request.document_kind),
+                    &error.to_string(),
+                ),
+            }
+        })
+        .await;
+        let mut tool_result = match task_result {
+            Ok(result) => result,
+            Err(error) => AgentToolResult {
+                exact_archive_file: None,
+                call_id: action_id.clone(),
+                tool: call.tool.clone(),
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "office_operation",
+                    "code": "executionTaskFailed",
+                    "recovery": "retry",
+                })),
+                error: Some(format!("Office operation task failed: {error}")),
+            },
+        };
+        // The Office engine owns the commit boundary. A cancellation observed before its
+        // commit-ready point produces a cancelled result and discards staging; once the atomic
+        // publish begins, a later cancellation must not rewrite a completed commit as cancelled.
+        let result_cancelled = tool_result
+            .result
+            .as_ref()
+            .and_then(|result| result.get("cancelled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if result_cancelled {
+            tool_result.ok = false;
+            let message = "Office operation was cancelled.".to_string();
+            tool_result.error = Some(message.clone());
+            if let Some(result) = tool_result.result.as_mut().and_then(Value::as_object_mut) {
+                result.insert("cancelled".to_string(), Value::Bool(true));
+                result.insert(
+                    "errorCode".to_string(),
+                    Value::String("office.cancelled".to_string()),
+                );
+                result.insert("error".to_string(), Value::String(message));
+            }
+        }
+        let desired_pending_status = if result_cancelled {
+            PendingActionStatus::Cancelled
+        } else if tool_result.ok {
+            PendingActionStatus::Completed
+        } else {
+            PendingActionStatus::Failed
+        };
+        let settlement = self.settle_manual_file_effect(
+            &record,
+            &call,
+            desired_pending_status,
+            tool_result,
+            "office_operation",
+            &notifications,
+        );
+        let (agent_input, tool_result, final_pending_status) = match settlement {
+            ManualFileEffectSettlement::Committed {
+                agent_input,
+                tool_result,
+                pending_status,
+            } => (*agent_input, tool_result, pending_status),
+            ManualFileEffectSettlement::CommittedAndAdvanced => {
+                file_effect_guard.mark_durably_settled();
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            ManualFileEffectSettlement::Unsettled => {
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+        };
+        file_effect_guard.mark_durably_settled();
+        drop(file_effect_guard);
+        // The receipt is already durable, but a concurrent message/conversation deletion may now
+        // own the scope. Do not emit a transient result for an owner that is being removed; the
+        // continuation below observes the same marker and terminates without recreating state.
+        {
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !deletion_lifecycle.contains_input(&record.agent_input) {
+                let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                    run_id: run_id.clone(),
+                    result: tool_result,
+                }));
+            }
+        }
+        self.run_action_continuation(
+            record,
+            agent_input,
+            notifications,
+            final_pending_status,
+            Some(run_cancellation_token),
+        )
+        .await;
+    }
+
+    pub(in crate::application::agent) async fn run_skill_script_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        let action_id = record.snapshot.action_id.clone();
+        self.seed_trace_snapshot_from_checkpoint(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+        );
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            return;
+        }
+        let AgentProposedAction::SkillScript { mut script } = record.snapshot.action.clone() else {
+            let _ = self.persist_pending_target_status(&record, PendingActionStatus::Failed);
+            let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
+            return;
+        };
+        script.approval_status = AgentApprovalStatus::Approved;
+
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+            };
+
+        let cancellation_token = AgentCancellationToken::new();
+        self.register_cancellation(&run_id, cancellation_token.clone());
+        let cancel_flag = guard.cancel_flag();
+        let post_execution_cancel_flag = Arc::clone(&cancel_flag);
+        let run_cancellation_token = cancellation_token.clone();
+        let mut tool_result = match self.restore_skill_resource_session(&record.agent_input) {
+            Err(error) => {
+                drop(guard);
+                AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: action_id.clone(),
+                    tool: "skills_run_script".to_string(),
+                    ok: false,
+                    result: Some(serde_json::json!({
+                        "type": "skill_script",
+                        "code": "snapshotUnavailable",
+                        "recovery": "reactivateSkill",
+                    })),
+                    error: Some(error.to_string()),
+                }
+            }
+            Ok(resources) => {
+                let service = self.clone();
+                let agent_input = record.agent_input.clone();
+                file_effect_guard.mark_effects_started();
+                match tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    service.execute_skill_script(
+                        &agent_input,
+                        &script,
+                        resources.as_deref(),
+                        CommandAuthorizationSource::ExplicitUser,
+                        cancellation_token,
+                        Some(cancel_flag),
+                    )
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => AgentToolResult {
+                        exact_archive_file: None,
+                        call_id: action_id.clone(),
+                        tool: "skills_run_script".to_string(),
+                        ok: false,
+                        result: Some(serde_json::json!({
+                            "type": "skill_script",
+                            "code": "executionTaskFailed",
+                            "recovery": "retry",
+                        })),
+                        error: Some(format!("Skill script execution task failed: {error}")),
+                    },
+                }
+            }
+        };
+        let result_cancelled = run_cancellation_token.is_cancelled()
+            || post_execution_cancel_flag.load(Ordering::SeqCst)
+            || tool_result
+                .result
+                .as_ref()
+                .and_then(|result| result.get("cancelled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if result_cancelled {
+            tool_result.ok = false;
+            let message = "Skill script execution was cancelled.".to_string();
+            tool_result.error = Some(message.clone());
+            if let Some(result) = tool_result.result.as_mut().and_then(Value::as_object_mut) {
+                result.insert("cancelled".to_string(), Value::Bool(true));
+                result.insert(
+                    "errorCode".to_string(),
+                    Value::String("skill_script.cancelled".to_string()),
+                );
+                result.insert("error".to_string(), Value::String(message));
+            }
+        }
+        let desired_pending_status = if result_cancelled {
+            PendingActionStatus::Cancelled
+        } else if tool_result.ok {
+            PendingActionStatus::Completed
+        } else {
+            PendingActionStatus::Failed
+        };
+        let settlement = self.settle_manual_file_effect(
+            &record,
+            &call,
+            desired_pending_status,
+            tool_result,
+            "skill_script",
+            &notifications,
+        );
+        let (agent_input, tool_result, final_pending_status) = match settlement {
+            ManualFileEffectSettlement::Committed {
+                agent_input,
+                tool_result,
+                pending_status,
+            } => (*agent_input, tool_result, pending_status),
+            ManualFileEffectSettlement::CommittedAndAdvanced => {
+                file_effect_guard.mark_durably_settled();
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            ManualFileEffectSettlement::Unsettled => {
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+        };
+        file_effect_guard.mark_durably_settled();
+        drop(file_effect_guard);
+        {
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !deletion_lifecycle.contains_input(&record.agent_input) {
+                let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                    run_id: run_id.clone(),
+                    result: tool_result,
+                }));
+            }
+        }
+        self.run_action_continuation(
+            record,
+            agent_input,
+            notifications,
+            final_pending_status,
+            Some(run_cancellation_token),
+        )
+        .await;
+    }
+
+    pub(in crate::application::agent) async fn run_command_execution(
+        &self,
+        record: PendingActionRecord,
+        call: AgentToolCall,
+        guard: CommandRunGuard,
+        notifications: CoreServerNotificationSender,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        let action_id = record.snapshot.action_id.clone();
+        self.seed_trace_snapshot_from_checkpoint(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+        );
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            return;
+        }
+        let AgentProposedAction::Command { command } = record.snapshot.action.clone() else {
+            if let Err(error) =
+                self.persist_pending_target_status(&record, PendingActionStatus::Failed)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Failed,
+                    &error,
+                );
+                return;
+            }
+            if let Err(error) = self.transition_pending_status(&record, PendingActionStatus::Failed)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Failed,
+                    &error,
+                );
+            }
+            return;
+        };
+
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+            };
+
+        let cancellation_token = AgentCancellationToken::new();
+        self.register_cancellation(&run_id, cancellation_token.clone());
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            cancellation_token.cancel();
+            self.unregister_cancellation(&run_id);
+            self.discard_usage_context(&run_id);
+            return;
+        }
+
+        let cancel_flag = guard.cancel_flag();
+        let post_execution_cancel_flag = Arc::clone(&cancel_flag);
+        let run_cancellation_token = cancellation_token.clone();
+        let command_for_error = command.clone();
+        let execution_record = record.clone();
+        let artifact_runtime = self.artifact_runtime.clone();
+        let skill_resources = self
+            .restore_skill_resource_session(&record.agent_input)
+            .ok()
+            .flatten();
+        let file_input_context = agent_file_input_execution_context(
+            &record.agent_input,
+            skill_resources,
+            Arc::clone(&self.storage),
+        );
+        let output_observer = command_output_observer(&run_id, &command.id, &notifications);
+        file_effect_guard.mark_effects_started();
+        let mut command_result = match tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            // Keep pre-cancelled manual approvals on the same executor path as every other
+            // command. The executor short-circuits before spawning a process, while still
+            // producing the frozen runtime and artifact-observation evidence expected by the
+            // durable command-result contract.
+            run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
+                &execution_record,
+                cancellation_token,
+                Some(cancel_flag),
+                artifact_runtime.as_deref(),
+                Some(&file_input_context),
+                Some(output_observer),
+            )
+        })
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                let policy_evaluation = error.policy_evaluation().cloned();
+                let artifact_observation = error.artifact_observation().cloned();
+                let mut result =
+                    failed_command_result(&command_for_error, error.to_string(), policy_evaluation);
+                result.artifact_observation = artifact_observation;
+                result
+            }
+            Err(error) => failed_command_result(
+                &command_for_error,
+                format!("命令执行任务失败：{error}"),
+                None,
+            ),
+        };
+        let execution_was_cancelled = run_cancellation_token.is_cancelled()
+            || post_execution_cancel_flag.load(Ordering::SeqCst)
+            || command_result.cancelled;
+        if execution_was_cancelled {
+            command_result.cancelled = true;
+        }
+
+        let (agent_input, final_pending_status) = {
+            let command_succeeded = !execution_was_cancelled
+                && command_result.error.is_none()
+                && !command_result.timed_out
+                && !command_result.cancelled
+                && command_result.exit_code == Some(0);
+            let desired_pending_status = if execution_was_cancelled {
+                PendingActionStatus::Cancelled
+            } else if command_succeeded {
+                PendingActionStatus::Completed
+            } else {
+                PendingActionStatus::Failed
+            };
+            let mut final_pending_status = desired_pending_status;
+            let mut tool_result = command_tool_result(&action_id, &command_result);
+            let mut agent_input = record.agent_input.clone();
+            agent_input.approval_decision = Some(AgentApprovalDecision {
+                action_id: action_id.clone(),
+                status: AgentApprovalDecisionStatus::Approved,
+                message: None,
+            });
+            agent_input.tool_continuation = Some(AgentToolContinuation {
+                call: call.clone(),
+                result: tool_result.clone(),
+            });
+
+            // Capture one immutable terminal timestamp and retry the exact settlement. The
+            // storage transaction is idempotent, so a SQLite commit that succeeded but returned
+            // an error is recovered without replacing the real result with a synthetic failure.
+            let completed_at = now_ms();
+            let mut settlement_errors = Vec::new();
+            let mut settled = false;
+            for _ in 0..2 {
+                match self.commit_audited_command_result_trace_with_continuation(
+                    &record,
+                    &agent_input,
+                    desired_pending_status,
+                    &command_result,
+                    completed_at,
+                    &notifications,
+                ) {
+                    Ok(()) => {
+                        settled = true;
+                        break;
+                    }
+                    Err(error) => settlement_errors.push(error),
+                }
+            }
+
+            if !settled {
+                match self.inspect_audited_command_result_trace_with_continuation(
+                    &record,
+                    &agent_input,
+                    desired_pending_status,
+                    &command_result,
+                    completed_at,
+                ) {
+                    Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                        settled = true;
+                    }
+                    Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                        file_effect_guard.mark_durably_settled();
+                        self.unregister_cancellation(&run_id);
+                        return;
+                    }
+                    Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => {}
+                    Ok(AgentPendingActionSettlementInspection::Diverged { component, reason }) => {
+                        self.unregister_cancellation(&run_id);
+                        emit_manual_command_settlement_error(
+                            &notifications,
+                            &run_id,
+                            ManualCommandSettlementError {
+                                code: "approval_result_commit_indeterminate",
+                                message: format!(
+                                    "命令已经结束，但审计事务处于冲突或部分提交状态；已停止续跑：{component}: {reason}"
+                                ),
+                                attempt_error: &settlement_errors.join("; retry: "),
+                                inspection_error: Some(&reason),
+                                command_result: &command_result,
+                                tool_result: &tool_result,
+                            },
+                        );
+                        return;
+                    }
+                    Err(inspection_error) => {
+                        self.unregister_cancellation(&run_id);
+                        emit_manual_command_settlement_error(
+                            &notifications,
+                            &run_id,
+                            ManualCommandSettlementError {
+                                code: "approval_result_commit_indeterminate",
+                                message: format!(
+                                    "命令已经结束，但无法权威核对审计事务是否提交；已停止续跑：{inspection_error}"
+                                ),
+                                attempt_error: &settlement_errors.join("; retry: "),
+                                inspection_error: Some(&inspection_error),
+                                command_result: &command_result,
+                                tool_result: &tool_result,
+                            },
+                        );
+                        return;
+                    }
+                }
+            }
+
+            if !settled {
+                let audit_error = settlement_errors.join("; retry: ");
+                tool_result = command_audit_persistence_failure(
+                    &command_for_error,
+                    "afterExecution",
+                    &audit_error,
+                    Some(&command_result),
+                );
+                final_pending_status = PendingActionStatus::Failed;
+                agent_input.tool_continuation = Some(AgentToolContinuation {
+                    call: call.clone(),
+                    result: tool_result.clone(),
+                });
+
+                let mut failure_errors = Vec::new();
+                for _ in 0..2 {
+                    match self.commit_audited_command_result_trace_with_continuation(
+                        &record,
+                        &agent_input,
+                        final_pending_status,
+                        &command_result,
+                        completed_at,
+                        &notifications,
+                    ) {
+                        Ok(()) => {
+                            settled = true;
+                            break;
+                        }
+                        Err(error) => failure_errors.push(error),
+                    }
+                }
+
+                if !settled {
+                    let persistence_error = failure_errors.join("; retry: ");
+                    match self.inspect_audited_command_result_trace_with_continuation(
+                        &record,
+                        &agent_input,
+                        final_pending_status,
+                        &command_result,
+                        completed_at,
+                    ) {
+                        Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                            settled = true;
+                        }
+                        Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                            file_effect_guard.mark_durably_settled();
+                            self.unregister_cancellation(&run_id);
+                            return;
+                        }
+                        Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => {
+                            self.unregister_cancellation(&run_id);
+                            emit_manual_command_settlement_error(
+                                &notifications,
+                                &run_id,
+                                ManualCommandSettlementError {
+                                    code: "approval_result_persistence_failed",
+                                    message: format!(
+                                        "命令已经结束，但审计、目标终态和工具结果轨迹确认未提交；已停止续跑：{persistence_error}"
+                                    ),
+                                    attempt_error: &persistence_error,
+                                    inspection_error: None,
+                                    command_result: &command_result,
+                                    tool_result: &tool_result,
+                                },
+                            );
+                            return;
+                        }
+                        Ok(AgentPendingActionSettlementInspection::Diverged {
+                            component,
+                            reason,
+                        }) => {
+                            self.unregister_cancellation(&run_id);
+                            emit_manual_command_settlement_error(
+                                &notifications,
+                                &run_id,
+                                ManualCommandSettlementError {
+                                    code: "approval_result_commit_indeterminate",
+                                    message: format!(
+                                        "命令已经结束，但失败回执处于冲突或部分提交状态；已停止续跑：{component}: {reason}"
+                                    ),
+                                    attempt_error: &persistence_error,
+                                    inspection_error: Some(&reason),
+                                    command_result: &command_result,
+                                    tool_result: &tool_result,
+                                },
+                            );
+                            return;
+                        }
+                        Err(inspection_error) => {
+                            self.unregister_cancellation(&run_id);
+                            emit_manual_command_settlement_error(
+                                &notifications,
+                                &run_id,
+                                ManualCommandSettlementError {
+                                    code: "approval_result_commit_indeterminate",
+                                    message: format!(
+                                        "命令已经结束，但无法权威核对失败回执是否提交；已停止续跑：{inspection_error}"
+                                    ),
+                                    attempt_error: &persistence_error,
+                                    inspection_error: Some(&inspection_error),
+                                    command_result: &command_result,
+                                    tool_result: &tool_result,
+                                },
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+            debug_assert!(settled);
+            file_effect_guard.mark_durably_settled();
+            (agent_input, final_pending_status)
+        };
+        // The file-producing boundary is now durably paired with its ToolResult. Release the
+        // project effect lease before model continuation; a concurrent deletion may proceed and
+        // the continuation's deletion marker check will then stop any new action.
+        drop(file_effect_guard);
+
+        if execution_was_cancelled && final_pending_status == PendingActionStatus::Cancelled {
+            const REASON: &str =
+                "Agent run was cancelled while the approved command was executing.";
+            // Order the final cancelled receipt, pending transition, and terminal events against
+            // the same lifecycle marker used by destructive operations. If deletion won the
+            // marker first, it owns cancellation and no state or event may be recreated here.
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if deletion_lifecycle.contains_input(&record.agent_input) {
+                drop(deletion_lifecycle);
+                self.discard_usage_context(&run_id);
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            if let Some(continuation) = agent_input.tool_continuation.as_ref() {
+                let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                    run_id: run_id.clone(),
+                    result: continuation.result.clone(),
+                }));
+            }
+            let mut cancelled_usage = None;
+            let continuation_snapshot = self
+                .trace_snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&run_id)
+                .cloned();
+            let persisted =
+                if let (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) = (
+                    record.snapshot.conversation_id.as_deref(),
+                    record.snapshot.assistant_message_id.as_deref(),
+                    continuation_snapshot,
+                ) {
+                    // Settlement already committed the exact Archive pointer and the central-gated
+                    // model observation into this authoritative snapshot. Terminalize that snapshot
+                    // instead of rebuilding the same ToolResult through the legacy ungated helper.
+                    let trace = cancelled_conversation_trace_from_snapshot(
+                        snapshot,
+                        &run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        REASON,
+                    );
+                    let mut output = AgentChatOutput {
+                        content: String::new(),
+                        status: AgentRunStatus::Cancelled,
+                        run_id: run_id.clone(),
+                        events: Vec::new(),
+                        tool_definitions: Vec::new(),
+                        todo: None,
+                        usage: None,
+                        finish_reason: Some(REASON.to_string()),
+                        proposed_actions: Vec::new(),
+                        conversation_turn_trace: Some(trace),
+                    };
+                    let persisted = self.persist_final_assistant_output(
+                        conversation_id,
+                        assistant_message_id,
+                        &mut output,
+                    );
+                    if persisted.is_ok() {
+                        cancelled_usage = output.usage.clone();
+                    }
+                    persisted
+                } else {
+                    Err(
+                        "cancelled command is missing its settled conversation trace snapshot"
+                            .to_string(),
+                    )
+                };
+            if let Err(error) = persisted {
+                self.unregister_cancellation(&run_id);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: format!(
+                        "无法原子持久化已取消命令的 assistant 终态与会话轨迹：{error}"
+                    ),
+                    recoverable: true,
+                    code: Some("conversation_trace_persistence_failed".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+            if let Err(error) =
+                self.transition_pending_status(&record, PendingActionStatus::Cancelled)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Cancelled,
+                    &error,
+                );
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            self.discard_trace_snapshot(&run_id);
+            self.unregister_cancellation(&run_id);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+                run_id,
+                success: false,
+                status: Some(AgentRunStatus::Cancelled),
+                content: None,
+                usage: cancelled_usage,
+                finish_reason: Some(REASON.to_string()),
+                proposed_actions: Vec::new(),
+            }));
+            return;
+        }
+
+        {
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !deletion_lifecycle.contains_input(&record.agent_input) {
+                if let Some(continuation) = agent_input.tool_continuation.as_ref() {
+                    let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                        run_id: run_id.clone(),
+                        result: continuation.result.clone(),
+                    }));
+                }
+            }
+        }
+
+        self.run_action_continuation(
+            record,
+            agent_input,
+            notifications,
+            final_pending_status,
+            Some(run_cancellation_token),
+        )
+        .await;
+    }
+
+    pub(in crate::application::agent) async fn run_action_continuation(
+        &self,
+        record: PendingActionRecord,
+        agent_input: AgentChatInput,
+        notifications: CoreServerNotificationSender,
+        final_pending_status: PendingActionStatus,
+        existing_cancellation_token: Option<AgentCancellationToken>,
+    ) {
+        let run_id = record.snapshot.run_id.clone();
+        let cancellation_token = existing_cancellation_token.unwrap_or_default();
+        if cancellation_token.is_cancelled() {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            return;
+        }
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            return;
+        }
+        self.register_cancellation(&run_id, cancellation_token.clone());
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            cancellation_token.cancel();
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            self.discard_usage_context(&run_id);
+            return;
+        }
+        let steer_input = match (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+        ) {
+            (Some(conversation_id), Some(assistant_message_id)) => Some(
+                self.register_active_run_control(
+                    &run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    record
+                        .agent_input
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.project_id.as_deref()),
+                    record.agent_input.model_capabilities,
+                ),
+            ),
+            _ => None,
+        };
+
+        let emitter_notifications = notifications.clone();
+        let emitter_service = self.clone();
+        let emitter_conversation_id = record.snapshot.conversation_id.clone();
+        let emitter_assistant_message_id = record.snapshot.assistant_message_id.clone();
+        let emitter_agent_input = record.agent_input.clone();
+        let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
+        let emitter_terminal_event_gate = terminal_event_gate.clone();
+        let pending_store_failure = Arc::new(Mutex::new(None::<String>));
+        let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
+        let emitter: AgentEventEmitter = Arc::new(move |event| {
+            if let AgentEvent::ApprovalRequired {
+                run_id,
+                action,
+                checkpoint,
+            } = &event
+            {
+                if let Err(error) = emitter_service.close_active_run_steering(
+                    run_id,
+                    AgentSteerRunRejectionCode::RunNotSteerable,
+                    "The agent run is waiting for approval and no longer accepts guidance.",
+                    &emitter_notifications,
+                ) {
+                    emitter_terminal_event_gate.discard();
+                    *emitter_pending_store_failure
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                    return;
+                }
+                let mut agent_input =
+                    agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
+                if let Err(error) =
+                    emitter_service.refresh_agent_input_attachment_library(&mut agent_input)
+                {
+                    emitter_terminal_event_gate.discard();
+                    *emitter_pending_store_failure
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                    return;
+                }
+                match emitter_service.store_pending_action(
+                    run_id,
+                    emitter_conversation_id.as_deref().unwrap_or_default(),
+                    emitter_assistant_message_id.as_deref().unwrap_or_default(),
+                    action.as_ref().clone(),
+                    agent_input,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        emitter_terminal_event_gate.discard();
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                        return;
+                    }
+                }
+            }
+            if emitter_pending_store_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+            {
+                return;
+            }
+            let event = emitter_service.project_cumulative_usage_onto_event(event);
+            if let Some(event) = emitter_terminal_event_gate.route(event) {
+                let _ = emitter_notifications.send(agent_event_notification(event));
+            }
+        });
+
+        let skill_resources = match self.restore_skill_resource_session(&agent_input) {
+            Ok(resources) => resources,
+            Err(error) => {
+                let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
+                self.discard_usage_context(&run_id);
+                if let Some(steer_input) = steer_input.as_ref() {
+                    let _ = self.unregister_active_run_control(
+                        &run_id,
+                        steer_input,
+                        AgentSteerRunRejectionCode::RunNotSteerable,
+                        "The agent run has finished and no longer accepts guidance.",
+                        &notifications,
+                    );
+                }
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: error.to_string(),
+                    recoverable: true,
+                    code: Some("skill_resource_snapshot_unavailable".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+        };
+        let initial_context_window_tool_projection = match self
+            .context_window_tool_projection(&record.agent_input, skill_resources.clone())
+        {
+            Ok(projection) => projection,
+            Err(error) => {
+                let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
+                self.discard_usage_context(&run_id);
+                if let Some(steer_input) = steer_input.as_ref() {
+                    let _ = self.unregister_active_run_control(
+                        &run_id,
+                        steer_input,
+                        AgentSteerRunRejectionCode::RunNotSteerable,
+                        "The agent run has finished and no longer accepts guidance.",
+                        &notifications,
+                    );
+                }
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: error,
+                    recoverable: true,
+                    code: Some("context_window_tool_projection_unavailable".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+        };
+        let context_window_tool_projection =
+            RunContextToolProjection::new(initial_context_window_tool_projection);
+        let host_executor = self.host_action_executor(
+            agent_input.clone(),
+            run_id.clone(),
+            record.snapshot.conversation_id.clone(),
+            record.snapshot.assistant_message_id.clone(),
+            skill_resources.clone(),
+            notifications.clone(),
+        );
+        let trace_conversation_id = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .unwrap_or_default();
+        let trace_assistant_message_id = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .unwrap_or_default();
+        let trace_observer = self.trace_observer(
+            &run_id,
+            trace_conversation_id,
+            trace_assistant_message_id,
+            record.snapshot.created_at,
+            record.agent_input.clone(),
+            context_window_tool_projection.clone(),
+            notifications.clone(),
+        );
+        let context_compaction_services = self.context_compaction_services(
+            &run_id,
+            trace_conversation_id,
+            trace_assistant_message_id,
+            record.agent_input.clone(),
+            context_window_tool_projection.clone(),
+            notifications.clone(),
+        );
+        let model_request_observer =
+            self.model_request_observer(&run_id, trace_conversation_id, trace_assistant_message_id);
+        let context_window_observer =
+            record
+                .agent_input
+                .context_window_indicator_enabled
+                .then(|| {
+                    self.context_window_observer(
+                        &run_id,
+                        trace_conversation_id,
+                        &record.agent_input.model,
+                        notifications.clone(),
+                    )
+                });
+        let mut host_services = AgentRuntimeHostServices::new()
+            .with_host_actions(host_executor, self.storage.clone())
+            .with_office_engine(self.office_engine.clone())
+            .with_trace_observer(trace_observer)
+            .with_model_request_observer(model_request_observer)
+            .with_context_compaction(context_compaction_services);
+        if let Some(context_window_observer) = context_window_observer {
+            host_services = host_services.with_context_window_observer(context_window_observer);
+        }
+        if let Some(image_generation_execution) = self.image_generation_execution.clone() {
+            host_services =
+                host_services.with_image_generation_execution(image_generation_execution);
+        }
+        host_services = host_services.with_skill_activation_resolver(
+            model_skill_activation_resolver(self.storage.clone(), self.skills.clone()),
+        );
+        if let Some(resources) = skill_resources {
+            host_services = host_services.with_skill_resources(resources);
+        }
+        if let Some(resolver) = self.artifact_runtime.clone() {
+            host_services = host_services.with_command_runtime_profile_resolver(resolver);
+        }
+        if let Some(steer_input) = steer_input.as_ref() {
+            host_services = host_services.with_steer_input(steer_input.clone());
+        }
+        let result = send_chat_with_host_services(
+            agent_input,
+            run_id.clone(),
+            emitter,
+            cancellation_token.clone(),
+            host_services,
+        )
+        .await;
+        let result = match pending_store_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            Some(error) => {
+                terminal_event_gate.discard();
+                Err(pending_action_persistence_error(error))
+            }
+            None => result,
+        };
+        let close_message = match &result {
+            Ok(output) if output.status == AgentRunStatus::WaitingForApproval => {
+                "The agent run is waiting for approval and no longer accepts guidance."
+            }
+            _ => "The agent run has finished and no longer accepts guidance.",
+        };
+        let result = if let Some(steer_input) = steer_input.as_ref() {
+            match self.unregister_active_run_control(
+                &run_id,
+                steer_input,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                close_message,
+                &notifications,
+            ) {
+                Ok(()) => result,
+                Err(error) => {
+                    terminal_event_gate.discard();
+                    Err(AgentError::new(format!(
+                        "无法关闭审批续跑的用户引导通道并持久化剩余引导：{error}"
+                    )))
+                }
+            }
+        } else {
+            result
+        };
+        let keep_trace_snapshot = matches!(
+            &result,
+            Ok(output) if output.status == AgentRunStatus::WaitingForApproval
+        );
+
+        let deletion_lifecycle = self
+            .deletion_lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if deletion_lifecycle.contains_input(&record.agent_input) {
+            drop(deletion_lifecycle);
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            return;
+        }
+
+        match result {
+            Ok(mut agent_output) => {
+                let committed_durable_context = is_terminal_run_status(agent_output.status);
+                let owner_ids = (
+                    record.snapshot.conversation_id.as_deref(),
+                    record.snapshot.assistant_message_id.as_deref(),
+                );
+                let persisted = match owner_ids {
+                    (Some(conversation_id), Some(assistant_message_id)) => self
+                        .persist_final_assistant_output(
+                            conversation_id,
+                            assistant_message_id,
+                            &mut agent_output,
+                        ),
+                    _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
+                };
+                let pending_transition = if persisted.is_ok() {
+                    self.transition_pending_status(&record, final_pending_status)
+                } else {
+                    Err("assistant 终态未持久化，已保留非终态 pending 记录供启动对账。".to_string())
+                }
+                .inspect_err(|error| {
+                    terminal_event_gate.discard();
+                    emit_pending_transition_error(
+                        &notifications,
+                        &run_id,
+                        final_pending_status,
+                        error,
+                    );
+                });
+                if let (Some(conversation_id), Some(assistant_message_id)) = owner_ids {
+                    if pending_terminal_commit_is_publishable(
+                        persisted.is_ok(),
+                        pending_transition.is_ok(),
+                        committed_durable_context,
+                    ) {
+                        self.emit_terminal_context_window_snapshot(
+                            &notifications,
+                            &record.agent_input,
+                            &run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            if agent_output.status == AgentRunStatus::Cancelled {
+                                ""
+                            } else {
+                                &agent_output.content
+                            },
+                        );
+                    } else if let Err(error) = &persisted {
+                        self.discard_usage_context(&run_id);
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(run_id.clone()),
+                            message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
+                            recoverable: true,
+                            code: Some("conversation_trace_persistence_failed".to_string()),
+                            details: None,
+                        }));
+                    }
+                    if pending_terminal_commit_is_publishable(
+                        persisted.is_ok(),
+                        pending_transition.is_ok(),
+                        committed_durable_context,
+                    ) {
+                        emit_terminal_events_after_persistence(
+                            &notifications,
+                            &terminal_event_gate,
+                            &agent_output,
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                terminal_event_gate.discard();
+                let usage = error.usage().cloned();
+                let code = error.code().map(ToString::to_string);
+                let details = error.details().cloned();
+                let message = error.to_string();
+                let conversation_turn_trace = match (
+                    error.conversation_turn_trace().cloned(),
+                    record.snapshot.conversation_id.as_deref(),
+                    record.snapshot.assistant_message_id.as_deref(),
+                ) {
+                    (Some(trace), _, _) => Some(trace),
+                    (None, Some(conversation_id), Some(assistant_message_id)) => Some(
+                        self.storage
+                            .get_conversation_turn_trace(assistant_message_id)
+                            .ok()
+                            .flatten()
+                            .filter(|trace| {
+                                trace.run_id == run_id
+                                    && trace.conversation_id == conversation_id
+                                    && trace.terminal_status
+                                        == ConversationTurnTraceTerminalStatus::InProgress
+                            })
+                            .map(|trace| {
+                                terminalize_interrupted_conversation_trace(
+                                    trace,
+                                    ConversationTurnTraceTerminalStatus::Failed,
+                                    &message,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                failed_conversation_trace_without_items(
+                                    &run_id,
+                                    conversation_id,
+                                    assistant_message_id,
+                                    &message,
+                                )
+                            }),
+                    ),
+                    _ => None,
+                };
+                let persisted = if let (Some(conversation_id), Some(assistant_message_id)) = (
+                    record.snapshot.conversation_id.as_deref(),
+                    record.snapshot.assistant_message_id.as_deref(),
+                ) {
+                    let persisted = self.persist_assistant_error(
+                        conversation_id,
+                        assistant_message_id,
+                        &message,
+                        usage.clone(),
+                        conversation_turn_trace
+                            .as_ref()
+                            .expect("trace exists when conversation and assistant ids exist"),
+                    );
+                    if let Err(error) = &persisted {
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(run_id.clone()),
+                            message: format!(
+                                "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
+                            ),
+                            recoverable: true,
+                            code: Some("conversation_trace_persistence_failed".to_string()),
+                            details: None,
+                        }));
+                    }
+                    persisted
+                } else {
+                    Err("审批续跑缺少 assistant 持久化身份。".to_string())
+                };
+                let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
+                let pending_transition = if persisted.is_ok() {
+                    self.transition_pending_status(&record, final_pending_status)
+                } else {
+                    Err(
+                        "assistant 失败终态未持久化，已保留非终态 pending 记录供启动对账。"
+                            .to_string(),
+                    )
+                }
+                .inspect_err(|transition_error| {
+                    emit_pending_transition_error(
+                        &notifications,
+                        &run_id,
+                        final_pending_status,
+                        transition_error,
+                    );
+                });
+                let terminal_commit_published = pending_terminal_commit_is_publishable(
+                    persisted.is_ok(),
+                    pending_transition.is_ok(),
+                    true,
+                );
+                if terminal_commit_published {
+                    if let (Some(conversation_id), Some(assistant_message_id)) = (
+                        record.snapshot.conversation_id.as_deref(),
+                        record.snapshot.assistant_message_id.as_deref(),
+                    ) {
+                        self.emit_terminal_context_window_snapshot(
+                            &notifications,
+                            &record.agent_input,
+                            &run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            &message,
+                        );
+                    }
+                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                        run_id: Some(run_id.clone()),
+                        message: message.clone(),
+                        recoverable: false,
+                        code,
+                        details,
+                    }));
+                    let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+                        run_id: run_id.clone(),
+                        success: false,
+                        status: Some(AgentRunStatus::Failed),
+                        content: Some(message),
+                        usage: cumulative_usage,
+                        finish_reason: None,
+                        proposed_actions: Vec::new(),
+                    }));
+                }
+            }
+        }
+
+        drop(deletion_lifecycle);
+        if !keep_trace_snapshot {
+            self.discard_trace_snapshot(&run_id);
+            self.discard_exact_running_context_window_snapshot(&run_id);
+        }
+        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+    }
+}

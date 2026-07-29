@@ -1,7 +1,7 @@
 import type { AgentProposedAction } from '@mycopilot/protocol'
 import { describe, expect, it } from 'vitest'
 import type { ChatMessage } from '../../features/chat/chatTypes'
-import { applyAgentEventToChatMessage } from '../agentEventReducer'
+import { applyAgentEventToChatMessage } from '../../features/agentRun/agentEventReducer'
 
 function assistantMessage(): ChatMessage {
   return {

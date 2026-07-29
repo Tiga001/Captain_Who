@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import type { AppWindowState } from '@mycopilot/host-api'
+import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
 import { getAdaptiveAppIcon, installAdaptiveAppIcon } from './appIcon'
 import {
   configureManagedWebviewHost,
@@ -43,8 +43,6 @@ const macWindowChromeOptions =
       }
     : {}
 
-const APP_WINDOW_STATE_CHANNEL = 'host:app.windowStateChange'
-
 function getAppWindowState(window: BrowserWindow): AppWindowState {
   return {
     isFullScreen: window.isFullScreen(),
@@ -56,7 +54,7 @@ function sendAppWindowState(window: BrowserWindow): void {
   if (window.isDestroyed() || window.webContents.isDestroyed()) {
     return
   }
-  window.webContents.send(APP_WINDOW_STATE_CHANNEL, getAppWindowState(window))
+  window.webContents.send(HOST_CHANNELS.app.windowStateChange, getAppWindowState(window))
 }
 
 function installNativeImageContextMenu(window: BrowserWindow): void {

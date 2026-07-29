@@ -94,6 +94,8 @@ import type {
   WorkspaceListDirectoryInput
 } from '@mycopilot/protocol'
 
+export { HOST_CHANNELS } from './channels'
+
 export interface AttachmentsHostApi {
   selectInputAttachments(request: AttachmentSelectInputRequest): Promise<AttachmentInputPayload[]>
 }

@@ -1,7 +1,7 @@
 import type { AgentEvent } from '@mycopilot/protocol'
 import { describe, expect, it } from 'vitest'
 import type { ChatAgentRunView, ChatMessage } from '../../features/chat/chatTypes'
-import { applyAgentEventToChatMessage } from '../agentEventReducer'
+import { applyAgentEventToChatMessage } from '../../features/agentRun/agentEventReducer'
 
 function message(): ChatMessage {
   const agentRun: ChatAgentRunView = {

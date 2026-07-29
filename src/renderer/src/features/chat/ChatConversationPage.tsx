@@ -31,7 +31,7 @@ import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { getLatestAgentTodo } from './todoLifetime'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
-import { getAgentActionApprovalStatus } from '../../app/agentActionUtils'
+import { getAgentActionApprovalStatus } from '../agentRun/agentActionUtils'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
 

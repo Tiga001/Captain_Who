@@ -14,6 +14,7 @@ import type {
   TerminalOutputEvent,
   TerminalSessionSnapshot
 } from '@mycopilot/protocol'
+import { HOST_CHANNELS } from '@mycopilot/host-api'
 import type {
   TerminalServiceCommand,
   TerminalServiceOutboundMessage,
@@ -53,8 +54,6 @@ export interface TerminalBridgeOptions {
   requestTimeoutMs?: number
 }
 
-const TERMINAL_OUTPUT_CHANNEL = 'host:terminal.output'
-const TERMINAL_EXIT_CHANNEL = 'host:terminal.exit'
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000
 const SHUTDOWN_TIMEOUT_MS = 1000
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/
@@ -309,7 +308,7 @@ export class TerminalBridge {
 
     for (const [sessionId, session] of [...this.sessions]) {
       if (session.childGeneration !== child.generation) continue
-      this.sendSessionEvent(session, TERMINAL_EXIT_CHANNEL, {
+      this.sendSessionEvent(session, HOST_CHANNELS.terminal.exit, {
         exitCode: null,
         finalOutputSequence: session.lastOutputSequence,
         sessionId,
@@ -351,7 +350,7 @@ export class TerminalBridge {
       if (message.event.sequence > session.lastOutputSequence) {
         session.lastOutputSequence = message.event.sequence
       }
-      this.sendSessionEvent(session, TERMINAL_OUTPUT_CHANNEL, message.event)
+      this.sendSessionEvent(session, HOST_CHANNELS.terminal.output, message.event)
       return
     }
 
@@ -359,7 +358,7 @@ export class TerminalBridge {
       session.lastOutputSequence,
       message.event.finalOutputSequence
     )
-    this.sendSessionEvent(session, TERMINAL_EXIT_CHANNEL, message.event)
+    this.sendSessionEvent(session, HOST_CHANNELS.terminal.exit, message.event)
     this.removeSessionOwnership(message.event.sessionId)
   }
 

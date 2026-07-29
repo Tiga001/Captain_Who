@@ -5,7 +5,7 @@ import {
   applyAgentActionExecutionToChatMessage,
   applyAgentEventToChatMessage,
   applyOptimisticGuidanceToChatMessage
-} from '../agentEventReducer'
+} from '../../features/agentRun/agentEventReducer'
 
 function assistantMessage(): ChatMessage {
   return {

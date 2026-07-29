@@ -16,19 +16,20 @@ MyCopilot 是一个本地优先的桌面 AI 工作助手。界面由 Electron、
 ## 架构
 
 ```text
-src/main/                 Electron 主进程、IPC、浏览器/终端桥接
+src/main/                 Electron 主进程、分域 IPC、浏览器/终端桥接
 src/preload/              隔离的 renderer Host API
 src/renderer/             React 界面
 packages/protocol/        TypeScript 跨进程数据类型
 packages/host-api/        Renderer 可调用的 Host API 类型
 crates/protocol-rs/       Rust JSON-RPC 协议
 crates/core/              Agent、工具、权限与 SQLite 存储
-crates/core-server/       Electron 启动的 Rust sidecar
+crates/core-server/       Rust 应用边界（application / transport / adapters）
 ```
 
 开发模式下，Electron 通过 Cargo 启动 `core-server`；生产包会把 release 二进制复制到 `process.resourcesPath`。Electron 与 Rust 之间使用逐行 JSON-RPC 通信。
 
 Agent 上下文的组装、长期轨迹、会话状态、分类计量、容量保护、压缩规划、审批恢复和前端用量投影见[上下文管理架构](docs/context-management.md)。
+各层依赖方向、core-server 分层、Agent 协议所有权和 IPC 约束见[架构边界](docs/architecture.md)。
 
 ## 环境要求
 

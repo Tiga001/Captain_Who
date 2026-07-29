@@ -1,23 +1,11 @@
-import {
-  BrowserWindow,
-  clipboard,
-  dialog,
-  ipcMain as electronIpcMain,
-  nativeTheme,
-  shell
-} from 'electron'
-import type {
-  IpcMainEvent,
-  IpcMainInvokeEvent,
-  OpenDialogOptions,
-  OpenDialogReturnValue
-} from 'electron'
+import { BrowserWindow, dialog, nativeTheme, shell } from 'electron'
+import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
 import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
-import { captureHostInvocation, type AppWindowState } from '@mycopilot/host-api'
+import { HOST_CHANNELS, type AppWindowState } from '@mycopilot/host-api'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 
 import { CoreServer } from './core/coreServer'
@@ -26,6 +14,14 @@ import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
 import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
+import { registerAgentIpc } from './ipc/agentIpc'
+import { registerGitIpc } from './ipc/gitIpc'
+import { registerSkillsIpc } from './ipc/skillsIpc'
+import { registerCoreServiceIpc } from './ipc/serviceIpc'
+import { registerStorageIpc } from './ipc/storageIpc'
+import { registerTerminalIpc } from './ipc/terminalIpc'
+import { createTrustedIpcMain } from './ipc/trustedIpc'
+import { registerWorkspaceFilesIpc } from './ipc/workspaceFilesIpc'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -282,236 +278,42 @@ export function registerHostIpc(
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
     getProjectPath(coreServer, projectId)
   )
-  type InvokeHandler = Parameters<typeof electronIpcMain.handle>[1]
-  type OneWayHandler = (event: IpcMainEvent, ...args: unknown[]) => void
-  const ipcMain = {
-    handle(channel: string, handler: InvokeHandler): void {
-      electronIpcMain.handle(channel, (event, ...args) => {
-        if (!isTrustedRenderer(event)) {
-          throw new Error(`Blocked untrusted IPC sender for ${channel}`)
-        }
-        return handler(event, ...args)
-      })
-    },
-    on(channel: string, handler: OneWayHandler): void {
-      electronIpcMain.on(channel, (event, ...args) => {
-        if (!isTrustedRenderer(event as unknown as IpcMainInvokeEvent)) {
-          console.warn(`Blocked untrusted one-way IPC sender for ${channel}`)
-          return
-        }
-        handler(event, ...args)
-      })
-    }
-  }
+  const ipcMain = createTrustedIpcMain(isTrustedRenderer)
 
-  coreServer.onAgentEvent((event) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
-        window.webContents.send('host:agent.event', event)
-      }
-    }
+  registerCoreServiceIpc(ipcMain, coreServer)
+  registerAgentIpc(ipcMain, coreServer)
+  registerSkillsIpc(ipcMain, coreServer, selectInstallationDirectory)
+  registerGitIpc(ipcMain, coreServer)
+  registerStorageIpc(ipcMain, coreServer, {
+    loadImageFile,
+    revealProjectFile,
+    selectProfileAvatar,
+    selectProjectDirectory,
+    showProjectInFolder
   })
-  coreServer.onSkillsChanged((event) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
-        window.webContents.send('host:skills.changed', event)
-      }
-    }
-  })
+  registerWorkspaceFilesIpc(ipcMain, workspaceFilesService)
+  registerTerminalIpc(ipcMain, terminalBridge)
 
-  ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
-  ipcMain.handle('host:office.getStatus', () => coreServer.getOfficeStatus())
-  ipcMain.handle('host:imageGeneration.getConfiguration', () =>
-    captureHostInvocation(() => coreServer.getImageGenerationConfiguration())
+  ipcMain.handle(HOST_CHANNELS.app.getWindowState, (event) =>
+    getAppWindowState(getInvokeWindow(event))
   )
-  ipcMain.handle('host:imageGeneration.updateConfiguration', (_event, input) =>
-    captureHostInvocation(() => coreServer.updateImageGenerationConfiguration(input))
-  )
-  ipcMain.handle('host:imageGeneration.setEnabled', (_event, input) =>
-    captureHostInvocation(() => coreServer.setImageGenerationEnabled(input))
-  )
-  ipcMain.handle('host:imageGeneration.getStatus', () =>
-    captureHostInvocation(() => coreServer.getImageGenerationStatus())
-  )
-  ipcMain.handle('host:imageGeneration.readArtifact', (_event, input) =>
-    captureHostInvocation(() => coreServer.readImageGenerationArtifact(input))
-  )
-  ipcMain.handle('host:app.getWindowState', (event) => getAppWindowState(getInvokeWindow(event)))
-  ipcMain.handle('host:app.openExternal', (_event, url) => openExternalUrl(url))
-  ipcMain.handle('host:app.setNativeThemeSource', (_event, themeSource) => {
+  ipcMain.handle(HOST_CHANNELS.app.openExternal, (_event, url) => openExternalUrl(url))
+  ipcMain.handle(HOST_CHANNELS.app.setNativeThemeSource, (_event, themeSource) => {
     if (!isNativeThemeSource(themeSource)) {
       throw new Error('Invalid native theme source')
     }
     nativeTheme.themeSource = themeSource
   })
-  ipcMain.handle('host:agent.startConversationTurn', (_event, input) =>
-    captureHostInvocation(() => coreServer.startConversationTurn(input))
-  )
-  ipcMain.handle('host:agent.getContextWindowSnapshot', (_event, input) =>
-    captureHostInvocation(() => coreServer.getContextWindowSnapshot(input))
-  )
-  ipcMain.handle('host:agent.steerRun', (_event, input) => coreServer.steerRun(input))
-  ipcMain.handle('host:agent.cancelRun', (_event, input) => coreServer.cancelRun(input))
-  ipcMain.handle('host:agent.listPendingActions', () => coreServer.listPendingActions())
-  ipcMain.handle('host:agent.approveAction', (_event, input) => coreServer.approveAction(input))
-  ipcMain.handle('host:agent.rejectAction', (_event, input) => coreServer.rejectAction(input))
-  ipcMain.handle('host:agent.cancelAction', (_event, input) => coreServer.cancelAction(input))
-  ipcMain.handle('host:agent.getUsageSummary', (_event, input) => coreServer.getUsageSummary(input))
-  ipcMain.handle('host:agent.clearUsageRecords', (_event, input) =>
-    coreServer.clearUsageRecords(input)
-  )
-  ipcMain.handle('host:agent.readFileDraft', (_event, input) => coreServer.readFileDraft(input))
-  ipcMain.handle('host:agent.getFileWriteDiff', (_event, input) =>
-    coreServer.getFileWriteDiff(input)
-  )
-  ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
-  ipcMain.handle('host:skills.list', (_event, input) => coreServer.listSkills(input))
-  ipcMain.handle('host:skills.selectInstallationDirectory', (event) =>
-    selectInstallationDirectory(event)
-  )
-  ipcMain.handle('host:skills.resolveInstallationSource', (_event, input) =>
-    captureHostInvocation(() => coreServer.resolveSkillInstallationSource(input))
-  )
-  ipcMain.handle('host:skills.cancelSourceResolution', (_event, input) =>
-    captureHostInvocation(() => coreServer.cancelSkillSourceResolution(input))
-  )
-  ipcMain.handle('host:skills.inspectInstallation', (_event, input) =>
-    captureHostInvocation(() => coreServer.inspectSkillInstallation(input))
-  )
-  ipcMain.handle('host:skills.commitInstallation', (_event, input) =>
-    captureHostInvocation(() => coreServer.commitSkillInstallation(input))
-  )
-  ipcMain.handle('host:skills.cancelPreparation', (_event, input) =>
-    captureHostInvocation(() => coreServer.cancelSkillPreparation(input))
-  )
-  ipcMain.handle('host:skills.listManagement', (_event, input) =>
-    captureHostInvocation(() => coreServer.listSkillManagement(input))
-  )
-  ipcMain.handle('host:skills.setEnabled', (_event, input) =>
-    captureHostInvocation(() => coreServer.setSkillEnabled(input))
-  )
-  ipcMain.handle('host:skills.uninstall', (_event, input) =>
-    captureHostInvocation(() => coreServer.uninstallSkill(input))
-  )
-  ipcMain.handle('host:git.inspectRepository', (_event, input) =>
-    coreServer.inspectGitRepository(input)
-  )
-  ipcMain.handle('host:git.getReviewSummary', (_event, input) =>
-    coreServer.getGitReviewSummary(input)
-  )
-  ipcMain.handle('host:git.getTurnDiffSummaries', (_event, input) =>
-    coreServer.getGitTurnDiffSummaries(input)
-  )
-  ipcMain.handle('host:git.getReviewFileDiff', (_event, input) =>
-    coreServer.getGitReviewFileDiff(input)
-  )
-  ipcMain.handle('host:git.getReviewFileContent', (_event, input) =>
-    coreServer.getGitReviewFileContent(input)
-  )
-  ipcMain.handle('host:git.mutateReviewFile', (_event, input) =>
-    coreServer.mutateGitReviewFile(input)
-  )
-  ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
+  ipcMain.handle(HOST_CHANNELS.attachments.selectInputAttachments, (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )
-  ipcMain.handle('host:browser.clearBrowsingData', async () => {
+  ipcMain.handle(HOST_CHANNELS.browser.clearBrowsingData, async () => {
     await Promise.all([
       clearManagedWebviewData(BROWSER_WEBVIEW_PARTITION),
       faviconResourceCache.clear()
     ])
   })
-  ipcMain.handle('host:resources.resolveFavicon', (_event, input) =>
+  ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
-  )
-  ipcMain.handle('host:storage.loadModelSettings', () => coreServer.loadModelSettings())
-  ipcMain.handle('host:storage.saveModelSettings', (_event, settings) =>
-    coreServer.saveModelSettings(settings)
-  )
-  ipcMain.handle('host:storage.loadAgentPromptPreferences', () =>
-    coreServer.loadAgentPromptPreferences()
-  )
-  ipcMain.handle('host:storage.saveAgentPromptPreferences', (_event, preferences) =>
-    coreServer.saveAgentPromptPreferences(preferences)
-  )
-  ipcMain.handle('host:storage.loadProjects', () => coreServer.loadProjects())
-  ipcMain.handle('host:storage.selectProjectDirectory', (event) => selectProjectDirectory(event))
-  ipcMain.handle('host:storage.saveProject', (_event, project) => coreServer.saveProject(project))
-  ipcMain.handle('host:storage.deleteProject', (_event, projectId) =>
-    coreServer.deleteProject(projectId)
-  )
-  ipcMain.handle('host:storage.showProjectInFolder', (_event, projectId) =>
-    showProjectInFolder(coreServer, projectId)
-  )
-  ipcMain.handle('host:storage.revealProjectFile', (_event, input) =>
-    revealProjectFile(coreServer, input)
-  )
-  ipcMain.handle('host:storage.loadConversations', () => coreServer.loadConversations())
-  ipcMain.handle('host:storage.loadConversationMetas', () => coreServer.loadConversationMetas())
-  ipcMain.handle('host:storage.loadConversation', (_event, conversationId) =>
-    coreServer.loadConversation(conversationId)
-  )
-  ipcMain.handle('host:storage.forkConversation', (_event, input) =>
-    coreServer.forkConversation(input)
-  )
-  ipcMain.handle('host:storage.saveConversationMeta', (_event, conversation) =>
-    coreServer.saveConversationMeta(conversation)
-  )
-  ipcMain.handle('host:storage.deleteConversation', (_event, conversationId) =>
-    coreServer.deleteConversation(conversationId)
-  )
-  ipcMain.handle('host:storage.deleteChatMessages', (_event, input) =>
-    coreServer.deleteChatMessages(input)
-  )
-  ipcMain.handle('host:storage.upsertChatMessages', (_event, input) =>
-    coreServer.upsertChatMessages(input)
-  )
-  ipcMain.handle('host:storage.saveChatMessageState', (_event, input) =>
-    coreServer.saveChatMessageState(input)
-  )
-  ipcMain.handle('host:storage.saveChatMessageUiState', (_event, input) =>
-    coreServer.saveChatMessageUiState(input)
-  )
-  ipcMain.handle('host:storage.loadComposerDrafts', () => coreServer.loadComposerDrafts())
-  ipcMain.handle('host:storage.saveComposerDraft', (_event, draft) =>
-    coreServer.saveComposerDraft(draft)
-  )
-  ipcMain.handle('host:storage.loadUiPreferences', () => coreServer.loadUiPreferences())
-  ipcMain.handle('host:storage.saveUiPreferences', (_event, preferences) =>
-    coreServer.saveUiPreferences(preferences)
-  )
-  ipcMain.handle('host:storage.selectProfileAvatar', (event) => selectProfileAvatar(event))
-  ipcMain.handle('host:storage.loadAttachmentImage', (_event, input) =>
-    coreServer.loadAttachmentImage(input)
-  )
-  ipcMain.handle('host:storage.loadInputAttachments', (_event, input) =>
-    coreServer.loadInputAttachments(input)
-  )
-  ipcMain.handle('host:storage.loadImageFile', (_event, input) => loadImageFile(coreServer, input))
-  ipcMain.handle('host:workspaceFiles.copyPath', async (_event, input) => {
-    clipboard.writeText(await workspaceFilesService.resolvePathForReveal(input))
-  })
-  ipcMain.handle('host:workspaceFiles.listDirectory', (_event, input) =>
-    workspaceFilesService.listDirectory(input)
-  )
-  ipcMain.handle('host:workspaceFiles.readPreview', (_event, input) =>
-    workspaceFilesService.readPreview(input)
-  )
-  ipcMain.handle('host:workspaceFiles.revealInFolder', async (_event, input) => {
-    shell.showItemInFolder(await workspaceFilesService.resolvePathForReveal(input))
-  })
-  ipcMain.handle('host:terminal.createSession', (event, request) =>
-    terminalBridge.createSession(event.sender, request)
-  )
-  ipcMain.on('host:terminal.writeInput', (event, sessionId, data) => {
-    terminalBridge.writeInput(event.sender, String(sessionId), typeof data === 'string' ? data : '')
-  })
-  ipcMain.on('host:terminal.acknowledgeOutput', (event, sessionId, sequence) => {
-    terminalBridge.acknowledgeOutput(event.sender, String(sessionId), Number(sequence))
-  })
-  ipcMain.handle('host:terminal.resizeSession', (event, sessionId, cols, rows) =>
-    terminalBridge.resizeSession(event.sender, sessionId, cols, rows)
-  )
-  ipcMain.handle('host:terminal.killSession', (event, sessionId) =>
-    terminalBridge.killSession(event.sender, sessionId)
   )
 }

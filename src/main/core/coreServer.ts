@@ -87,6 +87,19 @@ import type {
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
 import {
+  AGENT_APPROVE_ACTION_METHOD,
+  AGENT_CANCEL_ACTION_METHOD,
+  AGENT_CANCEL_RUN_METHOD,
+  AGENT_CLEAR_USAGE_RECORDS_METHOD,
+  AGENT_EVENT_NOTIFICATION_METHOD,
+  AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
+  AGENT_GET_FILE_WRITE_DIFF_METHOD,
+  AGENT_GET_USAGE_SUMMARY_METHOD,
+  AGENT_LIST_PENDING_ACTIONS_METHOD,
+  AGENT_READ_FILE_DRAFT_METHOD,
+  AGENT_REJECT_ACTION_METHOD,
+  AGENT_START_CONVERSATION_TURN_METHOD,
+  AGENT_STEER_RUN_METHOD,
   parseSkillInstallationCommitOutput,
   parseSkillInstallationPreview,
   parseSkillInspectionErrorData,
@@ -141,19 +154,6 @@ import { CoreJsonRpcClient } from './jsonRpcClient'
 
 const CORE_PING_METHOD = 'core.ping'
 const CORE_SHUTDOWN_METHOD = 'core.shutdown'
-const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
-const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
-const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
-const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
-const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
-const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
-const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
-const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
-const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
-const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
-const AGENT_READ_FILE_DRAFT_METHOD = 'agent.readFileDraft'
-const AGENT_GET_FILE_WRITE_DIFF_METHOD = 'agent.getFileWriteDiff'
-const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const SKILLS_LIST_METHOD = 'skills.list'
 const GIT_INSPECT_REPOSITORY_METHOD = 'git.inspectRepository'

@@ -133,7 +133,7 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
 })
 
 vi.mock('../../components/layout/ResizeHandle', () => ({ ResizeHandle: () => null }))
-vi.mock('../../components/sidebar/LeftSidebar', () => ({
+vi.mock('../shell/sidebar/LeftSidebar', () => ({
   LeftSidebar: ({
     conversations,
     onSelectConversation,
@@ -157,7 +157,7 @@ vi.mock('../../components/sidebar/LeftSidebar', () => ({
     </div>
   )
 }))
-vi.mock('../../components/sidebar/RightSidebar', () => ({ RightSidebar: () => null }))
+vi.mock('../../features/rightSidebar/RightSidebar', () => ({ RightSidebar: () => null }))
 vi.mock('../AppShellSettingsView', () => ({ AppShellSettingsView: () => null }))
 vi.mock('../../features/chat/NewConversationPage', () => ({
   NewConversationPage: ({ draft }: { draft: ChatComposerDraft }) => (

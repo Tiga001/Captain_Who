@@ -1,7 +1,7 @@
 import type { IpcRenderer } from 'electron'
-import type { OfficeHostApi } from '@mycopilot/host-api'
+import { HOST_CHANNELS, type OfficeHostApi } from '@mycopilot/host-api'
 
-export const OFFICE_GET_STATUS_CHANNEL = 'host:office.getStatus'
+export const OFFICE_GET_STATUS_CHANNEL = HOST_CHANNELS.office.getStatus
 
 type OfficeIpcRenderer = Pick<IpcRenderer, 'invoke'>
 

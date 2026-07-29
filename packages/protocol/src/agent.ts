@@ -1,5 +1,23 @@
 import type { ActivatedSkillSummary, SkillSelection } from './skills'
 
+/**
+ * Agent JSON-RPC names are transport contract, not host implementation details.
+ * Rust verifies the same values against the shared Agent golden fixture.
+ */
+export const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
+export const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
+export const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
+export const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
+export const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
+export const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
+export const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
+export const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
+export const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
+export const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
+export const AGENT_READ_FILE_DRAFT_METHOD = 'agent.readFileDraft'
+export const AGENT_GET_FILE_WRITE_DIFF_METHOD = 'agent.getFileWriteDiff'
+export const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
+
 export type AgentMessageRole = 'system' | 'user' | 'assistant'
 
 export type AgentRunStatus =

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "methods": {
+    "cancelRun": "agent.cancelRun",
+    "steerRun": "agent.steerRun",
+    "startConversationTurn": "agent.startConversationTurn",
+    "getContextWindowSnapshot": "agent.getContextWindowSnapshot",
+    "listPendingActions": "agent.listPendingActions",
+    "approveAction": "agent.approveAction",
+    "rejectAction": "agent.rejectAction",
+    "cancelAction": "agent.cancelAction",
+    "getUsageSummary": "agent.getUsageSummary",
+    "clearUsageRecords": "agent.clearUsageRecords",
+    "readFileDraft": "agent.readFileDraft",
+    "getFileWriteDiff": "agent.getFileWriteDiff",
+    "eventNotification": "agent.event"
+  },
+  "events": {
+    "messageDelta": {
+      "type": "message_delta",
+      "runId": "run-contract-v1",
+      "streamId": "stream-contract-v1",
+      "delta": "hello"
+    },
+    "toolCall": {
+      "type": "tool_call",
+      "runId": "run-contract-v1",
+      "call": {
+        "id": "call-contract-v1",
+        "tool": "read_file",
+        "args": {
+          "path": "README.md"
+        },
+        "approvalStatus": "not_required",
+        "reason": "Inspect project documentation."
+      }
+    },
+    "toolResult": {
+      "type": "tool_result",
+      "runId": "run-contract-v1",
+      "result": {
+        "callId": "call-contract-v1",
+        "tool": "read_file",
+        "ok": true,
+        "result": {
+          "content": "MyCopilot Next"
+        }
+      }
+    },
+    "done": {
+      "type": "done",
+      "runId": "run-contract-v1",
+      "success": true,
+      "status": "completed",
+      "content": "done"
+    }
+  }
+}

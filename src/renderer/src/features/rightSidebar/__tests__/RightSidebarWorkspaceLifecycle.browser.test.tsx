@@ -21,7 +21,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
   })
 }))
 
-const { RightSidebar } = await import('../../../components/sidebar/RightSidebar')
+const { RightSidebar } = await import('../RightSidebar')
 const surfaceLifecycleSpy = vi.fn()
 const surfaceRenderSpy = vi.fn()
 const NOOP = () => undefined
