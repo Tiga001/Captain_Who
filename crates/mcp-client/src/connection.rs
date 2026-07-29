@@ -1,4 +1,5 @@
 use std::fmt;
+use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -7,8 +8,10 @@ use rmcp::model::{
     CacheScope, CallToolRequest, CallToolRequestParams, ClientInfo, ClientRequest, ContentBlock,
     ListToolsRequest, PaginatedRequestParams, ResourceContents, ServerResult, Tool,
 };
-use rmcp::service::{PeerRequestOptions, RequestHandle, RunningService, ServiceError};
-use rmcp::RoleClient;
+use rmcp::service::{
+    NotificationContext, PeerRequestOptions, RequestHandle, RunningService, ServiceError,
+};
+use rmcp::{ClientHandler, RoleClient};
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -20,8 +23,9 @@ use crate::transports::stdio::{
 };
 use crate::{
     McpCacheScope, McpCancellationToken, McpConnectionState, McpContentBlock, McpEmbeddedResource,
-    McpError, McpProtocolSnapshot, McpResourceLink, McpServerId, McpStderrSnapshot,
-    McpToolAnnotations, McpToolCall, McpToolDescriptor, McpToolPage, McpToolResult,
+    McpError, McpPeerSignalPublisher, McpPeerSignalReceiver, McpProtocolSnapshot, McpResourceLink,
+    McpServerId, McpStderrSnapshot, McpToolAnnotations, McpToolCall, McpToolDescriptor,
+    McpToolPage, McpToolResult,
 };
 
 pub(crate) const STATE_CONNECTING: u8 = 0;
@@ -32,12 +36,41 @@ pub(crate) const STATE_FAILED: u8 = 4;
 
 const CANCELLATION_NOTIFICATION_GRACE: Duration = Duration::from_millis(100);
 
-type RmcpClientService = RunningService<RoleClient, ClientInfo>;
+#[derive(Clone)]
+pub(crate) struct McpClientEventHandler {
+    info: ClientInfo,
+    signals: McpPeerSignalPublisher,
+}
+
+impl McpClientEventHandler {
+    pub(crate) fn new(info: ClientInfo, signals: McpPeerSignalPublisher) -> Self {
+        Self { info, signals }
+    }
+}
+
+impl ClientHandler for McpClientEventHandler {
+    fn get_info(&self) -> ClientInfo {
+        self.info.clone()
+    }
+
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        self.signals.tools_changed();
+        std::future::ready(())
+    }
+}
+
+type RmcpClientService = RunningService<RoleClient, McpClientEventHandler>;
 
 struct ConnectionResources {
     service: RmcpClientService,
     process: StdioProcessSupervisor,
     stderr_task: JoinHandle<()>,
+    notification_task: Option<JoinHandle<()>>,
+    transport_monitor_cancel: McpCancellationToken,
+    transport_monitor_task: JoinHandle<()>,
 }
 
 /// Stable protocol operations exposed to the future registry/runtime adapter.
@@ -51,6 +84,9 @@ pub trait McpPeer: Send + Sync {
         call: McpToolCall,
         cancellation: McpCancellationToken,
     ) -> BoxMcpFuture<'a, McpToolResult>;
+    fn subscribe_signals(&self) -> Option<McpPeerSignalReceiver> {
+        None
+    }
     fn close(&self) -> BoxMcpFuture<'_, ()>;
 }
 
@@ -70,6 +106,7 @@ pub struct McpClientHandle {
     shutdown_timeout: Duration,
     state: Arc<AtomicU8>,
     close_guard: Mutex<()>,
+    signals: McpPeerSignalPublisher,
 }
 
 impl fmt::Debug for McpClientHandle {
@@ -93,12 +130,21 @@ impl McpClientHandle {
         child: tokio::process::Child,
         stderr: Arc<Mutex<StderrAccumulator>>,
         stderr_task: JoinHandle<()>,
+        notification_task: Option<JoinHandle<()>>,
+        signals: McpPeerSignalPublisher,
         request_timeout: Duration,
         shutdown_timeout: Duration,
     ) -> Self {
         let state = Arc::new(AtomicU8::new(STATE_READY));
         let (process, process_exit_code) =
-            spawn_process_supervisor(child, Arc::clone(&state), shutdown_timeout);
+            spawn_process_supervisor(child, Arc::clone(&state), shutdown_timeout, signals.clone());
+        let transport_monitor_cancel = McpCancellationToken::new();
+        let transport_monitor_task = spawn_transport_monitor(
+            peer.clone(),
+            signals.clone(),
+            Arc::clone(&process_exit_code),
+            transport_monitor_cancel.clone(),
+        );
         Self {
             server_id,
             protocol,
@@ -107,6 +153,9 @@ impl McpClientHandle {
                 service,
                 process,
                 stderr_task,
+                notification_task,
+                transport_monitor_cancel,
+                transport_monitor_task,
             })),
             shutdown_task: Mutex::new(None),
             close_result: Arc::new(StdMutex::new(None)),
@@ -116,6 +165,7 @@ impl McpClientHandle {
             shutdown_timeout,
             state,
             close_guard: Mutex::new(()),
+            signals,
         }
     }
 
@@ -137,6 +187,10 @@ impl McpClientHandle {
 
     pub fn protocol_snapshot(&self) -> &McpProtocolSnapshot {
         &self.protocol
+    }
+
+    pub fn subscribe_signals(&self) -> McpPeerSignalReceiver {
+        self.signals.subscribe()
     }
 
     pub async fn stderr_snapshot(&self) -> McpStderrSnapshot {
@@ -422,6 +476,12 @@ async fn shutdown_resources(
     shutdown_timeout: Duration,
     state: Arc<AtomicU8>,
 ) -> Result<(), McpError> {
+    if let Some(notification_task) = resources.notification_task.take() {
+        notification_task.abort();
+        let _ = notification_task.await;
+    }
+    resources.transport_monitor_cancel.cancel();
+    let _ = resources.transport_monitor_task.await;
     let mut shutdown_error = match resources.service.close_with_timeout(shutdown_timeout).await {
         Ok(Some(_)) => None,
         Ok(None) => Some(McpError::shutdown(
@@ -461,6 +521,38 @@ async fn shutdown_resources(
     }
 }
 
+fn spawn_transport_monitor(
+    peer: rmcp::Peer<RoleClient>,
+    signals: McpPeerSignalPublisher,
+    process_exit_code: ProcessExitCode,
+    cancel: McpCancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+            if !peer.is_transport_closed() {
+                continue;
+            }
+            // Give the process supervisor a short opportunity to retain a real
+            // exit code. If the child remains alive after protocol EOF, None is
+            // the correct safe representation.
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+            let exit_code = process_exit_code
+                .lock()
+                .ok()
+                .and_then(|exit_code| *exit_code);
+            signals.transport_closed(exit_code);
+            return;
+        }
+    })
+}
+
 impl McpPeer for McpClientHandle {
     fn server_id(&self) -> McpServerId {
         self.server_id()
@@ -484,6 +576,10 @@ impl McpPeer for McpClientHandle {
         cancellation: McpCancellationToken,
     ) -> BoxMcpFuture<'a, McpToolResult> {
         Box::pin(async move { self.call_tool(call, cancellation).await })
+    }
+
+    fn subscribe_signals(&self) -> Option<McpPeerSignalReceiver> {
+        Some(self.subscribe_signals())
     }
 
     fn close(&self) -> BoxMcpFuture<'_, ()> {

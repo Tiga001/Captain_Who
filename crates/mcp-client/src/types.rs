@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::McpError;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct McpServerId(Uuid);
 

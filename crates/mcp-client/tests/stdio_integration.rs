@@ -5,26 +5,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mycopilot_mcp_client::{
-    McpCancellationToken, McpConnectionState, McpConnector, McpContentBlock, McpEnvBinding,
-    McpErrorKind, McpLifecycleKind, McpPeer, McpServerConfig, McpServerId, McpServerScope,
-    McpStdioConfig, McpStdioConnector, McpStdioPolicy, McpToolCall, McpTransportConfig,
-    McpTrustLevel,
+    InMemoryMcpRegistry, McpCancellationToken, McpCatalogCompleteness, McpConnectionManager,
+    McpConnectionState, McpConnector, McpContentBlock, McpEnvBinding, McpErrorKind, McpEvent,
+    McpLifecycleKind, McpManagerPolicy, McpPeer, McpPeerNotificationState, McpRegistry,
+    McpServerConfig, McpServerId, McpServerScope, McpStdioConfig, McpStdioConnector,
+    McpStdioPolicy, McpToolCall, McpTransportConfig, McpTrustLevel,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, Json, ServerHandler, ServiceExt};
+use rmcp::model::{
+    CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
+    ServerCapabilities, ServerInfo, SubscriptionFilter, Tool,
+};
+use rmcp::service::{RequestContext, SubscriptionContext, SubscriptionSink};
+use rmcp::{tool, tool_handler, tool_router, Json, RoleServer, ServerHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const MODERN_FIXTURE: &str = "--fixture-modern";
 const LEGACY_FIXTURE: &str = "--fixture-legacy";
+const DYNAMIC_MODERN_FIXTURE: &str = "--fixture-dynamic-modern";
+const DYNAMIC_LEGACY_FIXTURE: &str = "--fixture-dynamic-legacy";
 const EARLY_EXIT_FIXTURE: &str = "--fixture-early-exit";
 const EXIT_AFTER_NEGOTIATION_FIXTURE: &str = "--fixture-exit-after-negotiation";
 const STDERR_FIXTURE: &str = "--fixture-stderr-flood";
 const STDOUT_FIXTURE: &str = "--fixture-stdout-flood";
 const UNCOOPERATIVE_FIXTURE: &str = "--fixture-uncooperative-close";
 const UNRESPONSIVE_FIXTURE: &str = "--fixture-unresponsive-after-negotiation";
+const PROTOCOL_EOF_FIXTURE: &str = "--fixture-protocol-eof-alive";
 const ENV_PARENT: &str = "--fixture-env-parent";
 const ENV_PROBE: &str = "--fixture-env-probe";
 const FORBIDDEN_TEST_ENV: &str = "MYCOPILOT_MCP_FORBIDDEN_TEST_VALUE";
@@ -154,18 +162,132 @@ impl ServerHandler for FixtureServer {
     }
 }
 
+#[derive(Clone)]
+struct DynamicFixtureServer {
+    modern: bool,
+    visible: Arc<AtomicBool>,
+    scheduled: Arc<AtomicBool>,
+    subscription: Arc<tokio::sync::Mutex<Option<SubscriptionSink>>>,
+}
+
+impl DynamicFixtureServer {
+    fn new(modern: bool) -> Self {
+        Self {
+            modern,
+            visible: Arc::new(AtomicBool::new(false)),
+            scheduled: Arc::new(AtomicBool::new(false)),
+            subscription: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    fn schedule_change(&self, peer: rmcp::Peer<RoleServer>) {
+        if self.scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let fixture = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            fixture.visible.store(true, Ordering::SeqCst);
+            if fixture.modern {
+                let sink = {
+                    let mut selected = None;
+                    for _ in 0..100 {
+                        if let Some(sink) = fixture.subscription.lock().await.clone() {
+                            selected = Some(sink);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    selected
+                };
+                if let Some(sink) = sink {
+                    for _ in 0..8 {
+                        let _ = sink.notify_tool_list_changed().await;
+                    }
+                }
+            } else {
+                for _ in 0..8 {
+                    let _ = peer.notify_tool_list_changed().await;
+                }
+            }
+        });
+    }
+}
+
+impl ServerHandler for DynamicFixtureServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_server_info(Implementation::new(
+            "mycopilot-owned-dynamic-fixture",
+            "1.0.0",
+        ))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        self.schedule_change(context.peer);
+        let schema = Arc::new(Default::default());
+        let mut tools = vec![Tool::new(
+            "baseline_tool",
+            "Deterministic baseline fixture tool",
+            Arc::clone(&schema),
+        )];
+        if self.visible.load(Ordering::SeqCst) {
+            tools.push(Tool::new(
+                "dynamic_tool",
+                "Deterministic dynamically discovered fixture tool",
+                schema,
+            ));
+        }
+        Ok(ListToolsResult {
+            tools,
+            ..Default::default()
+        })
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        self.modern
+            .then(|| requested.supported_by(&self.get_info().capabilities))
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), rmcp::ErrorData> {
+        if !self.modern {
+            return Err(rmcp::ErrorData::method_not_found::<
+                rmcp::model::SubscriptionsListenRequestMethod,
+            >());
+        }
+        *self.subscription.lock().await = Some(context.sink().clone());
+        context.cancelled().await;
+        *self.subscription.lock().await = None;
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() {
     match std::env::args().nth(1).as_deref() {
         Some(MODERN_FIXTURE) => serve_fixture(false).await,
         Some(LEGACY_FIXTURE) => serve_fixture(true).await,
+        Some(DYNAMIC_MODERN_FIXTURE) => serve_dynamic_fixture(false).await,
+        Some(DYNAMIC_LEGACY_FIXTURE) => serve_dynamic_fixture(true).await,
         Some(EARLY_EXIT_FIXTURE) => {}
         Some(EXIT_AFTER_NEGOTIATION_FIXTURE) => {
             let _service = FixtureServer::new()
                 .serve(rmcp::transport::stdio())
                 .await
                 .expect("start exit-after-negotiation owned fixture");
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
             std::process::exit(0);
         }
         Some(STDERR_FIXTURE) => {
@@ -208,6 +330,23 @@ async fn main() {
                 .expect("stop fixture protocol reader after negotiation");
             std::future::pending::<()>().await;
         }
+        #[cfg(unix)]
+        Some(PROTOCOL_EOF_FIXTURE) => {
+            let service = FixtureServer::new()
+                .serve(rmcp::transport::stdio())
+                .await
+                .expect("start protocol-EOF owned fixture");
+            service
+                .cancel()
+                .await
+                .expect("stop protocol service before closing stdout");
+            // SAFETY: this is an isolated repository-owned child fixture. Its
+            // only purpose is to model protocol EOF while PID remains alive.
+            unsafe {
+                libc::close(libc::STDOUT_FILENO);
+            }
+            std::future::pending::<()>().await;
+        }
         Some(ENV_PARENT) => run_environment_parent().await,
         Some(ENV_PROBE) => {
             let present = std::env::var_os(FORBIDDEN_TEST_ENV).is_some();
@@ -233,6 +372,35 @@ async fn serve_fixture(legacy: bool) {
 }
 
 async fn serve_legacy_preamble() {
+    let (stdin, stdout) = legacy_transport().await;
+    let service = FixtureServer::new()
+        .serve((stdin, stdout))
+        .await
+        .expect("start owned legacy fixture");
+    service.waiting().await.expect("wait for legacy fixture");
+}
+
+async fn serve_dynamic_fixture(legacy: bool) {
+    let server = DynamicFixtureServer::new(!legacy);
+    let service = if legacy {
+        let (stdin, stdout) = legacy_transport().await;
+        server
+            .serve((stdin, stdout))
+            .await
+            .expect("start owned legacy dynamic fixture")
+    } else {
+        server
+            .serve(rmcp::transport::stdio())
+            .await
+            .expect("start owned modern dynamic fixture")
+    };
+    service
+        .waiting()
+        .await
+        .expect("wait for owned dynamic fixture");
+}
+
+async fn legacy_transport() -> (tokio::io::Stdin, tokio::io::Stdout) {
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut request_line = String::new();
     reader
@@ -259,22 +427,22 @@ async fn serve_legacy_preamble() {
         .await
         .expect("terminate discover rejection");
     stdout.flush().await.expect("flush discover rejection");
-
-    let service = FixtureServer::new()
-        .serve((reader.into_inner(), stdout))
-        .await
-        .expect("start owned legacy fixture");
-    service.waiting().await.expect("wait for legacy fixture");
+    (reader.into_inner(), stdout)
 }
 
 async fn run_integration_suite() {
     modern_discovery_and_tool_round_trip().await;
     legacy_initialize_fallback_and_tool_call().await;
+    modern_and_legacy_dynamic_notifications_share_one_signal_api().await;
+    manager_debounces_dynamic_tool_refresh().await;
+    manager_emits_safe_owned_server_exit_event().await;
     timeout_sends_protocol_cancellation().await;
     explicit_cancellation_reaches_server().await;
     cancellation_stays_bounded_under_transport_backpressure().await;
     early_server_exit_is_structured().await;
     post_negotiation_exit_is_reaped_and_changes_state().await;
+    #[cfg(unix)]
+    protocol_eof_is_reported_while_the_child_remains_alive().await;
     close_reaps_server_process().await;
     forced_close_terminates_uncooperative_owned_fixture().await;
     stderr_is_continuously_drained_and_bounded().await;
@@ -283,6 +451,187 @@ async fn run_integration_suite() {
     launch_is_denied_without_explicit_authorization().await;
     invalid_timeout_configuration_is_rejected().await;
     transport_neutral_connector_api_and_stable_types().await;
+}
+
+async fn modern_and_legacy_dynamic_notifications_share_one_signal_api() {
+    for (mode, lifecycle) in [
+        (DYNAMIC_MODERN_FIXTURE, McpLifecycleKind::Discover),
+        (DYNAMIC_LEGACY_FIXTURE, McpLifecycleKind::InitializeFallback),
+    ] {
+        let client = connect_fixture(mode).await;
+        assert_eq!(client.protocol_snapshot().lifecycle, lifecycle);
+        let mut signals = client.subscribe_signals();
+        let initial = signals.snapshot();
+        assert_eq!(initial.notification_state, McpPeerNotificationState::Active);
+        let first = client
+            .list_tools(None)
+            .await
+            .expect("initial dynamic tools/list");
+        assert!(first.tools.iter().any(|tool| tool.name == "baseline_tool"));
+        assert!(!first.tools.iter().any(|tool| tool.name == "dynamic_tool"));
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let changed = signals
+                    .changed()
+                    .await
+                    .expect("dynamic fixture signal channel");
+                if changed.tools_revision > initial.tools_revision {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("dynamic tool notification");
+        let refreshed = client
+            .list_tools(None)
+            .await
+            .expect("refreshed dynamic tools/list");
+        assert!(
+            refreshed
+                .tools
+                .iter()
+                .any(|tool| tool.name == "dynamic_tool"),
+            "dynamic tool missing for {lifecycle:?}"
+        );
+        client.close().await.expect("close dynamic fixture");
+    }
+}
+
+async fn manager_debounces_dynamic_tool_refresh() {
+    let registry = InMemoryMcpRegistry::shared();
+    let config = fixture_config(DYNAMIC_MODERN_FIXTURE);
+    let server_id = config.id;
+    registry
+        .add(config)
+        .expect("register owned dynamic fixture");
+    let events = Arc::new(std::sync::Mutex::new(Vec::<McpEvent>::new()));
+    let event_capture = Arc::clone(&events);
+    let manager = McpConnectionManager::new(
+        registry,
+        Arc::new(fixture_connector()),
+        Arc::new(move |event: McpEvent| {
+            event_capture
+                .lock()
+                .expect("event capture lock")
+                .push(event);
+        }),
+        McpManagerPolicy {
+            notification_debounce: Duration::from_millis(100),
+            ..McpManagerPolicy::default()
+        },
+    )
+    .expect("construct dynamic fixture manager");
+
+    let started = manager
+        .start(server_id)
+        .await
+        .expect("start dynamic fixture through manager");
+    assert_eq!(started.catalog_generation, 1);
+    let first = manager.catalog(server_id).unwrap().unwrap();
+    assert_eq!(first.completeness, McpCatalogCompleteness::Complete);
+    assert!(!first
+        .tools
+        .iter()
+        .any(|tool| tool.raw_name == "dynamic_tool"));
+
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let catalog = manager.catalog(server_id).unwrap().unwrap();
+            if catalog.generation == 2
+                && catalog
+                    .tools
+                    .iter()
+                    .any(|tool| tool.raw_name == "dynamic_tool")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("manager dynamic catalog refresh");
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        manager.catalog(server_id).unwrap().unwrap().generation,
+        2,
+        "notification storm must not advance generation without content changes"
+    );
+    let generation_two_events = events
+        .lock()
+        .expect("event capture lock")
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                McpEvent::CatalogChanged {
+                    server_id: event_server,
+                    generation: 2,
+                    ..
+                } if *event_server == server_id
+            )
+        })
+        .count();
+    assert_eq!(generation_two_events, 1);
+    manager.stop_all().await;
+}
+
+async fn manager_emits_safe_owned_server_exit_event() {
+    let registry = InMemoryMcpRegistry::shared();
+    let config = fixture_config(EXIT_AFTER_NEGOTIATION_FIXTURE);
+    let server_id = config.id;
+    registry
+        .add(config)
+        .expect("register owned exiting fixture");
+    let events = Arc::new(std::sync::Mutex::new(Vec::<McpEvent>::new()));
+    let event_capture = Arc::clone(&events);
+    let manager = McpConnectionManager::new(
+        registry,
+        Arc::new(fixture_connector()),
+        Arc::new(move |event: McpEvent| {
+            event_capture
+                .lock()
+                .expect("event capture lock")
+                .push(event);
+        }),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct exiting fixture manager");
+    manager
+        .start(server_id)
+        .await
+        .expect("start owned exiting fixture");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let exited = events
+                .lock()
+                .expect("event capture lock")
+                .iter()
+                .any(|event| {
+                    matches!(
+                        event,
+                        McpEvent::ServerExited {
+                            server_id: event_server,
+                            ..
+                        } if *event_server == server_id
+                    )
+                });
+            if exited
+                && manager
+                    .get_status(server_id)
+                    .unwrap()
+                    .is_some_and(|status| {
+                        status.state == mycopilot_mcp_client::McpServerState::Error
+                    })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("manager observes owned fixture exit");
+    manager.stop_all().await;
 }
 
 async fn modern_discovery_and_tool_round_trip() {
@@ -473,6 +822,32 @@ async fn post_negotiation_exit_is_reaped_and_changes_state() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("post-negotiation process exit was not observed");
+}
+
+#[cfg(unix)]
+async fn protocol_eof_is_reported_while_the_child_remains_alive() {
+    let mut config = fixture_config(PROTOCOL_EOF_FIXTURE);
+    config.shutdown_timeout_ms = 150;
+    let client = fixture_connector()
+        .connect(&config)
+        .await
+        .expect("connect protocol-EOF owned fixture");
+    let mut signals = client.subscribe_signals();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = signals.snapshot();
+            if snapshot.transport_closed {
+                break;
+            }
+            signals
+                .changed()
+                .await
+                .expect("protocol-EOF signal channel");
+        }
+    })
+    .await
+    .expect("protocol EOF must become a manager-visible signal");
+    let _ = client.close().await;
 }
 
 async fn close_reaps_server_process() {

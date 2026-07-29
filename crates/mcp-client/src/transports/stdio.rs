@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use rmcp::model::{
     ClientCapabilities, ClientInfo, Implementation, ProtocolVersion, ServerCapabilities,
+    ServerNotification, SubscriptionFilter,
 };
 use rmcp::{ClientLifecycleMode, ClientServiceExt};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
@@ -18,11 +19,12 @@ use tokio::process::{Child, ChildStderr, Command};
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::connection::{STATE_FAILED, STATE_READY};
+use crate::connection::{McpClientEventHandler, STATE_FAILED, STATE_READY};
 use crate::{
     BoxMcpFuture, McpCapabilitySnapshot, McpClientHandle, McpConnector, McpEnvBinding, McpError,
-    McpImplementationInfo, McpLifecycleKind, McpPeer, McpProtocolSnapshot, McpServerConfig,
-    McpStderrSnapshot, McpStdioConfig, McpTransportConfig, McpTrustLevel,
+    McpImplementationInfo, McpLifecycleKind, McpPeer, McpPeerNotificationState,
+    McpPeerSignalPublisher, McpProtocolSnapshot, McpServerConfig, McpStderrSnapshot,
+    McpStdioConfig, McpTransportConfig, McpTrustLevel,
 };
 
 const DEFAULT_STDOUT_MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -114,13 +116,15 @@ impl McpStdioConnector {
             ClientCapabilities::default(),
             Implementation::new("mycopilot-mcp-client", env!("CARGO_PKG_VERSION")),
         );
+        let signals = McpPeerSignalPublisher::new();
+        let client_handler = McpClientEventHandler::new(client_info, signals.clone());
         let lifecycle = ClientLifecycleMode::Auto {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
             legacy_version: Some(ProtocolVersion::V_2025_11_25),
         };
         let negotiation = tokio::time::timeout(
             config.connect_timeout(),
-            client_info.serve_with_lifecycle(
+            client_handler.serve_with_lifecycle(
                 (
                     LineLimitedReader::new(stdout, self.policy.stdout_max_line_bytes),
                     stdin,
@@ -161,6 +165,9 @@ impl McpStdioConnector {
         };
         let protocol = map_protocol_snapshot(&peer_info);
         let peer = service.peer().clone();
+        let notification_task =
+            establish_tool_notifications(&peer, &protocol, &signals, config.connect_timeout())
+                .await;
         Ok(Arc::new(McpClientHandle::new(
             config.id,
             protocol,
@@ -169,6 +176,8 @@ impl McpStdioConnector {
             child,
             stderr_capture,
             stderr_task,
+            notification_task,
+            signals,
             config.request_timeout(),
             config.shutdown_timeout(),
         )))
@@ -266,6 +275,7 @@ pub(crate) fn spawn_process_supervisor(
     child: Child,
     state: Arc<AtomicU8>,
     shutdown_timeout: Duration,
+    signals: McpPeerSignalPublisher,
 ) -> (StdioProcessSupervisor, ProcessExitCode) {
     let exit_code = Arc::new(StdMutex::new(None));
     let task_exit_code = Arc::clone(&exit_code);
@@ -276,6 +286,7 @@ pub(crate) fn spawn_process_supervisor(
         state,
         task_exit_code,
         shutdown_timeout,
+        signals,
     ));
     (
         StdioProcessSupervisor {
@@ -315,6 +326,7 @@ async fn supervise_process(
     state: Arc<AtomicU8>,
     exit_code: ProcessExitCode,
     shutdown_timeout: Duration,
+    signals: McpPeerSignalPublisher,
 ) -> Result<(), McpError> {
     let outcome = tokio::select! {
         status = child.wait() => status
@@ -341,8 +353,57 @@ async fn supervise_process(
             Ordering::AcqRel,
             Ordering::Acquire,
         );
+        signals.transport_closed(status.code());
     }
     Ok(())
+}
+
+async fn establish_tool_notifications(
+    peer: &rmcp::Peer<rmcp::RoleClient>,
+    protocol: &McpProtocolSnapshot,
+    signals: &McpPeerSignalPublisher,
+    timeout: Duration,
+) -> Option<JoinHandle<()>> {
+    if !protocol.capabilities.tools_list_changed {
+        signals.set_notification_state(McpPeerNotificationState::Unsupported);
+        return None;
+    }
+    if protocol.lifecycle == McpLifecycleKind::InitializeFallback {
+        signals.set_notification_state(McpPeerNotificationState::Active);
+        return None;
+    }
+
+    let filter = SubscriptionFilter::builder().tools_list_changed().build();
+    let mut subscription = match tokio::time::timeout(timeout, peer.listen(filter)).await {
+        Ok(Ok(subscription)) if subscription.acknowledged().tools_list_changed == Some(true) => {
+            subscription
+        }
+        Ok(Ok(mut subscription)) => {
+            let _ = tokio::time::timeout(Duration::from_millis(100), subscription.cancel()).await;
+            signals.set_notification_state(McpPeerNotificationState::Unavailable);
+            return None;
+        }
+        Ok(Err(_)) | Err(_) => {
+            signals.set_notification_state(McpPeerNotificationState::Unavailable);
+            return None;
+        }
+    };
+    signals.set_notification_state(McpPeerNotificationState::Active);
+    let task_signals = signals.clone();
+    Some(tokio::spawn(async move {
+        loop {
+            match subscription.next().await {
+                Ok(Some(ServerNotification::ToolListChangedNotification(_))) => {
+                    task_signals.tools_changed();
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    task_signals.notifications_unavailable();
+                    break;
+                }
+            }
+        }
+    }))
 }
 
 async fn wait_then_force(

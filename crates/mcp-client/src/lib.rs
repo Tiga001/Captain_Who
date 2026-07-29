@@ -13,22 +13,42 @@
 //! use mycopilot_mcp_client::rmcp;
 //! ```
 
+mod catalog;
 mod config;
 mod connection;
 mod connector;
+mod digest;
 mod error;
 mod event;
+mod manager;
+mod registry;
 mod transports;
 mod types;
 
+pub use catalog::{
+    McpCatalogCompleteness, McpCatalogDiagnostic, McpCatalogDiagnosticKind, McpCatalogIssue,
+    McpCatalogLimits, McpCatalogPolicy, McpCatalogSnapshot, McpCatalogTool, McpToolId,
+};
 pub use config::{
     McpEnvBinding, McpServerConfig, McpServerScope, McpStdioConfig, McpTransportConfig,
     McpTrustLevel,
 };
 pub use connection::{McpClientHandle, McpPeer};
 pub use connector::{BoxMcpFuture, McpConnector};
+pub use digest::{config_digest, McpCatalogDigest, McpConfigDigest, McpSchemaDigest};
 pub use error::{McpError, McpErrorKind};
-pub use event::{McpConnectionEvent, McpStderrSnapshot};
+pub(crate) use event::McpPeerSignalPublisher;
+pub use event::{
+    McpConnectionEvent, McpEvent, McpEventSink, McpPeerNotificationState, McpPeerSignalReceiver,
+    McpPeerSignalSnapshot, McpSafeError, McpServerState, McpStderrSnapshot, NoopMcpEventSink,
+};
+pub use manager::{
+    McpBatchOperationResult, McpConnectionManager, McpManagerPolicy, McpServerStatus,
+};
+pub use registry::{
+    InMemoryMcpRegistry, McpRegistry, McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry,
+    McpRegistryMutation, McpRegistrySubscription, McpRegistrySubscriptionError,
+};
 pub use transports::stdio::{McpStdioConnector, McpStdioPolicy};
 pub use types::{
     McpCacheScope, McpCapabilitySnapshot, McpConnectionState, McpContentBlock, McpEmbeddedResource,
