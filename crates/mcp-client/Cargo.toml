@@ -1,0 +1,30 @@
+[package]
+name = "mycopilot-mcp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "mycopilot_mcp_client"
+path = "src/lib.rs"
+
+[[test]]
+name = "stdio_integration"
+path = "tests/stdio_integration.rs"
+harness = false
+
+[dependencies]
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+tokio = { workspace = true, features = ["process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uuid = { workspace = true, features = ["serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["macros", "server", "transport-io"] }
+schemars = "1"
