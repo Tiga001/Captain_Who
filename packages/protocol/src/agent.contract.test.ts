@@ -15,7 +15,9 @@ import {
   AGENT_REJECT_ACTION_METHOD,
   AGENT_START_CONVERSATION_TURN_METHOD,
   AGENT_STEER_RUN_METHOD,
-  type AgentEvent
+  type AgentEvent,
+  type AgentToolIdentity,
+  type ConversationTurnTraceItem
 } from './agent'
 
 const fixture = JSON.parse(
@@ -59,6 +61,38 @@ const events: Record<string, AgentEvent> = {
   }
 }
 
+const toolIdentities = [
+  { type: 'builtin', toolName: 'read_file' },
+  {
+    type: 'runtime_extension',
+    extensionId: 'office',
+    toolName: 'office_document'
+  },
+  {
+    type: 'mcp',
+    provenance: {
+      serverId: '7f4a2d91-24ab-4d24-9eed-63daf26a6c15',
+      scope: { type: 'project', projectId: 'project-fixture' },
+      rawToolName: 'add_numbers',
+      modelToolName: 'mcp__fixture_7f4a2d91__add_numbers',
+      configDigest: 'a'.repeat(64),
+      catalogGeneration: 4,
+      catalogDigest: 'b'.repeat(64)
+    }
+  }
+] satisfies AgentToolIdentity[]
+
+const mcpTraceToolCall = {
+  type: 'tool_call',
+  sequence: 3,
+  callId: 'call-mcp-fixture',
+  tool: 'mcp__fixture_7f4a2d91__add_numbers',
+  operation: { left: 2, right: 3 },
+  approvalStatus: 'not_required',
+  truncated: false,
+  provenance: toolIdentities[2]
+} satisfies ConversationTurnTraceItem
+
 describe('Agent cross-language golden contract', () => {
   it('keeps TypeScript event discriminants and field casing aligned with the fixture', () => {
     expect(events).toEqual(fixture.events)
@@ -80,5 +114,34 @@ describe('Agent cross-language golden contract', () => {
       getFileWriteDiff: AGENT_GET_FILE_WRITE_DIFF_METHOD,
       eventNotification: AGENT_EVENT_NOTIFICATION_METHOD
     })
+  })
+})
+
+describe('Agent tool identity contract', () => {
+  it('uses the Rust-compatible tagged identity and MCP scope field casing', () => {
+    expect(toolIdentities).toEqual([
+      { type: 'builtin', toolName: 'read_file' },
+      {
+        type: 'runtime_extension',
+        extensionId: 'office',
+        toolName: 'office_document'
+      },
+      {
+        type: 'mcp',
+        provenance: {
+          serverId: '7f4a2d91-24ab-4d24-9eed-63daf26a6c15',
+          scope: { type: 'project', projectId: 'project-fixture' },
+          rawToolName: 'add_numbers',
+          modelToolName: 'mcp__fixture_7f4a2d91__add_numbers',
+          configDigest: 'a'.repeat(64),
+          catalogGeneration: 4,
+          catalogDigest: 'b'.repeat(64)
+        }
+      }
+    ])
+  })
+
+  it('allows optional typed provenance on a tool-call trace item', () => {
+    expect(mcpTraceToolCall.provenance).toEqual(toolIdentities[2])
   })
 })

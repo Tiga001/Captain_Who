@@ -415,6 +415,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             "request": { "operation": "generate", "prompt": "private prompt" },
             "reason": "Create the requested image."
         }),
+        provenance: None,
         approval_status: AgentApprovalStatus::NotRequired,
         truncated: false,
     };

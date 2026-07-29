@@ -49,6 +49,26 @@ fn tool_definition() -> AgentToolDefinition {
     }
 }
 
+fn mcp_tool_definition() -> AgentToolDefinition {
+    AgentToolDefinition {
+        name: "mcp__fixture_7f4a2d91__add_numbers".to_string(),
+        description: "Add two fixture numbers.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "left": { "type": "number" },
+                "right": { "type": "number" }
+            },
+            "required": ["left", "right"],
+            "additionalProperties": false
+        }),
+        safety: AgentToolSafety::ReadOnly,
+        requires_workspace: false,
+        requires_approval: false,
+        approval_mode: crate::protocol::AgentToolApprovalMode::Never,
+    }
+}
+
 fn request_with_messages(messages: Vec<LlmMessage>) -> LlmChatRequest {
     LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
@@ -143,6 +163,7 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
                     sequence: 11,
                     call_id: call_id.clone(),
                     tool: "read_file".to_string(),
+                    provenance: None,
                     operation: json!({ "path": "src/lib.rs", "startLine": 1 }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -1033,6 +1054,105 @@ fn builds_openai_native_tool_payload_and_tool_result_messages() {
     assert_eq!(payload["messages"][1]["tool_calls"][0]["id"], "call-1");
     assert_eq!(payload["messages"][2]["role"], "tool");
     assert_eq!(payload["messages"][2]["tool_call_id"], "call-1");
+}
+
+#[test]
+fn builds_openai_mcp_namespace_tool_payload_without_internal_catalog_fields() {
+    let definition = mcp_tool_definition();
+    let expected_schema = definition.input_schema.clone();
+    let request = LlmChatRequest {
+        api_url: "https://example.test/v1/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        model: "gpt".to_string(),
+        api_style: AgentApiStyle::OpenAiCompatible,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![message(LlmMessageRole::User, "Add the numbers")],
+        tools: vec![definition],
+    };
+
+    let payload = build_payload(&request);
+    let tool = &payload["tools"][0];
+
+    assert_eq!(
+        tool,
+        &json!({
+            "type": "function",
+            "function": {
+                "name": "mcp__fixture_7f4a2d91__add_numbers",
+                "description": "Add two fixture numbers.",
+                "parameters": expected_schema
+            }
+        })
+    );
+    assert_eq!(tool["function"]["parameters"]["type"], "object");
+    assert_eq!(tool["function"].as_object().unwrap().len(), 3);
+
+    let encoded = serde_json::to_string(tool).unwrap();
+    for internal_field in [
+        "provenance",
+        "outputSchema",
+        "output_schema",
+        "_meta",
+        "serverId",
+        "rawToolName",
+        "configDigest",
+        "catalogGeneration",
+    ] {
+        assert!(
+            !encoded.contains(&format!("\"{internal_field}\"")),
+            "OpenAI tool payload leaked internal MCP field {internal_field}: {encoded}"
+        );
+    }
+}
+
+#[test]
+fn builds_anthropic_mcp_namespace_tool_payload_without_internal_catalog_fields() {
+    let definition = mcp_tool_definition();
+    let expected_schema = definition.input_schema.clone();
+    let request = LlmChatRequest {
+        api_url: "https://example.test/v1/messages".to_string(),
+        api_token: "token".to_string(),
+        model: "claude".to_string(),
+        api_style: AgentApiStyle::AnthropicCompatible,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![message(LlmMessageRole::User, "Add the numbers")],
+        tools: vec![definition],
+    };
+
+    let payload = build_payload(&request);
+    let tool = &payload["tools"][0];
+
+    assert_eq!(
+        tool,
+        &json!({
+            "name": "mcp__fixture_7f4a2d91__add_numbers",
+            "description": "Add two fixture numbers.",
+            "input_schema": expected_schema
+        })
+    );
+    assert_eq!(tool["input_schema"]["type"], "object");
+    assert_eq!(tool.as_object().unwrap().len(), 3);
+
+    let encoded = serde_json::to_string(tool).unwrap();
+    for internal_field in [
+        "provenance",
+        "outputSchema",
+        "output_schema",
+        "_meta",
+        "serverId",
+        "rawToolName",
+        "configDigest",
+        "catalogGeneration",
+    ] {
+        assert!(
+            !encoded.contains(&format!("\"{internal_field}\"")),
+            "Anthropic tool payload leaked internal MCP field {internal_field}: {encoded}"
+        );
+    }
 }
 
 #[test]

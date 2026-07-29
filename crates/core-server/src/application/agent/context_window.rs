@@ -173,6 +173,16 @@ impl AgentService {
         agent_input: &AgentChatInput,
         skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
     ) -> Result<AgentContextWindowToolProjection, String> {
+        let mcp_tools = self.capture_mcp_tool_runtime(agent_input);
+        self.context_window_tool_projection_with_mcp(agent_input, skill_resources, mcp_tools)
+    }
+
+    pub(super) fn context_window_tool_projection_with_mcp(
+        &self,
+        agent_input: &AgentChatInput,
+        skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
+        mcp_tools: Option<McpToolRuntime>,
+    ) -> Result<AgentContextWindowToolProjection, String> {
         let mut host_services =
             AgentRuntimeHostServices::new().with_office_engine(Arc::clone(&self.office_engine));
         if let Some(execution) = self.image_generation_execution.as_ref() {
@@ -180,6 +190,9 @@ impl AgentService {
         }
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
+        }
+        if let Some(mcp_tools) = mcp_tools {
+            host_services = host_services.with_mcp_tools(mcp_tools);
         }
         // AgentService always provides the real Host action executor to a started run. Passing
         // `true` keeps preview approval schemas aligned with that production boundary without

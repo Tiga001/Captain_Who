@@ -14,8 +14,8 @@ use crate::conversation_trace_projection::{
 use crate::llm::LlmMessage;
 use crate::protocol::{
     AgentApprovalStatus, AgentContextCheckpointToolCall, AgentInputAttachment,
-    AgentInputAttachmentKind, AgentProposedAction, AgentRunCheckpoint, AgentToolCall,
-    AgentToolResult,
+    AgentInputAttachmentKind, AgentMcpServerScope, AgentProposedAction, AgentRunCheckpoint,
+    AgentToolCall, AgentToolIdentity, AgentToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -287,6 +287,8 @@ pub enum ConversationTurnTraceItem {
         sequence: u64,
         call_id: String,
         tool: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<AgentToolIdentity>,
         operation: Value,
         approval_status: AgentApprovalStatus,
         truncated: bool,
@@ -486,6 +488,7 @@ impl ConversationTurnTrace {
                 ConversationTurnTraceItem::ToolCall {
                     call_id,
                     tool,
+                    provenance,
                     operation,
                     ..
                 } => {
@@ -497,6 +500,7 @@ impl ConversationTurnTrace {
                     if call_id.trim().is_empty() || !is_provider_safe_tool_name(tool) {
                         return Err("conversation trace tool call identity is invalid".to_string());
                     }
+                    validate_tool_identity(tool, provenance.as_ref())?;
                     if !call_ids.insert(call_id.as_str()) {
                         return Err(format!(
                             "conversation trace contains duplicate tool call id: {call_id}"
@@ -561,6 +565,78 @@ impl ConversationTurnTrace {
             self.items.len()
         }
     }
+}
+
+fn validate_tool_identity(
+    trace_tool: &str,
+    identity: Option<&AgentToolIdentity>,
+) -> Result<(), String> {
+    let Some(identity) = identity else {
+        // Legacy traces predate typed provenance and remain readable.
+        return Ok(());
+    };
+    match identity {
+        AgentToolIdentity::Builtin { tool_name } => {
+            if tool_name != trace_tool || tool_name.chars().any(char::is_control) {
+                return Err("conversation trace builtin provenance is inconsistent".to_string());
+            }
+        }
+        AgentToolIdentity::RuntimeExtension {
+            extension_id,
+            tool_name,
+        } => {
+            if extension_id.trim().is_empty()
+                || extension_id.trim() != extension_id
+                || extension_id.chars().any(char::is_control)
+                || tool_name != trace_tool
+            {
+                return Err(
+                    "conversation trace runtime-extension provenance is invalid".to_string()
+                );
+            }
+        }
+        AgentToolIdentity::Mcp { provenance } => {
+            let scoped_id_is_valid = match &provenance.scope {
+                AgentMcpServerScope::Project { project_id } => {
+                    !project_id.trim().is_empty()
+                        && project_id.trim() == project_id
+                        && project_id.len() <= 1_024
+                        && !project_id.chars().any(char::is_control)
+                }
+                AgentMcpServerScope::Plugin { plugin_id } => {
+                    !plugin_id.trim().is_empty()
+                        && plugin_id.trim() == plugin_id
+                        && plugin_id.len() <= 1_024
+                        && !plugin_id.chars().any(char::is_control)
+                }
+                AgentMcpServerScope::Builtin
+                | AgentMcpServerScope::User
+                | AgentMcpServerScope::Managed => true,
+            };
+            if provenance.model_tool_name != trace_tool
+                || uuid::Uuid::parse_str(&provenance.server_id).is_err()
+                || provenance.raw_tool_name.trim().is_empty()
+                || provenance.raw_tool_name.trim() != provenance.raw_tool_name
+                || provenance.raw_tool_name.len() > 1_024
+                || provenance.raw_tool_name.chars().any(char::is_control)
+                || provenance.catalog_generation == 0
+                || provenance.config_digest.len() != 64
+                || !provenance
+                    .config_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || provenance.catalog_digest.len() != 64
+                || !provenance
+                    .catalog_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || !scoped_id_is_valid
+            {
+                return Err("conversation trace MCP provenance is invalid".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ConversationHistoryArchiveTraceMetadata {
@@ -1029,6 +1105,10 @@ impl ConversationTraceRecorder {
         }
     }
 
+    pub(crate) fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+
     pub(crate) fn snapshot(&self) -> ConversationTraceSnapshot {
         let (items, projected_truncated) = if self.items_are_durable {
             (self.items.clone(), false)
@@ -1130,6 +1210,14 @@ impl ConversationTraceRecorder {
     }
 
     pub(crate) fn record_tool_call(&mut self, call: &AgentToolCall) -> Option<u64> {
+        self.record_tool_call_with_identity(call, None)
+    }
+
+    pub(crate) fn record_tool_call_with_identity(
+        &mut self,
+        call: &AgentToolCall,
+        provenance: Option<AgentToolIdentity>,
+    ) -> Option<u64> {
         if let Some(sequence) = self.items.iter().find_map(|item| {
             matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id)
                 .then(|| item.sequence())
@@ -1142,6 +1230,7 @@ impl ConversationTraceRecorder {
             sequence,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
+            provenance,
             operation,
             approval_status: call.approval_status,
             truncated: redacted,
@@ -1512,6 +1601,7 @@ fn project_durable_trace_items(
                 sequence,
                 call_id,
                 tool,
+                provenance,
                 operation,
                 approval_status,
                 truncated,
@@ -1524,6 +1614,7 @@ fn project_durable_trace_items(
                     sequence: *sequence,
                     call_id: call_id.clone(),
                     tool: tool.clone(),
+                    provenance: provenance.clone(),
                     operation: operation.value,
                     approval_status: *approval_status,
                     truncated: item_truncated,
@@ -1776,6 +1867,7 @@ fn is_provider_safe_tool_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{AgentMcpServerScope, AgentMcpToolProvenance};
 
     fn call(id: &str) -> AgentToolCall {
         AgentToolCall {
@@ -1785,6 +1877,81 @@ mod tests {
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         }
+    }
+
+    #[test]
+    fn mcp_tool_identity_round_trips_and_legacy_tool_calls_remain_readable() {
+        let tool_name = "mcp__fixture__echo";
+        let call = AgentToolCall {
+            id: "mcp-call-1".to_string(),
+            tool: tool_name.to_string(),
+            args: json!({"text": "hello"}),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let identity = AgentToolIdentity::Mcp {
+            provenance: AgentMcpToolProvenance {
+                server_id: "7f4a2d91-24ab-4d24-9eed-63daf26a6c15".to_string(),
+                scope: AgentMcpServerScope::Project {
+                    project_id: "project-fixture".to_string(),
+                },
+                raw_tool_name: "echo/raw".to_string(),
+                model_tool_name: tool_name.to_string(),
+                config_digest: "a".repeat(64),
+                catalog_generation: 4,
+                catalog_digest: "b".repeat(64),
+            },
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call_with_identity(&call, Some(identity));
+        recorder.record_tool_result(
+            &call,
+            &AgentToolResult {
+                exact_archive_file: None,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                ok: true,
+                result: Some(json!({"content": "done"})),
+                error: None,
+            },
+        );
+        let trace = recorder.finish(
+            "run-mcp-identity",
+            "conversation-mcp-identity",
+            "assistant-mcp-identity",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        trace.validate().unwrap();
+        let serialized = serde_json::to_value(&trace).unwrap();
+        assert_eq!(
+            serialized["items"][0]["provenance"]["provenance"]["catalogDigest"],
+            "b".repeat(64)
+        );
+        assert_eq!(
+            serialized["items"][0]["provenance"]["provenance"]["scope"]["projectId"],
+            "project-fixture"
+        );
+
+        let mut legacy = serialized["items"][0].clone();
+        legacy
+            .as_object_mut()
+            .expect("serialized trace item object")
+            .remove("provenance");
+        let legacy: ConversationTurnTraceItem = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            legacy,
+            ConversationTurnTraceItem::ToolCall {
+                provenance: None,
+                ..
+            }
+        ));
+
+        let mut mismatched = trace.clone();
+        if let ConversationTurnTraceItem::ToolCall { tool, .. } = &mut mismatched.items[0] {
+            *tool = "mcp__different__echo".to_string();
+        }
+        assert!(mismatched.validate().is_err());
     }
 
     #[test]
@@ -2188,6 +2355,7 @@ mod tests {
         assert!(!serialized.contains("--- a/src/lib.rs"));
 
         let ConversationTurnTraceItem::ToolCall {
+            provenance: None,
             operation: write_operation,
             ..
         } = &trace.items[0]
@@ -2207,6 +2375,7 @@ mod tests {
         assert_eq!(write_result["additions"], 2);
 
         let ConversationTurnTraceItem::ToolCall {
+            provenance: None,
             operation: patch_operation,
             ..
         } = &trace.items[2]
@@ -2325,6 +2494,7 @@ mod tests {
             .contains("actionable failure"));
 
         let ConversationTurnTraceItem::ToolCall {
+            provenance: None,
             operation: read_operation,
             ..
         } = &trace.items[2]
@@ -2455,6 +2625,7 @@ mod tests {
         recorder.record_tool_call(&call);
         let (checkpoint, _, _, _) = recorder.checkpoint();
         let ConversationTurnTraceItem::ToolCall {
+            provenance: None,
             operation: checkpoint_operation,
             ..
         } = &checkpoint[0]
@@ -2471,6 +2642,7 @@ mod tests {
                 .snapshot()
                 .in_progress_audit_trace("run", "conversation", "assistant");
         let ConversationTurnTraceItem::ToolCall {
+            provenance: None,
             operation: durable_operation,
             ..
         } = &durable.items[0]

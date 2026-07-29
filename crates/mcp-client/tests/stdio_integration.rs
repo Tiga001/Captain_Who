@@ -89,12 +89,20 @@ impl FixtureServer {
 
 #[tool_router(router = tool_router)]
 impl FixtureServer {
-    #[tool(name = "echo_text", description = "Echo deterministic fixture text")]
+    #[tool(
+        name = "echo_text",
+        description = "Echo deterministic fixture text",
+        annotations(read_only_hint = true)
+    )]
     async fn echo_text(&self, Parameters(input): Parameters<EchoInput>) -> String {
         input.text
     }
 
-    #[tool(name = "add_numbers", description = "Add two fixture integers")]
+    #[tool(
+        name = "add_numbers",
+        description = "Add two fixture integers",
+        annotations(read_only_hint = true)
+    )]
     async fn add_numbers(&self, Parameters(input): Parameters<AddInput>) -> Json<AddOutput> {
         Json(AddOutput {
             sum: input.left + input.right,
@@ -103,7 +111,8 @@ impl FixtureServer {
 
     #[tool(
         name = "structured_result",
-        description = "Return deterministic structured fixture data"
+        description = "Return deterministic structured fixture data",
+        annotations(read_only_hint = true)
     )]
     async fn structured_result(&self) -> Json<StructuredOutput> {
         Json(StructuredOutput {
@@ -114,7 +123,8 @@ impl FixtureServer {
 
     #[tool(
         name = "return_tool_error",
-        description = "Return a deterministic tool-level error"
+        description = "Return a deterministic tool-level error",
+        annotations(read_only_hint = true)
     )]
     async fn return_tool_error(&self) -> CallToolResult {
         CallToolResult::error(vec![ContentBlock::text("fixture tool error")])
@@ -122,7 +132,8 @@ impl FixtureServer {
 
     #[tool(
         name = "slow_tool",
-        description = "Wait for a controlled fixture duration"
+        description = "Wait for a controlled fixture duration",
+        annotations(read_only_hint = true)
     )]
     async fn slow_tool(
         &self,
@@ -144,7 +155,8 @@ impl FixtureServer {
 
     #[tool(
         name = "slow_status",
-        description = "Read deterministic in-memory fixture cancellation state"
+        description = "Read deterministic in-memory fixture cancellation state",
+        annotations(read_only_hint = true)
     )]
     async fn slow_status(&self) -> Json<SlowStatus> {
         Json(SlowStatus {
@@ -445,6 +457,7 @@ async fn run_integration_suite() {
     protocol_eof_is_reported_while_the_child_remains_alive().await;
     close_reaps_server_process().await;
     forced_close_terminates_uncooperative_owned_fixture().await;
+    manager_shutdown_force_reaps_uncooperative_owned_fixture().await;
     stderr_is_continuously_drained_and_bounded().await;
     oversized_protocol_line_is_rejected().await;
     unallowlisted_parent_environment_is_not_inherited().await;
@@ -876,6 +889,50 @@ async fn forced_close_terminates_uncooperative_owned_fixture() {
         .await
         .expect("resume, force terminate, and reap uncooperative owned fixture");
     assert_eq!(client.connection_state(), McpConnectionState::Closed);
+}
+
+async fn manager_shutdown_force_reaps_uncooperative_owned_fixture() {
+    let registry = InMemoryMcpRegistry::shared();
+    let mut config = fixture_config(UNCOOPERATIVE_FIXTURE);
+    config.shutdown_timeout_ms = 2_000;
+    let server_id = config.id;
+    registry
+        .add(config)
+        .expect("register uncooperative owned fixture");
+    let manager = McpConnectionManager::without_events(
+        registry,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct uncooperative fixture manager");
+    manager
+        .start(server_id)
+        .await
+        .expect("start uncooperative fixture through manager");
+
+    let report = tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.shutdown(Duration::from_millis(300)),
+    )
+    .await
+    .expect("manager shutdown must remain Host-deadline bounded");
+    assert!(report.forced);
+    assert!(
+        report.cleanup_complete,
+        "force token must let the stdio supervisor terminate and reap its live child"
+    );
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        mycopilot_mcp_client::McpServerState::Disabled
+    );
+    assert_eq!(
+        manager
+            .start(server_id)
+            .await
+            .expect_err("permanently shut down manager cannot restart a fixture")
+            .kind,
+        McpErrorKind::Shutdown
+    );
 }
 
 async fn stderr_is_continuously_drained_and_bounded() {

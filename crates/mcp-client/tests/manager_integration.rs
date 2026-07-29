@@ -1,17 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use mycopilot_mcp_client::{
     BoxMcpFuture, InMemoryMcpRegistry, McpBatchOperationResult, McpCancellationToken,
-    McpCapabilitySnapshot, McpCatalogCompleteness, McpCatalogDiagnosticKind, McpCatalogIssue,
-    McpCatalogPolicy, McpConnectionManager, McpConnectionState, McpConnector, McpContentBlock,
-    McpEnvBinding, McpError, McpErrorKind, McpEvent, McpEventSink, McpImplementationInfo,
-    McpLifecycleKind, McpManagerPolicy, McpPeer, McpProtocolSnapshot, McpRegistry, McpServerConfig,
-    McpServerId, McpServerScope, McpServerState, McpStdioConfig, McpToolCall, McpToolDescriptor,
-    McpToolPage, McpToolResult, McpTransportConfig, McpTrustLevel,
+    McpCapabilitySnapshot, McpCatalogCompleteness, McpCatalogDiagnosticKind, McpCatalogDigest,
+    McpCatalogIssue, McpCatalogPolicy, McpCatalogToolCall, McpConnectionManager,
+    McpConnectionState, McpConnector, McpContentBlock, McpEnvBinding, McpError, McpErrorKind,
+    McpEvent, McpEventSink, McpImplementationInfo, McpLifecycleKind, McpManagerPolicy, McpPeer,
+    McpProtocolSnapshot, McpRegistry, McpServerConfig, McpServerId, McpServerScope, McpServerState,
+    McpStdioConfig, McpToolCall, McpToolDescriptor, McpToolPage, McpToolResult, McpTransportConfig,
+    McpTrustLevel,
 };
 use serde_json::json;
 
@@ -28,6 +30,8 @@ struct MockServer {
     list_delay_ms: AtomicU64,
     close_delay_ms: AtomicU64,
     connect_error: Mutex<Option<McpError>>,
+    calls: Mutex<Vec<McpToolCall>>,
+    wait_for_call_cancellation: AtomicBool,
     registry_at_close: Mutex<Option<Arc<InMemoryMcpRegistry>>>,
     close_saw_registered: AtomicBool,
 }
@@ -43,6 +47,8 @@ impl MockServer {
             list_delay_ms: AtomicU64::new(0),
             close_delay_ms: AtomicU64::new(0),
             connect_error: Mutex::new(None),
+            calls: Mutex::new(Vec::new()),
+            wait_for_call_cancellation: AtomicBool::new(false),
             registry_at_close: Mutex::new(None),
             close_saw_registered: AtomicBool::new(false),
         })
@@ -54,6 +60,10 @@ impl MockServer {
 
     fn set_connect_error(&self, error: McpError) {
         *self.connect_error.lock().expect("mock connect error lock") = Some(error);
+    }
+
+    fn calls(&self) -> Vec<McpToolCall> {
+        self.calls.lock().expect("mock calls lock").clone()
     }
 }
 
@@ -165,10 +175,23 @@ impl McpPeer for MockPeer {
 
     fn call_tool<'a>(
         &'a self,
-        _call: McpToolCall,
-        _cancellation: McpCancellationToken,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
     ) -> BoxMcpFuture<'a, McpToolResult> {
         Box::pin(async move {
+            self.server
+                .calls
+                .lock()
+                .map_err(|_| McpError::protocol("mock calls lock unavailable"))?
+                .push(call);
+            if self
+                .server
+                .wait_for_call_cancellation
+                .load(Ordering::SeqCst)
+            {
+                cancellation.cancelled().await;
+                return Err(McpError::cancelled("mock tools/call"));
+            }
             Ok(McpToolResult {
                 content: vec![McpContentBlock::Text {
                     text: "owned mock result".to_string(),
@@ -177,6 +200,13 @@ impl McpPeer for MockPeer {
                 is_error: false,
             })
         })
+    }
+
+    fn force_close(&self) -> bool {
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            self.server.close_count.fetch_add(1, Ordering::SeqCst);
+        }
+        true
     }
 
     fn close(&self) -> BoxMcpFuture<'_, ()> {
@@ -282,6 +312,38 @@ fn manager(
         .expect("construct manager with valid owned-mock policy")
 }
 
+fn catalog_call(
+    manager: &McpConnectionManager,
+    server_id: McpServerId,
+    raw_name: &str,
+    arguments: serde_json::Value,
+) -> McpCatalogToolCall {
+    let status = manager
+        .get_status(server_id)
+        .expect("read manager status")
+        .expect("managed server status");
+    let catalog = manager
+        .catalog(server_id)
+        .expect("read manager catalog")
+        .expect("managed server catalog");
+    let tool = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.raw_name == raw_name)
+        .expect("catalog tool");
+    McpCatalogToolCall {
+        tool_id: tool.id.clone(),
+        expected_config_digest: status.config_digest,
+        expected_catalog_generation: catalog.generation,
+        expected_catalog_digest: catalog.content_digest.unwrap_or_else(|| {
+            McpCatalogDigest::from_str(&"0".repeat(64)).expect("test fallback catalog digest")
+        }),
+        expected_model_name: tool.model_name.clone(),
+        arguments,
+        timeout_ms: None,
+    }
+}
+
 fn result_for(
     results: &[McpBatchOperationResult],
     server_id: McpServerId,
@@ -290,6 +352,28 @@ fn result_for(
         .iter()
         .find(|result| result.server_id == Some(server_id))
         .expect("batch result for server")
+}
+
+#[tokio::test]
+async fn untrusted_server_is_rejected_by_manager_before_connector_dispatch() {
+    let server_id = McpServerId::new();
+    let registry = InMemoryMcpRegistry::shared();
+    let mut untrusted = config(server_id, "untrusted", true);
+    untrusted.trust = McpTrustLevel::Untrusted;
+    registry.add(untrusted).unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "echo")]);
+    let connector = Arc::new(MockConnector::default());
+    connector.add(server_id, Arc::clone(&server));
+    let sink = Arc::new(RecordingEventSink::default());
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+
+    let error = manager.start(server_id).await.unwrap_err();
+    assert_eq!(error.kind, McpErrorKind::Config);
+    assert_eq!(server.connect_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Error
+    );
 }
 
 async fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
@@ -957,4 +1041,431 @@ async fn stop_all_waits_for_an_already_admitted_start() {
         McpServerState::Disabled
     );
     assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanent_shutdown_reclaims_an_aborted_start_enabled_coordinator() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "shutdown-start", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    server.connect_delay_ms.store(10_000, Ordering::SeqCst);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+
+    let startup_manager = manager.clone();
+    let startup = tokio::spawn(async move { startup_manager.start_enabled().await });
+    wait_until(Duration::from_secs(1), || {
+        server.connect_count.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    startup.abort();
+    let _ = startup.await;
+
+    let shutdown = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.shutdown(Duration::from_millis(200)),
+    )
+    .await
+    .expect("permanent shutdown must remain bounded");
+    assert!(shutdown.results.iter().all(|result| {
+        result
+            .status
+            .as_ref()
+            .is_some_and(|status| status.state == McpServerState::Disabled)
+    }));
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Disabled
+    );
+    let restart_error = manager
+        .start(server_id)
+        .await
+        .expect_err("permanent shutdown must reject future starts");
+    assert_eq!(restart_error.kind, McpErrorKind::Shutdown);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn caller_cancellation_does_not_abandon_start_enabled_children() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "start-enabled-cancellation", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    server.connect_delay_ms.store(100, Ordering::SeqCst);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+
+    let startup_manager = manager.clone();
+    let startup = tokio::spawn(async move { startup_manager.start_enabled().await });
+    wait_until(Duration::from_secs(1), || {
+        server.connect_count.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    startup.abort();
+    let _ = startup.await;
+    wait_until(Duration::from_secs(2), || {
+        manager
+            .get_status(server_id)
+            .ok()
+            .flatten()
+            .is_some_and(|status| status.state == McpServerState::Ready)
+    })
+    .await;
+    assert_eq!(server.connect_count.load(Ordering::SeqCst), 1);
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanent_shutdown_cancels_a_detached_hung_catalog_refresh() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "shutdown-refresh", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+
+    server.list_delay_ms.store(10_000, Ordering::SeqCst);
+    let initial_lists = server.list_count.load(Ordering::SeqCst);
+    let refresh_manager = manager.clone();
+    let refresh = tokio::spawn(async move { refresh_manager.refresh(server_id).await });
+    wait_until(Duration::from_secs(1), || {
+        server.list_count.load(Ordering::SeqCst) > initial_lists
+    })
+    .await;
+
+    let shutdown = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.shutdown(Duration::from_millis(200)),
+    )
+    .await
+    .expect("shutdown must cancel detached refresh");
+    assert!(!shutdown.results.is_empty());
+    let refresh_error = refresh
+        .await
+        .expect("refresh waiter")
+        .expect_err("refresh must be cancelled by permanent shutdown");
+    assert_eq!(refresh_error.kind, McpErrorKind::Shutdown);
+    let status = manager.get_status(server_id).unwrap().unwrap();
+    assert_eq!(status.state, McpServerState::Disabled);
+    assert_eq!(status.tool_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forced_shutdown_invalidates_catalog_and_reports_disabled_status() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "forced-shutdown", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    server.close_delay_ms.store(10_000, Ordering::SeqCst);
+
+    let report = manager.shutdown(Duration::from_millis(100)).await;
+    assert!(report.forced);
+    assert!(!report.cleanup_complete);
+    assert_eq!(report.results.len(), 1);
+    let status = report.results[0].status.as_ref().unwrap();
+    assert_eq!(status.state, McpServerState::Disabled);
+    assert_eq!(status.tool_count, 0);
+    assert_eq!(status.catalog_generation, 1);
+    assert_eq!(
+        status.catalog_completeness,
+        McpCatalogCompleteness::Failed(McpCatalogIssue::RequestFailed)
+    );
+    assert!(manager
+        .catalog(server_id)
+        .unwrap()
+        .unwrap()
+        .tools
+        .is_empty());
+    assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanent_shutdown_cancels_a_detached_slow_stop() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "shutdown-stop", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    server.close_delay_ms.store(10_000, Ordering::SeqCst);
+
+    let stop_manager = manager.clone();
+    let stop = tokio::spawn(async move { stop_manager.stop(server_id).await });
+    wait_until(Duration::from_secs(1), || {
+        manager
+            .get_status(server_id)
+            .ok()
+            .flatten()
+            .is_some_and(|status| status.state == McpServerState::Stopping)
+    })
+    .await;
+    let report = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.shutdown(Duration::from_millis(300)),
+    )
+    .await
+    .expect("shutdown must not inherit a detached stop delay");
+    assert!(report.forced);
+    assert!(!report.cleanup_complete);
+    let stop_error = stop
+        .await
+        .expect("stop waiter")
+        .expect_err("permanent shutdown must cancel the detached stop");
+    assert_eq!(stop_error.kind, McpErrorKind::Shutdown);
+    assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Disabled
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_routes_by_server_id_and_raw_name() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry.add(config(server_id, "typed-call", true)).unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo/raw", "typed route")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+
+    let mut request = catalog_call(&manager, server_id, "echo/raw", json!({"value": "hello"}));
+    let model_name = request.expected_model_name.clone();
+    request.timeout_ms = Some(321);
+    let result = manager
+        .call_catalog_tool(request, McpCancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!result.is_error);
+    let calls = server.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "echo/raw");
+    assert_ne!(calls[0].name, model_name);
+    assert_eq!(calls[0].arguments, json!({"value": "hello"}));
+    assert_eq!(calls[0].timeout_ms, Some(321));
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_rejects_a_server_that_is_not_ready() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "not-ready-call", true))
+        .unwrap();
+    let server = MockServer::with_tools(Vec::new());
+    server.set_pages(BTreeMap::from([
+        (
+            None,
+            Ok(page(
+                vec![descriptor("echo", "partial catalog")],
+                Some("again"),
+            )),
+        ),
+        (
+            Some("again".to_string()),
+            Ok(page(Vec::new(), Some("again"))),
+        ),
+    ]));
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    assert_eq!(
+        manager.start(server_id).await.unwrap().state,
+        McpServerState::Degraded
+    );
+    let request = catalog_call(&manager, server_id, "echo", json!({}));
+
+    let error = manager
+        .call_catalog_tool(request, McpCancellationToken::new())
+        .await
+        .expect_err("degraded connection must not invoke");
+    assert_eq!(error.kind, McpErrorKind::Config);
+    assert!(error.message.contains("not ready"));
+    assert!(server.calls().is_empty());
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_rejects_a_stale_config_digest() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    let initial = config(server_id, "old-config-call", true);
+    registry.add(initial.clone()).unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "old config")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(
+        Arc::clone(&registry),
+        connector,
+        sink,
+        McpManagerPolicy::default(),
+    );
+    manager.start(server_id).await.unwrap();
+    let request = catalog_call(&manager, server_id, "echo", json!({}));
+
+    let mut changed = initial;
+    changed.display_name = "new-config-call".to_string();
+    registry.upsert(changed).unwrap();
+    let error = manager
+        .call_catalog_tool(request, McpCancellationToken::new())
+        .await
+        .expect_err("old config digest must fail closed");
+    assert_eq!(error.kind, McpErrorKind::Config);
+    assert!(server.calls().is_empty());
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_rejects_a_stale_catalog_generation() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "old-generation-call", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "generation one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    let request = catalog_call(&manager, server_id, "echo", json!({}));
+
+    server.set_pages(single_page(vec![descriptor("echo", "generation two")]));
+    assert_eq!(manager.refresh(server_id).await.unwrap().generation, 2);
+    let error = manager
+        .call_catalog_tool(request, McpCancellationToken::new())
+        .await
+        .expect_err("old generation must fail closed");
+    assert_eq!(error.kind, McpErrorKind::Config);
+    assert!(error.message.contains("generation"));
+    assert!(server.calls().is_empty());
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_rejects_a_stale_catalog_content_digest() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "old-catalog-digest-call", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "catalog one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    let mut request = catalog_call(&manager, server_id, "echo", json!({}));
+
+    server.set_pages(single_page(vec![descriptor("echo", "catalog two")]));
+    let refreshed = manager.refresh(server_id).await.unwrap();
+    request.expected_catalog_generation = refreshed.generation;
+    let error = manager
+        .call_catalog_tool(request, McpCancellationToken::new())
+        .await
+        .expect_err("old catalog digest must fail closed even when generation is forged current");
+    assert_eq!(error.kind, McpErrorKind::Config);
+    assert!(error.message.contains("content digest"));
+    assert!(server.calls().is_empty());
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_rejects_a_model_name_mismatch_without_parsing_it() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "model-name-call", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "model mismatch")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    let mut request = catalog_call(&manager, server_id, "echo", json!({}));
+    request.expected_model_name = "mcp__spoofed__tool".to_string();
+
+    let error = manager
+        .call_catalog_tool(request, McpCancellationToken::new())
+        .await
+        .expect_err("model name mismatch must fail closed");
+    assert_eq!(error.kind, McpErrorKind::Config);
+    assert!(error.message.contains("route"));
+    assert!(server.calls().is_empty());
+
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_call_propagates_cancellation_to_the_peer() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "cancel-call", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("slow", "waits for cancellation")]);
+    server
+        .wait_for_call_cancellation
+        .store(true, Ordering::SeqCst);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager.start(server_id).await.unwrap();
+    let request = catalog_call(&manager, server_id, "slow", json!({}));
+    let cancellation = McpCancellationToken::new();
+    let call_cancellation = cancellation.clone();
+    let call_manager = manager.clone();
+    let call = tokio::spawn(async move {
+        call_manager
+            .call_catalog_tool(request, call_cancellation)
+            .await
+    });
+    wait_until(Duration::from_secs(1), || server.calls().len() == 1).await;
+    cancellation.cancel();
+
+    let error = tokio::time::timeout(Duration::from_secs(1), call)
+        .await
+        .expect("cancelled call timeout")
+        .expect("cancelled call task")
+        .expect_err("cancelled peer call");
+    assert_eq!(error.kind, McpErrorKind::Cancelled);
+
+    manager.stop_all().await;
 }

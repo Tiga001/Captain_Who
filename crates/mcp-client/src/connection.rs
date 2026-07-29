@@ -87,6 +87,12 @@ pub trait McpPeer: Send + Sync {
     fn subscribe_signals(&self) -> Option<McpPeerSignalReceiver> {
         None
     }
+    /// Synchronously signal transport-specific forced cleanup.
+    ///
+    /// Returns true when the peer has a force path independent of polling [`Self::close`].
+    fn force_close(&self) -> bool {
+        false
+    }
     fn close(&self) -> BoxMcpFuture<'_, ()>;
 }
 
@@ -105,6 +111,7 @@ pub struct McpClientHandle {
     request_timeout: Duration,
     shutdown_timeout: Duration,
     state: Arc<AtomicU8>,
+    force_close: McpCancellationToken,
     close_guard: Mutex<()>,
     signals: McpPeerSignalPublisher,
 }
@@ -136,8 +143,14 @@ impl McpClientHandle {
         shutdown_timeout: Duration,
     ) -> Self {
         let state = Arc::new(AtomicU8::new(STATE_READY));
-        let (process, process_exit_code) =
-            spawn_process_supervisor(child, Arc::clone(&state), shutdown_timeout, signals.clone());
+        let force_close = McpCancellationToken::new();
+        let (process, process_exit_code) = spawn_process_supervisor(
+            child,
+            Arc::clone(&state),
+            shutdown_timeout,
+            signals.clone(),
+            force_close.clone(),
+        );
         let transport_monitor_cancel = McpCancellationToken::new();
         let transport_monitor_task = spawn_transport_monitor(
             peer.clone(),
@@ -164,6 +177,7 @@ impl McpClientHandle {
             request_timeout,
             shutdown_timeout,
             state,
+            force_close,
             close_guard: Mutex::new(()),
             signals,
         }
@@ -416,6 +430,10 @@ impl McpClientHandle {
         }
     }
 
+    pub fn force_close(&self) {
+        self.force_close.cancel();
+    }
+
     fn require_ready(&self, operation: &str) -> Result<(), McpError> {
         match self.connection_state() {
             McpConnectionState::Ready => Ok(()),
@@ -458,6 +476,17 @@ impl McpClientHandle {
             .lock()
             .ok()
             .and_then(|exit_code| *exit_code)
+    }
+}
+
+impl Drop for McpClientHandle {
+    fn drop(&mut self) {
+        self.force_close.cancel();
+        if let Ok(mut shutdown_task) = self.shutdown_task.try_lock() {
+            if let Some(task) = shutdown_task.take() {
+                task.abort();
+            }
+        }
     }
 }
 
@@ -580,6 +609,11 @@ impl McpPeer for McpClientHandle {
 
     fn subscribe_signals(&self) -> Option<McpPeerSignalReceiver> {
         Some(self.subscribe_signals())
+    }
+
+    fn force_close(&self) -> bool {
+        self.force_close();
+        true
     }
 
     fn close(&self) -> BoxMcpFuture<'_, ()> {

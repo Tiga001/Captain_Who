@@ -78,7 +78,8 @@ use mycopilot_core::{
     AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
     ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, ModelCapabilities,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, McpToolCatalogContext,
+    McpToolInvoker, McpToolRuntime, ModelCapabilities,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -311,6 +312,7 @@ pub struct AgentService {
     office_engine: Arc<dyn OfficeEngine>,
     image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
+    mcp_tool_invoker: Option<Arc<dyn McpToolInvoker>>,
     process_runs: CommandRunState,
     deletion_lifecycle: Arc<Mutex<DeletionLifecycleState>>,
     file_effects: Arc<FileEffectTracker>,
@@ -391,6 +393,7 @@ impl AgentService {
             office_engine,
             image_generation_execution: None,
             artifact_runtime,
+            mcp_tool_invoker: None,
             process_runs: CommandRunState::default(),
             deletion_lifecycle: Arc::new(Mutex::new(DeletionLifecycleState::default())),
             file_effects,
@@ -416,6 +419,31 @@ impl AgentService {
     ) -> Self {
         self.image_generation_execution = Some(service);
         self
+    }
+
+    /// Installs the process-owned MCP invocation boundary for future Agent runs.
+    ///
+    /// Connections, transport configuration and credentials remain owned by core-server. Each
+    /// run freezes only a bounded, protocol-neutral Tool catalog snapshot.
+    pub(crate) fn with_mcp_tool_invoker(mut self, invoker: Arc<dyn McpToolInvoker>) -> Self {
+        self.mcp_tool_invoker = Some(invoker);
+        self
+    }
+
+    fn capture_mcp_tool_runtime(&self, input: &AgentChatInput) -> Option<McpToolRuntime> {
+        let project_id = input
+            .context
+            .as_ref()
+            .and_then(|context| context.project_id.as_deref())
+            .map(str::trim)
+            .filter(|project_id| !project_id.is_empty())
+            .map(str::to_string);
+        self.mcp_tool_invoker.as_ref().map(|invoker| {
+            McpToolRuntime::capture_for_context(
+                Arc::clone(invoker),
+                McpToolCatalogContext { project_id },
+            )
+        })
     }
 
     /// Reconciles durable image ToolCalls with the authoritative image execution journal.

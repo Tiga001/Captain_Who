@@ -964,6 +964,60 @@ pub enum AgentToolSafety {
     Destructive,
 }
 
+/// Stable origin of a tool implementation selected by the trusted registry.
+///
+/// Provider-visible tool names are presentation/routing keys only. The runtime records this
+/// identity separately so durable traces never need to infer authority from a formatted name.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AgentToolIdentity {
+    Builtin {
+        tool_name: String,
+    },
+    RuntimeExtension {
+        extension_id: String,
+        tool_name: String,
+    },
+    Mcp {
+        provenance: AgentMcpToolProvenance,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum AgentMcpServerScope {
+    Builtin,
+    User,
+    Project { project_id: String },
+    Plugin { plugin_id: String },
+    Managed,
+}
+
+/// Immutable MCP catalog identity frozen into one run's ToolRegistry.
+///
+/// `model_tool_name` is never parsed to recover the server or raw tool. Invocation uses the
+/// remaining typed fields and revalidates the config digest and catalog generation at the Host
+/// boundary.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpToolProvenance {
+    pub server_id: String,
+    pub scope: AgentMcpServerScope,
+    pub raw_tool_name: String,
+    pub model_tool_name: String,
+    pub config_digest: String,
+    pub catalog_generation: u64,
+    pub catalog_digest: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolApprovalMode {

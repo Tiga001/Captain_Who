@@ -329,6 +329,7 @@ mod tests {
                     sequence: 0,
                     call_id: "call-1".to_string(),
                     tool: "conversation_history".to_string(),
+                    provenance: None,
                     operation: json!({ "open": "hist_v1_turn" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

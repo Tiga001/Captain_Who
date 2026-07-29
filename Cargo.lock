@@ -1390,6 +1390,7 @@ dependencies = [
  "image",
  "libc",
  "mycopilot-core",
+ "mycopilot-mcp-client",
  "mycopilot-protocol-rs",
  "security-framework",
  "serde",

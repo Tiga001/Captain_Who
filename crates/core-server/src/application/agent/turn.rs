@@ -25,13 +25,15 @@ impl AgentService {
                 return Err(error);
             }
         };
+        let mcp_tools = self.capture_mcp_tool_runtime(&prepared.agent_input);
         // A new turn may append a Conversation World State diff without changing the stable
         // system/tool configuration revision. Drop the measured conversation cache so the next
         // baseline is rebuilt with that exact durable record before the user message it governs.
         self.invalidate_conversation_context_state(&prepared.output.conversation_id);
-        let context_window_tool_projection = match self.context_window_tool_projection(
+        let context_window_tool_projection = match self.context_window_tool_projection_with_mcp(
             &prepared.agent_input,
             prepared.skill_resources.as_ref().map(Arc::clone),
+            mcp_tools.clone(),
         ) {
             Ok(projection) => RunContextToolProjection::new(projection),
             Err(error) => {
@@ -74,6 +76,7 @@ impl AgentService {
         let worker_assistant_created_at = output.assistant_message.created_at;
         let pending_agent_input = prepared.agent_input.clone();
         let skill_resources = prepared.skill_resources.clone();
+        let mcp_tools = mcp_tools.clone();
         let context_window_tool_projection = context_window_tool_projection.clone();
 
         tokio::spawn(async move {
@@ -209,6 +212,9 @@ impl AgentService {
             }
             if let Some(resolver) = service.artifact_runtime.clone() {
                 host_services = host_services.with_command_runtime_profile_resolver(resolver);
+            }
+            if let Some(mcp_tools) = mcp_tools {
+                host_services = host_services.with_mcp_tools(mcp_tools);
             }
             let result = send_chat_with_host_services(
                 prepared.agent_input,

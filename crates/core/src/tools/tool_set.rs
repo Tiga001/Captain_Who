@@ -1,11 +1,13 @@
 use super::{AgentToolExposure, ToolRegistry};
-use crate::protocol::{AgentError, AgentResult, AgentRunToolSetCheckpoint, AgentToolDefinition};
+use crate::protocol::{
+    AgentError, AgentResult, AgentRunToolSetCheckpoint, AgentToolDefinition, AgentToolIdentity,
+};
 use crate::revision::content_revision;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 const TOOL_CAPABILITY_ID_MAX_BYTES: usize = 128;
-const TOOL_SET_REVISION_SCHEMA_VERSION: u32 = 1;
+const TOOL_SET_REVISION_SCHEMA_VERSION: u32 = 2;
 
 pub(crate) const OFFICE_DOCUMENTS_CAPABILITY: &str = "office.documents";
 pub(crate) const OFFICE_SPREADSHEETS_CAPABILITY: &str = "office.spreadsheets";
@@ -71,6 +73,7 @@ pub(crate) struct EffectiveToolSet {
     permitted_definitions: BTreeMap<String, AgentToolDefinition>,
     permitted_names: BTreeSet<String>,
     registered_exposures: BTreeMap<String, AgentToolExposure>,
+    registered_identities: BTreeMap<String, AgentToolIdentity>,
     active_capabilities: BTreeSet<ToolCapabilityId>,
     stable_revision: String,
     dynamic_revision: String,
@@ -115,24 +118,34 @@ impl EffectiveToolSet {
             }
         }
 
-        let registered_exposures = registry
-            .definitions()
-            .into_iter()
-            .map(|definition| {
-                let exposure = registry
-                    .exposure(&definition.name)
-                    .expect("registered Tool definitions must have exposure metadata")
-                    .clone();
-                (definition.name, exposure)
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut registered_exposures = BTreeMap::new();
+        let mut registered_identities = BTreeMap::new();
+        for definition in registry.definitions() {
+            let name = definition.name;
+            let exposure = registry
+                .exposure(&name)
+                .expect("registered Tool definitions must have exposure metadata")
+                .clone();
+            let identity = registry
+                .identity(&name)
+                .expect("registered Tool definitions must have typed identity metadata")
+                .clone();
+            registered_exposures.insert(name.clone(), exposure);
+            registered_identities.insert(name, identity);
+        }
 
-        Self::from_validated_parts(permitted, registered_exposures, active_capabilities.clone())
+        Self::from_validated_parts(
+            permitted,
+            registered_exposures,
+            registered_identities,
+            active_capabilities.clone(),
+        )
     }
 
     fn from_validated_parts(
         permitted_definitions: BTreeMap<String, AgentToolDefinition>,
         registered_exposures: BTreeMap<String, AgentToolExposure>,
+        registered_identities: BTreeMap<String, AgentToolIdentity>,
         active_capabilities: BTreeSet<ToolCapabilityId>,
     ) -> AgentResult<Self> {
         let permitted_names = permitted_definitions
@@ -147,6 +160,7 @@ impl EffectiveToolSet {
                 .expect("permitted definitions were validated against the registry")
             {
                 AgentToolExposure::Stable => stable_definitions.push(definition),
+                AgentToolExposure::Dynamic => dynamic_definitions.push(definition),
                 AgentToolExposure::RequiresCapability(capability)
                     if active_capabilities.contains(capability) =>
                 {
@@ -172,10 +186,15 @@ impl EffectiveToolSet {
         let stable_revision = definition_revision(
             "stable",
             &stable_definitions,
+            &registered_identities,
             std::iter::empty::<&ToolCapabilityId>(),
         )?;
-        let dynamic_revision =
-            definition_revision("dynamic", &dynamic_definitions, active_capabilities.iter())?;
+        let dynamic_revision = definition_revision(
+            "dynamic",
+            &dynamic_definitions,
+            &registered_identities,
+            active_capabilities.iter(),
+        )?;
         let revision_material = serde_json::to_vec(&(
             TOOL_SET_REVISION_SCHEMA_VERSION,
             &stable_revision,
@@ -194,6 +213,7 @@ impl EffectiveToolSet {
             permitted_definitions,
             permitted_names,
             registered_exposures,
+            registered_identities,
             active_capabilities,
             stable_revision,
             dynamic_revision,
@@ -216,6 +236,7 @@ impl EffectiveToolSet {
         Self::from_validated_parts(
             self.permitted_definitions.clone(),
             self.registered_exposures.clone(),
+            self.registered_identities.clone(),
             active_capabilities,
         )
     }
@@ -372,17 +393,33 @@ fn strictly_sorted(definitions: &[AgentToolDefinition]) -> bool {
 fn definition_revision<'a>(
     partition: &str,
     definitions: &[AgentToolDefinition],
+    registered_identities: &BTreeMap<String, AgentToolIdentity>,
     capabilities: impl IntoIterator<Item = &'a ToolCapabilityId>,
 ) -> AgentResult<String> {
     let capabilities = capabilities
         .into_iter()
         .map(ToolCapabilityId::as_str)
         .collect::<Vec<_>>();
+    let identities = definitions
+        .iter()
+        .map(|definition| {
+            registered_identities
+                .get(&definition.name)
+                .map(|identity| (&definition.name, identity))
+                .ok_or_else(|| {
+                    AgentError::new(format!(
+                        "工具 `{}` 缺少 revision 所需的稳定身份。",
+                        definition.name
+                    ))
+                })
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
     let material = serde_json::to_vec(&(
         TOOL_SET_REVISION_SCHEMA_VERSION,
         partition,
         capabilities,
         definitions,
+        identities,
     ))
     .map_err(|error| AgentError::new(format!("无法生成 {partition} 工具集 revision：{error}")))?;
     Ok(format!(

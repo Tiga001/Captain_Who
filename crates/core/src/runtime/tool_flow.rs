@@ -192,30 +192,15 @@ pub(super) fn build_tool_observation_message(result: &AgentToolResult) -> String
     render_tool_observation(result)
 }
 
-pub(super) async fn execute_tool_on_blocking_thread(
+pub(super) async fn execute_registered_tool(
     registry: Arc<ToolRegistry>,
     context: ToolExecutionContext,
     call: AgentToolCall,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<AgentToolResult> {
-    let settlement = registry.cancellation_settlement(&call.tool);
-    let handle = tokio::task::spawn_blocking(move || registry.execute(&context, &call));
-    match settlement {
-        AgentToolCancellationSettlement::Interruptible => tokio::select! {
-            _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
-            result = handle => {
-                result.map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
-            }
-        },
-        AgentToolCancellationSettlement::Authoritative => {
-            // Cancellation is delivered through ToolExecutionContext. Once this class of tool has
-            // started it may already have caused a remote effect or crossed a durable publication
-            // boundary, so detaching the blocking task would fabricate an unknown local outcome.
-            handle
-                .await
-                .map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
-        }
-    }
+    registry
+        .execute_async(context, call, cancellation_token)
+        .await
 }
 
 pub(super) async fn execute_host_action_on_blocking_thread(
@@ -1004,7 +989,7 @@ mod tests {
         };
         let task_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
-            execute_tool_on_blocking_thread(registry, context, call, task_cancellation).await
+            execute_registered_tool(registry, context, call, task_cancellation).await
         });
         while !started.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;

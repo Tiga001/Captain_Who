@@ -7,12 +7,70 @@ use crate::{
     McpToolDescriptor,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolId {
     pub server_id: McpServerId,
     pub raw_name: String,
+}
+
+/// A catalog-bound request to invoke one MCP tool.
+///
+/// The optimistic snapshot fields make stale model-visible tool definitions
+/// fail closed. Routing still uses `tool_id` and never parses `model_name`.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCatalogToolCall {
+    pub tool_id: McpToolId,
+    pub expected_config_digest: McpConfigDigest,
+    pub expected_catalog_generation: u64,
+    pub expected_catalog_digest: McpCatalogDigest,
+    pub expected_model_name: String,
+    #[serde(default)]
+    pub arguments: Value,
+    pub timeout_ms: Option<u64>,
+}
+
+impl fmt::Debug for McpCatalogToolCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpCatalogToolCall")
+            .field("server_id", &self.tool_id.server_id)
+            .field("raw_name", &"<redacted>")
+            .field("expected_config_digest", &self.expected_config_digest)
+            .field(
+                "expected_catalog_generation",
+                &self.expected_catalog_generation,
+            )
+            .field("expected_catalog_digest", &self.expected_catalog_digest)
+            .field("expected_model_name", &"<redacted>")
+            .field("arguments", &"<redacted>")
+            .field("timeout_ms", &self.timeout_ms)
+            .finish()
+    }
+}
+
+impl McpCatalogToolCall {
+    pub fn new(
+        tool_id: McpToolId,
+        expected_config_digest: McpConfigDigest,
+        expected_catalog_generation: u64,
+        expected_catalog_digest: McpCatalogDigest,
+        expected_model_name: impl Into<String>,
+        arguments: Value,
+    ) -> Self {
+        Self {
+            tool_id,
+            expected_config_digest,
+            expected_catalog_generation,
+            expected_catalog_digest,
+            expected_model_name: expected_model_name.into(),
+            arguments,
+            timeout_ms: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -21,15 +22,60 @@ use tokio::task::JoinHandle;
 
 use crate::connection::{McpClientEventHandler, STATE_FAILED, STATE_READY};
 use crate::{
-    BoxMcpFuture, McpCapabilitySnapshot, McpClientHandle, McpConnector, McpEnvBinding, McpError,
-    McpImplementationInfo, McpLifecycleKind, McpPeer, McpPeerNotificationState,
-    McpPeerSignalPublisher, McpProtocolSnapshot, McpServerConfig, McpStderrSnapshot,
-    McpStdioConfig, McpTransportConfig, McpTrustLevel,
+    BoxMcpFuture, McpCancellationToken, McpCapabilitySnapshot, McpClientHandle, McpConnector,
+    McpEnvBinding, McpError, McpImplementationInfo, McpLifecycleKind, McpPeer,
+    McpPeerNotificationState, McpPeerSignalPublisher, McpProtocolSnapshot, McpServerConfig,
+    McpStderrSnapshot, McpStdioConfig, McpTransportConfig, McpTrustLevel,
 };
 
 const DEFAULT_STDOUT_MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_STDERR_MAX_RETAINED_BYTES: usize = 64 * 1024;
 const DEFAULT_STDERR_RATE_LIMIT_BYTES_PER_SECOND: usize = 16 * 1024;
+
+struct SpawnedChildGuard {
+    child: Option<Child>,
+}
+
+impl SpawnedChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn into_inner(mut self) -> Child {
+        self.child
+            .take()
+            .expect("owned MCP child must be present until supervision starts")
+    }
+}
+
+impl Deref for SpawnedChildGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        self.child
+            .as_ref()
+            .expect("owned MCP child must be present")
+    }
+}
+
+impl DerefMut for SpawnedChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child
+            .as_mut()
+            .expect("owned MCP child must be present")
+    }
+}
+
+impl Drop for SpawnedChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            // Async connector cancellation can drop this future at any await. Kill the isolated
+            // process group synchronously before Child's kill_on_drop fallback handles the direct
+            // child, so descendants are not left behind.
+            terminate_child(child);
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct McpStdioPolicy {
@@ -82,9 +128,11 @@ impl McpStdioConnector {
         }
         let McpTransportConfig::Stdio(stdio) = &config.transport;
         let mut command = build_command(stdio, &self.policy)?;
-        let mut child = command
-            .spawn()
-            .map_err(|_| McpError::spawn("failed to start MCP stdio server"))?;
+        let mut child = SpawnedChildGuard::new(
+            command
+                .spawn()
+                .map_err(|_| McpError::spawn("failed to start MCP stdio server"))?,
+        );
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
@@ -173,7 +221,7 @@ impl McpStdioConnector {
             protocol,
             peer,
             service,
-            child,
+            child.into_inner(),
             stderr_capture,
             stderr_task,
             notification_task,
@@ -267,6 +315,7 @@ pub(crate) type ProcessExitCode = Arc<StdMutex<Option<i32>>>;
 
 pub(crate) struct StdioProcessSupervisor {
     shutdown: Option<oneshot::Sender<()>>,
+    force: McpCancellationToken,
     task: JoinHandle<Result<(), McpError>>,
     shutdown_timeout: Duration,
 }
@@ -276,13 +325,16 @@ pub(crate) fn spawn_process_supervisor(
     state: Arc<AtomicU8>,
     shutdown_timeout: Duration,
     signals: McpPeerSignalPublisher,
+    force: McpCancellationToken,
 ) -> (StdioProcessSupervisor, ProcessExitCode) {
     let exit_code = Arc::new(StdMutex::new(None));
     let task_exit_code = Arc::clone(&exit_code);
     let (shutdown, shutdown_requested) = oneshot::channel();
+    let task_force = force.clone();
     let task = tokio::spawn(supervise_process(
         child,
         shutdown_requested,
+        task_force,
         state,
         task_exit_code,
         shutdown_timeout,
@@ -291,6 +343,7 @@ pub(crate) fn spawn_process_supervisor(
     (
         StdioProcessSupervisor {
             shutdown: Some(shutdown),
+            force,
             task,
             shutdown_timeout,
         },
@@ -310,6 +363,7 @@ impl StdioProcessSupervisor {
                 "MCP process supervisor task failed while closing",
             )),
             Err(_) => {
+                self.force.cancel();
                 self.task.abort();
                 let _ = (&mut self.task).await;
                 Err(McpError::shutdown(
@@ -320,19 +374,33 @@ impl StdioProcessSupervisor {
     }
 }
 
+impl Drop for StdioProcessSupervisor {
+    fn drop(&mut self) {
+        self.force.cancel();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
 async fn supervise_process(
     mut child: Child,
     mut shutdown_requested: oneshot::Receiver<()>,
+    force: McpCancellationToken,
     state: Arc<AtomicU8>,
     exit_code: ProcessExitCode,
     shutdown_timeout: Duration,
     signals: McpPeerSignalPublisher,
 ) -> Result<(), McpError> {
     let outcome = tokio::select! {
+        biased;
+        _ = force.cancelled() => force_then_reap(&mut child)
+            .await
+            .map(|status| (status, true)),
         status = child.wait() => status
             .map(|status| (status, false))
             .map_err(|_| McpError::shutdown("failed to reap MCP server process")),
-        _ = &mut shutdown_requested => wait_then_force(&mut child, shutdown_timeout)
+        _ = &mut shutdown_requested => wait_then_force(&mut child, shutdown_timeout, &force)
             .await
             .map(|status| (status, true)),
     };
@@ -356,6 +424,19 @@ async fn supervise_process(
         signals.transport_closed(status.code());
     }
     Ok(())
+}
+
+async fn force_then_reap(child: &mut Child) -> Result<std::process::ExitStatus, McpError> {
+    terminate_child(child);
+    match tokio::time::timeout(Duration::from_millis(250), child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(_)) => Err(McpError::shutdown(
+            "failed to reap MCP server process after forced termination",
+        )),
+        Err(_) => Err(McpError::shutdown(
+            "MCP server process did not exit after forced termination",
+        )),
+    }
 }
 
 async fn establish_tool_notifications(
@@ -409,11 +490,29 @@ async fn establish_tool_notifications(
 async fn wait_then_force(
     child: &mut Child,
     shutdown_timeout: Duration,
+    force: &McpCancellationToken,
 ) -> Result<std::process::ExitStatus, McpError> {
-    match tokio::time::timeout(shutdown_timeout, child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(_)) => Err(McpError::shutdown("failed to reap MCP server process")),
-        Err(_) => {
+    enum WaitOutcome {
+        Forced,
+        Child(
+            Result<Result<std::process::ExitStatus, std::io::Error>, tokio::time::error::Elapsed>,
+        ),
+    }
+
+    let outcome = tokio::select! {
+        biased;
+        _ = force.cancelled() => WaitOutcome::Forced,
+        result = tokio::time::timeout(shutdown_timeout, child.wait()) => {
+            WaitOutcome::Child(result)
+        }
+    };
+    match outcome {
+        WaitOutcome::Forced => force_then_reap(child).await,
+        WaitOutcome::Child(Ok(Ok(status))) => Ok(status),
+        WaitOutcome::Child(Ok(Err(_))) => {
+            Err(McpError::shutdown("failed to reap MCP server process"))
+        }
+        WaitOutcome::Child(Err(_)) => {
             terminate_child(child);
             match tokio::time::timeout(shutdown_timeout, child.wait()).await {
                 Ok(Ok(status)) => Ok(status),

@@ -326,6 +326,7 @@ mod tests {
                     sequence: 4,
                     call_id: call_id.clone(),
                     tool: "read_file".to_string(),
+                    provenance: None,
                     operation: json!({ "path": "src/lib.rs" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

@@ -742,6 +742,7 @@ mod tests {
                     sequence: 0,
                     call_id: "call-1".to_string(),
                     tool: "read_file".to_string(),
+                    provenance: None,
                     operation: json!({ "path": "README.md" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

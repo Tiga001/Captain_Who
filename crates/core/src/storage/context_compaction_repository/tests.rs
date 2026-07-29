@@ -48,6 +48,7 @@ fn setup() -> Connection {
                 sequence: 0,
                 call_id: "call-1".to_string(),
                 tool: "web_fetch".to_string(),
+                provenance: None,
                 operation: json!({ "url": "https://example.com" }),
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,

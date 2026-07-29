@@ -11,6 +11,7 @@
 .skill-install-dialog {
   position: relative;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: min(620px, calc(100vw - 64px));
   max-height: calc(100vh - 64px);
   overflow: hidden;
@@ -20,6 +21,10 @@
   border-radius: 22px;
   box-shadow: var(--mc-shadow-dialog);
   backdrop-filter: var(--mc-effect-blur-dialog);
+}
+
+.skill-install-dialog--preview {
+  height: min(720px, calc(100vh - 64px));
 }
 
 .skill-install-dialog__header {
@@ -45,8 +50,7 @@
   line-height: var(--mc-line-height-compact);
 }
 
-.skill-install-dialog__header p,
-.skill-install-preview__identity p {
+.skill-install-dialog__header p {
   margin: 9px 0 0;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-base);
@@ -83,8 +87,14 @@
 }
 
 .skill-install-dialog__body {
+  min-height: 0;
   overflow: auto;
   padding: 20px 28px 24px;
+}
+
+.skill-install-dialog__body--preview {
+  overflow: hidden;
+  padding: 20px 0 0;
 }
 
 .skill-source-choice {
@@ -321,11 +331,36 @@
 
 .skill-install-preview {
   display: grid;
-  gap: 14px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.skill-install-preview__identity {
+  padding: 0 28px 14px;
 }
 
 .skill-install-preview__identity h3 {
   font-size: var(--mc-font-size-settings-section-heading);
+}
+
+.skill-install-preview__scroll-region {
+  display: grid;
+  min-height: 0;
+  padding: 0 28px 18px;
+  align-content: start;
+  gap: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.skill-install-preview__description {
+  margin: 0;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-base);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
 }
 
 .skill-install-preview__source-summary {
@@ -558,6 +593,14 @@
   gap: 14px;
 }
 
+.skill-install-preview__actions {
+  z-index: 1;
+  margin-top: 0;
+  padding: 14px 28px 20px;
+  background: var(--mc-color-surface-glass-strong);
+  border-top: 1px solid var(--mc-color-border-hairline);
+}
+
 .skill-dialog-button {
   min-width: 76px;
   height: 42px;
@@ -609,6 +652,45 @@
 }
 
 @media (max-width: 680px) {
+  .skill-install-dialog__backdrop {
+    padding: 12px;
+  }
+
+  .skill-install-dialog {
+    width: min(620px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+  }
+
+  .skill-install-dialog--preview {
+    height: min(720px, calc(100vh - 24px));
+  }
+
+  .skill-install-dialog__header {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .skill-install-dialog__body {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .skill-install-dialog__body--preview {
+    padding-right: 0;
+    padding-left: 0;
+  }
+
+  .skill-install-preview__identity,
+  .skill-install-preview__scroll-region {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .skill-install-preview__actions {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
   .skill-source-choice__list {
     grid-template-columns: 1fr;
   }

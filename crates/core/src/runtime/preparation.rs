@@ -11,6 +11,7 @@ pub(super) struct RuntimeCapabilityServices {
         Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+    pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
 }
 
 pub(super) struct DurableConversationTimeline {
@@ -37,6 +38,7 @@ pub(super) fn prepare_runtime_capabilities(
             image_generation_execution: None,
             skill_activation_resolver: None,
             skill_resources: None,
+            mcp_tools: None,
         },
     )
 }
@@ -53,6 +55,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         image_generation_execution,
         skill_activation_resolver,
         skill_resources,
+        mcp_tools,
     } = services;
     let runtime_extensions = RuntimeExtensions::for_run_with_skills(
         run_id,
@@ -71,6 +74,9 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     tool_registry.register_conversation_history();
     tool_registry.register_goal_tools();
     runtime_extensions.register_tools(&mut tool_registry)?;
+    if let Some(mcp_tools) = mcp_tools.as_ref() {
+        tool_registry.register_mcp_runtime(mcp_tools);
+    }
 
     let command_permission = context
         .map(|context| context.permissions.command)
@@ -911,6 +917,7 @@ mod legacy_model_history_tests {
                     sequence: 0,
                     call_id: "call-legacy".to_string(),
                     tool: "read_file".to_string(),
+                    provenance: None,
                     operation: json!({ "path": "legacy.txt" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -1006,6 +1013,7 @@ mod legacy_model_history_tests {
                     sequence: 0,
                     call_id: "call-missing-archive".to_string(),
                     tool: "read_file".to_string(),
+                    provenance: None,
                     operation: json!({ "path": "legacy.txt" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

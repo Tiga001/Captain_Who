@@ -115,6 +115,34 @@ export type AgentToolName =
 
 export type AgentToolSafety = 'read_only' | 'requires_approval' | 'destructive'
 
+export type AgentMcpServerScope =
+  | { type: 'builtin' }
+  | { type: 'user' }
+  | { type: 'project'; projectId: string }
+  | { type: 'plugin'; pluginId: string }
+  | { type: 'managed' }
+
+/**
+ * Immutable MCP catalog identity captured for one Agent run.
+ *
+ * The model-visible name is not an authority boundary. Backend invocation routes with this typed
+ * identity and revalidates the server configuration digest and catalog generation.
+ */
+export interface AgentMcpToolProvenance {
+  serverId: string
+  scope: AgentMcpServerScope
+  rawToolName: string
+  modelToolName: string
+  configDigest: string
+  catalogGeneration: number
+  catalogDigest: string
+}
+
+export type AgentToolIdentity =
+  | { type: 'builtin'; toolName: string }
+  | { type: 'runtime_extension'; extensionId: string; toolName: string }
+  | { type: 'mcp'; provenance: AgentMcpToolProvenance }
+
 export type AgentToolApprovalMode = 'never' | 'always' | 'dynamic'
 
 export type AgentApprovalStatus = 'not_required' | 'required' | 'approved' | 'rejected'
@@ -159,6 +187,7 @@ export type ConversationTurnTraceItem =
       operation: unknown
       approvalStatus: AgentApprovalStatus
       truncated: boolean
+      provenance?: AgentToolIdentity
     }
   | {
       type: 'tool_result'

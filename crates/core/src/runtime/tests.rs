@@ -3591,6 +3591,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         sequence: 1,
         call_id: context_call_id.clone(),
         tool: "read_file".to_string(),
+        provenance: None,
         operation: json!({ "path": "src/lib.rs" }),
         approval_status: AgentApprovalStatus::NotRequired,
         truncated: false,

@@ -12,6 +12,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 mycopilot-core.workspace = true
+mycopilot-mcp-client.workspace = true
 mycopilot-protocol-rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true

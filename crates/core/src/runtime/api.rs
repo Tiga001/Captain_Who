@@ -231,6 +231,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
     pub(super) image_generation_execution:
         Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
+    pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     pub(super) steer_input: Option<AgentSteerInputQueue>,
@@ -287,6 +288,15 @@ impl AgentRuntimeHostServices {
         resources: Arc<crate::skills::SkillResourceSession>,
     ) -> Self {
         self.skill_resources = Some(resources);
+        self
+    }
+
+    /// Supplies one immutable MCP catalog snapshot for this run boundary.
+    ///
+    /// The process host owns connections and credentials; the core runtime only receives
+    /// provider-neutral descriptors and an invocation capability.
+    pub fn with_mcp_tools(mut self, mcp_tools: crate::tools::McpToolRuntime) -> Self {
+        self.mcp_tools = Some(mcp_tools);
         self
     }
 
@@ -519,6 +529,7 @@ pub fn prepare_context_window_tool_projection(
             image_generation_execution: host_services.image_generation_execution.clone(),
             skill_activation_resolver: host_services.skill_activation_resolver.clone(),
             skill_resources: host_services.skill_resources.clone(),
+            mcp_tools: host_services.mcp_tools.clone(),
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(

@@ -113,7 +113,7 @@ fn build_attachment_context_in_workspace(
         // that silently grants preprocessing more capability than the model has.
         match registry.exposure(tool_name) {
             Some(AgentToolExposure::Stable) => {}
-            Some(AgentToolExposure::RequiresCapability(_)) => {
+            Some(AgentToolExposure::Dynamic | AgentToolExposure::RequiresCapability(_)) => {
                 sections.push(format!(
                     "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；先激活匹配该文件类型的 Skill，再使用激活后提供的读取工具读取上述 readPath。",
                     attachment.name,

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -44,6 +45,36 @@ macro_rules! digest_type {
 digest_type!(McpConfigDigest);
 digest_type!(McpSchemaDigest);
 digest_type!(McpCatalogDigest);
+
+impl FromStr for McpConfigDigest {
+    type Err = McpError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(McpError::config("invalid MCP configuration digest"));
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+
+impl FromStr for McpCatalogDigest {
+    type Err = McpError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(McpError::config("invalid MCP catalog digest"));
+        }
+        Ok(Self(value.to_string()))
+    }
+}
 
 pub fn config_digest(config: &McpServerConfig) -> Result<McpConfigDigest, McpError> {
     let mut normalized = config.clone();
@@ -200,5 +231,15 @@ mod tests {
             schema_digest(&left, None).unwrap(),
             schema_digest(&right, None).unwrap()
         );
+    }
+
+    #[test]
+    fn configuration_digest_parser_is_strict_and_safe() {
+        let digest = "0123456789abcdef".repeat(4);
+        assert_eq!(digest.parse::<McpConfigDigest>().unwrap().as_str(), digest);
+        assert_eq!(digest.parse::<McpCatalogDigest>().unwrap().as_str(), digest);
+        assert!("A".repeat(64).parse::<McpConfigDigest>().is_err());
+        assert!("0".repeat(63).parse::<McpConfigDigest>().is_err());
+        assert!("g".repeat(64).parse::<McpCatalogDigest>().is_err());
     }
 }

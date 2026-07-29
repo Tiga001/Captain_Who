@@ -11,12 +11,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::discover_catalog;
 use crate::{
-    McpCatalogCompleteness, McpCatalogIssue, McpCatalogPolicy, McpCatalogSnapshot, McpConfigDigest,
-    McpConnector, McpError, McpEvent, McpEventSink, McpPeer, McpPeerNotificationState,
-    McpProtocolSnapshot, McpRegistry, McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry,
-    McpRegistrySubscriptionError, McpSafeError, McpServerId, McpServerScope, McpServerState,
-    McpToolId, McpTrustLevel, NoopMcpEventSink,
+    McpCancellationToken, McpCatalogCompleteness, McpCatalogIssue, McpCatalogPolicy,
+    McpCatalogSnapshot, McpCatalogToolCall, McpConfigDigest, McpConnector, McpError, McpEvent,
+    McpEventSink, McpPeer, McpPeerNotificationState, McpProtocolSnapshot, McpRegistry,
+    McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry, McpRegistrySubscriptionError,
+    McpSafeError, McpServerId, McpServerScope, McpServerState, McpToolCall, McpToolId,
+    McpToolResult, McpTrustLevel, NoopMcpEventSink,
 };
+
+const FORCE_SHUTDOWN_GRACE_MAX: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug)]
 pub struct McpManagerPolicy {
@@ -85,6 +88,7 @@ struct ManagedEntryState {
     status: McpServerStatus,
     catalog: McpCatalogSnapshot,
     peer: Option<Arc<dyn McpPeer>>,
+    closing_peer: Option<Arc<dyn McpPeer>>,
     connect_inflight: bool,
     refresh_inflight: bool,
     watcher_cancel: Option<CancellationToken>,
@@ -111,6 +115,7 @@ impl ManagedEntry {
                 catalog,
                 status,
                 peer: None,
+                closing_peer: None,
                 connect_inflight: false,
                 refresh_inflight: false,
                 watcher_cancel: None,
@@ -135,6 +140,8 @@ struct ManagerInner {
     entries: StdMutex<BTreeMap<McpServerId, Arc<ManagedEntry>>>,
     lifecycle: StdMutex<ManagerLifecycle>,
     lifecycle_settled: Notify,
+    shutdown_started: AtomicBool,
+    shutdown_cancel: CancellationToken,
     registry_watcher_started: AtomicBool,
     events: mpsc::UnboundedSender<McpEvent>,
 }
@@ -153,6 +160,10 @@ struct DrainPermit {
     inner: Arc<ManagerInner>,
 }
 
+struct EntryInflightGuard {
+    entry: Arc<ManagedEntry>,
+}
+
 impl Drop for StartPermit {
     fn drop(&mut self) {
         if let Ok(mut lifecycle) = self.inner.lifecycle.lock() {
@@ -169,6 +180,33 @@ impl Drop for DrainPermit {
         }
         self.inner.lifecycle_settled.notify_waiters();
     }
+}
+
+impl Drop for EntryInflightGuard {
+    fn drop(&mut self) {
+        let status = {
+            let Ok(mut state) = self.entry.state.lock() else {
+                return;
+            };
+            if !state.connect_inflight && !state.refresh_inflight {
+                return;
+            }
+            state.connect_inflight = false;
+            state.refresh_inflight = false;
+            state.status.clone()
+        };
+        self.entry.publish_status(&status);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct McpShutdownReport {
+    pub results: Vec<McpBatchOperationResult>,
+    /// True when the graceful deadline expired and the Manager invalidated every active entry,
+    /// cancelled watchers and force-polled peer close before returning.
+    pub forced: bool,
+    /// True only when every peer close future settled before the force grace expired.
+    pub cleanup_complete: bool,
 }
 
 #[derive(Clone)]
@@ -222,6 +260,8 @@ impl McpConnectionManager {
                 entries: StdMutex::new(BTreeMap::new()),
                 lifecycle: StdMutex::new(ManagerLifecycle::default()),
                 lifecycle_settled: Notify::new(),
+                shutdown_started: AtomicBool::new(false),
+                shutdown_cancel: CancellationToken::new(),
                 registry_watcher_started: AtomicBool::new(false),
                 events,
             }),
@@ -244,9 +284,22 @@ impl McpConnectionManager {
         let manager = self.clone();
         await_manager_operation(tokio::spawn(async move {
             let _permit = permit;
-            manager.start_reserved(server_id).await
+            manager.start_reserved_until_shutdown(server_id).await
         }))
         .await
+    }
+
+    async fn start_reserved_until_shutdown(
+        &self,
+        server_id: McpServerId,
+    ) -> Result<McpServerStatus, McpError> {
+        tokio::select! {
+            biased;
+            _ = self.inner.shutdown_cancel.cancelled() => {
+                Err(McpError::shutdown("MCP connection manager is shutting down"))
+            }
+            result = self.start_reserved(server_id) => result,
+        }
     }
 
     async fn start_reserved(&self, server_id: McpServerId) -> Result<McpServerStatus, McpError> {
@@ -267,6 +320,16 @@ impl McpConnectionManager {
         }
 
         loop {
+            if registry.config.trust == McpTrustLevel::Untrusted {
+                self.stop_entry(server_id, Arc::clone(&entry), false)
+                    .await?;
+                let error =
+                    McpError::config("MCP server is not trusted for connection or invocation");
+                let mut state = lock_entry(&entry)?;
+                apply_registry_locked(&self.inner.events, &entry, &mut state, &registry);
+                set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                return Err(error);
+            }
             let notified = entry.settled.notified();
             let reservation = {
                 let mut state = lock_entry(&entry)?;
@@ -284,6 +347,7 @@ impl McpConnectionManager {
                 }
                 if state.connect_inflight
                     || state.refresh_inflight
+                    || state.closing_peer.is_some()
                     || matches!(
                         state.status.state,
                         McpServerState::Starting
@@ -299,6 +363,7 @@ impl McpConnectionManager {
                     apply_registry_locked(&self.inner.events, &entry, &mut state, &registry);
                     state.status.last_error = None;
                     let old_peer = state.peer.take();
+                    state.closing_peer = old_peer.clone();
                     let old_cancel = state.watcher_cancel.take();
                     let old_watcher = state.watcher_task.take();
                     transition_locked(
@@ -314,12 +379,16 @@ impl McpConnectionManager {
                 notified.await;
                 continue;
             };
+            let _inflight_guard = EntryInflightGuard {
+                entry: Arc::clone(&entry),
+            };
 
             if let Some(cancel) = old_cancel {
                 cancel.cancel();
             }
             if let Some(peer) = old_peer {
                 let _ = peer.close().await;
+                clear_closing_peer(&entry, &peer);
             }
             if let Some(watcher) = old_watcher {
                 let _ = watcher.await;
@@ -532,9 +601,15 @@ impl McpConnectionManager {
 
     pub async fn stop(&self, server_id: McpServerId) -> Result<McpServerStatus, McpError> {
         let manager = self.clone();
-        await_manager_operation(tokio::spawn(
-            async move { manager.stop_owned(server_id).await },
-        ))
+        await_manager_operation(tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = manager.inner.shutdown_cancel.cancelled() => {
+                    Err(McpError::shutdown("MCP connection manager is shutting down"))
+                }
+                result = manager.stop_owned(server_id) => result,
+            }
+        }))
         .await
     }
 
@@ -557,9 +632,17 @@ impl McpConnectionManager {
     pub async fn restart(&self, server_id: McpServerId) -> Result<McpServerStatus, McpError> {
         let manager = self.clone();
         await_manager_operation(tokio::spawn(async move {
-            manager.stop_owned(server_id).await?;
-            let _permit = manager.reserve_start()?;
-            manager.start_reserved(server_id).await
+            tokio::select! {
+                biased;
+                _ = manager.inner.shutdown_cancel.cancelled() => {
+                    Err(McpError::shutdown("MCP connection manager is shutting down"))
+                }
+                result = async {
+                    manager.stop_owned(server_id).await?;
+                    let _permit = manager.reserve_start()?;
+                    manager.start_reserved_until_shutdown(server_id).await
+                } => result,
+            }
         }))
         .await
     }
@@ -567,7 +650,13 @@ impl McpConnectionManager {
     pub async fn refresh(&self, server_id: McpServerId) -> Result<McpCatalogSnapshot, McpError> {
         let manager = self.clone();
         await_manager_operation(tokio::spawn(async move {
-            manager.refresh_owned(server_id).await
+            tokio::select! {
+                biased;
+                _ = manager.inner.shutdown_cancel.cancelled() => {
+                    Err(McpError::shutdown("MCP connection manager is shutting down"))
+                }
+                result = manager.refresh_owned(server_id) => result,
+            }
         }))
         .await
     }
@@ -612,6 +701,9 @@ impl McpConnectionManager {
                 notified.await;
                 continue;
             };
+            let _inflight_guard = EntryInflightGuard {
+                entry: Arc::clone(&entry),
+            };
             return self
                 .finish_refresh(server_id, Arc::clone(&entry), epoch, peer)
                 .await;
@@ -638,7 +730,9 @@ impl McpConnectionManager {
                     let manager = self.clone();
                     tasks.push(tokio::spawn(async move {
                         let _permit = permit;
-                        let result = manager.start_reserved(registry.config.id).await;
+                        let result = manager
+                            .start_reserved_until_shutdown(registry.config.id)
+                            .await;
                         operation_result(registry.config.id, result)
                     }));
                 }
@@ -658,11 +752,137 @@ impl McpConnectionManager {
     }
 
     pub async fn stop_all(&self) -> Vec<McpBatchOperationResult> {
-        let manager = self.clone();
-        match tokio::spawn(async move { manager.stop_all_owned().await }).await {
+        let operation_manager = self.clone();
+        match tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = operation_manager.inner.shutdown_cancel.cancelled() => {
+                    vec![manager_task_batch_failure()]
+                }
+                results = operation_manager.stop_all_owned() => results,
+            }
+        })
+        .await
+        {
             Ok(results) => results,
             Err(_) => vec![manager_task_batch_failure()],
         }
+    }
+
+    /// Permanently stop this Manager within a Host-owned deadline.
+    ///
+    /// Unlike reusable [`Self::stop_all`], this rejects future starts and cancels every admitted
+    /// start. A reserved tail of the deadline is used to invalidate entries, abort notification
+    /// watchers and poll peer close concurrently if graceful shutdown does not settle.
+    pub async fn shutdown(&self, timeout: Duration) -> McpShutdownReport {
+        self.inner.shutdown_started.store(true, Ordering::Release);
+        self.inner.shutdown_cancel.cancel();
+
+        let force_grace = timeout.min(FORCE_SHUTDOWN_GRACE_MAX);
+        let graceful_grace = timeout.saturating_sub(force_grace);
+        if !graceful_grace.is_zero() {
+            if let Ok(results) = tokio::time::timeout(graceful_grace, self.stop_all_owned()).await {
+                return McpShutdownReport {
+                    results,
+                    forced: false,
+                    cleanup_complete: true,
+                };
+            }
+        }
+
+        let (results, cleanup_complete) = self.force_shutdown_entries(force_grace).await;
+        McpShutdownReport {
+            results,
+            forced: true,
+            cleanup_complete,
+        }
+    }
+
+    async fn force_shutdown_entries(
+        &self,
+        force_grace: Duration,
+    ) -> (Vec<McpBatchOperationResult>, bool) {
+        let entries = self
+            .inner
+            .entries
+            .lock()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|(server_id, entry)| (*server_id, Arc::clone(entry)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut tasks = JoinSet::new();
+        let mut results = Vec::with_capacity(entries.len());
+        for (server_id, entry) in entries {
+            let (peers, cancel, watcher, status) = {
+                let Ok(mut state) = entry.state.lock() else {
+                    continue;
+                };
+                state.removed = true;
+                state.epoch = state.epoch.saturating_add(1);
+                state.connect_inflight = false;
+                state.refresh_inflight = false;
+                let mut peers = Vec::new();
+                if let Some(peer) = state.peer.take() {
+                    peers.push(peer);
+                }
+                if let Some(peer) = state.closing_peer.take() {
+                    if !peers.iter().any(|active| Arc::ptr_eq(active, &peer)) {
+                        peers.push(peer);
+                    }
+                }
+                let cancel = state.watcher_cancel.take();
+                let watcher = state.watcher_task.take();
+                let generation = state.catalog.generation;
+                state.catalog = McpCatalogSnapshot::empty(server_id);
+                state.catalog.generation = generation;
+                sync_catalog_status_from_state(&mut state);
+                state.status.protocol = None;
+                state.status.notification_state = McpPeerNotificationState::Unknown;
+                state.status.last_error = None;
+                transition_locked(
+                    &self.inner.events,
+                    &entry,
+                    &mut state,
+                    McpServerState::Disabled,
+                );
+                (peers, cancel, watcher, state.status.clone())
+            };
+            if let Some(cancel) = cancel {
+                cancel.cancel();
+            }
+            if let Some(watcher) = watcher {
+                watcher.abort();
+                tasks.spawn(async move {
+                    let _ = watcher.await;
+                });
+            }
+            for peer in peers {
+                let _ = peer.force_close();
+                tasks.spawn(async move {
+                    let _ = peer.close().await;
+                });
+            }
+            results.push(McpBatchOperationResult {
+                server_id: Some(server_id),
+                status: Some(status),
+                error: None,
+            });
+        }
+
+        let settled = tokio::time::timeout(force_grace, async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await
+        .is_ok();
+        if !settled {
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
+        results.sort_by_key(|result| result.server_id);
+        (results, settled)
     }
 
     async fn stop_all_owned(&self) -> Vec<McpBatchOperationResult> {
@@ -720,7 +940,7 @@ impl McpConnectionManager {
         for server_id in ids {
             let manager = self.clone();
             tasks.spawn(async move {
-                let result = manager.stop(server_id).await;
+                let result = manager.stop_owned(server_id).await;
                 operation_result(server_id, result)
             });
         }
@@ -740,7 +960,13 @@ impl McpConnectionManager {
     ) -> Result<Option<McpRegistryEntry>, McpError> {
         let manager = self.clone();
         await_manager_operation(tokio::spawn(async move {
-            manager.remove_server_owned(server_id).await
+            tokio::select! {
+                biased;
+                _ = manager.inner.shutdown_cancel.cancelled() => {
+                    Err(McpError::shutdown("MCP connection manager is shutting down"))
+                }
+                result = manager.remove_server_owned(server_id) => result,
+            }
         }))
         .await
     }
@@ -823,6 +1049,7 @@ impl McpConnectionManager {
             let state = lock_entry(entry)?;
             if state.removed
                 || !state.status.enabled
+                || state.status.trust == McpTrustLevel::Untrusted
                 || !matches!(
                     state.status.state,
                     McpServerState::Ready | McpServerState::Degraded
@@ -845,6 +1072,141 @@ impl McpConnectionManager {
         Ok(resolved)
     }
 
+    /// Invoke a tool only if the caller's catalog and configuration snapshot
+    /// still identify the active, complete catalog.
+    ///
+    /// All routing checks happen while briefly holding the per-server state
+    /// lock. The peer and raw call are cloned out before the protocol request
+    /// is awaited.
+    pub async fn call_catalog_tool(
+        &self,
+        request: McpCatalogToolCall,
+        cancellation: McpCancellationToken,
+    ) -> Result<McpToolResult, McpError> {
+        let server_id = request.tool_id.server_id;
+        let registry =
+            self.inner.registry.get(server_id)?.ok_or_else(|| {
+                McpError::config("MCP catalog invocation server is not registered")
+            })?;
+        if !registry.config.enabled {
+            return Err(McpError::config(
+                "MCP catalog invocation server is disabled",
+            ));
+        }
+        if registry.config.trust == McpTrustLevel::Untrusted {
+            return Err(McpError::config(
+                "MCP catalog invocation server is not trusted",
+            ));
+        }
+        let entry = self
+            .get_entry(server_id)?
+            .ok_or_else(|| McpError::config("MCP catalog invocation server is not ready"))?;
+
+        let (peer, call, timeout_ms) = {
+            let state = lock_entry(&entry)?;
+            if state.removed {
+                return Err(McpError::config(
+                    "MCP catalog invocation server is not registered",
+                ));
+            }
+            if !state.status.enabled {
+                return Err(McpError::config(
+                    "MCP catalog invocation server is disabled",
+                ));
+            }
+            if state.status.trust == McpTrustLevel::Untrusted {
+                return Err(McpError::config(
+                    "MCP catalog invocation server is not trusted",
+                ));
+            }
+            if state.status.state != McpServerState::Ready {
+                return Err(McpError::config(
+                    "MCP catalog invocation server is not ready",
+                ));
+            }
+            let peer = state.peer.clone().ok_or_else(|| {
+                McpError::protocol("MCP catalog invocation active peer is unavailable")
+            })?;
+            if peer.server_id() != server_id || state.catalog.server_id != server_id {
+                return Err(McpError::protocol(
+                    "MCP catalog invocation server identity is inconsistent",
+                ));
+            }
+            if state.catalog.completeness != McpCatalogCompleteness::Complete {
+                return Err(McpError::config(
+                    "MCP catalog invocation catalog is incomplete",
+                ));
+            }
+            if state.status.config_digest != registry.config_digest
+                || state.catalog.source_config_digest.as_ref() != Some(&state.status.config_digest)
+                || request.expected_config_digest != state.status.config_digest
+            {
+                return Err(McpError::config(
+                    "MCP catalog invocation configuration snapshot is stale",
+                ));
+            }
+            if request.expected_catalog_generation != state.catalog.generation {
+                return Err(McpError::config(
+                    "MCP catalog invocation generation is stale",
+                ));
+            }
+            if state.catalog.content_digest.as_ref() != Some(&request.expected_catalog_digest) {
+                return Err(McpError::config(
+                    "MCP catalog invocation content digest is stale",
+                ));
+            }
+            let tool = state
+                .catalog
+                .tools
+                .iter()
+                .find(|tool| tool.id == request.tool_id)
+                .ok_or_else(|| McpError::config("MCP catalog invocation tool is unavailable"))?;
+            if !tool.routable {
+                return Err(McpError::config(
+                    "MCP catalog invocation tool is not routable",
+                ));
+            }
+            if tool.raw_name != request.tool_id.raw_name
+                || tool.model_name != request.expected_model_name
+            {
+                return Err(McpError::config(
+                    "MCP catalog invocation tool route is stale",
+                ));
+            }
+            let timeout_ms = request
+                .timeout_ms
+                .filter(|timeout_ms| *timeout_ms > 0)
+                .map(|timeout_ms| timeout_ms.min(registry.config.request_timeout_ms))
+                .unwrap_or(registry.config.request_timeout_ms);
+            let call = McpToolCall {
+                name: request.tool_id.raw_name.clone(),
+                arguments: request.arguments,
+                timeout_ms: Some(timeout_ms),
+            };
+            (peer, call, timeout_ms)
+        };
+
+        let settle_cancellation = cancellation.clone();
+        let protocol_call = peer.call_tool(call, cancellation);
+        tokio::pin!(protocol_call);
+        let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+        tokio::pin!(deadline);
+        tokio::select! {
+            biased;
+            _ = self.inner.shutdown_cancel.cancelled() => {
+                settle_cancellation.cancel();
+                let _ = tokio::time::timeout(Duration::from_millis(250), &mut protocol_call).await;
+                Err(McpError::shutdown("MCP connection manager is shutting down"))
+            }
+            _ = &mut deadline => {
+                settle_cancellation.cancel();
+                let _ = tokio::time::timeout(Duration::from_millis(250), &mut protocol_call).await;
+                Err(McpError::timeout("MCP tools/call", timeout_ms))
+            }
+            result = &mut protocol_call => result,
+        }
+    }
+
     async fn stop_entry(
         &self,
         _server_id: McpServerId,
@@ -860,6 +1222,7 @@ impl McpConnectionManager {
                 }
                 if state.status.state == McpServerState::Disabled
                     && state.peer.is_none()
+                    && state.closing_peer.is_none()
                     && !state.connect_inflight
                     && !state.refresh_inflight
                 {
@@ -871,6 +1234,7 @@ impl McpConnectionManager {
                     state.epoch = next_epoch(state.epoch)?;
                     let epoch = state.epoch;
                     let peer = state.peer.take();
+                    state.closing_peer = peer.clone();
                     let cancel = state.watcher_cancel.take();
                     let watcher = state.watcher_task.take();
                     transition_locked(
@@ -889,8 +1253,10 @@ impl McpConnectionManager {
             if let Some(cancel) = cancel {
                 cancel.cancel();
             }
-            let close_result = if let Some(peer) = peer {
-                peer.close().await
+            let close_result = if let Some(peer) = peer.as_ref() {
+                let result = peer.close().await;
+                clear_closing_peer(&entry, peer);
+                result
             } else {
                 Ok(())
             };
@@ -1067,9 +1433,10 @@ impl McpConnectionManager {
                 return;
             }
             observed = latest;
-            let _ = self
-                .refresh_for_epoch(server_id, Arc::clone(&entry), epoch)
-                .await;
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = self.refresh_for_epoch(server_id, Arc::clone(&entry), epoch) => {}
+            }
         }
     }
 
@@ -1105,6 +1472,9 @@ impl McpConnectionManager {
             let Some(peer) = peer else {
                 notified.await;
                 continue;
+            };
+            let _inflight_guard = EntryInflightGuard {
+                entry: Arc::clone(&entry),
             };
             let _ = self
                 .finish_refresh(server_id, Arc::clone(&entry), epoch, peer)
@@ -1152,10 +1522,13 @@ impl McpConnectionManager {
             set_error_locked(&self.inner.events, &entry, &mut state, &error);
             state.watcher_cancel.take();
             state.watcher_task.take();
-            state.peer.take()
+            let peer = state.peer.take();
+            state.closing_peer = peer.clone();
+            peer
         };
         if let Some(peer) = peer {
             let _ = peer.close().await;
+            clear_closing_peer(&entry, &peer);
         }
     }
 
@@ -1210,12 +1583,17 @@ impl McpConnectionManager {
     }
 
     fn reserve_start(&self) -> Result<StartPermit, McpError> {
+        if self.inner.shutdown_started.load(Ordering::Acquire) {
+            return Err(McpError::shutdown(
+                "MCP connection manager has begun permanent shutdown",
+            ));
+        }
         let mut lifecycle = self
             .inner
             .lifecycle
             .lock()
             .map_err(|_| McpError::shutdown("MCP manager lifecycle lock is unavailable"))?;
-        if lifecycle.draining {
+        if lifecycle.draining || self.inner.shutdown_started.load(Ordering::Acquire) {
             return Err(McpError::shutdown(
                 "MCP connection manager is stopping all servers",
             ));
@@ -1415,6 +1793,24 @@ fn lock_entry(
         .state
         .lock()
         .map_err(|_| McpError::protocol("MCP manager entry lock is unavailable"))
+}
+
+fn clear_closing_peer(entry: &Arc<ManagedEntry>, expected: &Arc<dyn McpPeer>) {
+    let status = {
+        let Ok(mut state) = entry.state.lock() else {
+            return;
+        };
+        if state
+            .closing_peer
+            .as_ref()
+            .is_none_or(|peer| !Arc::ptr_eq(peer, expected))
+        {
+            return;
+        }
+        state.closing_peer.take();
+        state.status.clone()
+    };
+    entry.publish_status(&status);
 }
 
 fn apply_registry_locked(

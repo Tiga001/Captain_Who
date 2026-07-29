@@ -114,6 +114,7 @@ fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> Convers
                     "filePath": "src/history.rs",
                     "mode": "create"
                 }),
+                provenance: None,
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
             },

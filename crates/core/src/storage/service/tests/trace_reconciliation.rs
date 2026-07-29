@@ -104,6 +104,7 @@ fn in_progress_trace(
                 sequence: 1,
                 call_id: format!("call-{run_id}"),
                 tool: "read_file".to_string(),
+                provenance: None,
                 operation: serde_json::json!({ "path": "notes.txt" }),
                 approval_status: crate::AgentApprovalStatus::NotRequired,
                 truncated: false,
@@ -282,6 +283,7 @@ fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
             sequence: 0,
             call_id: "image-call".to_string(),
             tool: "image_generation".to_string(),
+            provenance: None,
             operation: serde_json::json!({
                 "request": { "operation": "generate", "prompt": "private prompt" },
                 "reason": "Create the requested image."

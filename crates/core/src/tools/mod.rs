@@ -11,6 +11,7 @@ mod goal;
 mod image_generation;
 mod input_stream;
 mod limits;
+mod mcp;
 pub(crate) mod model_projection;
 mod office;
 mod read_file;
@@ -38,7 +39,7 @@ mod write_file_stream;
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::protocol::{
     AgentError, AgentFileWritePreview, AgentProposedAction, AgentResult, AgentSearchConfig,
-    AgentSearchMode, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    AgentSearchMode, AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult,
 };
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
@@ -71,6 +72,8 @@ use skills_read_resource::SkillsReadResourceTool;
 pub(crate) use skills_script::validate_frozen_skill_script_trace_args;
 use skills_script::{SkillsPreflightScriptTool, SkillsRunScriptTool};
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 pub(crate) use tool_set::{
     validate_tool_set_checkpoint_shape, EffectiveToolSet, ToolCapabilityId, ToolUnavailability,
@@ -93,6 +96,13 @@ use filesystem::{
     walk_workspace_with_cancellation, WalkEntry, WalkResult,
 };
 use limits::*;
+use mcp::McpAgentTool;
+pub use mcp::{
+    McpAgentToolAnnotations, McpAgentToolDescriptor, McpOmittedContentKind, McpToolCatalogContext,
+    McpToolContentBlock, McpToolDiagnosticCode, McpToolInvocation, McpToolInvocationFuture,
+    McpToolInvocationResult, McpToolInvoker, McpToolRegistrationDiagnostic, McpToolRuntime,
+    MCP_RUNTIME_MAX_CATALOG_BYTES, MCP_RUNTIME_MAX_TOOL_DEFINITIONS,
+};
 
 /// Rebuilds the model-only projection for a host result restored after approval.
 ///
@@ -243,15 +253,134 @@ fn value_contains_true(value: &Value) -> bool {
     }
 }
 
+pub(crate) type BoxAgentToolFuture<'a> =
+    Pin<Box<dyn Future<Output = AgentResult<Value>> + Send + 'a>>;
+
+/// True asynchronous tool execution boundary.
+///
+/// Existing built-ins continue implementing [`AgentTool`] and are dispatched through the blocking
+/// adapter. Network/protocol-backed tools implement this subtrait so their futures run directly on
+/// Tokio and receive the same ToolExecutionContext cancellation authority.
+pub(crate) trait AsyncAgentTool: AgentTool {
+    fn execute_async<'a>(
+        &'a self,
+        context: &'a ToolExecutionContext,
+        args: Value,
+    ) -> BoxAgentToolFuture<'a>;
+}
+
+enum AgentToolHandler {
+    Blocking(Box<dyn AgentTool>),
+    Async(Box<dyn AsyncAgentTool>),
+}
+
+impl AgentToolHandler {
+    fn tool(&self) -> &dyn AgentTool {
+        match self {
+            Self::Blocking(tool) => tool.as_ref(),
+            Self::Async(tool) => tool.as_ref(),
+        }
+    }
+
+    fn async_tool(&self) -> Option<&dyn AsyncAgentTool> {
+        match self {
+            Self::Blocking(_) => None,
+            Self::Async(tool) => Some(tool.as_ref()),
+        }
+    }
+
+    fn definition(&self) -> AgentToolDefinition {
+        self.tool().definition()
+    }
+
+    fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
+        self.tool().execute(context, args)
+    }
+
+    fn permission_policy(&self) -> AgentToolPermissionPolicy {
+        self.tool().permission_policy()
+    }
+
+    fn exposure(&self) -> AgentToolExposure {
+        self.tool().exposure()
+    }
+
+    fn error_result(&self, error: &AgentError) -> Option<Value> {
+        self.tool().error_result(error)
+    }
+
+    fn cancellation_settlement(&self) -> AgentToolCancellationSettlement {
+        self.tool().cancellation_settlement()
+    }
+
+    fn proposed_action(
+        &self,
+        context: &ToolExecutionContext,
+        call: &AgentToolCall,
+    ) -> AgentResult<AgentProposedAction> {
+        self.tool().proposed_action(context, call)
+    }
+
+    fn requires_approval_for_call(&self, args: &Value) -> bool {
+        self.tool().requires_approval_for_call(args)
+    }
+
+    fn input_stream_observer(
+        &self,
+        context: ToolExecutionContext,
+    ) -> Option<Box<dyn ToolInputStreamObserver>> {
+        self.tool().input_stream_observer(context)
+    }
+
+    fn trace_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tool().trace_call_projection(call)
+    }
+
+    fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tool().event_call_projection(call)
+    }
+
+    fn model_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tool().model_call_projection(call)
+    }
+
+    fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tool().trace_projection(result)
+    }
+
+    fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tool().archive_projection(result)
+    }
+
+    fn archives_result(&self) -> bool {
+        self.tool().archives_result()
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tool().model_projection(result)
+    }
+
+    fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tool().event_projection(result)
+    }
+
+    fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tool().checkpoint_projection(result)
+    }
+}
+
 pub struct ToolRegistry {
-    tools: BTreeMap<String, Box<dyn AgentTool>>,
+    tools: BTreeMap<String, AgentToolHandler>,
     owners: BTreeMap<String, String>,
     exposures: BTreeMap<String, AgentToolExposure>,
+    identities: BTreeMap<String, crate::protocol::AgentToolIdentity>,
+    mcp_diagnostics: Vec<McpToolRegistrationDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentToolExposure {
     Stable,
+    Dynamic,
     RequiresCapability(ToolCapabilityId),
 }
 
@@ -283,6 +412,28 @@ pub(crate) enum FileWriteToolAccess {
 pub(crate) enum AgentToolCancellationSettlement {
     Interruptible,
     Authoritative,
+}
+
+/// Whether an unexecuted model call may be retained across a durable approval boundary.
+///
+/// External MCP calls need a future authorization/Secret Store aware checkpoint format. Unknown
+/// calls are denied too: there is no registered tool-owned projection that can make their
+/// arguments safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentToolCallCheckpointPersistence {
+    Allowed,
+    DeniedMcp,
+    DeniedUnknown,
+}
+
+fn unknown_tool_call_projection(call: &AgentToolCall) -> AgentToolCall {
+    AgentToolCall {
+        id: call.id.clone(),
+        tool: call.tool.clone(),
+        args: Value::Object(serde_json::Map::new()),
+        approval_status: call.approval_status,
+        reason: None,
+    }
 }
 
 impl AgentToolPermissionPolicy {
@@ -318,6 +469,8 @@ impl ToolRegistry {
             tools: BTreeMap::new(),
             owners: BTreeMap::new(),
             exposures: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            mcp_diagnostics: Vec::new(),
         };
         registry.register(AttachmentsListTool);
         registry.register(AttachmentsListProjectTool);
@@ -420,7 +573,7 @@ impl ToolRegistry {
         self.tools
             .get(&call.tool)
             .map(|tool| tool.trace_call_projection(call))
-            .unwrap_or_else(|| call.clone())
+            .unwrap_or_else(|| unknown_tool_call_projection(call))
     }
 
     /// Produces the presentation-safe clone emitted to event consumers. This
@@ -430,11 +583,35 @@ impl ToolRegistry {
         self.tools
             .get(&call.tool)
             .map(|tool| tool.event_call_projection(call))
-            .unwrap_or_else(|| call.clone())
+            .unwrap_or_else(|| unknown_tool_call_projection(call))
+    }
+
+    /// Produces the security projection retained in the current model timeline and resumable
+    /// checkpoint. Execution always receives the original call.
+    pub(crate) fn model_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tools
+            .get(&call.tool)
+            .map(|tool| tool.model_call_projection(call))
+            .unwrap_or_else(|| unknown_tool_call_projection(call))
     }
 
     pub(crate) fn contains_tool(&self, tool_name: &str) -> bool {
         self.tools.contains_key(tool_name)
+    }
+
+    pub(crate) fn identity(&self, tool_name: &str) -> Option<&AgentToolIdentity> {
+        self.identities.get(tool_name)
+    }
+
+    pub(crate) fn checkpoint_persistence(
+        &self,
+        tool_name: &str,
+    ) -> AgentToolCallCheckpointPersistence {
+        match self.identities.get(tool_name) {
+            Some(AgentToolIdentity::Mcp { .. }) => AgentToolCallCheckpointPersistence::DeniedMcp,
+            Some(_) => AgentToolCallCheckpointPersistence::Allowed,
+            None => AgentToolCallCheckpointPersistence::DeniedUnknown,
+        }
     }
 
     pub(crate) fn contains_tool_prefix(&self, tool_name: &str) -> bool {
@@ -510,6 +687,74 @@ impl ToolRegistry {
         }
     }
 
+    /// Executes a registered Tool through the common runtime boundary.
+    ///
+    /// Existing synchronous built-ins retain their implementation and are isolated on Tokio's
+    /// blocking pool. Protocol-backed Tools are awaited directly so cancellation and transport
+    /// progress do not require a nested runtime or an unnecessary blocking worker.
+    pub(crate) async fn execute_async(
+        self: Arc<Self>,
+        context: ToolExecutionContext,
+        call: AgentToolCall,
+        cancellation_token: crate::AgentCancellationToken,
+    ) -> AgentResult<AgentToolResult> {
+        if context.check_cancelled().is_err() {
+            return Err(AgentError::cancelled());
+        }
+
+        let Some(tool) = self.tools.get(&call.tool) else {
+            return Ok(failed_tool_result(
+                &call,
+                None,
+                format!("未知工具：{}", call.tool),
+            ));
+        };
+
+        if let Some(async_tool) = tool.async_tool() {
+            let call_context = context.clone().with_tool_call_id(call.id.clone());
+            let settlement = tool.cancellation_settlement();
+            let execution = async_tool.execute_async(&call_context, call.args.clone());
+            tokio::pin!(execution);
+            let execution = match settlement {
+                AgentToolCancellationSettlement::Interruptible => tokio::select! {
+                    biased;
+                    _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+                    result = &mut execution => result,
+                },
+                AgentToolCancellationSettlement::Authoritative => execution.await,
+            };
+            return match execution {
+                Err(error) if error.is_cancelled() => Err(error),
+                Err(error) => Ok(failed_tool_result(
+                    &call,
+                    tool.error_result(&error),
+                    error.to_string(),
+                )),
+                Ok(_)
+                    if settlement == AgentToolCancellationSettlement::Interruptible
+                        && cancellation_token.is_cancelled() =>
+                {
+                    Err(AgentError::cancelled())
+                }
+                Ok(result) => Ok(successful_tool_result(&call, result)),
+            };
+        }
+
+        let settlement = tool.cancellation_settlement();
+        let handle = tokio::task::spawn_blocking(move || self.execute(&context, &call));
+        match settlement {
+            AgentToolCancellationSettlement::Interruptible => tokio::select! {
+                _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
+                result = handle => {
+                    result.map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
+                }
+            },
+            AgentToolCancellationSettlement::Authoritative => handle
+                .await
+                .map_err(|error| AgentError::new(format!("工具执行线程失败：{error}"))),
+        }
+    }
+
     /// Returns the tool-owned pre-projection for durable history.
     ///
     /// Tools can remove intrinsically non-durable payloads here. The conversation trace recorder
@@ -572,7 +817,51 @@ impl ToolRegistry {
         extension_id: &str,
         tool: Box<dyn AgentTool>,
     ) -> AgentResult<()> {
-        self.register_boxed(format!("extension:{extension_id}"), tool)
+        let tool_name = tool.definition().name;
+        self.register_handler(
+            format!("extension:{extension_id}"),
+            AgentToolIdentity::RuntimeExtension {
+                extension_id: extension_id.to_string(),
+                tool_name,
+            },
+            AgentToolHandler::Blocking(tool),
+        )
+    }
+
+    pub(crate) fn register_mcp_runtime(&mut self, runtime: &McpToolRuntime) {
+        let mut diagnostics = runtime.initial_diagnostics().to_vec();
+        let invoker = runtime.invoker();
+        let caller = runtime.catalog_context().clone();
+        for descriptor in runtime.tools().iter().cloned() {
+            let provenance = descriptor.provenance.clone();
+            let tool = match McpAgentTool::prepare(descriptor, Arc::clone(&invoker), caller.clone())
+            {
+                Ok(tool) => tool,
+                Err(diagnostic) => {
+                    diagnostics.push(diagnostic);
+                    continue;
+                }
+            };
+            if self
+                .register_handler(
+                    format!("mcp:{}", provenance.server_id),
+                    AgentToolIdentity::Mcp {
+                        provenance: provenance.clone(),
+                    },
+                    AgentToolHandler::Async(Box::new(tool)),
+                )
+                .is_err()
+            {
+                diagnostics.push(McpToolRegistrationDiagnostic::name_collision(&provenance));
+            }
+        }
+        self.mcp_diagnostics = diagnostics;
+        runtime.invoker().report_diagnostics(&self.mcp_diagnostics);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_diagnostics(&self) -> &[McpToolRegistrationDiagnostic] {
+        &self.mcp_diagnostics
     }
 
     pub(crate) fn register_conversation_history(&mut self) {
@@ -600,6 +889,20 @@ impl ToolRegistry {
     }
 
     fn register_boxed(&mut self, owner: String, tool: Box<dyn AgentTool>) -> AgentResult<()> {
+        let tool_name = tool.definition().name;
+        self.register_handler(
+            owner,
+            AgentToolIdentity::Builtin { tool_name },
+            AgentToolHandler::Blocking(tool),
+        )
+    }
+
+    fn register_handler(
+        &mut self,
+        owner: String,
+        identity: AgentToolIdentity,
+        tool: AgentToolHandler,
+    ) -> AgentResult<()> {
         let definition = tool.definition();
         let exposure = tool.exposure();
         let name = definition.name.trim();
@@ -624,7 +927,8 @@ impl ToolRegistry {
         let name = name.to_string();
         self.tools.insert(name.clone(), tool);
         self.owners.insert(name.clone(), owner);
-        self.exposures.insert(name, exposure);
+        self.exposures.insert(name.clone(), exposure);
+        self.identities.insert(name, identity);
         Ok(())
     }
 
@@ -634,6 +938,8 @@ impl ToolRegistry {
             tools: BTreeMap::new(),
             owners: BTreeMap::new(),
             exposures: BTreeMap::new(),
+            identities: BTreeMap::new(),
+            mcp_diagnostics: Vec::new(),
         }
     }
 
@@ -652,6 +958,32 @@ fn structured_error_result(error: &AgentError) -> Option<Value> {
         }
         details
     })
+}
+
+fn successful_tool_result(call: &AgentToolCall, result: Value) -> AgentToolResult {
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        ok: true,
+        result: Some(result),
+        error: None,
+    }
+}
+
+fn failed_tool_result(
+    call: &AgentToolCall,
+    result: Option<Value>,
+    error: String,
+) -> AgentToolResult {
+    AgentToolResult {
+        exact_archive_file: None,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        ok: false,
+        result,
+        error: Some(error),
+    }
 }
 
 fn tavily_api_key(search_config: Option<&AgentSearchConfig>) -> Option<String> {
@@ -718,6 +1050,14 @@ pub(crate) trait AgentTool: Send + Sync {
     /// payloads can redact only this projection without changing history.
     fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
         self.trace_call_projection(call)
+    }
+
+    /// Returns the clone retained in current-turn model context and approval checkpoints.
+    ///
+    /// This is deliberately separate from execution arguments. External tools can redact
+    /// credential-shaped values without changing what was sent to the selected implementation.
+    fn model_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        call.clone()
     }
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
@@ -1266,6 +1606,34 @@ mod tests {
         assert_eq!(
             ordinary_event.approval_status,
             ordinary_trace.approval_status
+        );
+        assert_eq!(
+            registry.checkpoint_persistence("read_file"),
+            AgentToolCallCheckpointPersistence::Allowed
+        );
+
+        let unknown_secret = "Bearer unknown-tool-secret";
+        let unknown_call = AgentToolCall {
+            id: "unknown-observable".to_string(),
+            tool: "provider_hallucinated_tool".to_string(),
+            args: json!({ "text": unknown_secret }),
+            approval_status: crate::AgentApprovalStatus::NotRequired,
+            reason: Some(unknown_secret.to_string()),
+        };
+        for projection in [
+            registry.trace_call_projection(&unknown_call),
+            registry.event_call_projection(&unknown_call),
+            registry.model_call_projection(&unknown_call),
+        ] {
+            assert_eq!(projection.args, json!({}));
+            assert_eq!(projection.reason, None);
+            assert!(!serde_json::to_string(&projection)
+                .unwrap()
+                .contains(unknown_secret));
+        }
+        assert_eq!(
+            registry.checkpoint_persistence(&unknown_call.tool),
+            AgentToolCallCheckpointPersistence::DeniedUnknown
         );
     }
 

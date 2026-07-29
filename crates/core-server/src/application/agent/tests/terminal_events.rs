@@ -1341,6 +1341,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             operation: call.args.clone(),
+            provenance: None,
             approval_status: AgentApprovalStatus::Required,
             truncated: false,
         }],

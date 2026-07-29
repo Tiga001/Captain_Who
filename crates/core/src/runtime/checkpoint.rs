@@ -22,7 +22,9 @@ use crate::protocol::{
     AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
     AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
-use crate::tools::{validate_tool_set_checkpoint_shape, EffectiveToolSet};
+use crate::tools::{
+    validate_tool_set_checkpoint_shape, AgentToolCallCheckpointPersistence, EffectiveToolSet,
+};
 use crate::world_state::{
     WorldStateLifetime, WorldStateSectionId, WorldStateSnapshot, WorldStateVisibility,
 };
@@ -31,6 +33,13 @@ use std::collections::{BTreeSet, VecDeque};
 #[derive(Debug, Clone)]
 pub(super) struct QueuedToolCall {
     pub(super) call: LlmToolCall,
+    /// Security projection that may enter a durable approval checkpoint. It is never executed.
+    pub(super) checkpoint_call: LlmToolCall,
+    /// Whether this queued call may cross a durable approval boundary.
+    ///
+    /// MCP calls are denied as a class until resumable external-tool authorization and a Secret
+    /// Store exist. Field-name redaction is intentionally not treated as a persistence boundary.
+    pub(super) checkpoint_persistence: AgentToolCallCheckpointPersistence,
     pub(super) assistant_content: String,
     pub(super) group_id: String,
 }
@@ -66,22 +75,31 @@ impl ToolCallBatch {
         assistant_content: String,
         calls: Vec<LlmToolCall>,
         suppressed_narration: bool,
+        mut checkpoint_projection: impl FnMut(
+            &LlmToolCall,
+        )
+            -> (LlmToolCall, AgentToolCallCheckpointPersistence),
     ) -> Self {
         let queue = calls
             .into_iter()
             .enumerate()
-            .map(|(tool_index, call)| QueuedToolCall {
-                call,
-                assistant_content: if tool_index == 0 {
-                    assistant_content.clone()
-                } else {
-                    String::new()
-                },
-                group_id: format!(
-                    "run:{run_id}:tool-exchange:{}:{}",
-                    model_request_index + 1,
-                    tool_index + 1
-                ),
+            .map(|(tool_index, call)| {
+                let (checkpoint_call, checkpoint_persistence) = checkpoint_projection(&call);
+                QueuedToolCall {
+                    call,
+                    checkpoint_call,
+                    checkpoint_persistence,
+                    assistant_content: if tool_index == 0 {
+                        assistant_content.clone()
+                    } else {
+                        String::new()
+                    },
+                    group_id: format!(
+                        "run:{run_id}:tool-exchange:{}:{}",
+                        model_request_index + 1,
+                        tool_index + 1
+                    ),
+                }
             })
             .collect();
         Self {
@@ -188,7 +206,7 @@ pub(super) fn create_run_checkpoint(
             .queue
             .iter()
             .map(queued_tool_call_checkpoint)
-            .collect(),
+            .collect::<AgentResult<Vec<_>>>()?,
         suppressed_narration: tool_batch.suppressed_narration,
         extension_snapshots,
         tool_set: tool_set.checkpoint(),
@@ -473,16 +491,52 @@ fn tool_exchange_response_prefix(group_id: &str) -> Option<&str> {
         .filter(|prefix| prefix.contains(":tool-exchange:"))
 }
 
-fn queued_tool_call_checkpoint(call: &QueuedToolCall) -> AgentQueuedToolCallCheckpoint {
-    AgentQueuedToolCallCheckpoint {
+fn queued_tool_call_checkpoint(
+    call: &QueuedToolCall,
+) -> AgentResult<AgentQueuedToolCallCheckpoint> {
+    if call.checkpoint_persistence != AgentToolCallCheckpointPersistence::Allowed {
+        let code = match call.checkpoint_persistence {
+            AgentToolCallCheckpointPersistence::DeniedMcp => "mcpToolCallPersistenceDenied",
+            AgentToolCallCheckpointPersistence::DeniedUnknown => "unknownToolCallPersistenceDenied",
+            AgentToolCallCheckpointPersistence::Allowed => unreachable!("checked above"),
+        };
+        return Err(AgentError::structured(
+            "agent.checkpoint_private_tool_arguments",
+            "无法创建运行检查点：同批待执行工具调用不能在当前版本中安全持久化。",
+            serde_json::json!({
+                "type": "checkpoint",
+                "code": code,
+                "recovery": "restartRun",
+                "tool": call.call.name,
+            }),
+        ));
+    }
+    if call.checkpoint_call.id != call.call.id || call.checkpoint_call.name != call.call.name {
+        return Err(AgentError::new(
+            "无法创建运行检查点：工具调用安全投影改变了调用身份。",
+        ));
+    }
+    if call.checkpoint_call.args != call.call.args {
+        return Err(AgentError::structured(
+            "agent.checkpoint_private_tool_arguments",
+            "无法创建运行检查点：同批待执行工具调用包含不能安全持久化的参数。",
+            serde_json::json!({
+                "type": "checkpoint",
+                "code": "privateToolArguments",
+                "recovery": "restartRun",
+                "tool": call.call.name,
+            }),
+        ));
+    }
+    Ok(AgentQueuedToolCallCheckpoint {
         call: AgentContextCheckpointToolCall {
-            id: call.call.id.clone(),
-            name: call.call.name.clone(),
-            args: call.call.args.clone(),
+            id: call.checkpoint_call.id.clone(),
+            name: call.checkpoint_call.name.clone(),
+            args: call.checkpoint_call.args.clone(),
         },
         assistant_content: call.assistant_content.clone(),
         group_id: call.group_id.clone(),
-    }
+    })
 }
 
 fn validate_context_checkpoint_tool_call_ids(
@@ -573,12 +627,15 @@ fn restore_queued_tool_calls(
             {
                 return Err(AgentError::new("运行检查点中的工具交换分组为空或重复。"));
             }
+            let call = LlmToolCall {
+                id: queued.call.id,
+                name: queued.call.name,
+                args: queued.call.args,
+            };
             Ok(QueuedToolCall {
-                call: LlmToolCall {
-                    id: queued.call.id,
-                    name: queued.call.name,
-                    args: queued.call.args,
-                },
+                checkpoint_call: call.clone(),
+                call,
+                checkpoint_persistence: AgentToolCallCheckpointPersistence::Allowed,
                 assistant_content: queued.assistant_content,
                 group_id: queued.group_id,
             })
@@ -627,6 +684,65 @@ mod tests {
         model_response_tool_call_id("checkpoint-validation-run", 0, tool_index, provider_call_id)
     }
 
+    #[test]
+    fn approval_checkpoint_rejects_private_queued_tool_arguments_without_leaking_them() {
+        let secret = "fixture-token-that-must-not-persist";
+        let call_id = canonical_test_call_id(1, "provider-private-mcp");
+        let queued = QueuedToolCall {
+            call: LlmToolCall {
+                id: call_id.clone(),
+                name: "mcp__fixture__credential_tool".to_string(),
+                args: json!({"token": secret, "query": "safe"}),
+            },
+            checkpoint_call: LlmToolCall {
+                id: call_id,
+                name: "mcp__fixture__credential_tool".to_string(),
+                args: json!({"token": "[redacted MCP argument]", "query": "safe"}),
+            },
+            checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
+            assistant_content: String::new(),
+            group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
+        };
+
+        let error = queued_tool_call_checkpoint(&queued).unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some("agent.checkpoint_private_tool_arguments")
+        );
+        assert!(!error.to_string().contains(secret));
+        assert!(!error
+            .details()
+            .is_some_and(|details| details.to_string().contains(secret)));
+    }
+
+    #[test]
+    fn approval_checkpoint_rejects_all_mcp_calls_even_when_projection_cannot_detect_secret() {
+        let secret = "Bearer fixture-neutral-field-secret";
+        let call_id = canonical_test_call_id(1, "provider-neutral-mcp");
+        let call = LlmToolCall {
+            id: call_id,
+            name: "provider_visible_name_without_routing_semantics".to_string(),
+            args: json!({"text": secret}),
+        };
+        let queued = QueuedToolCall {
+            checkpoint_call: call.clone(),
+            call,
+            checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
+            assistant_content: String::new(),
+            group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
+        };
+
+        let error = queued_tool_call_checkpoint(&queued).unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some("agent.checkpoint_private_tool_arguments")
+        );
+        assert!(!error.to_string().contains(secret));
+        assert!(!error
+            .details()
+            .is_some_and(|details| details.to_string().contains(secret)));
+    }
+
     fn restorable_checkpoint_fixture() -> (AgentRunCheckpoint, AgentToolContinuation) {
         let pending = LlmToolCall {
             id: canonical_test_call_id(0, "provider-pending"),
@@ -653,6 +769,7 @@ mod tests {
                 args: json!({ "path": "report.txt" }),
             }],
             false,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
         );
         let trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
@@ -817,6 +934,7 @@ mod tests {
                 },
             ],
             false,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
         );
         let first = batch.pop_front().unwrap();
         let duplicate = batch.pop_front().unwrap();
@@ -855,6 +973,7 @@ mod tests {
             String::new(),
             vec![first.clone(), pending.clone(), duplicate_first],
             false,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
         );
         let first = batch.pop_front().unwrap();
         assert_eq!(batch.claim(&first.call), ToolCallBatchClaim::Execute);
@@ -1005,6 +1124,7 @@ mod tests {
                 args: json!({ "path": "report.txt" }),
             }],
             false,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
         );
         let error = create_run_checkpoint(
             "create-invalid-queue",
@@ -1142,6 +1262,7 @@ mod tests {
                 sequence: 0,
                 call_id: "legacy/provider/trace".to_string(),
                 tool: "read_file".to_string(),
+                provenance: None,
                 operation: json!({ "path": "old.txt" }),
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,
@@ -1257,6 +1378,7 @@ mod tests {
                 args: json!({ "path": "report.txt" }),
             }],
             true,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
         );
         let trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(

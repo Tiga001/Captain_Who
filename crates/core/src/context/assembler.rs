@@ -761,6 +761,7 @@ mod tests {
                         sequence: 1,
                         call_id: call_id.clone(),
                         tool: "write_file".to_string(),
+                        provenance: None,
                         operation: json!({
                             "filePath": "src/new.rs",
                             "mode": "create"

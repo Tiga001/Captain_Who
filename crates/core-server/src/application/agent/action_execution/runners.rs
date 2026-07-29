@@ -1348,9 +1348,13 @@ impl AgentService {
                 return;
             }
         };
+        let mcp_tools = self.capture_mcp_tool_runtime(&record.agent_input);
         let initial_context_window_tool_projection = match self
-            .context_window_tool_projection(&record.agent_input, skill_resources.clone())
-        {
+            .context_window_tool_projection_with_mcp(
+                &record.agent_input,
+                skill_resources.clone(),
+                mcp_tools.clone(),
+            ) {
             Ok(projection) => projection,
             Err(error) => {
                 let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
@@ -1450,6 +1454,9 @@ impl AgentService {
         }
         if let Some(steer_input) = steer_input.as_ref() {
             host_services = host_services.with_steer_input(steer_input.clone());
+        }
+        if let Some(mcp_tools) = mcp_tools {
+            host_services = host_services.with_mcp_tools(mcp_tools);
         }
         let result = send_chat_with_host_services(
             agent_input,

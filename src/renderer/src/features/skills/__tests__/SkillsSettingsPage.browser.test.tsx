@@ -702,6 +702,55 @@ describe('Skill installation and update workflow', () => {
     await expect.element(screen.getByText('skills.previewExpires')).toBeVisible()
   })
 
+  it('keeps preview identity and actions fixed while technical details scroll independently', async () => {
+    service.inspectInstallation.mockResolvedValueOnce(
+      installationPreview({
+        compatibility: { issues: [], status: 'compatible' },
+        package: {
+          description: 'A '.repeat(900),
+          fileCount: 4,
+          formatVersion: 3,
+          name: 'Long preview skill',
+          packageRevision: 'package-revision-long-preview',
+          totalBytes: 28_600
+        }
+      })
+    )
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText(installedSkill.name)).toBeVisible()
+    await screen.getByRole('button', { name: 'skills.install' }).click()
+    await screen.getByRole('button', { name: /skills.installLocal/ }).click()
+    await screen.getByRole('button', { name: 'skills.showTechnicalDetails' }).click()
+
+    const dialog = document.querySelector<HTMLElement>('.skill-install-dialog')
+    const body = document.querySelector<HTMLElement>('.skill-install-dialog__body')
+    const identity = document.querySelector<HTMLElement>('.skill-install-preview__identity')
+    const scrollRegion = document.querySelector<HTMLElement>(
+      '.skill-install-preview__scroll-region'
+    )
+    const actions = document.querySelector<HTMLElement>('.skill-install-preview__actions')
+    const technicalFacts = document.querySelector<HTMLElement>(
+      '.skill-install-preview__technical-facts'
+    )
+
+    expect(dialog).not.toBeNull()
+    expect(body).not.toBeNull()
+    expect(identity).not.toBeNull()
+    expect(scrollRegion).not.toBeNull()
+    expect(actions).not.toBeNull()
+    expect(technicalFacts).not.toBeNull()
+    expect(scrollRegion?.contains(technicalFacts)).toBe(true)
+    expect(scrollRegion?.contains(identity)).toBe(false)
+    expect(scrollRegion?.contains(actions)).toBe(false)
+    expect(getComputedStyle(body!).overflowY).toBe('hidden')
+    expect(getComputedStyle(scrollRegion!).overflowY).toBe('auto')
+    expect(scrollRegion!.scrollHeight).toBeGreaterThan(scrollRegion!.clientHeight)
+    await expect.element(screen.getByRole('button', { name: 'skills.back' })).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: 'skills.installOperation' }))
+      .toBeVisible()
+  })
+
   it('treats an unchanged update as already current and does not offer a commit action', async () => {
     service.inspectInstallation.mockResolvedValueOnce(
       installationPreview({

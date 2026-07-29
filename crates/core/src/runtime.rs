@@ -90,7 +90,7 @@ use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
     approve_proposed_action, cancellation_preempts_tool_result, cancelled_output, done_event,
     enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
-    execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
+    execute_registered_tool, extract_reason_from_args, failed_tool_call_result,
     file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
     redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
     tool_calls_from_response,
@@ -233,6 +233,7 @@ impl AgentRuntime {
             skill_activation_resolver,
             office_engine,
             image_generation_execution,
+            mcp_tools,
             command_runtime_profile_resolver,
             steer_input,
         } = host_services.unwrap_or_default();
@@ -336,6 +337,7 @@ impl AgentRuntime {
                 image_generation_execution,
                 skill_activation_resolver,
                 skill_resources: skill_resources.clone(),
+                mcp_tools,
             },
         )
         .map_err(|error| {
@@ -1107,6 +1109,24 @@ impl AgentRuntime {
                         },
                         tool_requests,
                         suppressed_narration,
+                        |call| {
+                            let projected =
+                                tool_registry.model_call_projection(&AgentToolCall {
+                                    id: call.id.clone(),
+                                    tool: call.name.clone(),
+                                    args: call.args.clone(),
+                                    approval_status: AgentApprovalStatus::NotRequired,
+                                    reason: None,
+                                });
+                            (
+                                crate::llm::LlmToolCall {
+                                    id: projected.id,
+                                    name: projected.tool,
+                                    args: projected.args,
+                                },
+                                tool_registry.checkpoint_persistence(&call.name),
+                            )
+                        },
                     );
                 }
 
@@ -1301,11 +1321,14 @@ impl AgentRuntime {
                         }
                     }
                     let trace_call = tool_registry.trace_call_projection(&call);
+                    let model_call = tool_registry.model_call_projection(&call);
+                    let tool_identity = tool_registry.identity(&call.tool).cloned();
                     let call_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
-                        let sequence = recorder.record_tool_call(&trace_call);
+                        let sequence =
+                            recorder.record_tool_call_with_identity(&trace_call, tool_identity);
                         if let Some(sequence) = sequence {
                             recorder.record_model_message(
                                 sequence,
@@ -1313,21 +1336,24 @@ impl AgentRuntime {
                                 &LlmMessage::assistant(
                                     "",
                                     vec![crate::llm::LlmToolCall {
-                                        id: call.id.clone(),
-                                        name: call.tool.clone(),
-                                        args: call.args.clone(),
+                                        id: model_call.id.clone(),
+                                        name: model_call.tool.clone(),
+                                        args: model_call.args.clone(),
                                     }],
                                 ),
                             );
+                            if trace_call.args != call.args || model_call.args != call.args {
+                                recorder.mark_truncated();
+                            }
                         }
                         sequence
                     };
                     active_context.push(ContextItem::assistant(
                         assistant_tool_content,
                         vec![crate::llm::LlmToolCall {
-                            id: call.id.clone(),
-                            name: call.tool.clone(),
-                            args: call.args.clone(),
+                            id: model_call.id,
+                            name: model_call.tool,
+                            args: model_call.args,
                         }],
                         with_trace_origin(
                             ContextMetadata::new(
@@ -1580,7 +1606,7 @@ impl AgentRuntime {
                             Err(error) => Ok(failed_tool_call_result(&call, error)),
                         }
                     } else {
-                        execute_tool_on_blocking_thread(
+                        execute_registered_tool(
                             tool_registry.clone(),
                             tool_context.clone(),
                             call.clone(),
@@ -1641,6 +1667,13 @@ impl AgentRuntime {
                         &llm_result,
                         &archive_metadata,
                     )?;
+                    let checkpoint_observation = finalize_model_tool_observation(
+                        &model_tool_result_gate,
+                        &call.id,
+                        !result.ok,
+                        &checkpoint_result,
+                        &ConversationHistoryArchiveTraceMetadata::default(),
+                    )?;
                     let recorded_result_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
@@ -1656,7 +1689,7 @@ impl AgentRuntime {
                                 0,
                                 &LlmMessage::tool_result(
                                     call.id.clone(),
-                                    model_observation.clone(),
+                                    checkpoint_observation.clone(),
                                     !result.ok,
                                 ),
                             );
@@ -1714,7 +1747,7 @@ impl AgentRuntime {
                         )
                         .with_checkpoint_tool_result(
                             call.id.clone(),
-                            model_observation,
+                            checkpoint_observation,
                             !result.ok,
                         ),
                     );

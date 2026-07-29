@@ -56,6 +56,7 @@ fn persist_settled_manual_command(
         sequence: 0,
         call_id: call_id.to_string(),
         tool: "run_command".to_string(),
+        provenance: None,
         operation: serde_json::json!({
             "command": "node build.mjs",
             "timeoutMs": 5_000,
@@ -176,6 +177,7 @@ fn persist_settled_manual_command(
                 sequence: 0,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
+                provenance: None,
                 operation: call.args.clone(),
                 approval_status: call.approval_status,
                 truncated: false,

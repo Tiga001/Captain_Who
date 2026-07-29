@@ -183,6 +183,42 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .agent_service
         .reconcile_startup_orphaned_conversation_traces()
         .map_err(io::Error::other)?;
+
+    // Round 3 deliberately starts with an empty in-memory Registry. The stdio policy authorizes
+    // no executable, so constructing the optional MCP subsystem cannot launch an unknown Server.
+    // Future persisted settings will populate this Registry through an explicit authorization
+    // boundary; the process-owned Manager and adapter can remain unchanged.
+    let mcp_registry = InMemoryMcpRegistry::shared();
+    let mcp_connector: Arc<dyn McpConnector> =
+        Arc::new(McpStdioConnector::new(McpStdioPolicy::default()));
+    let mcp_manager = Arc::new(
+        McpConnectionManager::without_events(
+            mcp_registry,
+            mcp_connector,
+            McpManagerPolicy::default(),
+        )
+        .map_err(|_| io::Error::other("failed to initialize the MCP connection manager"))?,
+    );
+    let mcp_startup_manager = Arc::clone(&mcp_manager);
+    let mcp_startup = tokio::spawn(async move {
+        let failures = mcp_startup_manager
+            .start_enabled()
+            .await
+            .into_iter()
+            .filter(|result| result.error.is_some())
+            .count();
+        if failures > 0 {
+            eprintln!(
+                "{failures} optional MCP server(s) failed to start; built-in Agent tools remain available"
+            );
+        }
+    });
+    let mcp_bridge = Arc::new(McpRuntimeBridge::new(Arc::clone(&mcp_manager)));
+    let agent_service = bootstrap
+        .agent_service
+        .clone()
+        .with_mcp_tool_invoker(mcp_bridge);
+
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (image_artifact_outbound_tx, image_artifact_outbound_rx) =
         mpsc::channel::<ImageArtifactOutbound>(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
@@ -215,7 +251,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
                 DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
             )),
         },
-        &bootstrap.agent_service,
+        &agent_service,
         bootstrap.skill_services.clone(),
         Arc::clone(&bootstrap.git_review_service),
         &request_dispatchers,
@@ -225,6 +261,12 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         },
     )
     .await;
+
+    // Optional connection discovery must never delay admission or outlive Host shutdown.
+    // Aborting this coordinator does not replace Manager cleanup; stop_all below remains the
+    // process-owned close authority for every connection that reached the Manager.
+    mcp_startup.abort();
+    let _ = mcp_startup.await;
 
     // Admission has stopped. Settle accepted filesystem jobs while active agents are cancelled in
     // parallel; queued jobs receive cancellation errors and running jobs get a bounded grace
@@ -236,6 +278,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         image_generation_configuration_dispatcher_result,
         image_generation_execution_shutdown,
         (cancelled_runs, timed_out),
+        mcp_shutdown,
     ) = tokio::join!(
         git_dispatcher.shutdown(),
         skill_dispatcher.shutdown(),
@@ -244,9 +287,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         bootstrap
             .image_generation_execution
             .shutdown(Duration::from_secs(2)),
-        bootstrap
-            .agent_service
-            .shutdown_active_runs(Duration::from_secs(2))
+        agent_service.shutdown_active_runs(Duration::from_secs(2)),
+        mcp_manager.shutdown(Duration::from_secs(2))
     );
 
     let mut outbound_error = None;
@@ -285,6 +327,22 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
             "image-generation execution shutdown timed out after cancelling {} active execution(s)",
             image_generation_execution_shutdown.cancelled_executions
         );
+    }
+    let mcp_shutdown_failures = mcp_shutdown
+        .results
+        .iter()
+        .filter(|result| result.error.is_some())
+        .count();
+    if mcp_shutdown.forced {
+        eprintln!(
+            "MCP graceful shutdown reached its deadline; forced transport cleanup was required"
+        );
+    }
+    if !mcp_shutdown.cleanup_complete {
+        eprintln!("MCP forced cleanup did not settle every transport before the Host deadline");
+    }
+    if mcp_shutdown_failures > 0 {
+        eprintln!("{mcp_shutdown_failures} MCP server(s) did not shut down cleanly");
     }
     if let Some(error) = outbound_error {
         return Err(error);

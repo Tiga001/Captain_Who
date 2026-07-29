@@ -35,6 +35,7 @@ use adapters::git_dispatcher::{GitDispatcher, GitJobPriority};
 use adapters::image_generation_dispatcher::{
     ImageGenerationConfigurationDispatcher, ImageGenerationConfigurationJobKind,
 };
+use adapters::mcp_runtime::McpRuntimeBridge;
 use adapters::skill_installation_workflow_adapter::{
     absent_cancellation_response, cancellation_preparation_id, cancellation_response,
     commit_request, commit_response, dispatch_failure, is_missing_preparation, preparation_request,
@@ -84,6 +85,10 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{AgentSteerRunInput, AgentUsageClearInput, AgentUsageSummaryInput};
+use mycopilot_mcp_client::{
+    InMemoryMcpRegistry, McpConnectionManager, McpConnector, McpManagerPolicy, McpStdioConnector,
+    McpStdioPolicy,
+};
 use mycopilot_protocol_rs::{
     error, error_with_data, success, AgentActionIdRequest, AgentCancelRunRequest,
     AgentCancelRunResponse, AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest,

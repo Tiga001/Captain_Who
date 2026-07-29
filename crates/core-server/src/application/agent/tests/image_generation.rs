@@ -71,6 +71,7 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
                 "request": { "operation": "generate", "prompt": "private prompt" },
                 "reason": "Create the requested image."
             }),
+            provenance: None,
             approval_status: AgentApprovalStatus::NotRequired,
             truncated: false,
         }],

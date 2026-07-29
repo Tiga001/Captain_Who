@@ -27,7 +27,8 @@ mod types;
 
 pub use catalog::{
     McpCatalogCompleteness, McpCatalogDiagnostic, McpCatalogDiagnosticKind, McpCatalogIssue,
-    McpCatalogLimits, McpCatalogPolicy, McpCatalogSnapshot, McpCatalogTool, McpToolId,
+    McpCatalogLimits, McpCatalogPolicy, McpCatalogSnapshot, McpCatalogTool, McpCatalogToolCall,
+    McpToolId,
 };
 pub use config::{
     McpEnvBinding, McpServerConfig, McpServerScope, McpStdioConfig, McpTransportConfig,
@@ -44,6 +45,7 @@ pub use event::{
 };
 pub use manager::{
     McpBatchOperationResult, McpConnectionManager, McpManagerPolicy, McpServerStatus,
+    McpShutdownReport,
 };
 pub use registry::{
     InMemoryMcpRegistry, McpRegistry, McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry,
