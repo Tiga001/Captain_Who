@@ -1,8 +1,7 @@
 import { AlertTriangle, LoaderCircle, RefreshCw, Wrench } from 'lucide-react'
-import type { McpServerListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { McpCatalogCompletenessBadge } from './McpServerStatusBadge'
-import { shortMcpFingerprint, toSafeMcpDisplayText } from './mcpSafeDisplay'
+import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 import type { McpToolCatalogState } from './useMcpManagement'
 
 interface McpToolCatalogProps {
@@ -10,16 +9,9 @@ interface McpToolCatalogProps {
   onLoad: () => void
   onLoadMore: () => void
   onRefresh: () => void
-  server: McpServerListItem
 }
 
-export function McpToolCatalog({
-  catalog,
-  onLoad,
-  onLoadMore,
-  onRefresh,
-  server
-}: McpToolCatalogProps) {
+export function McpToolCatalog({ catalog, onLoad, onLoadMore, onRefresh }: McpToolCatalogProps) {
   const { t } = useFrontendConfig()
 
   return (
@@ -97,28 +89,14 @@ export function McpToolCatalog({
             >
               <div className="mcp-tool-row__heading">
                 <h4>{toSafeMcpDisplayText(tool.rawName, 1024)}</h4>
-                <span>{toSafeMcpDisplayText(tool.modelName, 64)}</span>
-                <span
-                  className="mcp-routability-badge"
-                  data-state={tool.routable && !tool.disabled ? 'routable' : 'disabled'}
-                >
-                  {tool.routable && !tool.disabled
-                    ? t('mcp.catalog.routable')
-                    : t('mcp.catalog.disabled')}
-                </span>
+                {(!tool.routable || tool.disabled) && (
+                  <span className="mcp-routability-badge" data-state="disabled">
+                    {t('mcp.catalog.disabled')}
+                  </span>
+                )}
               </div>
               <p>{toSafeMcpDisplayText(tool.description, 1024)}</p>
               {tool.descriptionTruncated && <small>{t('mcp.catalog.descriptionTruncated')}</small>}
-              <dl>
-                <div>
-                  <dt>{t('mcp.catalog.schemaFingerprint')}</dt>
-                  <dd>{shortMcpFingerprint(tool.schemaDigestPrefix)}</dd>
-                </div>
-                <div>
-                  <dt>{t('mcp.detail.catalogGeneration')}</dt>
-                  <dd>{tool.catalogGeneration}</dd>
-                </div>
-              </dl>
               {tool.diagnosticCodes.length > 0 && (
                 <div className="mcp-tool-diagnostics" role="status">
                   <AlertTriangle aria-hidden="true" />
@@ -144,10 +122,6 @@ export function McpToolCatalog({
           {catalog.isRefreshing ? t('mcp.catalog.loadingMore') : t('mcp.catalog.loadMore')}
         </button>
       )}
-
-      <p className="mcp-catalog-provenance">
-        {t('mcp.catalog.server')}: {toSafeMcpDisplayText(server.displayName, 256)}
-      </p>
     </section>
   )
 }

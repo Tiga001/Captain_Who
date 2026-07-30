@@ -1,8 +1,8 @@
-import { useEffect, useId, useState } from 'react'
-import { CornerDownLeft, PencilLine } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import type { AgentMcpToolInvocationState, AgentProposedAction } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
+import { ApprovalDialogShell } from './ApprovalDialogShell'
 import { McpToolApprovalCard } from './McpToolApprovalCard'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
 
@@ -135,7 +135,6 @@ function StandardAgentApprovalDialog({
   onReject
 }: StandardAgentApprovalDialogProps) {
   const { t } = useFrontendConfig()
-  const titleId = useId()
   const [rejectMessage, setRejectMessage] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const request = getApprovalRequest(action, t)
@@ -162,88 +161,42 @@ function StandardAgentApprovalDialog({
   }
 
   return (
-    <section aria-labelledby={titleId} className="agent-approval-dialog" role="dialog">
-      <h2 className="agent-approval-dialog__request" id={titleId}>
-        {request || getApprovalFallbackTitle(action, t)}
-      </h2>
-
-      {code ? (
-        <code
-          className="agent-approval-dialog__command"
-          data-multiline={
-            action.type === 'skill_script' || action.type === 'office_operation'
-              ? 'true'
-              : undefined
-          }
-        >
-          {code}
-        </code>
-      ) : null}
-      <p className="agent-approval-dialog__policy">{policyHint}</p>
-
-      <button
-        className="agent-approval-dialog__choice"
-        data-choice="primary"
-        disabled={isSubmitting}
-        onClick={() => approve(false)}
-        type="button"
-      >
-        <span className="agent-approval-dialog__index">1</span>
-        <span>{t('agent.approval.dialog.approve')}</span>
-      </button>
-
-      {showRememberChoice ? (
-        <button
-          className="agent-approval-dialog__choice"
-          data-choice="remember"
-          disabled={isSubmitting}
-          onClick={() => approve(true)}
-          type="button"
-        >
-          <span className="agent-approval-dialog__index">2</span>
-          <span className="agent-approval-dialog__choice-text">
-            {action.type === 'diff' || action.type === 'file_write'
-              ? t('agent.approval.dialog.approvePatchRemember')
-              : t('agent.approval.dialog.approveRemember')}
-            {rememberPrefix ? (
-              <small>
-                {formatTranslation(t, 'agent.approval.dialog.rememberPrefix', {
-                  prefix: rememberPrefix
-                })}
-              </small>
-            ) : null}
-          </span>
-        </button>
-      ) : null}
-
-      <div className="agent-approval-dialog__reject-row">
-        <span className="agent-approval-dialog__reject-icon" aria-hidden="true">
-          <PencilLine />
-        </span>
-        <input
-          aria-label={t('agent.approval.dialog.rejectPlaceholder')}
-          disabled={isSubmitting}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-              event.preventDefault()
-              reject()
+    <ApprovalDialogShell
+      approvalKind="standard"
+      approveLabel={t('agent.approval.dialog.approve')}
+      code={code}
+      codeMultiline={action.type === 'skill_script' || action.type === 'office_operation'}
+      isSubmitting={isSubmitting}
+      onApprove={() => approve(false)}
+      onReject={reject}
+      onRejectMessageChange={setRejectMessage}
+      policyHint={policyHint}
+      rejectLabel={t('agent.approval.dialog.reject')}
+      rejectMessage={rejectMessage}
+      rejectPlaceholder={t('agent.approval.dialog.rejectPlaceholder')}
+      rememberChoice={
+        showRememberChoice
+          ? {
+              content: (
+                <span className="agent-approval-dialog__choice-text">
+                  {action.type === 'diff' || action.type === 'file_write'
+                    ? t('agent.approval.dialog.approvePatchRemember')
+                    : t('agent.approval.dialog.approveRemember')}
+                  {rememberPrefix ? (
+                    <small>
+                      {formatTranslation(t, 'agent.approval.dialog.rememberPrefix', {
+                        prefix: rememberPrefix
+                      })}
+                    </small>
+                  ) : null}
+                </span>
+              ),
+              onSelect: () => approve(true)
             }
-          }}
-          onChange={(event) => setRejectMessage(event.target.value)}
-          placeholder={t('agent.approval.dialog.rejectPlaceholder')}
-          value={rejectMessage}
-        />
-        <button
-          className="agent-approval-dialog__reject"
-          disabled={isSubmitting}
-          onClick={reject}
-          type="button"
-        >
-          {t('agent.approval.dialog.reject')}
-          <CornerDownLeft aria-hidden="true" />
-        </button>
-      </div>
-    </section>
+          : undefined
+      }
+      request={request || getApprovalFallbackTitle(action, t)}
+    />
   )
 }
 

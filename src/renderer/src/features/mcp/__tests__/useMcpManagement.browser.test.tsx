@@ -59,8 +59,12 @@ const EPOCH_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const EPOCH_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const SOURCE_EPOCH = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const SOURCE_EPOCH_B = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const AUTHORIZED_CONFIG_EPOCH = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+const ENABLED_CONFIG_EPOCH = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const DIGEST_A = 'a'.repeat(64)
 const DIGEST_B = 'b'.repeat(64)
+const AUTHORIZED_CONFIG_DIGEST = 'c'.repeat(64)
+const ENABLED_CONFIG_DIGEST = 'e'.repeat(64)
 
 function details(
   serverId = SERVER_A,
@@ -154,6 +158,7 @@ function Harness() {
     <div>
       <output data-testid="status">{management.state.status}</output>
       <output data-testid="server-state">{first?.state ?? 'none'}</output>
+      <output data-testid="tool-count">{first?.toolCount ?? 0}</output>
       <output data-testid="detail-state">
         {loadedDetails?.state ?? 'none'}:{loadedDetails?.activeCallCount ?? 0}
       </output>
@@ -162,7 +167,13 @@ function Harness() {
         {catalog?.catalogGeneration ?? 'none'}:{catalog?.catalogCompleteness ?? 'none'}
       </output>
       <output data-testid="pending">{management.pendingOperations.size}</output>
+      <output data-testid="refreshing">
+        {management.state.isRefreshing ? 'refreshing' : 'idle'}
+      </output>
       <output data-testid="last-action">{lastAction}</output>
+      <button onClick={() => void management.refresh()} type="button">
+        refresh servers
+      </button>
       <button
         onClick={() => {
           void management.addServer(draft)
@@ -286,6 +297,30 @@ function Harness() {
         disabled={!first}
         onClick={() => {
           if (!first) return
+          void management
+            .setServerEnabled(first, true)
+            .then((result) => setLastAction(result ? 'enabled' : 'enable-ignored'))
+            .catch(() => setLastAction('enable-failed'))
+        }}
+        type="button"
+      >
+        enable with authorization
+      </button>
+      <button
+        disabled={!first}
+        onClick={() => {
+          if (!first) return
+          void management.setServerEnabled(first, true)
+          void management.setServerEnabled(first, true)
+        }}
+        type="button"
+      >
+        double enable with authorization
+      </button>
+      <button
+        disabled={!first}
+        onClick={() => {
+          if (!first) return
           void management.deleteServer(first)
           void management.deleteServer(first)
         }}
@@ -350,6 +385,41 @@ describe('useMcpManagement concurrency', () => {
     await expect.poll(() => service.listServers.mock.calls.length).toBe(2)
   })
 
+  it('keeps background event refreshes visually silent', async () => {
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    const background = deferred<McpServerListOutput>()
+    service.listServers.mockReturnValueOnce(background.promise)
+
+    changedHandler?.({
+      schemaVersion: 1,
+      sourceEpoch: SOURCE_EPOCH,
+      sequence: 1,
+      registryRevision: 5,
+      kind: 'stateChanged',
+      serverId: SERVER_A,
+      state: 'ready'
+    })
+
+    await expect.poll(() => service.listServers.mock.calls.length).toBe(2)
+    await expect.element(screen.getByTestId('refreshing')).toHaveTextContent('idle')
+    background.resolve(listOutput())
+  })
+
+  it('shows refresh activity only for an explicit user refresh', async () => {
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    const manual = deferred<McpServerListOutput>()
+    service.listServers.mockReturnValueOnce(manual.promise)
+
+    await screen.getByRole('button', { name: 'refresh servers' }).click()
+
+    await expect.poll(() => service.listServers.mock.calls.length).toBe(2)
+    await expect.element(screen.getByTestId('refreshing')).toHaveTextContent('refreshing')
+    manual.resolve(listOutput())
+    await expect.element(screen.getByTestId('refreshing')).toHaveTextContent('idle')
+  })
+
   it('admits only one add operation in the same tick', async () => {
     const add = deferred<McpServerDetailsOutput>()
     service.addServer.mockReturnValue(add.promise)
@@ -386,9 +456,222 @@ describe('useMcpManagement concurrency', () => {
     const screen = await render(<Harness />)
     await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
 
-    await screen.getByRole('button', { name: button }).click()
+    await screen.getByRole('button', { name: button, exact: true }).click()
     expect(method).toHaveBeenCalledTimes(1)
     response.resolve(detailsOutput(details()))
+  })
+
+  it('authorizes, enables, and starts with each fresh Host CAS identity', async () => {
+    const initial = details(SERVER_A, {
+      catalogGeneration: 0,
+      enabled: false,
+      launchAuthorizationState: 'required',
+      state: 'disabled',
+      toolCount: 0,
+      trust: 'untrusted'
+    })
+    const authorized = details(SERVER_A, {
+      catalogGeneration: 0,
+      configDigest: AUTHORIZED_CONFIG_DIGEST,
+      configEpoch: AUTHORIZED_CONFIG_EPOCH,
+      enabled: false,
+      launchAuthorizationState: 'authorized',
+      registryRevision: 6,
+      state: 'disabled',
+      toolCount: 0,
+      trust: 'userApproved',
+      updatedAtMs: 30
+    })
+    service.listServers.mockResolvedValue(listOutput([initial]))
+    service.requestLaunchAuthorization.mockResolvedValue({
+      schemaVersion: 1,
+      authorized: true,
+      server: authorized
+    })
+    service.enableServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          catalogGeneration: 0,
+          configDigest: ENABLED_CONFIG_DIGEST,
+          configEpoch: ENABLED_CONFIG_EPOCH,
+          enabled: true,
+          launchAuthorizationState: 'authorized',
+          registryRevision: 7,
+          state: 'disabled',
+          toolCount: 0,
+          trust: 'userApproved',
+          updatedAtMs: 40
+        })
+      )
+    )
+    service.startServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          catalogGeneration: 1,
+          configDigest: ENABLED_CONFIG_DIGEST,
+          configEpoch: ENABLED_CONFIG_EPOCH,
+          enabled: true,
+          launchAuthorizationState: 'authorized',
+          registryRevision: 7,
+          state: 'ready',
+          toolCount: 14,
+          trust: 'userApproved',
+          updatedAtMs: 40
+        })
+      )
+    )
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    await screen.getByRole('button', { name: 'enable with authorization', exact: true }).click()
+    await expect.poll(() => service.enableServer.mock.calls.length).toBe(1)
+    expect(service.requestLaunchAuthorization).toHaveBeenCalledTimes(1)
+    expect(service.enableServer).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      serverId: SERVER_A,
+      precondition: {
+        expectedRegistryRevision: 6,
+        expectedConfigEpoch: AUTHORIZED_CONFIG_EPOCH,
+        expectedConfigDigest: AUTHORIZED_CONFIG_DIGEST
+      }
+    })
+    await expect.poll(() => service.startServer.mock.calls.length).toBe(1)
+    expect(service.startServer).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      serverId: SERVER_A,
+      precondition: {
+        expectedRegistryRevision: 7,
+        expectedConfigEpoch: ENABLED_CONFIG_EPOCH,
+        expectedConfigDigest: ENABLED_CONFIG_DIGEST
+      }
+    })
+    await expect.element(screen.getByTestId('last-action')).toHaveTextContent('enabled')
+    await expect.element(screen.getByTestId('server-state')).toHaveTextContent('ready')
+    await expect.element(screen.getByTestId('tool-count')).toHaveTextContent('14')
+  })
+
+  it('does not enable when launch authorization is not granted', async () => {
+    const current = details(SERVER_A, {
+      enabled: false,
+      launchAuthorizationState: 'required',
+      state: 'disabled',
+      trust: 'untrusted'
+    })
+    service.listServers.mockResolvedValue(listOutput([current]))
+    service.requestLaunchAuthorization.mockResolvedValue({
+      schemaVersion: 1,
+      authorized: false,
+      server: current
+    })
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    await screen.getByRole('button', { name: 'enable with authorization', exact: true }).click()
+    await expect.element(screen.getByTestId('last-action')).toHaveTextContent('enable-ignored')
+    expect(service.enableServer).not.toHaveBeenCalled()
+    expect(service.startServer).not.toHaveBeenCalled()
+  })
+
+  it('enables an already authorized Server without another native confirmation', async () => {
+    service.enableServer.mockResolvedValue(
+      detailsOutput(details(SERVER_A, { registryRevision: 6, updatedAtMs: 30 }))
+    )
+    service.startServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          registryRevision: 7,
+          state: 'starting',
+          updatedAtMs: 40
+        })
+      )
+    )
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    await screen.getByRole('button', { name: 'enable with authorization', exact: true }).click()
+    await expect.poll(() => service.enableServer.mock.calls.length).toBe(1)
+    expect(service.requestLaunchAuthorization).not.toHaveBeenCalled()
+    await expect.poll(() => service.startServer.mock.calls.length).toBe(1)
+  })
+
+  it('does not retry or pretend Ready when start fails after enable', async () => {
+    service.enableServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          enabled: true,
+          registryRevision: 6,
+          state: 'disabled',
+          updatedAtMs: 30
+        })
+      )
+    )
+    service.startServer.mockRejectedValue(new Error('fixed-start-failure'))
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    await screen.getByRole('button', { name: 'enable with authorization', exact: true }).click()
+    await expect.element(screen.getByTestId('last-action')).toHaveTextContent('enable-failed')
+    expect(service.enableServer).toHaveBeenCalledTimes(1)
+    expect(service.startServer).toHaveBeenCalledTimes(1)
+    expect(service.requestLaunchAuthorization).not.toHaveBeenCalled()
+    await expect.element(screen.getByTestId('server-state')).toHaveTextContent('disabled')
+  })
+
+  it('admits one combined enable flow when activated twice', async () => {
+    const authorization = deferred<{
+      schemaVersion: 1
+      authorized: boolean
+      server: McpServerDetailsView
+    }>()
+    service.listServers.mockResolvedValue(
+      listOutput([
+        details(SERVER_A, {
+          enabled: false,
+          launchAuthorizationState: 'required',
+          state: 'disabled',
+          trust: 'untrusted'
+        })
+      ])
+    )
+    service.requestLaunchAuthorization.mockReturnValue(authorization.promise)
+    service.enableServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          enabled: true,
+          launchAuthorizationState: 'authorized',
+          registryRevision: 7,
+          state: 'starting',
+          trust: 'userApproved',
+          updatedAtMs: 40
+        })
+      )
+    )
+    service.startServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          enabled: true,
+          launchAuthorizationState: 'authorized',
+          registryRevision: 8,
+          state: 'starting',
+          trust: 'userApproved',
+          updatedAtMs: 50
+        })
+      )
+    )
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+    await screen.getByRole('button', { name: 'double enable with authorization' }).click()
+    expect(service.requestLaunchAuthorization).toHaveBeenCalledTimes(1)
+    authorization.resolve({
+      schemaVersion: 1,
+      authorized: true,
+      server: details(SERVER_A, {
+        enabled: false,
+        launchAuthorizationState: 'authorized',
+        registryRevision: 6,
+        state: 'disabled',
+        trust: 'userApproved',
+        updatedAtMs: 30
+      })
+    })
+    await expect.poll(() => service.enableServer.mock.calls.length).toBe(1)
+    await expect.poll(() => service.startServer.mock.calls.length).toBe(1)
   })
 
   it('does not regress Ready to an older Starting snapshot', async () => {
@@ -498,12 +781,12 @@ describe('useMcpManagement concurrency', () => {
     await expect.element(screen.getByTestId('detail-state')).toHaveTextContent('ready:0')
   })
 
-  it('rejects an authorization response that changes frozen config identity', async () => {
+  it('rejects a non-monotonic authorization response with a changed config identity', async () => {
     service.requestLaunchAuthorization.mockResolvedValue({
       schemaVersion: 1,
       authorized: true,
       server: details(SERVER_A, {
-        registryRevision: 6,
+        registryRevision: 5,
         configEpoch: SOURCE_EPOCH_B,
         configDigest: 'd'.repeat(64),
         updatedAtMs: 30
@@ -517,6 +800,44 @@ describe('useMcpManagement concurrency', () => {
       .toHaveTextContent('authorization-ignored')
     expect(service.listServers).toHaveBeenCalledTimes(2)
     await expect.element(screen.getByTestId('server-state')).toHaveTextContent('ready')
+  })
+
+  it('accepts a fresh runtime state with the same persisted identity and empty Catalog', async () => {
+    service.listServers.mockResolvedValueOnce(
+      listOutput([
+        details(SERVER_A, {
+          catalogGeneration: 0,
+          enabled: true,
+          state: 'disabled',
+          toolCount: 0
+        })
+      ])
+    )
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('server-state')).toHaveTextContent('disabled')
+
+    service.listServers.mockResolvedValueOnce(
+      listOutput([
+        details(SERVER_A, {
+          catalogGeneration: 0,
+          enabled: true,
+          state: 'error',
+          toolCount: 0
+        })
+      ])
+    )
+    changedHandler?.({
+      schemaVersion: 1,
+      sourceEpoch: SOURCE_EPOCH,
+      sequence: 1,
+      registryRevision: 5,
+      kind: 'stateChanged',
+      serverId: SERVER_A,
+      state: 'error'
+    })
+
+    await expect.poll(() => service.listServers.mock.calls.length).toBe(2)
+    await expect.element(screen.getByTestId('server-state')).toHaveTextContent('error')
   })
 
   it('tracks notification sequence independently per bounded source epoch', async () => {

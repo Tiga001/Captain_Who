@@ -191,15 +191,17 @@ export function parseAgentMcpToolApproval(value: unknown): AgentMcpToolApproval 
   }
   const approvalMode = expectEnum(
     record.approvalMode,
-    ['prompt', 'deny'] as const,
+    ['prompt', 'auto', 'deny'] as const,
     `${context}.approvalMode`
   )
   if (
-    approvalMode !== 'prompt' ||
-    call.approvalStatus !== 'required' ||
+    !(
+      (approvalMode === 'prompt' && call.approvalStatus === 'required') ||
+      (approvalMode === 'auto' && call.approvalStatus === 'approved')
+    ) ||
     call.reason !== undefined
   ) {
-    throw invalidProtocolValue(context, 'approval must be a fresh Prompt decision')
+    throw invalidProtocolValue(context, 'approval mode and call status must remain consistent')
   }
   return {
     identity,
@@ -633,6 +635,7 @@ function parseApprovalSummary(value: unknown, context: string): AgentMcpToolAppr
       'scope',
       'rawToolName',
       'modelToolName',
+      'displayReason',
       'arguments',
       'risk',
       'external'
@@ -652,6 +655,11 @@ function parseApprovalSummary(value: unknown, context: string): AgentMcpToolAppr
     scope: parseScope(record.scope, `${context}.scope`),
     rawToolName: expectDisplayText(record.rawToolName, `${context}.rawToolName`, 1024),
     modelToolName: expectDisplayText(record.modelToolName, `${context}.modelToolName`, 64),
+    ...(record.displayReason === undefined
+      ? {}
+      : {
+          displayReason: expectDisplayText(record.displayReason, `${context}.displayReason`, 512)
+        }),
     arguments: parseArgumentSummary(record.arguments, `${context}.arguments`),
     risk: expectEnum(
       record.risk,

@@ -24,7 +24,14 @@ fn catalog_descriptor_registers_provider_definition_and_typed_identity() {
     assert!(definition.description.starts_with(MCP_DESCRIPTION_PREFIX));
     assert!(definition.description.ends_with("echo_text fixture tool"));
     assert_eq!(definition.input_schema["type"], "object");
-    assert_eq!(definition.input_schema["required"], json!(["text"]));
+    assert_eq!(
+        definition.input_schema["required"],
+        json!(["text", "__mycopilot_call_reason"])
+    );
+    assert_eq!(
+        definition.input_schema["properties"]["__mycopilot_call_reason"]["type"],
+        "string"
+    );
     assert_eq!(definition.safety, AgentToolSafety::RequiresApproval);
     assert!(definition.requires_approval);
     assert_eq!(definition.approval_mode, AgentToolApprovalMode::Always);
@@ -53,6 +60,22 @@ fn catalog_descriptor_registers_provider_definition_and_typed_identity() {
             .any(|definition| definition.name == model_name),
         "the provider-facing registry must retain the MCP definition"
     );
+}
+
+#[test]
+fn auto_policy_skips_prompt_but_still_requires_a_prepared_typed_host_action() {
+    let model_name = "mcp__fixture__auto_echo";
+    let mut tool = descriptor("auto_echo", model_name, json!({"type": "object"}));
+    tool.approval_mode = AgentMcpApprovalMode::Auto;
+    let registry = registry_with(MockMcpToolInvoker::returning(vec![tool], empty_result()));
+    let definition = registry.definition_for(model_name).expect("auto MCP tool");
+
+    assert!(!definition.requires_approval);
+    assert_eq!(definition.approval_mode, AgentToolApprovalMode::Never);
+    assert!(registry.auto_executes_prepared_action(model_name));
+    let approval = propose(&registry, model_name, json!({"value": "fixture"})).unwrap();
+    assert_eq!(approval.approval_mode, AgentMcpApprovalMode::Auto);
+    assert_eq!(approval.call.approval_status, AgentApprovalStatus::Approved);
 }
 
 #[test]

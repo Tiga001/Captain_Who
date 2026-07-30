@@ -53,7 +53,7 @@ use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcom
 use mycopilot_core::storage::service::{
     AgentPendingActionSettlementInspection, AgentRunGuidanceStoreOutcome,
     AgentRunGuidanceTransitionOutcome, McpActionTerminalizationRequest,
-    McpStartupActionTerminalOutcome, StorageService,
+    McpAutoActionJournalTerminalOutcome, McpStartupActionTerminalOutcome, StorageService,
 };
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
@@ -466,8 +466,10 @@ impl AgentService {
             .filter(|(_, record)| {
                 record.snapshot.status == PendingActionStatus::Approved
                     && matches!(
-                        record.snapshot.action,
-                        AgentProposedAction::McpToolCall { .. }
+                        &record.snapshot.action,
+                        AgentProposedAction::McpToolCall { approval }
+                            if approval.approval_mode
+                                == mycopilot_core::AgentMcpApprovalMode::Prompt
                     )
             })
             .map(|(storage_id, _)| storage_id.clone())
@@ -598,7 +600,12 @@ impl AgentService {
                     Some(McpStartupActionTerminalOutcome::OutcomeUnknown)
                 }
                 PendingActionStatus::Pending | PendingActionStatus::Approved => {
-                    if approval.expires_at <= now {
+                    if approval.approval_mode == mycopilot_core::AgentMcpApprovalMode::Auto {
+                        // Auto invocations never become resumable approvals. An `approved` journal
+                        // row proves the durable dispatch CAS was not reached, so startup retires
+                        // it without invoking the Server or exposing an approval prompt.
+                        Some(McpStartupActionTerminalOutcome::PolicyDenied)
+                    } else if approval.expires_at <= now {
                         Some(McpStartupActionTerminalOutcome::Expired)
                     } else {
                         match self

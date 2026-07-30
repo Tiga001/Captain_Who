@@ -34,14 +34,17 @@ pub enum McpTrustLevel {
 /// Host-side policy for every tool invocation from this server.
 ///
 /// `Prompt` means the Host must obtain a distinct per-call approval before it
-/// invokes the Manager. `Deny` is an emergency/configuration kill switch and is
-/// enforced again inside the Manager.
+/// invokes the Manager. `Auto` allows the Host to dispatch without that
+/// per-call prompt after all other identity, trust and catalog checks pass.
+/// `Deny` is an emergency/configuration kill switch and is enforced again
+/// inside the Manager.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum McpApprovalMode {
     #[default]
     Prompt,
+    Auto,
     Deny,
 }
 
@@ -244,5 +247,14 @@ mod tests {
         value = config();
         value.shutdown_timeout_ms = MAX_SHUTDOWN_TIMEOUT_MS + 1;
         assert!(value.validate_timeouts().is_err());
+    }
+
+    #[test]
+    fn missing_approval_mode_remains_prompt_for_backward_compatibility() {
+        assert_eq!(McpApprovalMode::default(), McpApprovalMode::Prompt);
+        let mut serialized = serde_json::to_value(config()).unwrap();
+        serialized.as_object_mut().unwrap().remove("approvalMode");
+        let restored: McpServerConfig = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.approval_mode, McpApprovalMode::Prompt);
     }
 }

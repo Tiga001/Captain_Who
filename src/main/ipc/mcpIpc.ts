@@ -1,10 +1,5 @@
 import { BrowserWindow, dialog } from 'electron'
-import type {
-  IpcMainInvokeEvent,
-  MessageBoxOptions,
-  OpenDialogOptions,
-  OpenDialogReturnValue
-} from 'electron'
+import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
 import { resolve } from 'node:path'
 import {
   captureHostInvocation,
@@ -36,21 +31,14 @@ import type { TrustedIpcMain } from './trustedIpc'
 
 const MCP_NOTIFICATION_COALESCE_MS = 25
 const MCP_NOTIFICATION_PENDING_LIMIT = 1024
-const UNSAFE_LAUNCH_DISPLAY_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu
-
 type ShowOpenDialog = (
   event: IpcMainInvokeEvent,
   options: OpenDialogOptions
 ) => Promise<OpenDialogReturnValue>
-type ConfirmLaunch = (
-  event: IpcMainInvokeEvent,
-  preview: McpLaunchAuthorizationPreview
-) => Promise<boolean>
 
 export interface McpIpcNativeDialogs {
   selectExecutable(event: IpcMainInvokeEvent): Promise<string | null>
   selectWorkingDirectory(event: IpcMainInvokeEvent): Promise<string | null>
-  confirmLaunch(event: IpcMainInvokeEvent, preview: McpLaunchAuthorizationPreview): Promise<boolean>
 }
 
 export function registerMcpIpc(
@@ -96,13 +84,12 @@ export function registerMcpIpc(
       parseMcpServerDetailsOutput
     )
   )
-  ipcMain.handle(HOST_CHANNELS.mcp.requestLaunchAuthorization, (event, input) =>
+  ipcMain.handle(HOST_CHANNELS.mcp.requestLaunchAuthorization, (_event, input) =>
     captureMcpInputInvocation(
       'prepareLaunchAuthorization',
       () => parseMcpServerMutationInput(input),
-      (request) =>
-        requestMcpLaunchAuthorization(event, coreServer, nativeDialogs.confirmLaunch, request),
-      (value) => (value === null ? null : parseMcpLaunchAuthorizationResult(value))
+      (request) => requestMcpLaunchAuthorization(coreServer, request),
+      parseMcpLaunchAuthorizationResult
     )
   )
   ipcMain.handle(HOST_CHANNELS.mcp.enableServer, (_event, input) =>
@@ -183,8 +170,7 @@ export function registerMcpIpc(
 }
 
 export function createMcpNativeDialogs(
-  showOpenDialog: ShowOpenDialog = showNativeOpenDialog,
-  confirmLaunch: ConfirmLaunch = showNativeLaunchConfirmation
+  showOpenDialog: ShowOpenDialog = showNativeOpenDialog
 ): McpIpcNativeDialogs {
   return {
     selectExecutable: async (event) => {
@@ -202,22 +188,16 @@ export function createMcpNativeDialogs(
       })
       const selected = result.filePaths[0]
       return result.canceled || !selected ? null : resolve(selected)
-    },
-    confirmLaunch
+    }
   }
 }
 
 async function requestMcpLaunchAuthorization(
-  event: IpcMainInvokeEvent,
   coreServer: CoreServer,
-  confirmLaunch: ConfirmLaunch,
   input: McpServerMutationInput
-): Promise<McpLaunchAuthorizationResult | null> {
+): Promise<McpLaunchAuthorizationResult> {
   const preview = await coreServer.prepareMcpLaunchAuthorization(input)
   assertPreviewMatchesRequest(preview, input)
-  if (!(await confirmLaunch(event, preview))) {
-    return null
-  }
   return coreServer.commitMcpLaunchAuthorization({
     schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
     authorizationId: preview.authorizationId,
@@ -315,53 +295,6 @@ async function showNativeOpenDialog(
 ): Promise<OpenDialogReturnValue> {
   const window = BrowserWindow.fromWebContents(event.sender)
   return window ? dialog.showOpenDialog(window, options) : dialog.showOpenDialog(options)
-}
-
-async function showNativeLaunchConfirmation(
-  event: IpcMainInvokeEvent,
-  preview: McpLaunchAuthorizationPreview
-): Promise<boolean> {
-  const options: MessageBoxOptions = {
-    type: 'warning',
-    title: 'Authorize local MCP server',
-    message: 'Allow MyCopilot to start this exact local MCP server configuration?',
-    detail: formatLaunchAuthorizationDetail(preview),
-    buttons: ['Cancel', 'Authorize'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true
-  }
-  const window = BrowserWindow.fromWebContents(event.sender)
-  const result = window
-    ? await dialog.showMessageBox(window, options)
-    : await dialog.showMessageBox(options)
-  return result.response === 1
-}
-
-function formatLaunchAuthorizationDetail(preview: McpLaunchAuthorizationPreview): string {
-  const argumentsText =
-    preview.arguments.length === 0
-      ? '(none)'
-      : preview.arguments
-          .map((argument, index) => `[${index}] ${escapeLaunchDisplayValue(argument)}`)
-          .join('\n')
-  return [
-    `Server: ${escapeLaunchDisplayValue(preview.displayName)}`,
-    `Executable: ${escapeLaunchDisplayValue(preview.executable)}`,
-    'Arguments:',
-    argumentsText,
-    `Working directory: ${escapeLaunchDisplayValue(preview.cwd)}`,
-    `Launch-spec digest: ${preview.launchSpecDigest}`
-  ].join('\n')
-}
-
-function escapeLaunchDisplayValue(value: string): string {
-  return (JSON.stringify(value) ?? '""').replace(UNSAFE_LAUNCH_DISPLAY_CHARACTER, (character) => {
-    const codePoint = character.codePointAt(0) ?? 0xfffd
-    return codePoint <= 0xffff
-      ? `\\u${codePoint.toString(16).padStart(4, '0')}`
-      : `\\u{${codePoint.toString(16)}}`
-  })
 }
 
 class McpChangedBroadcaster {

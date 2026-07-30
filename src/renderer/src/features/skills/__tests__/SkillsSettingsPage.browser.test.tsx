@@ -400,7 +400,7 @@ describe('Skills settings navigation and management inventory', () => {
       .element(screen.getByRole('heading', { level: 1, name: 'settings.page.skills' }))
       .toBeVisible()
 
-    await screen.getByRole('button', { name: 'settings.page.mcp' }).click()
+    await screen.getByRole('button', { name: 'settings.nav.mcp' }).click()
     await expect.element(screen.getByText('mcp-page')).toBeVisible()
     await screen.getByRole('button', { name: 'make-mcp-dirty' }).click()
     await screen.getByRole('button', { name: 'settings.page.environment' }).click()
@@ -412,7 +412,7 @@ describe('Skills settings navigation and management inventory', () => {
     await screen.getByRole('button', { name: 'mcp.unsaved.discard' }).click()
     await expect.element(screen.getByText('environment-page')).toBeVisible()
 
-    await screen.getByRole('button', { name: 'settings.page.mcp' }).click()
+    await screen.getByRole('button', { name: 'settings.nav.mcp' }).click()
     await screen.getByRole('button', { name: 'make-mcp-dirty' }).click()
     await screen.getByRole('button', { name: 'settings.backToApp' }).click()
     await screen.getByRole('button', { name: 'mcp.unsaved.discard' }).click()

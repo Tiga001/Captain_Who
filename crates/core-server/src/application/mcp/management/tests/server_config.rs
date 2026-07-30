@@ -46,6 +46,33 @@ async fn add_is_disabled_untrusted_prompt_and_projects_only_safe_fields() {
 }
 
 #[tokio::test]
+async fn add_accepts_auto_mode_without_changing_safe_new_server_defaults() {
+    let harness = TestHarness::new();
+    let mut input = create_input("automatic fixture");
+    input.approval_mode = McpApprovalModeDto::Auto;
+    let output = harness.service.add_server(input).expect("add auto server");
+
+    assert!(!output.server.summary.enabled);
+    assert_eq!(output.server.summary.trust, McpTrustLevelDto::Untrusted);
+    assert_eq!(
+        output.server.summary.approval_mode,
+        McpApprovalModeDto::Auto
+    );
+    assert_eq!(
+        output.server.summary.launch_authorization_state,
+        McpLaunchAuthorizationStateDto::Required
+    );
+    let persisted = harness
+        .registry
+        .get_persisted(server_id(&output.server))
+        .expect("read persisted server")
+        .expect("server exists");
+    assert_eq!(persisted.entry.config.approval_mode, McpApprovalMode::Auto);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn add_maps_registry_capacity_to_policy_denied_without_publishing_an_event() {
     const MAX_SERVERS: usize = crate::application::mcp::sqlite_registry::MCP_REGISTRY_MAX_SERVERS;
 
@@ -149,10 +176,51 @@ async fn non_launch_update_preserves_authorization_but_launch_update_revokes_it(
         original_authorization.launch_spec_digest
     );
 
+    let mut auto_input = update_input(
+        &renamed.server,
+        "renamed update fixture",
+        renamed.server.arguments.clone(),
+    );
+    auto_input.approval_mode = McpApprovalModeDto::Auto;
+    let automatic = harness
+        .service
+        .update_server(auto_input)
+        .await
+        .expect("approval mode update");
+    let after_auto = harness
+        .registry
+        .get_persisted(id)
+        .expect("read automatic server")
+        .expect("automatic server exists");
+    assert_eq!(
+        automatic.server.summary.approval_mode,
+        McpApprovalModeDto::Auto
+    );
+    assert_eq!(after_auto.entry.config.approval_mode, McpApprovalMode::Auto);
+    assert_eq!(after_auto.entry.config.id, id);
+    assert_ne!(
+        after_auto.entry.config_epoch,
+        after_rename.entry.config_epoch
+    );
+    assert_ne!(
+        after_auto.entry.config_digest,
+        after_rename.entry.config_digest
+    );
+    assert!(automatic.server.summary.enabled);
+    assert_eq!(
+        automatic.server.summary.launch_authorization_state,
+        McpLaunchAuthorizationStateDto::Authorized
+    );
+    assert_eq!(
+        after_auto.launch_spec_digest,
+        after_rename.launch_spec_digest
+    );
+    assert!(after_auto.launch_authorization.is_some());
+
     let launch_changed = harness
         .service
         .update_server(update_input(
-            &renamed.server,
+            &automatic.server,
             "renamed update fixture",
             vec![
                 "--different-fixture".to_string(),

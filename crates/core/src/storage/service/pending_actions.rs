@@ -45,6 +45,45 @@ pub enum McpStartupActionTerminalOutcome {
     OutcomeUnknown,
 }
 
+/// Terminal state for the internal journal used by automatically authorized MCP calls.
+///
+/// This journal records only the frozen, Renderer-safe call identity. It deliberately excludes
+/// Tool arguments and results; terminal settlement scrubs the remaining action/input projection
+/// and any one-time payload envelope in the same transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpAutoActionJournalTerminalOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+    OutcomeUnknown,
+}
+
+impl McpAutoActionJournalTerminalOutcome {
+    fn pending_status(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed | Self::OutcomeUnknown => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn error_code(self) -> Option<&'static str> {
+        match self {
+            Self::OutcomeUnknown => Some("mcp.tool_outcome_unknown"),
+            Self::Completed | Self::Failed | Self::Cancelled => None,
+        }
+    }
+
+    fn safe_reason(self) -> Option<&'static str> {
+        match self {
+            Self::OutcomeUnknown => Some(
+                "The automatic MCP invocation crossed the durable dispatch boundary, but no authoritative Tool response was received; it was not replayed.",
+            ),
+            Self::Completed | Self::Failed | Self::Cancelled => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpActionTerminalizationRequest {
     pub action_id: String,
@@ -929,6 +968,127 @@ fn terminalize_mcp_action_in_transaction(
 }
 
 impl StorageService {
+    /// Settles the hidden dispatch journal for one automatically authorized MCP invocation.
+    ///
+    /// `approved` is a definitely-not-dispatched preparation state. `executing` is the durable
+    /// boundary after which startup recovery must assume the external Tool may have run. This
+    /// method changes only the internal journal; the live Agent runtime remains responsible for
+    /// its normal ToolResult/trace continuation.
+    pub fn settle_auto_mcp_action_journal(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        outcome: McpAutoActionJournalTerminalOutcome,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        let transition_is_valid = match expected_status {
+            "approved" => matches!(
+                outcome,
+                McpAutoActionJournalTerminalOutcome::Failed
+                    | McpAutoActionJournalTerminalOutcome::Cancelled
+            ),
+            "executing" => true,
+            _ => false,
+        };
+        if !transition_is_valid {
+            return Err("invalid automatic MCP journal terminal transition".to_string());
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let Some(record) = pending_action_repository::load_pending_action(&transaction, action_id)
+            .map_err(storage_error)?
+        else {
+            return Ok(false);
+        };
+        if record.status != expected_status || record.action_type != "mcp_tool_call" {
+            return Ok(false);
+        }
+        let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
+            .map_err(|_| "automatic MCP journal contains an invalid frozen action".to_string())?;
+        let AgentProposedAction::McpToolCall { approval } = action else {
+            return Err("automatic MCP journal action type is inconsistent".to_string());
+        };
+        let identity = &approval.identity;
+        let provenance = &identity.provenance;
+        let expected_storage_id = format!(
+            "v2:{}:{}:{}",
+            identity.run_id.len(),
+            identity.run_id,
+            identity.action_id
+        );
+        if approval.approval_mode != crate::AgentMcpApprovalMode::Auto
+            || approval.call.approval_status != crate::AgentApprovalStatus::Approved
+            || record.action_id != expected_storage_id
+            || record.run_id != identity.run_id
+            || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
+            || record.tool_name != provenance.model_tool_name
+            || approval.call.id != identity.call_id
+            || approval.call.tool != provenance.model_tool_name
+            || approval.summary.server_id != provenance.server_id
+            || approval.summary.scope != provenance.scope
+            || approval.summary.raw_tool_name != provenance.raw_tool_name
+            || approval.summary.model_tool_name != provenance.model_tool_name
+            || !approval.summary.external
+        {
+            return Err("automatic MCP journal rejected a drifted typed identity".to_string());
+        }
+
+        let terminal_status = outcome.pending_status();
+        let affected = transaction
+            .execute(
+                "
+                UPDATE agent_pending_actions
+                SET status = ?3,
+                    target_status = ?3,
+                    action_json = '{}',
+                    agent_input_json = '{}',
+                    updated_at = ?4
+                WHERE action_id = ?1
+                  AND status = ?2
+                  AND action_type = 'mcp_tool_call'
+                ",
+                rusqlite::params![action_id, expected_status, terminal_status, updated_at],
+            )
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Ok(false);
+        }
+        transaction
+            .execute(
+                "
+                UPDATE agent_action_audit
+                SET status = ?2,
+                    action_json = '{}',
+                    patch_result_json = NULL,
+                    command_result_json = NULL,
+                    tool_result_json = NULL,
+                    error = ?3,
+                    blocked_reason = ?4,
+                    completed_at = COALESCE(completed_at, ?5)
+                WHERE action_id = ?1
+                ",
+                rusqlite::params![
+                    action_id,
+                    terminal_status,
+                    outcome.error_code(),
+                    outcome.safe_reason(),
+                    updated_at
+                ],
+            )
+            .map_err(storage_error)?;
+        transaction
+            .execute(
+                "DELETE FROM mcp_approval_payload_envelopes WHERE action_id = ?1",
+                [action_id],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(true)
+    }
+
     /// Atomically terminalizes one startup MCP action without retaining action arguments.
     ///
     /// `pending` and `approved` are pre-dispatch states and therefore accept only definitely-not-

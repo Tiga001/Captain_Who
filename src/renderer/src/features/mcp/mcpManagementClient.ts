@@ -49,7 +49,7 @@ export async function deleteMcpServer(
 
 export async function requestMcpLaunchAuthorization(
   input: McpServerMutationInput
-): Promise<McpLaunchAuthorizationResult | null> {
+): Promise<McpLaunchAuthorizationResult> {
   const result = await hostClient.mcp.requestLaunchAuthorization(input)
   if (!result.ok) throw new HostInvocationError(result.error)
   return result.value

@@ -6,6 +6,7 @@ pub(in crate::tools) struct McpAgentTool {
     invoker: Arc<dyn McpToolInvoker>,
     provenance: AgentMcpToolProvenance,
     server_display_name: String,
+    approval_mode: AgentMcpApprovalMode,
     risk: AgentMcpToolRisk,
     caller: McpToolCatalogContext,
     definition: AgentToolDefinition,
@@ -42,6 +43,12 @@ impl McpAgentTool {
             ));
         }
         validate_provenance(&descriptor.provenance)?;
+        if descriptor.approval_mode == AgentMcpApprovalMode::Deny {
+            return Err(McpToolRegistrationDiagnostic::for_tool(
+                &descriptor.provenance,
+                McpToolDiagnosticCode::ApprovalRequiredUnsupported,
+            ));
+        }
         let description = normalize_description(descriptor.description.as_deref());
         let server_display_name =
             normalize_server_display_name(&descriptor.server_display_name, &descriptor.provenance);
@@ -52,13 +59,18 @@ impl McpAgentTool {
             input_schema,
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
-            requires_approval: true,
-            approval_mode: AgentToolApprovalMode::Always,
+            requires_approval: descriptor.approval_mode == AgentMcpApprovalMode::Prompt,
+            approval_mode: if descriptor.approval_mode == AgentMcpApprovalMode::Prompt {
+                AgentToolApprovalMode::Always
+            } else {
+                AgentToolApprovalMode::Never
+            },
         };
         Ok(Self {
             invoker,
             provenance: descriptor.provenance,
             server_display_name,
+            approval_mode: descriptor.approval_mode,
             risk,
             caller,
             definition,
@@ -108,16 +120,7 @@ impl AgentTool for McpAgentTool {
                 }),
             ));
         }
-        if !call.args.is_object() {
-            return Err(AgentError::structured(
-                "mcp.invalid_tool_arguments",
-                "MCP tool arguments must be a JSON object.",
-                json!({
-                    "type": "mcp_tool_arguments",
-                    "code": "rootMustBeObject",
-                }),
-            ));
-        }
+        let (server_arguments, display_reason) = split_model_mcp_arguments(&call.args)?;
         let run_id = context.run_id()?.to_string();
         let created_at = crate::storage::now_ms();
         let identity = AgentMcpToolInvocationIdentity {
@@ -126,22 +129,29 @@ impl AgentTool for McpAgentTool {
             run_id,
             call_id: call.id.clone(),
             provenance: self.provenance.clone(),
-            arguments_digest: mcp_tool_arguments_digest(&call.args)?,
+            arguments_digest: mcp_tool_arguments_digest(&server_arguments)?,
+        };
+        let mut projected_call = project_mcp_tool_call(call);
+        projected_call.approval_status = if self.approval_mode == AgentMcpApprovalMode::Prompt {
+            AgentApprovalStatus::Required
+        } else {
+            AgentApprovalStatus::Approved
         };
         let approval = AgentMcpToolApproval {
             identity,
-            call: project_mcp_tool_call(call),
+            call: projected_call,
             summary: AgentMcpToolApprovalSummary {
                 server_id: self.provenance.server_id.clone(),
                 server_display_name: self.server_display_name.clone(),
                 scope: self.provenance.scope.clone(),
                 raw_tool_name: self.provenance.raw_tool_name.clone(),
                 model_tool_name: self.provenance.model_tool_name.clone(),
-                arguments: summarize_mcp_arguments(&call.args)?,
+                display_reason: Some(display_reason),
+                arguments: summarize_mcp_arguments(&server_arguments)?,
                 risk: self.risk,
                 external: true,
             },
-            approval_mode: AgentMcpApprovalMode::Prompt,
+            approval_mode: self.approval_mode,
             payload_persistence: AgentMcpApprovalPayloadPersistence::ProcessOnly,
             created_at,
             expires_at: created_at.saturating_add(MCP_APPROVAL_TTL_MS),
@@ -149,7 +159,7 @@ impl AgentTool for McpAgentTool {
         validate_mcp_tool_approval(&approval)?;
         let prepared = self.invoker.prepare_approval(McpToolApprovalRequest {
             approval: approval.clone(),
-            arguments: call.args.clone(),
+            arguments: server_arguments,
             caller: self.caller.clone(),
         })?;
         let mut expected_prepared = approval.clone();
@@ -194,6 +204,10 @@ impl AgentTool for McpAgentTool {
 
     fn archives_result(&self) -> bool {
         false
+    }
+
+    fn auto_executes_prepared_action(&self) -> bool {
+        self.approval_mode == AgentMcpApprovalMode::Auto
     }
 
     fn trace_call_projection(

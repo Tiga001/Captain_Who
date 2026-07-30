@@ -14,41 +14,15 @@ const PROPERTY_NAME_CANARY = 'neutral-secret-property-canary'
 const DIGEST_CANARY = 'f'.repeat(64)
 
 const translations: Record<string, string> = {
+  'agent.approval.dialog.reject': 'No',
+  'agent.approval.dialog.rejectPlaceholder': 'No, tell me how to adjust',
+  'agent.approval.dialog.approve': 'Yes',
   'agent.mcp.approval.title': 'Approve external MCP tool?',
-  'agent.mcp.approval.externalBadge': 'External MCP',
   'agent.mcp.approval.serverLabel': 'Server',
-  'agent.mcp.approval.serverIdLabel': 'Server ID',
-  'agent.mcp.approval.scopeLabel': 'Scope',
-  'agent.mcp.approval.scope.user': 'User',
   'agent.mcp.approval.rawToolLabel': 'Raw tool',
-  'agent.mcp.approval.modelToolLabel': 'Model tool',
-  'agent.mcp.approval.riskLabel': 'Risk',
-  'agent.mcp.approval.risk.readOnlyClaimed': 'Server claims read-only; approval is still required',
-  'agent.mcp.approval.argumentsTitle': 'Argument structure',
-  'agent.mcp.approval.encodedBytes': 'Encoded bytes',
-  'agent.mcp.approval.topLevelProperties': 'Top-level properties',
-  'agent.mcp.approval.maxDepth': 'Maximum depth',
-  'agent.mcp.approval.strings': 'Strings',
-  'agent.mcp.approval.numbers': 'Numbers',
-  'agent.mcp.approval.booleans': 'Booleans',
-  'agent.mcp.approval.nulls': 'Nulls',
-  'agent.mcp.approval.objects': 'Objects',
-  'agent.mcp.approval.arrays': 'Arrays',
-  'agent.mcp.approval.truncated': 'Summary was truncated',
-  'agent.mcp.approval.createdAtLabel': 'Created',
-  'agent.mcp.approval.expiresAtLabel': 'Expires',
-  'agent.mcp.approval.payloadLabel': 'Recovery',
-  'agent.mcp.approval.payload.processOnly': 'Available only in this app process',
-  'agent.mcp.approval.payload.durable': 'Protected recovery is available',
-  'agent.mcp.approval.policyPrompt': 'This external call requires a separate approval every time.',
-  'agent.mcp.approval.state.pendingApproval': 'Waiting for approval',
   'agent.mcp.approval.state.expired': 'Expired',
   'agent.mcp.approval.state.payloadUnavailable': 'Approval payload unavailable',
-  'agent.mcp.approval.state.policyDenied': 'Blocked by policy',
-  'agent.mcp.approval.approve': 'Approve once',
-  'agent.mcp.approval.cancel': 'Cancel call',
-  'agent.mcp.approval.rejectingPlaceholder': 'Optional rejection guidance',
-  'agent.mcp.approval.reject': 'Reject'
+  'agent.mcp.approval.state.policyDenied': 'Blocked by policy'
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -118,6 +92,7 @@ function createMcpAction(
         scope: { type: 'user' },
         rawToolName: 'echo_text',
         modelToolName: 'mcp_safe_echo',
+        displayReason: 'Read the workspace inventory',
         arguments: {
           encodedBytes: 91,
           topLevelPropertyCount: 1,
@@ -142,8 +117,8 @@ function createMcpAction(
 }
 
 function getButton(container: HTMLElement, label: string): HTMLButtonElement {
-  const button = [...container.querySelectorAll('button')].find(
-    (candidate) => candidate.textContent === label
+  const button = [...container.querySelectorAll('button')].find((candidate) =>
+    candidate.textContent?.trim().endsWith(label)
   )
   if (!(button instanceof HTMLButtonElement)) {
     const labels = [...container.querySelectorAll('button')].map(
@@ -178,7 +153,7 @@ afterEach(() => {
 })
 
 describe('McpToolApprovalCard', () => {
-  it('routes typed MCP actions before generic formatting and renders only safe structure data', async () => {
+  it('routes typed MCP actions through the native approval shell and renders only reason and identity', async () => {
     const action = createMcpAction()
     const onApprove = vi.fn()
     const screen = await render(
@@ -188,17 +163,23 @@ describe('McpToolApprovalCard', () => {
       />
     )
 
-    expect(screen.container.querySelector('.mcp-tool-approval-card')).not.toBeNull()
-    expect(screen.container.querySelector('.agent-approval-dialog')).toBeNull()
+    expect(screen.container.querySelector('.agent-approval-dialog')).not.toBeNull()
+    expect(
+      screen.container.querySelector('.agent-approval-dialog')?.getAttribute('data-approval-kind')
+    ).toBe('mcp')
     expect(formatToolDetails).not.toHaveBeenCalled()
     expect(screen.container.querySelector('img')).toBeNull()
+    expect(screen.container.textContent).toContain('Read the workspace inventory')
     expect(screen.container.textContent).toContain('<img src=x onerror=alert(1)>Safe server')
-    expect(screen.container.textContent).toContain('Server claims read-only')
-    expect(screen.container.textContent).toContain('Encoded bytes')
-    expect(screen.container.textContent).toContain('91')
+    expect(screen.container.textContent).toContain('Raw tool: echo_text')
+    expect(screen.container.textContent).not.toContain('Server claims read-only')
+    expect(screen.container.textContent).not.toContain('Server ID')
+    expect(screen.container.textContent).not.toContain('Encoded bytes')
+    expect(screen.container.textContent).not.toContain('91')
     expect(screen.container.textContent).not.toContain(RAW_ARGUMENT_CANARY)
     expect(screen.container.textContent).not.toContain(PROPERTY_NAME_CANARY)
     expect(screen.container.textContent).not.toContain(DIGEST_CANARY)
+    expect(screen.container.querySelector('details')).toBeNull()
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
     expect(screen.container.textContent).not.toContain('Always Allow')
 
@@ -210,7 +191,7 @@ describe('McpToolApprovalCard', () => {
     expect(hiddenMarkup).not.toContain(PROPERTY_NAME_CANARY)
     expect(hiddenMarkup).not.toContain(DIGEST_CANARY)
 
-    const approveButton = getButton(screen.container, 'Approve once')
+    const approveButton = getButton(screen.container, 'Yes')
     approveButton.click()
     approveButton.click()
     expect(onApprove).toHaveBeenCalledTimes(1)
@@ -218,7 +199,7 @@ describe('McpToolApprovalCard', () => {
     screen.unmount()
   })
 
-  it('submits rejection separately from approve and cancel', async () => {
+  it('submits optional rejection guidance separately from approve and cancel', async () => {
     const action = createMcpAction()
     const onReject = vi.fn()
     const onCancel = vi.fn()
@@ -230,17 +211,17 @@ describe('McpToolApprovalCard', () => {
       />
     )
 
-    const input = screen.container.querySelector('input')
-    if (!(input instanceof HTMLInputElement)) throw new Error('Expected rejection input')
-    input.value = 'Do not use this external server'
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    getButton(screen.container, 'Reject').click()
-    expect(onReject).toHaveBeenCalledOnce()
+    await screen
+      .getByRole('textbox', { name: 'No, tell me how to adjust' })
+      .fill('Use a different server')
+    await screen.getByRole('button', { name: 'No' }).click()
+    expect(onReject).toHaveBeenCalledWith('assistant-message', action, 'Use a different server')
+    expect(onReject).toHaveBeenCalledTimes(1)
     expect(onCancel).not.toHaveBeenCalled()
     screen.unmount()
   })
 
-  it('submits cancellation separately from approve and reject', async () => {
+  it('keeps cancellation separate on Escape without adding a third visible choice', async () => {
     const action = createMcpAction()
     const onReject = vi.fn()
     const onCancel = vi.fn()
@@ -251,10 +232,13 @@ describe('McpToolApprovalCard', () => {
         onReject={onReject}
       />
     )
-    getButton(screen.container, 'Cancel call').click()
+    const dialog = screen.container.querySelector('[data-approval-kind="mcp"]')
+    if (!(dialog instanceof HTMLElement)) throw new Error('Expected MCP approval dialog')
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }))
     expect(onCancel).toHaveBeenCalledWith('assistant-message', action)
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onReject).not.toHaveBeenCalled()
+    expect([...screen.container.querySelectorAll('button')]).toHaveLength(2)
     screen.unmount()
   })
 
@@ -266,7 +250,7 @@ describe('McpToolApprovalCard', () => {
     vi.setSystemTime(realNow)
     getButton(screen.container, 'Arm expiry').click()
 
-    const approveButton = getButton(screen.container, 'Approve once')
+    const approveButton = getButton(screen.container, 'Yes')
     expect(approveButton.disabled).toBe(false)
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000)
@@ -289,7 +273,7 @@ describe('McpToolApprovalCard', () => {
       />
     )
 
-    expect(getButton(screen.container, 'Approve once').disabled).toBe(true)
+    expect(getButton(screen.container, 'Yes').disabled).toBe(true)
     expect(screen.container.textContent).toContain(statusLabel)
     screen.unmount()
   })
@@ -305,9 +289,9 @@ describe('McpToolApprovalCard', () => {
       />
     )
 
-    expect(getButton(screen.container, 'Approve once').disabled).toBe(true)
+    expect(getButton(screen.container, 'Yes').disabled).toBe(true)
     expect(screen.container.textContent).toContain('Blocked by policy')
-    expect(screen.container.textContent).toContain('Server claims read-only')
+    expect(screen.container.textContent).not.toContain('Server claims read-only')
     screen.unmount()
   })
 })

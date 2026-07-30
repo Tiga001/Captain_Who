@@ -41,23 +41,19 @@ type Translate = ReturnType<typeof useFrontendConfig>['t']
 function stateLabel(state: McpServerStateView, t: Translate): string {
   switch (state) {
     case 'disabled':
-      return t('mcp.state.disabled')
+    case 'stopping':
+      return t('mcp.state.off')
     case 'starting':
-      return t('mcp.state.starting')
     case 'discovering':
-      return t('mcp.state.discovering')
+    case 'backoff':
+      return t('mcp.state.connecting')
     case 'ready':
       return t('mcp.state.ready')
-    case 'stopping':
-      return t('mcp.state.stopping')
     case 'error':
-      return t('mcp.state.error')
-    case 'backoff':
-      return t('mcp.state.backoff')
     case 'degraded':
-      return t('mcp.state.degraded')
+      return t('mcp.state.needsAttention')
     default:
-      return t('mcp.state.unknown')
+      return t('mcp.state.needsAttention')
   }
 }
 

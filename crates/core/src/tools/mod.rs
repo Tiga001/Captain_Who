@@ -334,6 +334,10 @@ impl AgentToolHandler {
         self.tool().requires_approval_for_call(args)
     }
 
+    fn auto_executes_prepared_action(&self) -> bool {
+        self.tool().auto_executes_prepared_action()
+    }
+
     fn input_stream_observer(
         &self,
         context: ToolExecutionContext,
@@ -546,6 +550,12 @@ impl ToolRegistry {
             .get(tool_name)
             .map(|tool| tool.requires_approval_for_call(args))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn auto_executes_prepared_action(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_some_and(AgentToolHandler::auto_executes_prepared_action)
     }
 
     pub(crate) fn permission_policy(&self, tool_name: &str) -> AgentToolPermissionPolicy {
@@ -1106,6 +1116,14 @@ pub(crate) trait AgentTool: Send + Sync {
 
     fn requires_approval_for_call(&self, _args: &Value) -> bool {
         self.definition().requires_approval
+    }
+
+    /// Whether this Tool must first freeze a typed action even though Host policy skips prompting.
+    ///
+    /// This is intentionally distinct from `requires_approval_for_call`: automatic MCP calls still
+    /// need one-time payload preparation and exact Host revalidation.
+    fn auto_executes_prepared_action(&self) -> bool {
+        false
     }
 
     fn input_stream_observer(

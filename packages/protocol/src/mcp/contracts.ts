@@ -39,7 +39,7 @@ export type McpTransportKind = 'stdio'
 export type McpServerScopeView = 'user'
 export type McpServerSourceView = 'userManual'
 export type McpTrustView = 'untrusted' | 'userApproved'
-export type McpApprovalModeView = 'prompt' | 'deny'
+export type McpApprovalModeView = 'prompt' | 'auto' | 'deny'
 export type McpLaunchAuthorizationState = 'required' | 'authorized' | 'stale'
 export type McpServerStateView =
   'disabled' | 'starting' | 'discovering' | 'ready' | 'stopping' | 'error' | 'backoff' | 'degraded'

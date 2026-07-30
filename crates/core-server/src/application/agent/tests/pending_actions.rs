@@ -90,6 +90,362 @@ impl McpToolInvoker for RecoverableApprovalRaceInvoker {
     }
 }
 
+struct AutoJournalObservingInvoker {
+    storage: Arc<StorageService>,
+    invocations: std::sync::atomic::AtomicUsize,
+    saw_executing_before_invoke: std::sync::atomic::AtomicBool,
+    return_outcome_unknown: bool,
+}
+
+impl AutoJournalObservingInvoker {
+    fn new(storage: Arc<StorageService>) -> Arc<Self> {
+        Self::with_outcome_unknown(storage, false)
+    }
+
+    fn with_outcome_unknown(
+        storage: Arc<StorageService>,
+        return_outcome_unknown: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            storage,
+            invocations: std::sync::atomic::AtomicUsize::new(0),
+            saw_executing_before_invoke: std::sync::atomic::AtomicBool::new(false),
+            return_outcome_unknown,
+        })
+    }
+}
+
+impl McpToolInvoker for AutoJournalObservingInvoker {
+    fn catalog(
+        &self,
+        _context: &McpToolCatalogContext,
+    ) -> AgentResult<Vec<mycopilot_core::McpAgentToolDescriptor>> {
+        Ok(Vec::new())
+    }
+
+    fn revalidate_approved(
+        &self,
+        _approval: &mycopilot_core::AgentMcpToolApproval,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    fn invalidate_prepared_approval(
+        &self,
+        _identity: &mycopilot_core::AgentMcpToolInvocationIdentity,
+    ) -> AgentResult<()> {
+        Ok(())
+    }
+
+    fn invoke_approved<'a>(
+        &'a self,
+        invocation: McpApprovedToolInvocation,
+        _cancellation: AgentCancellationToken,
+    ) -> mycopilot_core::McpToolInvocationFuture<'a> {
+        Box::pin(async move {
+            let storage_id = pending_action_storage_id(
+                &invocation.approval.identity.run_id,
+                &invocation.approval.identity.action_id,
+            );
+            let saw_executing = self
+                .storage
+                .list_active_agent_actions_for_startup()?
+                .into_iter()
+                .any(|row| row.action_id == storage_id && row.status == "executing");
+            self.saw_executing_before_invoke
+                .store(saw_executing, std::sync::atomic::Ordering::SeqCst);
+            self.invocations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.return_outcome_unknown {
+                return Err(AgentError::structured(
+                    "mcp.tool_outcome_unknown",
+                    "Test transport lost the authoritative response.",
+                    json!({
+                        "type": "mcp_tool",
+                        "code": "outcomeUnknown",
+                        "retryable": false,
+                        "dispatchCertainty": "possibly_dispatched",
+                    }),
+                ));
+            }
+            Ok(mycopilot_core::McpToolInvocationResult {
+                content: vec![mycopilot_core::McpToolContentBlock::Text {
+                    text: "AUTO_RESULT_CANARY_NOT_DURABLE".to_string(),
+                }],
+                structured_content: None,
+                is_error: false,
+                truncated_at_source: false,
+            })
+        })
+    }
+}
+
+fn auto_mcp_action(
+    run_id: &str,
+    action_id: &str,
+    invocation_id: &str,
+    created_at: i64,
+) -> AgentProposedAction {
+    let mut action = test_mcp_pending_action(run_id, action_id, invocation_id, created_at);
+    let AgentProposedAction::McpToolCall { approval } = &mut action else {
+        unreachable!("test helper always creates an MCP action");
+    };
+    approval.approval_mode = mycopilot_core::AgentMcpApprovalMode::Auto;
+    approval.call.approval_status = AgentApprovalStatus::Approved;
+    action
+}
+
+fn auto_mcp_agent_input() -> AgentChatInput {
+    serde_json::from_value(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs_terminal_row() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("auto-mcp-journal.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let invoker = AutoJournalObservingInvoker::new(Arc::clone(&storage));
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let run_id = "auto-mcp-journal-run";
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let action = auto_mcp_action(
+        run_id,
+        &action_id,
+        &invocation_id,
+        mycopilot_core::storage::now_ms(),
+    );
+    let AgentProposedAction::McpToolCall { approval } = action else {
+        unreachable!();
+    };
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let context = AutoApprovedActionContext::new(
+        auto_mcp_agent_input(),
+        run_id.to_string(),
+        Some("auto-mcp-conversation".to_string()),
+        Some("auto-mcp-assistant".to_string()),
+        None,
+    )
+    .with_notifications(notifications);
+
+    let result = service
+        .execute_auto_mcp_tool_action(&context, approval, AgentCancellationToken::new())
+        .await
+        .unwrap();
+    assert!(result.ok);
+    assert_eq!(
+        invoker
+            .invocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert!(invoker
+        .saw_executing_before_invoke
+        .load(std::sync::atomic::Ordering::SeqCst));
+    assert!(service.list_pending_actions().is_empty());
+    assert!(storage
+        .list_active_agent_actions_for_startup()
+        .unwrap()
+        .is_empty());
+    while let Ok(notification) = receiver.try_recv() {
+        assert_ne!(notification["params"]["type"], "approval_required");
+        assert!(
+            notification["params"]["status"] != "waiting_for_approval",
+            "Auto journal must never become a Renderer approval"
+        );
+    }
+
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let terminal: (String, String, String) = rusqlite::Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status, action_json, agent_input_json
+             FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(terminal.0, "completed");
+    assert_eq!(terminal.1, "{}");
+    assert_eq!(terminal.2, "{}");
+    let durable = format!("{}{}", terminal.1, terminal.2);
+    assert!(!durable.contains("AUTO_RESULT_CANARY_NOT_DURABLE"));
+}
+
+#[tokio::test]
+async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_failure() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("auto-mcp-outcome-unknown.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let invoker = AutoJournalObservingInvoker::with_outcome_unknown(Arc::clone(&storage), true);
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let run_id = "auto-mcp-outcome-unknown-run";
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let action = auto_mcp_action(
+        run_id,
+        &action_id,
+        &invocation_id,
+        mycopilot_core::storage::now_ms(),
+    );
+    let AgentProposedAction::McpToolCall { approval } = action else {
+        unreachable!();
+    };
+    let context = AutoApprovedActionContext::new(
+        auto_mcp_agent_input(),
+        run_id.to_string(),
+        None,
+        None,
+        None,
+    );
+
+    let result = service
+        .execute_auto_mcp_tool_action(&context, approval, AgentCancellationToken::new())
+        .await
+        .unwrap();
+    assert!(!result.ok);
+    assert_eq!(
+        result
+            .result
+            .as_ref()
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_str),
+        Some("mcp.tool_outcome_unknown")
+    );
+    assert!(storage
+        .list_active_agent_actions_for_startup()
+        .unwrap()
+        .is_empty());
+
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let terminal: (String, String, String) = rusqlite::Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT pending.status, pending.action_json, audit.error
+             FROM agent_pending_actions pending
+             JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+             WHERE pending.action_id = ?1",
+            [&storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(terminal.0, "failed");
+    assert_eq!(terminal.1, "{}");
+    assert_eq!(terminal.2, "mcp.tool_outcome_unknown");
+
+    drop(service);
+    let restarted = AgentService::try_new(Arc::clone(&storage)).unwrap();
+    assert!(restarted.list_pending_actions().is_empty());
+    assert_eq!(
+        invoker
+            .invocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a durably settled outcome-unknown invocation must never replay"
+    );
+}
+
+#[test]
+fn startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unknown() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("auto-mcp-restart.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let now = mycopilot_core::storage::now_ms();
+    let mut identities = Vec::new();
+    for should_claim in [false, true] {
+        let run_id = format!("auto-mcp-restart-{should_claim}");
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let invocation_id = uuid::Uuid::new_v4().to_string();
+        let action = auto_mcp_action(&run_id, &action_id, &invocation_id, now);
+        let mut record = service
+            .prepare_auto_mcp_action_journal(&run_id, None, None, action, auto_mcp_agent_input())
+            .unwrap();
+        if should_claim {
+            service.claim_auto_mcp_dispatch(&mut record).unwrap();
+        }
+        assert!(service.list_pending_actions().is_empty());
+        identities.push((record.storage_id, should_claim));
+    }
+    drop(service);
+
+    let invoker = Arc::new(RecoverableApprovalRaceInvoker::default());
+    let restarted = AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&storage))
+        .unwrap()
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>)
+        .with_mcp_startup_inspector(Arc::new(StaticMcpStartupInspector(
+            McpApprovalStartupPayloadState::DurableAvailable,
+        )));
+    assert_eq!(restarted.reconcile_startup_mcp_actions().unwrap(), 2);
+    assert!(restarted.list_pending_actions().is_empty());
+    assert!(storage
+        .list_active_agent_actions_for_startup()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        invoker
+            .invocations
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    for (storage_id, was_claimed) in identities {
+        let terminal: (String, String, Option<String>) = connection
+            .query_row(
+                "SELECT pending.status, pending.action_json, audit.error
+                 FROM agent_pending_actions pending
+                 LEFT JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+                 WHERE pending.action_id = ?1",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(terminal.0, "failed");
+        assert_eq!(terminal.1, "{}");
+        assert_eq!(
+            terminal.2.as_deref(),
+            if was_claimed {
+                Some("mcp.tool_outcome_unknown")
+            } else {
+                Some("mcp.approval_policy_denied")
+            }
+        );
+    }
+}
+
 #[test]
 fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
     let fixture = tempdir().unwrap();
@@ -463,6 +819,7 @@ fn test_mcp_pending_action(
                 scope,
                 raw_tool_name,
                 model_tool_name,
+                display_reason: None,
                 arguments: mycopilot_core::AgentMcpArgumentSummary {
                     encoded_bytes: 2,
                     top_level_property_count: 0,

@@ -1083,14 +1083,16 @@ pub enum AgentMcpToolRisk {
     OpenWorldClaimed,
 }
 
-/// MCP approval policy frozen into a proposed external Tool invocation.
+/// MCP invocation policy frozen into one exact external Tool invocation.
 ///
-/// The MVP deliberately has no allow-without-prompt state. Managed policy can grow as a distinct
-/// variant later without reinterpreting `Prompt`.
+/// `Auto` is a Host-configured per-Server policy. It skips the user prompt, but does not bypass
+/// preparation, one-time payload consumption, typed identity checks, cancellation, or output
+/// limits.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMcpApprovalMode {
     Prompt,
+    Auto,
     Deny,
 }
 
@@ -1144,6 +1146,12 @@ pub struct AgentMcpToolApprovalSummary {
     pub scope: AgentMcpServerScope,
     pub raw_tool_name: String,
     pub model_tool_name: String,
+    /// Bounded model-authored explanation stored independently from Server arguments.
+    ///
+    /// Legacy pending approvals may not contain this field. It is never reconstructed from raw
+    /// MCP arguments and is never sent to the MCP Server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_reason: Option<String>,
     pub arguments: AgentMcpArgumentSummary,
     pub risk: AgentMcpToolRisk,
     pub external: bool,

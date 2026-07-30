@@ -244,12 +244,19 @@ mod tests {
     #[test]
     fn approval_policy_is_part_of_the_config_digest() {
         let prompt = config(Vec::new());
+        let mut auto = prompt.clone();
+        auto.approval_mode = McpApprovalMode::Auto;
         let mut deny = prompt.clone();
         deny.approval_mode = McpApprovalMode::Deny;
         assert_ne!(
             config_digest(&prompt).unwrap(),
+            config_digest(&auto).unwrap()
+        );
+        assert_ne!(
+            config_digest(&prompt).unwrap(),
             config_digest(&deny).unwrap()
         );
+        assert_ne!(config_digest(&auto).unwrap(), config_digest(&deny).unwrap());
     }
 
     #[test]

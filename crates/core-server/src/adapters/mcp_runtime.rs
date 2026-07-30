@@ -137,7 +137,7 @@ impl McpRuntimeBridge {
     ) -> AgentResult<()> {
         self.ensure_registry_reconciled()?;
         let provenance = &approval.identity.provenance;
-        if approval.approval_mode != AgentMcpApprovalMode::Prompt {
+        if approval.approval_mode == AgentMcpApprovalMode::Deny {
             return Err(policy_error("mcp.approval_policy_denied"));
         }
         let server_id = McpServerId::from_str(&provenance.server_id)
@@ -159,7 +159,7 @@ impl McpRuntimeBridge {
         if !status.enabled
             || status.state != McpServerState::Ready
             || status.trust == McpTrustLevel::Untrusted
-            || status.approval_mode != McpApprovalMode::Prompt
+            || !approval_mode_matches(approval.approval_mode, status.approval_mode)
             || status.catalog_completeness != McpCatalogCompleteness::Complete
             || status.config_epoch != expected_epoch
             || status.registry_revision != provenance.registry_revision
@@ -302,7 +302,7 @@ impl McpToolInvoker for McpRuntimeBridge {
             if !status.enabled
                 || status.state != McpServerState::Ready
                 || status.trust == McpTrustLevel::Untrusted
-                || status.approval_mode != McpApprovalMode::Prompt
+                || status.approval_mode == McpApprovalMode::Deny
                 || status.catalog_completeness != McpCatalogCompleteness::Complete
                 || !scope_visible_to_context(&status.scope, context)
             {
@@ -332,7 +332,8 @@ impl McpToolInvoker for McpRuntimeBridge {
                 || current_status.scope != status.scope
                 || current_status.trust != status.trust
                 || current_status.trust == McpTrustLevel::Untrusted
-                || current_status.approval_mode != McpApprovalMode::Prompt
+                || current_status.approval_mode == McpApprovalMode::Deny
+                || current_status.approval_mode != status.approval_mode
                 || !scope_visible_to_context(&current_status.scope, context)
             {
                 continue;
@@ -389,6 +390,8 @@ impl McpToolInvoker for McpRuntimeBridge {
                 };
                 tools.push(McpAgentToolDescriptor {
                     provenance,
+                    approval_mode: map_approval_mode(current_status.approval_mode)
+                        .ok_or_else(|| policy_error("mcp.approval_policy_denied"))?,
                     server_display_name: current_status.display_name.clone(),
                     description: tool.descriptor.description,
                     input_schema: tool.descriptor.input_schema,
@@ -643,6 +646,23 @@ fn map_scope(scope: &McpServerScope) -> Option<AgentMcpServerScope> {
         McpServerScope::Managed => Some(AgentMcpServerScope::Managed),
         _ => None,
     }
+}
+
+fn map_approval_mode(mode: McpApprovalMode) -> Option<AgentMcpApprovalMode> {
+    match mode {
+        McpApprovalMode::Prompt => Some(AgentMcpApprovalMode::Prompt),
+        McpApprovalMode::Auto => Some(AgentMcpApprovalMode::Auto),
+        McpApprovalMode::Deny => None,
+        _ => None,
+    }
+}
+
+fn approval_mode_matches(agent: AgentMcpApprovalMode, server: McpApprovalMode) -> bool {
+    matches!(
+        (agent, server),
+        (AgentMcpApprovalMode::Prompt, McpApprovalMode::Prompt)
+            | (AgentMcpApprovalMode::Auto, McpApprovalMode::Auto)
+    )
 }
 
 fn map_annotations(annotations: Option<McpToolAnnotations>) -> McpAgentToolAnnotations {
@@ -1279,7 +1299,7 @@ mod tests {
         }
     }
 
-    fn config(server_id: McpServerId) -> McpServerConfig {
+    fn config_with_mode(server_id: McpServerId, approval_mode: McpApprovalMode) -> McpServerConfig {
         McpServerConfig {
             id: server_id,
             display_name: "owned fixture".to_string(),
@@ -1287,7 +1307,7 @@ mod tests {
                 project_id: "project-fixture".to_string(),
             },
             trust: McpTrustLevel::Managed,
-            approval_mode: McpApprovalMode::Prompt,
+            approval_mode,
             enabled: true,
             transport: McpTransportConfig::Stdio(McpStdioConfig {
                 program: PathBuf::from("/owned/fixture"),
@@ -1312,9 +1332,21 @@ mod tests {
         Arc<McpConnectionManager>,
         Arc<OwnedFixturePeer>,
     ) {
+        ready_bridge_with_mode(McpApprovalMode::Prompt).await
+    }
+
+    async fn ready_bridge_with_mode(
+        approval_mode: McpApprovalMode,
+    ) -> (
+        Arc<McpRuntimeBridge>,
+        Arc<McpConnectionManager>,
+        Arc<OwnedFixturePeer>,
+    ) {
         let server_id = McpServerId::new();
         let registry = InMemoryMcpRegistry::shared();
-        registry.add(config(server_id)).unwrap();
+        registry
+            .add(config_with_mode(server_id, approval_mode))
+            .unwrap();
         let peer = Arc::new(OwnedFixturePeer::new(server_id));
         let connector: Arc<dyn McpConnector> = Arc::new(OwnedFixtureConnector {
             peer: Arc::clone(&peer),
@@ -1337,6 +1369,24 @@ mod tests {
         arguments: serde_json::Value,
         call_id: &str,
     ) -> AgentMcpToolApproval {
+        seal_test_invocation(
+            bridge,
+            provenance,
+            arguments,
+            call_id,
+            AgentMcpApprovalMode::Prompt,
+            AgentApprovalStatus::Required,
+        )
+    }
+
+    fn seal_test_invocation(
+        bridge: &McpRuntimeBridge,
+        provenance: AgentMcpToolProvenance,
+        arguments: serde_json::Value,
+        call_id: &str,
+        approval_mode: AgentMcpApprovalMode,
+        approval_status: AgentApprovalStatus,
+    ) -> AgentMcpToolApproval {
         let call_id = format!("tc1_{}", URL_SAFE_NO_PAD.encode(Sha256::digest(call_id)));
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1355,7 +1405,7 @@ mod tests {
                 id: call_id,
                 tool: provenance.model_tool_name.clone(),
                 args: json!({}),
-                approval_status: AgentApprovalStatus::Required,
+                approval_status,
                 reason: None,
             },
             summary: AgentMcpToolApprovalSummary {
@@ -1364,6 +1414,7 @@ mod tests {
                 scope: provenance.scope.clone(),
                 raw_tool_name: provenance.raw_tool_name.clone(),
                 model_tool_name: provenance.model_tool_name.clone(),
+                display_reason: None,
                 arguments: AgentMcpArgumentSummary {
                     encoded_bytes: serde_json::to_vec(&arguments).unwrap().len() as u64,
                     top_level_property_count: arguments
@@ -1381,7 +1432,7 @@ mod tests {
                 risk: AgentMcpToolRisk::ReadOnlyClaimed,
                 external: true,
             },
-            approval_mode: AgentMcpApprovalMode::Prompt,
+            approval_mode,
             payload_persistence: AgentMcpApprovalPayloadPersistence::ProcessOnly,
             created_at,
             expires_at: created_at.saturating_add(60_000),
@@ -1574,6 +1625,7 @@ mod tests {
         let catalog = bridge.catalog(&project_context()).unwrap();
         assert_eq!(catalog.len(), 1);
         let descriptor = catalog.into_iter().next().unwrap();
+        assert_eq!(descriptor.approval_mode, AgentMcpApprovalMode::Prompt);
         assert_eq!(descriptor.provenance.raw_tool_name, "raw/echo");
         assert!(descriptor.provenance.model_tool_name.starts_with("mcp__"));
         let status = manager.list_statuses().unwrap().remove(0);
@@ -1627,6 +1679,65 @@ mod tests {
             assert_eq!(calls[0].name, "raw/echo");
             assert_eq!(calls[0].arguments, json!({"text": "hello"}));
         }
+        let _ = manager.stop_all().await;
+    }
+
+    #[tokio::test]
+    async fn auto_catalog_is_visible_and_revalidation_requires_the_exact_policy() {
+        let (bridge, manager, peer) = ready_bridge_with_mode(McpApprovalMode::Auto).await;
+        let descriptor = bridge.catalog(&project_context()).unwrap().remove(0);
+        assert_eq!(descriptor.approval_mode, AgentMcpApprovalMode::Auto);
+
+        let approval = seal_test_invocation(
+            &bridge,
+            descriptor.provenance,
+            json!({"text": "automatic"}),
+            "provider-adapter-auto-call",
+            AgentMcpApprovalMode::Auto,
+            AgentApprovalStatus::Approved,
+        );
+        bridge
+            .revalidate_approved(&approval)
+            .expect("an exact automatic policy snapshot must remain routable");
+        let result = bridge
+            .invoke_approved(
+                McpApprovedToolInvocation {
+                    approval: approval.clone(),
+                },
+                AgentCancellationToken::new(),
+            )
+            .await
+            .expect("automatic policy must use the same sealed one-time invocation path");
+        assert!(!result.is_error);
+
+        let mut stale_prompt = approval.clone();
+        stale_prompt.approval_mode = AgentMcpApprovalMode::Prompt;
+        stale_prompt.call.approval_status = AgentApprovalStatus::Required;
+        assert_eq!(
+            bridge
+                .revalidate_approved(&stale_prompt)
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_snapshot_stale")
+        );
+        assert_eq!(
+            peer.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            1
+        );
+        assert_eq!(
+            bridge
+                .invoke_approved(
+                    McpApprovedToolInvocation { approval },
+                    AgentCancellationToken::new(),
+                )
+                .await
+                .expect_err("an automatically dispatched payload must not replay")
+                .code(),
+            Some("mcp.approval_payload_unavailable")
+        );
         let _ = manager.stop_all().await;
     }
 

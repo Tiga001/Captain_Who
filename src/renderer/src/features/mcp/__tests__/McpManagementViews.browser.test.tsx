@@ -71,7 +71,7 @@ describe('MCP Server editor', () => {
     await screen.getByRole('button', { name: 'mcp.form.addArgument' }).click()
     await screen.getByRole('button', { name: 'mcp.form.addArgument' }).click()
     await screen.getByLabelText('mcp.form.argument 2').fill('$(never-run); | one argv')
-    await screen.getByRole('button', { name: 'mcp.actions.saveServer' }).click()
+    await screen.getByRole('button', { name: 'mcp.actions.save' }).click()
     await expect.poll(() => submit.mock.calls.length).toBe(1)
     expect(submit).toHaveBeenCalledWith({
       approvalMode: 'prompt',
@@ -80,6 +80,29 @@ describe('MCP Server editor', () => {
       displayName: 'fixture',
       executable: '/usr/bin/fixture'
     })
+  })
+
+  it('defaults automatic execution off and persists an explicit per-Server opt-in', async () => {
+    const submit = vi.fn()
+    const screen = await render(
+      <McpServerEditor
+        busy={false}
+        onCancel={vi.fn()}
+        onSelectExecutable={async () => null}
+        onSelectWorkingDirectory={async () => null}
+        onSubmit={submit}
+      />
+    )
+    const toggle = screen.getByRole('switch', { name: 'mcp.form.autoExecute' })
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await toggle.click()
+    await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
+    await screen.getByLabelText('mcp.form.name').fill('fixture')
+    await screen.getByLabelText('mcp.form.executable').fill('/usr/bin/fixture')
+    await screen.getByLabelText('mcp.form.cwd').fill('/tmp')
+    await screen.getByRole('button', { name: 'mcp.actions.save' }).click()
+    await expect.poll(() => submit.mock.calls.length).toBe(1)
+    expect(submit.mock.calls[0]?.[0]).toMatchObject({ approvalMode: 'auto' })
   })
 
   it('does not expose unsupported remote, OAuth, environment, or allow-always controls', async () => {
@@ -97,6 +120,29 @@ describe('MCP Server editor', () => {
     expect(screen.getByText(/OAuth/i).query()).toBeNull()
     expect(screen.getByText(/environment/i).query()).toBeNull()
     expect(screen.getByText(/always allow/i).query()).toBeNull()
+    expect(screen.getByText('mcp.form.approvalMode').query()).toBeNull()
+  })
+
+  it('preserves an existing deny policy without presenting it as ordinary prompt mode', async () => {
+    const submit = vi.fn()
+    const screen = await render(
+      <McpServerEditor
+        busy={false}
+        initial={server({ approvalMode: 'deny' })}
+        onCancel={vi.fn()}
+        onSelectExecutable={async () => null}
+        onSelectWorkingDirectory={async () => null}
+        onSubmit={submit}
+      />
+    )
+    await expect.element(screen.getByText('mcp.form.callsCurrentlyDenied')).toBeVisible()
+    await expect
+      .element(screen.getByRole('switch', { name: 'mcp.form.autoExecute' }))
+      .toHaveAttribute('aria-checked', 'false')
+    await screen.getByLabelText('mcp.form.name').fill('renamed fixture')
+    await screen.getByRole('button', { name: 'mcp.actions.save' }).click()
+    await expect.poll(() => submit.mock.calls.length).toBe(1)
+    expect(submit.mock.calls[0]?.[0]).toMatchObject({ approvalMode: 'deny' })
   })
 
   it('keeps picker values unchanged when native selection is cancelled', async () => {
@@ -162,6 +208,21 @@ describe('MCP Server editor', () => {
 })
 
 describe('MCP Server list', () => {
+  it('opens the exact Server editor from the settings button', async () => {
+    const current = server()
+    const onEdit = vi.fn()
+    const screen = await render(
+      <McpServerList
+        onEdit={onEdit}
+        onSetEnabled={vi.fn()}
+        pendingOperations={new Map()}
+        servers={[current]}
+      />
+    )
+    await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
+    expect(onEdit).toHaveBeenCalledWith(current)
+  })
+
   it('keeps enabled state separate from every connection state and supports duplicate names', async () => {
     const states: McpServerStateView[] = [
       'disabled',
@@ -175,9 +236,7 @@ describe('MCP Server list', () => {
     ]
     const screen = await render(
       <McpServerList
-        onDelete={vi.fn()}
-        onOpen={vi.fn()}
-        onRestart={vi.fn()}
+        onEdit={vi.fn()}
         onSetEnabled={vi.fn()}
         pendingOperations={new Map()}
         servers={states.map((state, index) => ({
@@ -190,14 +249,20 @@ describe('MCP Server list', () => {
       />
     )
 
-    for (const state of states) {
-      await expect.element(screen.getByText(`mcp.state.${state}`)).toBeVisible()
-    }
+    expect(screen.getByText('mcp.state.off').elements()).toHaveLength(2)
+    expect(screen.getByText('mcp.state.connecting').elements()).toHaveLength(3)
+    expect(screen.getByText('mcp.state.ready').elements()).toHaveLength(1)
+    expect(screen.getByText('mcp.state.needsAttention').elements()).toHaveLength(2)
     expect(screen.container.querySelectorAll('.mcp-server-row')).toHaveLength(states.length)
     expect(screen.getByText('duplicate name').elements()).toHaveLength(states.length)
     const readyRow = screen.container.querySelectorAll('.mcp-server-row')[3]
     expect(readyRow.textContent).toContain('mcp.state.ready')
-    expect(readyRow.textContent).toContain('mcp.disabled')
+    expect(readyRow.querySelector('[role="switch"]')).toHaveAttribute('aria-checked', 'false')
+    const startingRow = screen.container.querySelectorAll('.mcp-server-row')[1]
+    expect(startingRow.querySelector('[role="switch"]')).toHaveAttribute('aria-checked', 'true')
+    expect(screen.container.textContent).not.toContain('mcp.activeCalls')
+    expect(screen.getByRole('button', { name: 'mcp.actions.restart' }).query()).toBeNull()
+    expect(screen.getByRole('button', { name: 'mcp.actions.delete' }).query()).toBeNull()
   })
 })
 
@@ -205,10 +270,10 @@ describe('MCP Server details', () => {
   it('fails closed for an out-of-range safe integer timestamp', async () => {
     const screen = await render(
       <McpServerDetail
-        onAuthorize={vi.fn()}
         onBack={vi.fn()}
+        onDelete={vi.fn()}
         onEdit={vi.fn()}
-        onRestart={vi.fn()}
+        onRetry={vi.fn()}
         onSetEnabled={vi.fn()}
         server={server({
           createdAtMs: Number.MAX_SAFE_INTEGER,
@@ -216,7 +281,26 @@ describe('MCP Server details', () => {
         })}
       />
     )
+    await screen.getByText('mcp.detail.technicalDetails').click()
     await expect.element(screen.getByText('—').first()).toBeVisible()
+  })
+
+  it('keeps internal identities behind technical details', async () => {
+    const current = server()
+    const screen = await render(
+      <McpServerDetail
+        onBack={vi.fn()}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+        onRetry={vi.fn()}
+        onSetEnabled={vi.fn()}
+        server={current}
+      />
+    )
+    await expect.element(screen.getByText(current.serverId)).not.toBeVisible()
+    expect(screen.getByRole('button', { name: 'mcp.actions.authorizeLaunch' }).query()).toBeNull()
+    await screen.getByText('mcp.detail.technicalDetails').click()
+    await expect.element(screen.getByText(current.serverId)).toBeVisible()
   })
 })
 
@@ -249,7 +333,6 @@ describe('MCP Catalog safe presentation', () => {
         onLoad={vi.fn()}
         onLoadMore={vi.fn()}
         onRefresh={vi.fn()}
-        server={{ ...server(), displayName: hostile }}
       />
     )
     await expect
@@ -277,7 +360,6 @@ describe('MCP Catalog safe presentation', () => {
         onLoad={vi.fn()}
         onLoadMore={vi.fn()}
         onRefresh={vi.fn()}
-        server={server()}
       />
     )
     expect(screen.container.textContent).not.toContain(cursor)

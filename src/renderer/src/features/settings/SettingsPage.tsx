@@ -83,7 +83,7 @@ const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsNavItem[
     titleKey: 'settings.group.coding',
     items: [
       { id: 'skills', labelKey: 'settings.page.skills', icon: WandSparkles },
-      { id: 'mcp', labelKey: 'settings.page.mcp', icon: Cable },
+      { id: 'mcp', labelKey: 'settings.nav.mcp', icon: Cable },
       { id: 'environment', labelKey: 'settings.page.environment', icon: Monitor }
     ]
   },

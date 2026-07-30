@@ -2127,6 +2127,36 @@ async fn stop_cancels_and_settles_active_calls_before_closing_peer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_approval_mode_allows_manager_dispatch_after_normal_policy_checks() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    let mut server_config = config(server_id, "auto-invocation", true);
+    server_config.approval_mode = mycopilot_mcp_client::McpApprovalMode::Auto;
+    registry.add(server_config).unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "automatic")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    let status = manager.start(server_id).await.unwrap();
+    assert_eq!(
+        status.approval_mode,
+        mycopilot_mcp_client::McpApprovalMode::Auto
+    );
+
+    let result = manager
+        .call_catalog_tool(
+            catalog_call(&manager, server_id, "echo", json!({"value": "automatic"})),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect("auto mode may dispatch after normal Manager checks");
+    assert!(!result.is_error);
+    assert_eq!(server.calls().len(), 1);
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deny_approval_mode_fails_closed_inside_manager() {
     let registry = InMemoryMcpRegistry::shared();
     let connector = Arc::new(MockConnector::default());

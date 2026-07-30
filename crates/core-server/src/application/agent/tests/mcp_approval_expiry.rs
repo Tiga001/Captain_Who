@@ -115,6 +115,7 @@ fn approval_action(
                 scope,
                 raw_tool_name,
                 model_tool_name,
+                display_reason: None,
                 arguments: AgentMcpArgumentSummary {
                     encoded_bytes: 2,
                     top_level_property_count: 0,

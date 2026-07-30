@@ -14,7 +14,8 @@ const STARTUP_WORK_PHRASE_KEYS = [
   'startup.ambient.connectingCapabilities',
   'startup.ambient.buildingPlan',
   'startup.ambient.validatingResults',
-  'startup.ambient.turningIdeasIntoWork'
+  'startup.ambient.turningIdeasIntoWork',
+  'startup.ambient.connectingMcpTools'
 ] as const satisfies readonly TranslationKey[]
 
 const STARTUP_REFLECTIVE_PHRASE_KEYS = [
@@ -27,6 +28,7 @@ const STARTUP_REFLECTIVE_PHRASE_KEYS = [
   'startup.ambient.possibilitiesInDetails',
   'startup.ambient.imaginationWithRigor',
   'startup.ambient.creationContinues',
+  'startup.ambient.mcpOneProtocolManyTools',
   'startup.ambient.attentionIsAllYouNeed'
 ] as const satisfies readonly TranslationKey[]
 
@@ -64,7 +66,9 @@ const STARTUP_LLM_PHRASE_KEYS = [
   'startup.ambient.llmParametersAnswer',
   'startup.ambient.llmEmergenceScale',
   'startup.ambient.llmGradientWayHome',
-  'startup.ambient.llmAttentionStillAll'
+  'startup.ambient.llmAttentionStillAll',
+  'startup.ambient.llmMcpServerHandshake',
+  'startup.ambient.llmJsonRpcIntent'
 ] as const satisfies readonly TranslationKey[]
 
 export const STARTUP_AMBIENT_PHRASE_GROUPS = [

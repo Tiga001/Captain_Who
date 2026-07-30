@@ -255,6 +255,7 @@ fn provenance_for_schema(
 fn descriptor(raw_name: &str, model_name: &str, input_schema: Value) -> McpAgentToolDescriptor {
     McpAgentToolDescriptor {
         provenance: provenance_for_schema(raw_name, model_name, &input_schema),
+        approval_mode: AgentMcpApprovalMode::Prompt,
         server_display_name: "Fixture MCP".to_string(),
         description: Some(format!("{raw_name} fixture tool")),
         input_schema,

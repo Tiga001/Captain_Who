@@ -136,6 +136,154 @@ fn take_manual_action_audit_post_commit_failure(storage_id: &str, status: &str) 
 }
 
 impl AgentService {
+    /// Persists the hidden pre-dispatch journal for one automatically authorized MCP call.
+    ///
+    /// The row starts at `approved`, so it is never published through the pending-approval API.
+    /// Only a subsequent durable `approved -> executing` CAS permits the transport invocation.
+    pub(super) fn prepare_auto_mcp_action_journal(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        action: AgentProposedAction,
+        agent_input: AgentChatInput,
+    ) -> Result<PendingActionRecord, String> {
+        let AgentProposedAction::McpToolCall { approval } = &action else {
+            return Err("automatic MCP journal requires a typed MCP action".to_string());
+        };
+        if approval.approval_mode != mycopilot_core::AgentMcpApprovalMode::Auto
+            || approval.call.approval_status != AgentApprovalStatus::Approved
+        {
+            return Err("automatic MCP journal requires Host-authorized Auto policy".to_string());
+        }
+        let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
+        let deletion_lifecycle = self
+            .deletion_lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if deletion_lifecycle.contains_input(&agent_input) {
+            return Err("项目或会话正在移除，无法启动 MCP 操作。".to_string());
+        }
+        if !mcp_pending_action_binding_matches(run_id, None, &action, &agent_input) {
+            return Err("automatic MCP journal frozen identity is inconsistent".to_string());
+        }
+
+        let action_id = approval.identity.action_id.clone();
+        let storage_id = pending_action_storage_id(run_id, &action_id);
+        let record = PendingActionRecord {
+            storage_id: storage_id.clone(),
+            snapshot: PendingAgentActionSnapshot {
+                action_id,
+                run_id: run_id.to_string(),
+                conversation_id: normalized_optional(conversation_id),
+                assistant_message_id: normalized_optional(assistant_message_id),
+                action_type: action_type_for_action(&action).to_string(),
+                tool_name: tool_name_for_action(&action),
+                tool_call_id: Some(approval.identity.call_id.clone()),
+                action,
+                created_at: now_ms(),
+                status: PendingActionStatus::Approved,
+            },
+            agent_input,
+        };
+
+        {
+            let pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if pending_actions.contains_key(&storage_id) {
+                return Err("automatic MCP invocation journal already exists".to_string());
+            }
+        }
+        let outcome = self.persist_pending_action(&record)?;
+        if outcome != PendingActionStoreOutcome::Inserted {
+            return Err(
+                "automatic MCP invocation was already journaled and will not be replayed"
+                    .to_string(),
+            );
+        }
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match pending_actions.entry(storage_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(record.clone());
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err("automatic MCP invocation journal raced another dispatch".to_string());
+            }
+        }
+        drop(pending_actions);
+        if self
+            .persist_action_audit(
+                &record,
+                Some("approved"),
+                "approved",
+                None,
+                None,
+                None,
+                None,
+                Some(record.snapshot.created_at),
+                None,
+            )
+            .is_err()
+        {
+            let _ = self.settle_auto_mcp_action_journal(
+                &record,
+                McpAutoActionJournalTerminalOutcome::Failed,
+            );
+            return Err(
+                "automatic MCP invocation journal audit could not be persisted".to_string(),
+            );
+        }
+        drop(deletion_lifecycle);
+        Ok(record)
+    }
+
+    /// Claims the durable possibly-dispatched boundary immediately before transport invocation.
+    pub(super) fn claim_auto_mcp_dispatch(
+        &self,
+        record: &mut PendingActionRecord,
+    ) -> Result<(), String> {
+        if record.snapshot.status != PendingActionStatus::Approved {
+            return Err("automatic MCP journal is not ready for dispatch".to_string());
+        }
+        self.transition_pending_status(record, PendingActionStatus::Executing)?;
+        record.snapshot.status = PendingActionStatus::Executing;
+        Ok(())
+    }
+
+    /// Terminalizes and removes one hidden automatic MCP journal without persisting Tool output.
+    pub(super) fn settle_auto_mcp_action_journal(
+        &self,
+        record: &PendingActionRecord,
+        outcome: McpAutoActionJournalTerminalOutcome,
+    ) -> Result<(), String> {
+        let expected_status = pending_status_label(record.snapshot.status);
+        let settled = self.storage.settle_auto_mcp_action_journal(
+            &record.storage_id,
+            expected_status,
+            outcome,
+            now_ms(),
+        )?;
+        if !settled {
+            return Err("automatic MCP journal terminal CAS was lost".to_string());
+        }
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if pending_actions
+            .get(&record.storage_id)
+            .is_some_and(|current| same_pending_action_identity_except_status(current, record))
+        {
+            pending_actions.remove(&record.storage_id);
+        }
+        Ok(())
+    }
+
     pub(super) fn store_pending_action(
         &self,
         run_id: &str,
@@ -808,10 +956,17 @@ pub(super) fn mcp_pending_action_binding_matches(
     let AgentProposedAction::McpToolCall { approval } = action else {
         return record.is_none_or(|record| record.action_type != "mcp_tool_call");
     };
+    let lifecycle_state = match approval.approval_mode {
+        mycopilot_core::AgentMcpApprovalMode::Prompt => {
+            AgentMcpToolInvocationState::PendingApproval
+        }
+        mycopilot_core::AgentMcpApprovalMode::Auto => AgentMcpToolInvocationState::Approved,
+        mycopilot_core::AgentMcpApprovalMode::Deny => return false,
+    };
     if mcp_tool_invocation_event(
         approval,
         McpToolInvocationEventUpdate {
-            state: AgentMcpToolInvocationState::PendingApproval,
+            state: lifecycle_state,
             dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
             outcome: None,
             is_error: None,
@@ -825,17 +980,34 @@ pub(super) fn mcp_pending_action_binding_matches(
         return false;
     }
     let identity = &approval.identity;
-    let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
-        return false;
-    };
     if identity.run_id != run_id
-        || checkpoint.run_id != identity.run_id
-        || checkpoint.pending_action_id.as_deref() != Some(identity.action_id.as_str())
-        || checkpoint.pending_tool_call_id != identity.call_id
         || approval.call.id != identity.call_id
         || approval.call.tool != identity.provenance.model_tool_name
     {
         return false;
+    }
+    match approval.approval_mode {
+        mycopilot_core::AgentMcpApprovalMode::Prompt => {
+            let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
+                return false;
+            };
+            if checkpoint.run_id != identity.run_id
+                || checkpoint.pending_action_id.as_deref() != Some(identity.action_id.as_str())
+                || checkpoint.pending_tool_call_id != identity.call_id
+            {
+                return false;
+            }
+        }
+        mycopilot_core::AgentMcpApprovalMode::Auto => {
+            if agent_input
+                .resume_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.run_id != identity.run_id)
+            {
+                return false;
+            }
+        }
+        mycopilot_core::AgentMcpApprovalMode::Deny => return false,
     }
     record.is_none_or(|record| {
         record.action_type == "mcp_tool_call"
@@ -1039,6 +1211,21 @@ pub(super) fn same_pending_action_identity(
         && serialize_json(&existing.snapshot.action) == serialize_json(&candidate.snapshot.action)
         && persisted_pending_agent_input_json(&existing.agent_input, existing.snapshot.status)
             == persisted_pending_agent_input_json(&candidate.agent_input, candidate.snapshot.status)
+}
+
+fn same_pending_action_identity_except_status(
+    existing: &PendingActionRecord,
+    candidate: &PendingActionRecord,
+) -> bool {
+    existing.storage_id == candidate.storage_id
+        && existing.snapshot.action_id == candidate.snapshot.action_id
+        && existing.snapshot.run_id == candidate.snapshot.run_id
+        && existing.snapshot.conversation_id == candidate.snapshot.conversation_id
+        && existing.snapshot.assistant_message_id == candidate.snapshot.assistant_message_id
+        && existing.snapshot.action_type == candidate.snapshot.action_type
+        && existing.snapshot.tool_name == candidate.snapshot.tool_name
+        && existing.snapshot.tool_call_id == candidate.snapshot.tool_call_id
+        && serialize_json(&existing.snapshot.action) == serialize_json(&candidate.snapshot.action)
 }
 
 pub(super) fn persisted_pending_agent_input_json(

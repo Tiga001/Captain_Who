@@ -62,7 +62,8 @@ pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutco
 pub use lifecycle::*;
 pub use pending_actions::{
     AgentPendingActionResultCommitOutcome, AgentPendingActionSettlementInspection,
-    McpActionTerminalizationRequest, McpStartupActionTerminalOutcome,
+    McpActionTerminalizationRequest, McpAutoActionJournalTerminalOutcome,
+    McpStartupActionTerminalOutcome,
 };
 #[cfg(test)]
 use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;

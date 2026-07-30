@@ -23,6 +23,10 @@ impl AgentService {
         notifications: CoreServerNotificationSender,
     ) -> AgentHostActionExecutor {
         let service = self.clone();
+        // Core invokes Host actions on Tokio's blocking pool. Capture the owning runtime before
+        // entering that pool so the synchronous Host executor can safely drive the one async MCP
+        // invocation path without constructing or nesting another runtime.
+        let runtime = tokio::runtime::Handle::try_current().ok();
         let context = AutoApprovedActionContext::new(
             agent_input,
             run_id,
@@ -33,6 +37,28 @@ impl AgentService {
         .with_notifications(notifications);
         Arc::new(move |action, cancellation_token| {
             let mut refreshed = context.clone();
+            if let AgentProposedAction::McpToolCall { approval } = action {
+                let Some(runtime) = runtime.as_ref() else {
+                    service.invalidate_mcp_pending_payload(&AgentProposedAction::McpToolCall {
+                        approval: approval.clone(),
+                    });
+                    return Err(AgentError::structured(
+                        "mcp.runtime_unavailable",
+                        "The MCP invocation runtime is unavailable.",
+                        serde_json::json!({
+                            "type": "mcp_tool",
+                            "code": "runtimeUnavailable",
+                            "retryable": false,
+                            "dispatchCertainty": "definitely_not_dispatched",
+                        }),
+                    ));
+                };
+                return runtime.block_on(service.execute_auto_mcp_tool_action(
+                    &refreshed,
+                    approval,
+                    cancellation_token,
+                ));
+            }
             service
                 .refresh_agent_input_attachment_library(&mut refreshed.agent_input)
                 .map_err(AgentError::new)?;

@@ -138,7 +138,7 @@ pub(super) fn normalize_description(description: Option<&str>) -> String {
     let description = description.trim();
     if description.is_empty() {
         truncate_utf8(
-            "External MCP tool with no server description; every invocation requires user approval.",
+            "External MCP tool with no server description.",
             MAX_MCP_DESCRIPTION_BYTES,
         )
     } else {
@@ -209,7 +209,65 @@ pub(super) fn normalize_input_schema_value(
     if !root.contains_key("type") {
         root.insert("type".to_string(), Value::String("object".to_string()));
     }
+    let properties = root
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| {
+            AgentError::structured(
+                "mcp.invalid_input_schema",
+                "The MCP input schema properties entry must be an object.",
+                json!({"retryable": false}),
+            )
+        })?;
+    if properties.contains_key(MCP_CALL_REASON_FIELD) {
+        return Err(AgentError::structured(
+            "mcp.invalid_input_schema",
+            "The MCP input schema collides with a reserved Host field.",
+            json!({"retryable": false}),
+        ));
+    }
+    properties.insert(
+        MCP_CALL_REASON_FIELD.to_string(),
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_MCP_CALL_REASON_BYTES,
+            "description": "Briefly explain why this tool call is needed. Do not include argument values, credentials, or other sensitive data."
+        }),
+    );
+    let required = root
+        .entry("required".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| {
+            AgentError::structured(
+                "mcp.invalid_input_schema",
+                "The MCP input schema required entry must be an array.",
+                json!({"retryable": false}),
+            )
+        })?;
+    if !required
+        .iter()
+        .any(|entry| entry.as_str() == Some(MCP_CALL_REASON_FIELD))
+    {
+        required.push(Value::String(MCP_CALL_REASON_FIELD.to_string()));
+    }
     let normalized = Value::Object(root);
+    let normalized_bytes = serde_json::to_vec(&normalized).map_err(|_| {
+        AgentError::structured(
+            "mcp.invalid_input_schema",
+            "The normalized MCP input schema could not be encoded safely.",
+            json!({"retryable": false}),
+        )
+    })?;
+    if normalized_bytes.len() > MAX_MCP_PROVIDER_SCHEMA_BYTES {
+        return Err(AgentError::structured(
+            "mcp.input_schema_too_large",
+            "The normalized MCP input schema exceeds the Provider-facing size limit.",
+            json!({"retryable": false}),
+        ));
+    }
     if schema_requests_model_supplied_credentials(&normalized) {
         return Err(AgentError::structured(
             "mcp.invalid_input_schema",

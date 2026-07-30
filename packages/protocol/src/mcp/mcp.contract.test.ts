@@ -160,6 +160,36 @@ describe('MCP management cross-language contract', () => {
     expect(parseMcpServerCreateInput(value)).toEqual(value)
   })
 
+  it.each(['prompt', 'auto', 'deny'] as const)(
+    'round-trips the supported %s approval mode',
+    (approvalMode) => {
+      const value = {
+        schemaVersion: 1,
+        displayName: 'Owned fixture',
+        transport: 'stdio',
+        executable: '/owned/fixture',
+        arguments: [],
+        cwd: '/owned',
+        approvalMode
+      } as const
+      expect(parseMcpServerCreateInput(value)).toEqual(value)
+    }
+  )
+
+  it('rejects unknown approval modes', () => {
+    expect(() =>
+      parseMcpServerCreateInput({
+        schemaVersion: 1,
+        displayName: 'Owned fixture',
+        transport: 'stdio',
+        executable: '/owned/fixture',
+        arguments: [],
+        cwd: '/owned',
+        approvalMode: 'always'
+      })
+    ).toThrow(/unexpected value/)
+  })
+
   it.each(['environment', 'secretRef', 'headers', 'bearer', 'url', 'serverId', 'trust', 'command'])(
     'rejects forbidden create field %s',
     (field) => {

@@ -144,6 +144,7 @@ impl McpManagementService {
                 _ => McpTrustLevelDto::Untrusted,
             },
             approval_mode: match record.entry.config.approval_mode {
+                McpApprovalMode::Auto => McpApprovalModeDto::Auto,
                 McpApprovalMode::Deny => McpApprovalModeDto::Deny,
                 _ => McpApprovalModeDto::Prompt,
             },

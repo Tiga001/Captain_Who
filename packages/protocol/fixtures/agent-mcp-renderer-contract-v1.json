@@ -25,7 +25,7 @@
             "catalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "catalogSchemaDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "schemaDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            "schemaNormalizerVersion": 1
+            "schemaNormalizerVersion": 2
           }
         },
         "call": {
@@ -42,6 +42,7 @@
           },
           "rawToolName": "echo_text",
           "modelToolName": "mcp__owned_fixture__echo_text",
+          "displayReason": "读取测试数据以完成用户请求",
           "arguments": {
             "encodedBytes": 24,
             "topLevelPropertyCount": 1,
@@ -110,7 +111,7 @@
               "catalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "catalogSchemaDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
               "schemaDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-              "schemaNormalizerVersion": 1
+              "schemaNormalizerVersion": 2
             }
           },
           "call": {
@@ -127,6 +128,7 @@
             },
             "rawToolName": "echo_text",
             "modelToolName": "mcp__owned_fixture__echo_text",
+            "displayReason": "读取测试数据以完成用户请求",
             "arguments": {
               "encodedBytes": 24,
               "topLevelPropertyCount": 1,

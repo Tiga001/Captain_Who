@@ -808,6 +808,21 @@ fn mcp_management_contract_is_strict_and_separates_launch_arguments() {
     assert_eq!(parsed.arguments[2], "value with spaces;$(not-a-shell)");
     assert_eq!(serde_json::to_value(parsed).unwrap(), request);
 
+    for approval_mode in ["prompt", "auto", "deny"] {
+        let mut with_approval_mode = request.clone();
+        with_approval_mode["approvalMode"] = serde_json::json!(approval_mode);
+        let parsed: McpServerCreateInput = serde_json::from_value(with_approval_mode.clone())
+            .expect("supported MCP approval mode");
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap(),
+            with_approval_mode,
+            "approval mode must round-trip on the management wire"
+        );
+    }
+    let mut with_unknown_approval_mode = request.clone();
+    with_unknown_approval_mode["approvalMode"] = serde_json::json!("always");
+    assert!(serde_json::from_value::<McpServerCreateInput>(with_unknown_approval_mode).is_err());
+
     let mut with_environment = request.clone();
     with_environment["environment"] = serde_json::json!({"TOKEN": "must-not-cross"});
     assert!(serde_json::from_value::<McpServerCreateInput>(with_environment).is_err());

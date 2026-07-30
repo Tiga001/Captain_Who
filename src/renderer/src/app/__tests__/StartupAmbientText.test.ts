@@ -34,7 +34,10 @@ describe('pickNextStartupPhraseIndex', () => {
 
   it('keeps the original, reflective, and LLM catalogs as separate groups', () => {
     expect(STARTUP_AMBIENT_PHRASE_GROUPS).toHaveLength(3)
-    expect(STARTUP_AMBIENT_PHRASE_GROUPS[0]).toHaveLength(10)
+    expect(STARTUP_AMBIENT_PHRASE_GROUPS[0]).toHaveLength(11)
+    expect(STARTUP_AMBIENT_PHRASE_GROUPS[0].map((key) => zhCNTranslations[key])).toContain(
+      '正在连接 MCP 工具'
+    )
     expect(STARTUP_AMBIENT_PHRASE_GROUPS[1].map((key) => zhCNTranslations[key])).toEqual([
       'token正在寻找它的位置',
       '让灵感在秩序中生长',
@@ -45,6 +48,7 @@ describe('pickNextStartupPhraseIndex', () => {
       '在细节深处发现新的可能',
       '把想象交给严谨去实现',
       '世界尚未完成，创造仍在继续',
+      '一个协议，连接无数工具',
       'Attention is all you need'
     ])
     expect(STARTUP_AMBIENT_PHRASE_GROUPS[2].map((key) => zhCNTranslations[key])).toEqual([
@@ -81,7 +85,9 @@ describe('pickNextStartupPhraseIndex', () => {
       '参数很多，答案只有一个',
       '涌现正在等待规模',
       '梯度知道来时的路',
-      'Attention 仍然是 all you need'
+      'Attention 仍然是 all you need',
+      'MCP Server 正在握手',
+      'JSON-RPC 正在交换意图'
     ])
   })
 

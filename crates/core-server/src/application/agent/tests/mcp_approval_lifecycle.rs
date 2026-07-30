@@ -1,10 +1,11 @@
 use super::*;
 use mycopilot_core::{
-    mcp_normalized_input_schema_identity, mcp_tool_arguments_digest, AgentMcpServerScope,
-    AgentMcpToolApproval, AgentMcpToolInvocationIdentity, AgentMcpToolProvenance,
-    McpAgentToolAnnotations, McpAgentToolDescriptor, McpApprovedToolInvocation,
-    McpToolApprovalRequest, McpToolCatalogContext, McpToolContentBlock, McpToolInvocationFuture,
-    McpToolInvocationResult, McpToolInvoker, MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
+    mcp_normalized_input_schema_identity, mcp_tool_arguments_digest, AgentMcpApprovalMode,
+    AgentMcpServerScope, AgentMcpToolApproval, AgentMcpToolInvocationIdentity,
+    AgentMcpToolProvenance, McpAgentToolAnnotations, McpAgentToolDescriptor,
+    McpApprovedToolInvocation, McpToolApprovalRequest, McpToolCatalogContext, McpToolContentBlock,
+    McpToolInvocationFuture, McpToolInvocationResult, McpToolInvoker,
+    MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -202,6 +203,7 @@ fn lifecycle_descriptor() -> McpAgentToolDescriptor {
             schema_digest: normalized.schema_digest,
             schema_normalizer_version: normalized.normalizer_version,
         },
+        approval_mode: AgentMcpApprovalMode::Prompt,
         server_display_name: "Owned approval fixture".to_string(),
         description: Some("Repository-owned approval lifecycle fixture".to_string()),
         input_schema,

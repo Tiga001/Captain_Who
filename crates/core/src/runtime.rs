@@ -1303,8 +1303,11 @@ impl AgentRuntime {
                         && uses_file_write_policy
                         && patch_auto_approve
                         && definition_requires_approval;
-                    let auto_execute_host_action =
-                        auto_execute_policy_action || auto_execute_patch;
+                    let auto_execute_mcp_action = policy_preflight_failure.is_none()
+                        && tool_registry.auto_executes_prepared_action(&call.tool);
+                    let auto_execute_host_action = auto_execute_policy_action
+                        || auto_execute_patch
+                        || auto_execute_mcp_action;
                     if !is_policy_process_tool {
                         if policy_preflight_failure.is_some() {
                             // A rejected or unavailable call is terminal for this attempt. Never
@@ -1654,16 +1657,30 @@ impl AgentRuntime {
                                         diff: diff.clone(),
                                     });
                                 }
-                                execute_host_action_on_blocking_thread(
-                                    host_executor
-                                        .as_ref()
-                                        .expect("automatic host action requires host executor")
-                                        .clone(),
-                                    action,
-                                    call.clone(),
-                                    cancellation_token.clone(),
-                                )
-                                .await
+                                if let Some(executor) = host_executor.as_ref() {
+                                    execute_host_action_on_blocking_thread(
+                                        executor.clone(),
+                                        action,
+                                        call.clone(),
+                                        cancellation_token.clone(),
+                                    )
+                                    .await
+                                } else {
+                                    let _ = tool_registry.invalidate_proposed_action(&action);
+                                    Ok(failed_tool_call_result(
+                                        &call,
+                                        AgentError::structured(
+                                            "agent.host_executor_unavailable",
+                                            "The Host execution boundary is unavailable.",
+                                            json!({
+                                                "type": "host_execution",
+                                                "code": "hostExecutorUnavailable",
+                                                "outcome": "not_dispatched",
+                                                "retryable": false,
+                                            }),
+                                        ),
+                                    ))
+                                }
                             }
                             Err(error) => Ok(failed_tool_call_result(&call, error)),
                         }

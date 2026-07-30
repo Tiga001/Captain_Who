@@ -4,10 +4,8 @@ import type { McpServerDetailsView, McpServerListItem } from '@mycopilot/protoco
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { useToast } from '../../components/toast/ToastContext'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
-import { McpServerDetail } from './McpServerDetail'
 import { McpServerEditor } from './McpServerEditor'
 import { McpServerList, McpServerListRefreshButton } from './McpServerList'
-import { McpToolCatalog } from './McpToolCatalog'
 import {
   getMcpManagementErrorDetails,
   mcpOperationNeedsAuthoritativeConfirmation
@@ -17,7 +15,7 @@ import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 import { useMcpManagement } from './useMcpManagement'
 import './McpSettingsPage.css'
 
-type McpSettingsView = 'list' | 'add' | 'detail' | 'edit'
+type McpSettingsView = 'list' | 'add' | 'edit'
 
 export interface McpSettingsPageProps {
   onDirtyChange?: (dirty: boolean) => void
@@ -34,9 +32,10 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
   )
   const [editorDirty, setEditorDirty] = useState(false)
   const [pendingDelete, setPendingDelete] = useState<McpServerListItem | null>(null)
+  const [pendingEnableConfirmation, setPendingEnableConfirmation] =
+    useState<McpServerListItem | null>(null)
   const pageTitleRef = useRef<HTMLHeadingElement | null>(null)
   const loadDetails = management.loadDetails
-  const loadTools = management.loadTools
 
   const selectedListItem = useMemo(
     () =>
@@ -55,10 +54,6 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
     selectedDetails.configDigest === selectedListItem.configDigest
       ? selectedDetails
       : null
-  const selectedCatalog = selectedServerId
-    ? management.catalogsById.get(selectedServerId)
-    : undefined
-
   useEffect(() => {
     onDirtyChange?.(editorDirty)
   }, [editorDirty, onDirtyChange])
@@ -66,7 +61,7 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
 
   useEffect(() => {
     if (
-      (view === 'detail' || view === 'edit') &&
+      view === 'edit' &&
       selectedListItem &&
       (!selectedDetails ||
         selectedDetails.registryRevision !== selectedListItem.registryRevision ||
@@ -75,21 +70,18 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
     ) {
       void loadDetails(selectedListItem).catch((error: unknown) => {
         showSafeError(error, showToast, t)
+        setEditingServerSnapshot(null)
+        setSelectedServerId(null)
+        setView('list')
       })
     }
   }, [loadDetails, selectedDetails, selectedListItem, showToast, t, view])
 
   useEffect(() => {
-    if (
-      view === 'detail' &&
-      selectedListItem &&
-      (!selectedCatalog || selectedCatalog.status === 'idle')
-    ) {
-      void loadTools(selectedListItem).catch((error: unknown) => {
-        showSafeError(error, showToast, t)
-      })
+    if (view === 'edit' && !editingServerSnapshot && currentSelectedDetails) {
+      setEditingServerSnapshot(currentSelectedDetails)
     }
-  }, [loadTools, selectedCatalog, selectedListItem, showToast, t, view])
+  }, [currentSelectedDetails, editingServerSnapshot, view])
 
   useEffect(() => {
     if (
@@ -106,10 +98,18 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
     }
   }, [editorDirty, management.state.status, selectedListItem, selectedServerId, view])
 
-  const openServer = (server: McpServerListItem) => {
-    setEditingServerSnapshot(null)
+  const editServer = (server: McpServerListItem) => {
     setSelectedServerId(server.serverId)
-    setView('detail')
+    const cached = management.detailsById.get(server.serverId)
+    setEditingServerSnapshot(
+      cached &&
+        cached.registryRevision === server.registryRevision &&
+        cached.configEpoch === server.configEpoch &&
+        cached.configDigest === server.configDigest
+        ? cached
+        : null
+    )
+    setView('edit')
   }
 
   const runServerOperation = useCallback(
@@ -123,13 +123,33 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
     [showToast, t]
   )
 
+  const requestServerEnabledChange = (server: McpServerListItem, enabled: boolean) => {
+    if (enabled && server.launchAuthorizationState !== 'authorized') {
+      setPendingEnableConfirmation(server)
+      return
+    }
+    void runServerOperation(() => management.setServerEnabled(server, enabled))
+  }
+
+  const confirmEnable = async () => {
+    const server = pendingEnableConfirmation
+    if (!server) return
+    try {
+      await management.setServerEnabled(server, true)
+      setPendingEnableConfirmation(null)
+    } catch (error) {
+      showSafeError(error, showToast, t)
+      setPendingEnableConfirmation(null)
+    }
+  }
+
   const submitAdd = async (draft: McpServerDraft) => {
     try {
       const server = await management.addServer(draft)
       if (!server) return
-      setSelectedServerId(server.serverId)
+      setSelectedServerId(null)
       setEditorDirty(false)
-      setView('detail')
+      setView('list')
       showToast(t('mcp.toast.savedDisabled'), { durationMs: 3200 })
     } catch (error) {
       showSafeError(error, showToast, t)
@@ -156,23 +176,9 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
       if (!server) return
       setEditorDirty(false)
       setEditingServerSnapshot(null)
-      setView('detail')
-      showToast(
-        server.launchAuthorizationState === 'authorized'
-          ? t('mcp.toast.saved')
-          : t('mcp.toast.savedNeedsAuthorization'),
-        { durationMs: 3200 }
-      )
-    } catch (error) {
-      showSafeError(error, showToast, t)
-    }
-  }
-
-  const authorizeSelected = async () => {
-    if (!selectedListItem) return
-    try {
-      const result = await management.authorizeLaunch(selectedListItem)
-      if (result) showToast(t('mcp.toast.launchAuthorized'), { durationMs: 3200 })
+      setSelectedServerId(null)
+      setView('list')
+      showToast(t('mcp.toast.saved'), { durationMs: 3200 })
     } catch (error) {
       showSafeError(error, showToast, t)
     }
@@ -185,6 +191,8 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
       await management.deleteServer(server)
       setPendingDelete(null)
       if (selectedServerId === server.serverId) {
+        setEditorDirty(false)
+        setEditingServerSnapshot(null)
         setSelectedServerId(null)
         setView('list')
       }
@@ -220,7 +228,7 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
               onRefresh={() => void management.refresh()}
             />
             <button
-              className="mcp-primary-button"
+              className="mcp-secondary-button"
               onClick={() => {
                 setSelectedServerId(null)
                 setView('add')
@@ -285,16 +293,8 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
               </div>
             ) : (
               <McpServerList
-                onDelete={setPendingDelete}
-                onOpen={openServer}
-                onRestart={(server) =>
-                  void runServerOperation(() => management.restartServer(server))
-                }
-                onSetEnabled={(server, enabled) =>
-                  void runServerOperation(() =>
-                    enabled ? management.enableServer(server) : management.disableServer(server)
-                  )
-                }
+                onEdit={editServer}
+                onSetEnabled={requestServerEnabledChange}
                 pendingOperations={management.pendingOperations}
                 servers={output.servers}
               />
@@ -305,7 +305,6 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
       {view === 'add' && (
         <>
           <h2 className="mcp-subpage-title">{t('mcp.add.title')}</h2>
-          <p className="mcp-subpage-description">{t('mcp.add.description')}</p>
           <McpServerEditor
             busy={management.isAdding}
             onCancel={() => {
@@ -323,15 +322,16 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
       {view === 'edit' && editingServerSnapshot && (
         <>
           <h2 className="mcp-subpage-title">{t('mcp.edit.title')}</h2>
-          <p className="mcp-subpage-description">{t('mcp.edit.description')}</p>
           <McpServerEditor
             busy={Boolean(management.pendingOperations.get(editingServerSnapshot.serverId))}
             initial={editingServerSnapshot}
             onCancel={() => {
               setEditorDirty(false)
               setEditingServerSnapshot(null)
-              setView('detail')
+              setSelectedServerId(null)
+              setView('list')
             }}
+            onDelete={() => setPendingDelete(selectedListItem)}
             onDirtyChange={setEditorDirty}
             onSelectExecutable={management.selectExecutable}
             onSelectWorkingDirectory={management.selectWorkingDirectory}
@@ -340,67 +340,11 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
         </>
       )}
 
-      {(view === 'detail' || (view === 'edit' && !editingServerSnapshot)) &&
-        selectedListItem &&
-        !currentSelectedDetails && (
-          <div className="mcp-page-state" role="status">
-            <LoaderCircle aria-hidden="true" className="mcp-spinner" />
-            {t('mcp.detail.loading')}
-          </div>
-        )}
-
-      {view === 'detail' && selectedListItem && currentSelectedDetails && (
-        <>
-          <McpServerDetail
-            onAuthorize={() => void authorizeSelected()}
-            onBack={() => {
-              setSelectedServerId(null)
-              setView('list')
-            }}
-            onEdit={() => {
-              setEditingServerSnapshot(currentSelectedDetails)
-              setView('edit')
-            }}
-            onRestart={() =>
-              void runServerOperation(() => management.restartServer(selectedListItem))
-            }
-            onSetEnabled={(enabled) =>
-              void runServerOperation(() =>
-                enabled
-                  ? management.enableServer(selectedListItem)
-                  : management.disableServer(selectedListItem)
-              )
-            }
-            pending={management.pendingOperations.get(currentSelectedDetails.serverId)}
-            server={currentSelectedDetails}
-          />
-          <McpToolCatalog
-            catalog={
-              selectedCatalog ?? {
-                errorMessage: null,
-                isRefreshing: false,
-                status: 'idle',
-                tools: []
-              }
-            }
-            onLoad={() =>
-              void management.loadTools(selectedListItem).catch((error: unknown) => {
-                showSafeError(error, showToast, t)
-              })
-            }
-            onLoadMore={() =>
-              void management.loadTools(selectedListItem, true).catch((error: unknown) => {
-                showSafeError(error, showToast, t)
-              })
-            }
-            onRefresh={() =>
-              void management.refreshCatalog(selectedListItem).catch((error: unknown) => {
-                showSafeError(error, showToast, t)
-              })
-            }
-            server={selectedListItem}
-          />
-        </>
+      {view === 'edit' && selectedListItem && !editingServerSnapshot && (
+        <div className="mcp-page-state" role="status">
+          <LoaderCircle aria-hidden="true" className="mcp-spinner" />
+          {t('mcp.detail.loading')}
+        </div>
       )}
 
       {pendingDelete && (
@@ -412,6 +356,22 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
           onCancel={() => setPendingDelete(null)}
           onConfirm={confirmDelete}
           title={`${t('mcp.delete.title')}: ${toSafeMcpDisplayText(pendingDelete.displayName, 256)}`}
+        />
+      )}
+
+      {pendingEnableConfirmation && (
+        <ConfirmationDialog
+          cancelLabel={t('mcp.actions.cancel')}
+          confirmLabel={t('mcp.actions.enable')}
+          confirmVariant="primary"
+          description={t('mcp.authorization.confirmDescription')}
+          fallbackFocusRef={pageTitleRef}
+          onCancel={() => setPendingEnableConfirmation(null)}
+          onConfirm={confirmEnable}
+          title={t('mcp.authorization.confirmTitle').replace(
+            '{serverName}',
+            toSafeMcpDisplayText(pendingEnableConfirmation.displayName, 256)
+          )}
         />
       )}
     </article>

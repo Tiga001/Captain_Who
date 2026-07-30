@@ -99,6 +99,206 @@ fn emit_mcp_lifecycle_event(
     }
 }
 
+struct McpInvocationSettlement {
+    tool_result: AgentToolResult,
+    state: AgentMcpToolInvocationState,
+    outcome: AgentMcpToolInvocationOutcome,
+    error_code: Option<String>,
+    dispatch_certainty: AgentMcpDispatchCertainty,
+    output_truncated: bool,
+}
+
+fn settle_mcp_invocation(
+    approval: &mycopilot_core::AgentMcpToolApproval,
+    invocation_result: AgentResult<mycopilot_core::McpToolInvocationResult>,
+    failed_before_dispatch: bool,
+) -> McpInvocationSettlement {
+    let (
+        tool_result,
+        state,
+        outcome,
+        error_code,
+        dispatch_certainty,
+        output_truncated,
+    ) = match invocation_result {
+        Ok(result) => {
+            let is_error = result.is_error;
+            match mcp_tool_result_from_approved_invocation(approval, &result) {
+                Ok(tool_result) => {
+                    let output_truncated =
+                        result.truncated_at_source || mcp_tool_result_output_truncated(&tool_result);
+                    (
+                        tool_result,
+                        AgentMcpToolInvocationState::Completed,
+                        if is_error {
+                            AgentMcpToolInvocationOutcome::ToolError
+                        } else {
+                            AgentMcpToolInvocationOutcome::Succeeded
+                        },
+                        is_error.then(|| "mcp.tool_error".to_string()),
+                        AgentMcpDispatchCertainty::ResponseReceived,
+                        output_truncated,
+                    )
+                }
+                Err(error) => (
+                    failed_mcp_tool_result(
+                        approval,
+                        "mcp.result_projection_failed",
+                        "The MCP response could not be projected safely.",
+                        AgentMcpDispatchCertainty::ResponseReceived,
+                    ),
+                    AgentMcpToolInvocationState::Failed,
+                    AgentMcpToolInvocationOutcome::TransportError,
+                    Some(
+                        error
+                            .code()
+                            .unwrap_or("mcp.result_projection_failed")
+                            .to_string(),
+                    ),
+                    AgentMcpDispatchCertainty::ResponseReceived,
+                    result.truncated_at_source,
+                ),
+            }
+        }
+        Err(error) if error.code() == Some("mcp.tool_outcome_unknown") => (
+            failed_mcp_tool_result(
+                approval,
+                "mcp.tool_outcome_unknown",
+                "The MCP invocation may have reached the server, but its outcome is unknown. Check the authoritative system before deciding whether to try again.",
+                AgentMcpDispatchCertainty::PossiblyDispatched,
+            ),
+            AgentMcpToolInvocationState::OutcomeUnknown,
+            AgentMcpToolInvocationOutcome::OutcomeUnknown,
+            Some("mcp.tool_outcome_unknown".to_string()),
+            AgentMcpDispatchCertainty::PossiblyDispatched,
+            false,
+        ),
+        Err(error) if error.code() == Some("mcp.tool_output_too_large") => (
+            failed_mcp_tool_result(
+                approval,
+                "mcp.tool_output_too_large",
+                "The MCP server returned a Tool response that exceeded Host output limits.",
+                AgentMcpDispatchCertainty::ResponseReceived,
+            ),
+            AgentMcpToolInvocationState::Failed,
+            AgentMcpToolInvocationOutcome::OutputTooLarge,
+            Some("mcp.tool_output_too_large".to_string()),
+            AgentMcpDispatchCertainty::ResponseReceived,
+            true,
+        ),
+        Err(error) if error.code() == Some("mcp.approval_payload_expired") => (
+            failed_mcp_tool_result(
+                approval,
+                "mcp.approval_payload_expired",
+                "The MCP invocation payload expired before dispatch.",
+                AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            ),
+            AgentMcpToolInvocationState::Expired,
+            AgentMcpToolInvocationOutcome::Expired,
+            Some("mcp.approval_payload_expired".to_string()),
+            AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            false,
+        ),
+        Err(error)
+            if matches!(
+                error.code(),
+                Some("mcp.approval_payload_unavailable" | "mcp.approval_payload_store_unavailable")
+            ) =>
+        {
+            (
+                failed_mcp_tool_result(
+                    approval,
+                    "mcp.approval_payload_unavailable",
+                    "The sealed MCP invocation payload is unavailable.",
+                    AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                ),
+                AgentMcpToolInvocationState::PayloadUnavailable,
+                AgentMcpToolInvocationOutcome::PayloadUnavailable,
+                Some("mcp.approval_payload_unavailable".to_string()),
+                AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                false,
+            )
+        }
+        Err(error) if error.code() == Some("mcp.approval_policy_denied") => (
+            failed_mcp_tool_result(
+                approval,
+                "mcp.approval_policy_denied",
+                "Host policy denied the MCP invocation.",
+                AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            ),
+            AgentMcpToolInvocationState::PolicyDenied,
+            AgentMcpToolInvocationOutcome::PolicyDenied,
+            Some("mcp.approval_policy_denied".to_string()),
+            AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            false,
+        ),
+        Err(error) if failed_before_dispatch && error.is_cancelled() => (
+            failed_mcp_tool_result(
+                approval,
+                "mcp.tool_cancelled_before_dispatch",
+                "The MCP invocation was cancelled before dispatch.",
+                AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            ),
+            AgentMcpToolInvocationState::Cancelled,
+            AgentMcpToolInvocationOutcome::Cancelled,
+            Some("mcp.tool_cancelled".to_string()),
+            AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            false,
+        ),
+        Err(error) => {
+            let dispatch_certainty = if failed_before_dispatch {
+                AgentMcpDispatchCertainty::DefinitelyNotDispatched
+            } else {
+                mcp_agent_error_dispatch_certainty(&error)
+            };
+            if dispatch_certainty == AgentMcpDispatchCertainty::PossiblyDispatched {
+                (
+                    failed_mcp_tool_result(
+                        approval,
+                        "mcp.tool_outcome_unknown",
+                        "The MCP invocation may have reached the server, but its outcome is unknown. Check the authoritative system before deciding whether to try again.",
+                        dispatch_certainty,
+                    ),
+                    AgentMcpToolInvocationState::OutcomeUnknown,
+                    AgentMcpToolInvocationOutcome::OutcomeUnknown,
+                    Some("mcp.tool_outcome_unknown".to_string()),
+                    dispatch_certainty,
+                    false,
+                )
+            } else {
+                let outcome = if error.code() == Some("mcp.tool_timeout")
+                    && dispatch_certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
+                {
+                    AgentMcpToolInvocationOutcome::TimedOut
+                } else {
+                    AgentMcpToolInvocationOutcome::TransportError
+                };
+                (
+                    failed_mcp_tool_result(
+                        approval,
+                        error.code().unwrap_or("mcp.tool_failed"),
+                        "The MCP invocation failed without a server Tool response.",
+                        dispatch_certainty,
+                    ),
+                    AgentMcpToolInvocationState::Failed,
+                    outcome,
+                    Some(error.code().unwrap_or("mcp.tool_failed").to_string()),
+                    dispatch_certainty,
+                    false,
+                )
+            }
+        }
+    };
+    McpInvocationSettlement {
+        tool_result,
+        state,
+        outcome,
+        error_code,
+        dispatch_certainty,
+        output_truncated,
+    }
+}
+
 impl AgentService {
     pub(in crate::application::agent) fn execute_office_operation(
         &self,
@@ -512,6 +712,219 @@ impl AgentService {
         })
     }
 
+    pub(in crate::application::agent) async fn execute_auto_mcp_tool_action(
+        &self,
+        context: &AutoApprovedActionContext,
+        approval: Box<mycopilot_core::AgentMcpToolApproval>,
+        cancellation: AgentCancellationToken,
+    ) -> AgentResult<AgentToolResult> {
+        if approval.approval_mode != mycopilot_core::AgentMcpApprovalMode::Auto
+            || approval.call.approval_status != AgentApprovalStatus::Approved
+            || approval.identity.run_id != context.run_id
+            || approval.identity.call_id != approval.call.id
+            || approval.identity.provenance.model_tool_name != approval.call.tool
+        {
+            self.invalidate_mcp_pending_payload(&AgentProposedAction::McpToolCall {
+                approval: approval.clone(),
+            });
+            return Err(AgentError::structured(
+                "mcp.auto_invocation_not_authorized",
+                "The MCP invocation is not authorized for automatic execution.",
+                serde_json::json!({
+                    "type": "mcp_tool",
+                    "code": "autoInvocationNotAuthorized",
+                    "retryable": false,
+                    "dispatchCertainty": "definitely_not_dispatched",
+                }),
+            ));
+        }
+        let Some(invoker) = self.mcp_tool_invoker.clone() else {
+            self.invalidate_mcp_pending_payload(&AgentProposedAction::McpToolCall {
+                approval: approval.clone(),
+            });
+            return Err(AgentError::structured(
+                "mcp.runtime_unavailable",
+                "The MCP invocation runtime is unavailable.",
+                serde_json::json!({
+                    "type": "mcp_tool",
+                    "code": "runtimeUnavailable",
+                    "retryable": false,
+                    "dispatchCertainty": "definitely_not_dispatched",
+                }),
+            ));
+        };
+        if self.is_agent_input_scope_deleting(&context.agent_input) {
+            self.invalidate_mcp_pending_payload(&AgentProposedAction::McpToolCall {
+                approval: approval.clone(),
+            });
+            return Err(AgentError::cancelled());
+        }
+
+        let action = AgentProposedAction::McpToolCall {
+            approval: approval.clone(),
+        };
+        let mut journal = match self.prepare_auto_mcp_action_journal(
+            &context.run_id,
+            context.conversation_id.as_deref(),
+            context.assistant_message_id.as_deref(),
+            action.clone(),
+            context.agent_input.clone(),
+        ) {
+            Ok(record) => record,
+            Err(_) => {
+                self.invalidate_mcp_pending_payload(&action);
+                return Err(AgentError::structured(
+                    "mcp.auto_dispatch_journal_unavailable",
+                    "The MCP invocation could not establish its durable dispatch boundary.",
+                    serde_json::json!({
+                        "type": "mcp_tool",
+                        "code": "autoDispatchJournalUnavailable",
+                        "retryable": false,
+                        "dispatchCertainty": "definitely_not_dispatched",
+                    }),
+                ));
+            }
+        };
+        let preflight_result = if cancellation.is_cancelled() {
+            Err(AgentError::cancelled())
+        } else {
+            invoker.revalidate_approved(&approval)
+        };
+        if preflight_result.is_err() {
+            self.invalidate_mcp_pending_payload(&action);
+        }
+
+        let started_at = Instant::now();
+        let failed_before_dispatch = preflight_result.is_err();
+        if failed_before_dispatch {
+            let invocation_result = preflight_result.map(|()| unreachable!());
+            let settlement =
+                settle_mcp_invocation(&approval, invocation_result, failed_before_dispatch);
+            let terminal_outcome = if settlement.state == AgentMcpToolInvocationState::Cancelled {
+                McpAutoActionJournalTerminalOutcome::Cancelled
+            } else {
+                McpAutoActionJournalTerminalOutcome::Failed
+            };
+            let _ = self.settle_auto_mcp_action_journal(&journal, terminal_outcome);
+            if let Some(notifications) = context.notifications.as_ref() {
+                let elapsed_ms =
+                    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+                emit_mcp_lifecycle_event(
+                    notifications,
+                    &context.run_id,
+                    &approval,
+                    McpToolInvocationEventUpdate {
+                        state: settlement.state,
+                        dispatch_certainty: settlement.dispatch_certainty,
+                        outcome: Some(settlement.outcome),
+                        is_error: mcp_lifecycle_is_error(settlement.outcome),
+                        error_code: settlement.error_code.as_deref(),
+                        duration_ms: Some(elapsed_ms),
+                        output_truncated: settlement.output_truncated,
+                    },
+                );
+            }
+            return Ok(settlement.tool_result);
+        }
+
+        if self.claim_auto_mcp_dispatch(&mut journal).is_err() {
+            self.invalidate_mcp_pending_payload(&action);
+            let _ = self.settle_auto_mcp_action_journal(
+                &journal,
+                McpAutoActionJournalTerminalOutcome::Failed,
+            );
+            return Err(AgentError::structured(
+                "mcp.auto_dispatch_claim_failed",
+                "The MCP invocation lost its durable dispatch claim and was not sent.",
+                serde_json::json!({
+                    "type": "mcp_tool",
+                    "code": "autoDispatchClaimFailed",
+                    "retryable": false,
+                    "dispatchCertainty": "definitely_not_dispatched",
+                }),
+            ));
+        }
+
+        if let Some(notifications) = context.notifications.as_ref() {
+            emit_mcp_lifecycle_event(
+                notifications,
+                &context.run_id,
+                &approval,
+                McpToolInvocationEventUpdate {
+                    state: AgentMcpToolInvocationState::Dispatching,
+                    dispatch_certainty: AgentMcpDispatchCertainty::PossiblyDispatched,
+                    outcome: None,
+                    is_error: None,
+                    error_code: None,
+                    duration_ms: None,
+                    output_truncated: false,
+                },
+            );
+        }
+
+        let invocation_result = invoker
+            .invoke_approved(
+                McpApprovedToolInvocation {
+                    approval: approval.as_ref().clone(),
+                },
+                cancellation,
+            )
+            .await;
+        // The payload is single-use. `invoke_approved` consumes it before dispatch; this delete
+        // also closes every fail-before-consume path without creating a replayable payload.
+        self.invalidate_mcp_pending_payload(&action);
+
+        let mut settlement = settle_mcp_invocation(&approval, invocation_result, false);
+        let journal_outcome = match settlement.state {
+            AgentMcpToolInvocationState::Completed => {
+                McpAutoActionJournalTerminalOutcome::Completed
+            }
+            AgentMcpToolInvocationState::OutcomeUnknown => {
+                McpAutoActionJournalTerminalOutcome::OutcomeUnknown
+            }
+            _ => McpAutoActionJournalTerminalOutcome::Failed,
+        };
+        if self
+            .settle_auto_mcp_action_journal(&journal, journal_outcome)
+            .is_err()
+        {
+            // A durable terminal receipt could not be proven. Never expose the transient response
+            // as authoritative: leave the `executing` row for startup reconciliation and report
+            // outcome-unknown without retrying the external call.
+            settlement = McpInvocationSettlement {
+                tool_result: failed_mcp_tool_result(
+                    &approval,
+                    "mcp.tool_outcome_unknown",
+                    "The MCP invocation may have completed, but its durable result boundary is unknown. Check the authoritative system before deciding whether to try again.",
+                    AgentMcpDispatchCertainty::PossiblyDispatched,
+                ),
+                state: AgentMcpToolInvocationState::OutcomeUnknown,
+                outcome: AgentMcpToolInvocationOutcome::OutcomeUnknown,
+                error_code: Some("mcp.tool_outcome_unknown".to_string()),
+                dispatch_certainty: AgentMcpDispatchCertainty::PossiblyDispatched,
+                output_truncated: false,
+            };
+        }
+        if let Some(notifications) = context.notifications.as_ref() {
+            let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            emit_mcp_lifecycle_event(
+                notifications,
+                &context.run_id,
+                &approval,
+                McpToolInvocationEventUpdate {
+                    state: settlement.state,
+                    dispatch_certainty: settlement.dispatch_certainty,
+                    outcome: Some(settlement.outcome),
+                    is_error: mcp_lifecycle_is_error(settlement.outcome),
+                    error_code: settlement.error_code.as_deref(),
+                    duration_ms: Some(elapsed_ms),
+                    output_truncated: settlement.output_truncated,
+                },
+            );
+        }
+        Ok(settlement.tool_result)
+    }
+
     pub(in crate::application::agent) async fn run_mcp_tool_execution(
         &self,
         mut record: PendingActionRecord,
@@ -618,188 +1031,14 @@ impl AgentService {
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
         let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-        let (
-            tool_result,
-            invocation_state,
-            invocation_outcome,
-            event_error_code,
-            dispatch_certainty,
-            output_truncated,
-        ) =
-            match invocation_result {
-                Ok(result) => {
-                    let is_error = result.is_error;
-                    match mcp_tool_result_from_approved_invocation(&approval, &result) {
-                        Ok(tool_result) => {
-                            let output_truncated =
-                                result.truncated_at_source
-                                    || mcp_tool_result_output_truncated(&tool_result);
-                            (
-                                tool_result,
-                                AgentMcpToolInvocationState::Completed,
-                                if is_error {
-                                    AgentMcpToolInvocationOutcome::ToolError
-                                } else {
-                                    AgentMcpToolInvocationOutcome::Succeeded
-                                },
-                                is_error.then(|| "mcp.tool_error".to_string()),
-                                AgentMcpDispatchCertainty::ResponseReceived,
-                                output_truncated,
-                            )
-                        }
-                        Err(error) => (
-                            failed_mcp_tool_result(
-                                &approval,
-                                "mcp.result_projection_failed",
-                                "The MCP response could not be projected safely.",
-                                AgentMcpDispatchCertainty::ResponseReceived,
-                            ),
-                            AgentMcpToolInvocationState::Failed,
-                            AgentMcpToolInvocationOutcome::TransportError,
-                            Some(
-                                error
-                                    .code()
-                                    .unwrap_or("mcp.result_projection_failed")
-                                    .to_string(),
-                            ),
-                            AgentMcpDispatchCertainty::ResponseReceived,
-                            result.truncated_at_source,
-                        ),
-                    }
-                }
-                Err(error) if error.code() == Some("mcp.tool_outcome_unknown") => (
-                    failed_mcp_tool_result(
-                        &approval,
-                        "mcp.tool_outcome_unknown",
-                        "The MCP invocation may have reached the server, but its outcome is unknown. Check the authoritative system before deciding whether to try again.",
-                        AgentMcpDispatchCertainty::PossiblyDispatched,
-                    ),
-                    AgentMcpToolInvocationState::OutcomeUnknown,
-                    AgentMcpToolInvocationOutcome::OutcomeUnknown,
-                    Some("mcp.tool_outcome_unknown".to_string()),
-                    AgentMcpDispatchCertainty::PossiblyDispatched,
-                    false,
-                ),
-                Err(error) if error.code() == Some("mcp.tool_output_too_large") => (
-                    failed_mcp_tool_result(
-                        &approval,
-                        "mcp.tool_output_too_large",
-                        "The MCP server returned a Tool response that exceeded Host output limits.",
-                        AgentMcpDispatchCertainty::ResponseReceived,
-                    ),
-                    AgentMcpToolInvocationState::Failed,
-                    AgentMcpToolInvocationOutcome::OutputTooLarge,
-                    Some("mcp.tool_output_too_large".to_string()),
-                    AgentMcpDispatchCertainty::ResponseReceived,
-                    true,
-                ),
-                Err(error) if error.code() == Some("mcp.approval_payload_expired") => (
-                    failed_mcp_tool_result(
-                        &approval,
-                        "mcp.approval_payload_expired",
-                        "The MCP approval expired before dispatch.",
-                        AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    ),
-                    AgentMcpToolInvocationState::Expired,
-                    AgentMcpToolInvocationOutcome::Expired,
-                    Some("mcp.approval_payload_expired".to_string()),
-                    AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    false,
-                ),
-                Err(error)
-                    if matches!(
-                        error.code(),
-                        Some(
-                            "mcp.approval_payload_unavailable"
-                                | "mcp.approval_payload_store_unavailable"
-                        )
-                    ) =>
-                {
-                    (
-                        failed_mcp_tool_result(
-                            &approval,
-                            "mcp.approval_payload_unavailable",
-                            "The sealed MCP approval payload is unavailable.",
-                            AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                        ),
-                        AgentMcpToolInvocationState::PayloadUnavailable,
-                        AgentMcpToolInvocationOutcome::PayloadUnavailable,
-                        Some("mcp.approval_payload_unavailable".to_string()),
-                        AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                        false,
-                    )
-                }
-                Err(error) if error.code() == Some("mcp.approval_policy_denied") => (
-                    failed_mcp_tool_result(
-                        &approval,
-                        "mcp.approval_policy_denied",
-                        "Host policy denied the MCP invocation.",
-                        AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    ),
-                    AgentMcpToolInvocationState::PolicyDenied,
-                    AgentMcpToolInvocationOutcome::PolicyDenied,
-                    Some("mcp.approval_policy_denied".to_string()),
-                    AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    false,
-                ),
-                Err(error) if failed_before_dispatch && error.is_cancelled() => (
-                    failed_mcp_tool_result(
-                        &approval,
-                        "mcp.tool_cancelled_before_dispatch",
-                        "The MCP invocation was cancelled before dispatch.",
-                        AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    ),
-                    AgentMcpToolInvocationState::Cancelled,
-                    AgentMcpToolInvocationOutcome::Cancelled,
-                    Some("mcp.tool_cancelled".to_string()),
-                    AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    false,
-                ),
-                Err(error) => {
-                    let dispatch_certainty = if failed_before_dispatch {
-                        AgentMcpDispatchCertainty::DefinitelyNotDispatched
-                    } else {
-                        mcp_agent_error_dispatch_certainty(&error)
-                    };
-                    if dispatch_certainty == AgentMcpDispatchCertainty::PossiblyDispatched {
-                        (
-                            failed_mcp_tool_result(
-                                &approval,
-                                "mcp.tool_outcome_unknown",
-                                "The MCP invocation may have reached the server, but its outcome is unknown. Check the authoritative system before deciding whether to try again.",
-                                dispatch_certainty,
-                            ),
-                            AgentMcpToolInvocationState::OutcomeUnknown,
-                            AgentMcpToolInvocationOutcome::OutcomeUnknown,
-                            Some("mcp.tool_outcome_unknown".to_string()),
-                            dispatch_certainty,
-                            false,
-                        )
-                    } else {
-                        let invocation_outcome = if error.code() == Some("mcp.tool_timeout")
-                            && dispatch_certainty
-                                == AgentMcpDispatchCertainty::DefinitelyNotDispatched
-                        {
-                            AgentMcpToolInvocationOutcome::TimedOut
-                        } else {
-                            AgentMcpToolInvocationOutcome::TransportError
-                        };
-                        (
-                            failed_mcp_tool_result(
-                                &approval,
-                                error.code().unwrap_or("mcp.tool_failed"),
-                                "The MCP invocation failed without a server Tool response.",
-                                dispatch_certainty,
-                            ),
-                            AgentMcpToolInvocationState::Failed,
-                            invocation_outcome,
-                            Some(error.code().unwrap_or("mcp.tool_failed").to_string()),
-                            dispatch_certainty,
-                            false,
-                        )
-                    }
-                }
-            };
+        let settlement =
+            settle_mcp_invocation(&approval, invocation_result, failed_before_dispatch);
+        let tool_result = settlement.tool_result;
+        let invocation_state = settlement.state;
+        let invocation_outcome = settlement.outcome;
+        let event_error_code = settlement.error_code;
+        let dispatch_certainty = settlement.dispatch_certainty;
+        let output_truncated = settlement.output_truncated;
 
         call.approval_status = AgentApprovalStatus::Approved;
         let mut agent_input = record.agent_input.clone();

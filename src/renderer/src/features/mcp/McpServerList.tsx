@@ -1,11 +1,4 @@
-import {
-  AlertTriangle,
-  ChevronRight,
-  LoaderCircle,
-  RefreshCw,
-  RotateCw,
-  Trash2
-} from 'lucide-react'
+import { RefreshCw, Settings2 } from 'lucide-react'
 import type { McpServerListItem } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { McpServerStatusBadge } from './McpServerStatusBadge'
@@ -13,18 +6,14 @@ import { toSafeMcpDisplayText } from './mcpSafeDisplay'
 import type { McpServerPendingOperation } from './useMcpManagement'
 
 interface McpServerListProps {
-  onDelete: (server: McpServerListItem) => void
-  onOpen: (server: McpServerListItem) => void
-  onRestart: (server: McpServerListItem) => void
+  onEdit: (server: McpServerListItem) => void
   onSetEnabled: (server: McpServerListItem, enabled: boolean) => void
   pendingOperations: ReadonlyMap<string, McpServerPendingOperation>
   servers: readonly McpServerListItem[]
 }
 
 export function McpServerList({
-  onDelete,
-  onOpen,
-  onRestart,
+  onEdit,
   onSetEnabled,
   pendingOperations,
   servers
@@ -42,63 +31,21 @@ export function McpServerList({
             className="mcp-server-row"
             key={server.serverId}
           >
-            <button
-              aria-label={t('mcp.actions.openDetails')}
-              className="mcp-server-row__primary"
-              onClick={() => onOpen(server)}
-              type="button"
-            >
-              <span className="mcp-server-row__identity">
-                <span className="mcp-server-row__name">{displayName}</span>
-                <span className="mcp-transport-badge">STDIO</span>
-                <span className="mcp-source-badge">{t('mcp.source.userManual')}</span>
-              </span>
-              <span className="mcp-server-row__summary">
-                <McpServerStatusBadge state={server.state} />
-                <span>{server.enabled ? t('mcp.enabled') : t('mcp.disabled')}</span>
-                <span>
-                  {t('mcp.tools.count')}: {server.toolCount}
-                </span>
-                {server.activeCallCount > 0 && (
-                  <span>
-                    {t('mcp.activeCalls')}: {server.activeCallCount}
-                  </span>
-                )}
-              </span>
-              {server.lastError && (
-                <span className="mcp-server-row__error" role="status">
-                  <AlertTriangle aria-hidden="true" />
-                  {toSafeMcpDisplayText(server.lastError.message)}
-                </span>
-              )}
-              <ChevronRight aria-hidden="true" className="mcp-server-row__chevron" />
-            </button>
+            <div className="mcp-server-row__primary">
+              <span className="mcp-server-row__name">{displayName}</span>
+              <McpServerStatusBadge state={server.state} />
+            </div>
 
             <div className="mcp-server-row__controls">
               <button
-                aria-label={t('mcp.actions.restart')}
+                aria-label={`${t('mcp.actions.edit')}: ${displayName}`}
                 className="mcp-icon-button"
-                disabled={Boolean(pending) || !server.enabled}
-                onClick={() => onRestart(server)}
-                type="button"
-              >
-                <RotateCw aria-hidden="true" />
-              </button>
-              <button
-                aria-label={t('mcp.actions.delete')}
-                className="mcp-icon-button mcp-icon-button--danger"
                 disabled={Boolean(pending)}
-                onClick={() => onDelete(server)}
+                onClick={() => onEdit(server)}
                 type="button"
               >
-                <Trash2 aria-hidden="true" />
+                <Settings2 aria-hidden="true" />
               </button>
-              {pending && (
-                <span className="mcp-row-pending" role="status">
-                  <LoaderCircle aria-hidden="true" />
-                  <span className="mcp-visually-hidden">{t('mcp.operation.pending')}</span>
-                </span>
-              )}
               <button
                 aria-checked={server.enabled}
                 aria-label={server.enabled ? t('mcp.actions.disable') : t('mcp.actions.enable')}

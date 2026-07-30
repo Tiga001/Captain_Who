@@ -178,9 +178,81 @@ pub(super) fn project_mcp_tool_call(
     // per-tool persistence policy. Server-authored schemas and field names cannot prove that a
     // scalar is safe to retain in traces, events, model history, or approval checkpoints.
     projected.args = Value::Object(Map::new());
-    projected.approval_status = AgentApprovalStatus::Required;
     projected.reason = None;
     projected
+}
+
+/// Separates the Host-only display reason from the exact arguments sent to the MCP Server.
+///
+/// The reserved field is injected only into the Provider-facing schema. It is required, bounded,
+/// removed before digest/sealing/schema validation, and never reaches the external Server.
+pub(super) fn split_model_mcp_arguments(arguments: &Value) -> AgentResult<(Value, String)> {
+    let Value::Object(mut server_arguments) = arguments.clone() else {
+        return Err(AgentError::structured(
+            "mcp.invalid_tool_arguments",
+            "MCP tool arguments must be a JSON object.",
+            json!({
+                "type": "mcp_tool_arguments",
+                "code": "rootMustBeObject",
+            }),
+        ));
+    };
+    let reason = match server_arguments.remove(MCP_CALL_REASON_FIELD) {
+        Some(Value::String(reason)) => reason,
+        Some(_) => {
+            return Err(AgentError::structured(
+                "mcp.call_reason_required",
+                "The MCP Tool Call reason must be a string.",
+                json!({
+                    "type": "mcp_tool_arguments",
+                    "code": "callReasonRequired",
+                    "retryable": false,
+                }),
+            ));
+        }
+        // Compatibility fallback for providers that omit a newly required schema property. This
+        // text is Host-owned and reveals no argument value.
+        None => "Use this MCP tool to complete the current request.".to_string(),
+    };
+    let reason = reason
+        .chars()
+        .map(|character| {
+            if is_unsafe_mcp_display_character(character) {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let reason = truncate_utf8(reason.trim(), MAX_MCP_CALL_REASON_BYTES);
+    if reason.is_empty() {
+        return Err(AgentError::structured(
+            "mcp.call_reason_required",
+            "The MCP Tool Call reason must not be empty.",
+            json!({
+                "type": "mcp_tool_arguments",
+                "code": "callReasonRequired",
+                "retryable": false,
+            }),
+        ));
+    }
+    let server_arguments = Value::Object(server_arguments);
+    validate_mcp_argument_shape(&server_arguments)?;
+    Ok((server_arguments, reason))
+}
+
+fn is_unsafe_mcp_display_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{feff}'
+        )
 }
 
 /// Computes the stable digest used to bind a Host-sealed MCP argument payload.
@@ -545,9 +617,12 @@ pub(super) fn validate_mcp_tool_approval(approval: &AgentMcpToolApproval) -> Age
             .args
             .as_object()
             .is_none_or(|args| !args.is_empty())
-        || approval.call.approval_status != AgentApprovalStatus::Required
+        || !matches!(
+            (approval.approval_mode, approval.call.approval_status),
+            (AgentMcpApprovalMode::Prompt, AgentApprovalStatus::Required)
+                | (AgentMcpApprovalMode::Auto, AgentApprovalStatus::Approved)
+        )
         || approval.call.reason.is_some()
-        || approval.approval_mode != AgentMcpApprovalMode::Prompt
         || approval.created_at < 0
         || approval.expires_at <= approval.created_at
         || approval.expires_at.saturating_sub(approval.created_at) > MCP_APPROVAL_TTL_MS
@@ -563,6 +638,16 @@ pub(super) fn validate_mcp_tool_approval(approval: &AgentMcpToolApproval) -> Age
             .server_display_name
             .chars()
             .any(char::is_control)
+        || approval
+            .summary
+            .display_reason
+            .as_ref()
+            .is_some_and(|reason| {
+                reason.trim().is_empty()
+                    || reason.trim() != reason
+                    || reason.len() > MAX_MCP_CALL_REASON_BYTES
+                    || reason.chars().any(is_unsafe_mcp_display_character)
+            })
     {
         return Err(AgentError::structured(
             "mcp.invalid_approval_identity",

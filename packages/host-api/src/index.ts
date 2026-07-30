@@ -231,7 +231,7 @@ export interface McpHostApi {
   deleteServer(input: McpServerMutationInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
   requestLaunchAuthorization(
     input: McpServerMutationInput
-  ): Promise<HostInvocationResult<McpLaunchAuthorizationResult | null>>
+  ): Promise<HostInvocationResult<McpLaunchAuthorizationResult>>
   enableServer(input: McpServerMutationInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
   disableServer(
     input: McpServerMutationInput

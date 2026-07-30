@@ -32,6 +32,7 @@ pub enum McpTrustLevelDto {
 #[serde(rename_all = "camelCase")]
 pub enum McpApprovalModeDto {
     Prompt,
+    Auto,
     Deny,
 }
 

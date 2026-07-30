@@ -10,6 +10,7 @@ interface McpServerEditorProps {
   busy: boolean
   initial?: McpServerDetailsView
   onCancel: () => void
+  onDelete?: () => void
   onDirtyChange?: (dirty: boolean) => void
   onSelectExecutable: () => Promise<string | null>
   onSelectWorkingDirectory: () => Promise<string | null>
@@ -20,6 +21,7 @@ export function McpServerEditor({
   busy,
   initial,
   onCancel,
+  onDelete,
   onDirtyChange,
   onSelectExecutable,
   onSelectWorkingDirectory,
@@ -95,6 +97,7 @@ export function McpServerEditor({
       <div className="mcp-editor__field">
         <label htmlFor={`${id}-name`}>{t('mcp.form.name')}</label>
         <input
+          autoFocus
           autoComplete="off"
           id={`${id}-name`}
           maxLength={MCP_MANAGEMENT_LIMITS.displayNameBytes}
@@ -137,7 +140,6 @@ export function McpServerEditor({
 
       <fieldset className="mcp-arguments-field">
         <legend>{t('mcp.form.arguments')}</legend>
-        <p>{t('mcp.form.argumentsHelp')}</p>
         <div className="mcp-argument-list">
           {draft.arguments.map((argument, index) => (
             <div className="mcp-argument-row" key={index}>
@@ -209,28 +211,38 @@ export function McpServerEditor({
             <FolderOpen aria-hidden="true" />
           </button>
         </div>
-        <small>{t('mcp.form.cwdHelp')}</small>
       </div>
 
-      <div className="mcp-editor__field">
-        <label htmlFor={`${id}-approval`}>{t('mcp.form.approvalMode')}</label>
-        <select
-          id={`${id}-approval`}
-          onChange={(event) => {
-            const approvalMode = event.currentTarget.value === 'deny' ? 'deny' : 'prompt'
-            setDraft((current) => ({ ...current, approvalMode }))
-          }}
-          value={draft.approvalMode}
+      <div className="mcp-auto-execute-row">
+        <label htmlFor={`${id}-auto-execute`}>
+          {t('mcp.form.autoExecute')}
+          {draft.approvalMode === 'deny' ? (
+            <small>{t('mcp.form.callsCurrentlyDenied')}</small>
+          ) : null}
+        </label>
+        <button
+          aria-checked={draft.approvalMode === 'auto'}
+          aria-label={t('mcp.form.autoExecute')}
+          className="settings-switch"
+          data-state={draft.approvalMode === 'auto' ? 'on' : 'off'}
+          disabled={busy}
+          id={`${id}-auto-execute`}
+          onClick={() =>
+            setDraft((current) => ({
+              ...current,
+              approvalMode: current.approvalMode === 'auto' ? 'prompt' : 'auto'
+            }))
+          }
+          role="switch"
+          type="button"
         >
-          <option value="prompt">{t('mcp.form.promptEveryCall')}</option>
-          <option value="deny">{t('mcp.form.denyCalls')}</option>
-        </select>
+          <span aria-hidden="true" className="settings-switch__thumb" />
+        </button>
       </div>
 
       <div className="mcp-security-notice" role="status">
         <strong>{t('mcp.form.securityTitle')}</strong>
-        <p>{t('mcp.form.persistenceWarning')}</p>
-        <p>{t('mcp.form.noSecretsWarning')}</p>
+        <p>{t('mcp.form.simpleSecurityHelp')}</p>
       </div>
 
       {launchChanged && (
@@ -249,6 +261,17 @@ export function McpServerEditor({
       )}
 
       <div className="mcp-editor__actions">
+        {initial && onDelete && (
+          <button
+            className="mcp-danger-button mcp-editor__delete"
+            disabled={busy}
+            onClick={onDelete}
+            type="button"
+          >
+            <Trash2 aria-hidden="true" />
+            {t('mcp.actions.delete')}
+          </button>
+        )}
         <button
           className="mcp-secondary-button"
           disabled={busy}
@@ -259,12 +282,12 @@ export function McpServerEditor({
           {t('mcp.actions.cancel')}
         </button>
         <button
-          className="mcp-primary-button"
+          className="primary-settings-button"
           disabled={busy}
           onClick={() => void submit()}
           type="button"
         >
-          {initial ? t('mcp.actions.saveChanges') : t('mcp.actions.saveServer')}
+          {t('mcp.actions.save')}
         </button>
       </div>
 

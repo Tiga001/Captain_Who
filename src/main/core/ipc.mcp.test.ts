@@ -1,15 +1,10 @@
 import type { IpcMainInvokeEvent } from 'electron'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type {
-  McpChangedNotification,
-  McpLaunchAuthorizationPreview,
-  McpServerDetailsOutput
-} from '@mycopilot/protocol'
+import type { McpChangedNotification, McpServerDetailsOutput } from '@mycopilot/protocol'
 import type { TrustedIpcMain } from '../ipc/trustedIpc'
 
 const sent = vi.hoisted(() => vi.fn())
 const getAllWindows = vi.hoisted(() => vi.fn())
-const showMessageBox = vi.hoisted(() => vi.fn())
 
 vi.mock('electron', () => ({
   BrowserWindow: {
@@ -17,12 +12,11 @@ vi.mock('electron', () => ({
     getAllWindows
   },
   dialog: {
-    showMessageBox,
     showOpenDialog: vi.fn()
   }
 }))
 
-import { createMcpNativeDialogs, registerMcpIpc } from '../ipc/mcpIpc'
+import { createMcpNativeDialogs, registerMcpIpc, type McpIpcNativeDialogs } from '../ipc/mcpIpc'
 
 const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
 const configEpoch = '41818332-0842-4d2e-808f-175b70eb4628'
@@ -136,10 +130,17 @@ function createCore(overrides: Record<string, unknown> = {}) {
 
 const event = { sender: {} } as IpcMainInvokeEvent
 
+function createNativeDialogs(overrides: Partial<McpIpcNativeDialogs> = {}): McpIpcNativeDialogs {
+  return {
+    selectExecutable: vi.fn(),
+    selectWorkingDirectory: vi.fn(),
+    ...overrides
+  }
+}
+
 describe('MCP trusted IPC', () => {
   beforeEach(() => {
     sent.mockReset()
-    showMessageBox.mockReset()
     getAllWindows.mockReturnValue([
       {
         isDestroyed: () => false,
@@ -155,11 +156,7 @@ describe('MCP trusted IPC', () => {
   it('registers only explicit management methods and rejects forbidden input before Core', async () => {
     const trusted = createTrustedIpc()
     const core = createCore()
-    const cleanup = registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch: vi.fn()
-    })
+    const cleanup = registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
 
     expect([...trusted.handlers.keys()]).toEqual(
       expect.arrayContaining([
@@ -215,31 +212,10 @@ describe('MCP trusted IPC', () => {
     cleanup()
   })
 
-  it('cancels native launch confirmation without committing', async () => {
+  it('commits only the authorization id and frozen precondition after the trusted request', async () => {
     const trusted = createTrustedIpc()
     const core = createCore()
-    const confirmLaunch = vi.fn().mockResolvedValue(false)
-    registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch
-    })
-
-    const authorize = trusted.handlers.get('host:mcp.requestLaunchAuthorization')
-    await expect(authorize?.(event, mutation)).resolves.toEqual({ ok: true, value: null })
-    expect(core.prepareMcpLaunchAuthorization).toHaveBeenCalledWith(mutation)
-    expect(confirmLaunch).toHaveBeenCalledOnce()
-    expect(core.commitMcpLaunchAuthorization).not.toHaveBeenCalled()
-  })
-
-  it('commits only the authorization id and frozen precondition after confirmation', async () => {
-    const trusted = createTrustedIpc()
-    const core = createCore()
-    registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch: vi.fn().mockResolvedValue(true)
-    })
+    registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
 
     const authorize = trusted.handlers.get('host:mcp.requestLaunchAuthorization')
     await expect(authorize?.(event, mutation)).resolves.toMatchObject({
@@ -253,7 +229,7 @@ describe('MCP trusted IPC', () => {
     })
   })
 
-  it('fails closed if the prepared identity drifts before native confirmation', async () => {
+  it('fails closed if the prepared identity drifts before commit', async () => {
     const core = createCore({
       prepareMcpLaunchAuthorization: vi.fn().mockResolvedValue({
         schemaVersion: 1,
@@ -269,12 +245,7 @@ describe('MCP trusted IPC', () => {
       })
     })
     const trusted = createTrustedIpc()
-    const confirmLaunch = vi.fn().mockResolvedValue(true)
-    registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch
-    })
+    registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
 
     const authorize = trusted.handlers.get('host:mcp.requestLaunchAuthorization')
     await expect(authorize?.(event, mutation)).resolves.toEqual({
@@ -292,7 +263,6 @@ describe('MCP trusted IPC', () => {
         }
       }
     })
-    expect(confirmLaunch).not.toHaveBeenCalled()
     expect(core.commitMcpLaunchAuthorization).not.toHaveBeenCalled()
   })
 
@@ -317,11 +287,7 @@ describe('MCP trusted IPC', () => {
       ),
       stopMcpServer: vi.fn().mockRejectedValue(new Error('stderr fixed-canary-must-not-cross'))
     })
-    registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch: vi.fn()
-    })
+    registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
 
     await expect(trusted.handlers.get('host:mcp.enableServer')?.(event, mutation)).resolves.toEqual(
       {
@@ -357,11 +323,7 @@ describe('MCP trusted IPC', () => {
       })
     })
     const trusted = createTrustedIpc()
-    const cleanup = registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch: vi.fn()
-    })
+    const cleanup = registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
     onChanged?.({
       schemaVersion: 1,
       sourceEpoch,
@@ -433,11 +395,7 @@ describe('MCP trusted IPC', () => {
       })
     })
     const trusted = createTrustedIpc()
-    const cleanup = registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch: vi.fn()
-    })
+    const cleanup = registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
 
     onChanged?.({
       schemaVersion: 1,
@@ -482,11 +440,7 @@ describe('MCP trusted IPC', () => {
       })
     })
     const trusted = createTrustedIpc()
-    const cleanup = registerMcpIpc(trusted.ipc, core as never, {
-      selectExecutable: vi.fn(),
-      selectWorkingDirectory: vi.fn(),
-      confirmLaunch: vi.fn()
-    })
+    const cleanup = registerMcpIpc(trusted.ipc, core as never, createNativeDialogs())
 
     expect(() =>
       onChanged?.({
@@ -530,7 +484,7 @@ describe('MCP trusted IPC', () => {
       .fn()
       .mockResolvedValueOnce({ canceled: false, filePaths: ['fixtures/owned-server'] })
       .mockResolvedValueOnce({ canceled: true, filePaths: ['/ignored'] })
-    const dialogs = createMcpNativeDialogs(showOpenDialog, vi.fn())
+    const dialogs = createMcpNativeDialogs(showOpenDialog)
 
     await expect(dialogs.selectExecutable(event)).resolves.toMatch(/\/fixtures\/owned-server$/)
     await expect(dialogs.selectWorkingDirectory(event)).resolves.toBeNull()
@@ -542,36 +496,5 @@ describe('MCP trusted IPC', () => {
       title: 'Select MCP server working directory',
       properties: ['openDirectory']
     })
-  })
-
-  it('renders the exact frozen launch spec in a native warning and escapes control characters', async () => {
-    showMessageBox.mockResolvedValue({ response: 0 })
-    const dialogs = createMcpNativeDialogs(vi.fn())
-    const preview = {
-      schemaVersion: 1,
-      authorizationId,
-      expiresAtMs: 1_753_843_260_000,
-      serverId,
-      displayName: 'Owned fixture',
-      executable: '/owned/path\nspoof\u202eexe',
-      arguments: ['', 'value with spaces;$(not-a-shell)', 'line\nbreak\u2066hidden'],
-      cwd: '/owned/work\nspoof',
-      launchSpecDigest: 'b'.repeat(64),
-      precondition
-    } satisfies McpLaunchAuthorizationPreview
-
-    await expect(dialogs.confirmLaunch(event, preview)).resolves.toBe(false)
-    const options = showMessageBox.mock.calls[0]?.[0]
-    expect(options).toMatchObject({
-      type: 'warning',
-      buttons: ['Cancel', 'Authorize'],
-      defaultId: 0,
-      cancelId: 0
-    })
-    expect(options.detail).toContain('Executable: "/owned/path\\nspoof\\u202eexe"')
-    expect(options.detail).toContain('[0] ""')
-    expect(options.detail).toContain('[1] "value with spaces;$(not-a-shell)"')
-    expect(options.detail).toContain('[2] "line\\nbreak\\u2066hidden"')
-    expect(options.detail).toContain('Working directory: "/owned/work\\nspoof"')
   })
 })

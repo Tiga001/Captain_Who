@@ -698,6 +698,8 @@ fn run_migrations(connection: &mut Connection) -> Result<(), McpRegistryPersiste
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
     quarantine_incompatible_registry_schema(&transaction)?;
+    let migrate_approval_mode_constraint =
+        prepare_approval_mode_constraint_migration(&transaction)?;
     transaction
         .execute_batch(
             "
@@ -728,7 +730,7 @@ fn run_migrations(connection: &mut Connection) -> Result<(), McpRegistryPersiste
                     trust IN ('untrusted', 'user_approved')
                 ),
                 approval_mode TEXT NOT NULL CHECK (
-                    approval_mode IN ('prompt', 'deny')
+                    approval_mode IN ('prompt', 'auto', 'deny')
                 ),
                 connect_timeout_ms INTEGER NOT NULL CHECK (
                     connect_timeout_ms BETWEEN 1 AND 10000
@@ -783,6 +785,9 @@ fn run_migrations(connection: &mut Connection) -> Result<(), McpRegistryPersiste
             ",
         )
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    if migrate_approval_mode_constraint {
+        finish_approval_mode_constraint_migration(&transaction)?;
+    }
 
     let now = now_ms()?;
     transaction
@@ -805,6 +810,69 @@ fn run_migrations(connection: &mut Connection) -> Result<(), McpRegistryPersiste
     }
     transaction
         .commit()
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)
+}
+
+const APPROVAL_MODE_MIGRATION_BACKUP: &str = "mcp_registry_servers_approval_mode_prompt_deny_v1";
+
+/// SQLite cannot alter a CHECK constraint in place. Preserve every v1 row and
+/// identity field in a transaction, recreate the table with the additive
+/// `auto` value, then copy the rows back verbatim.
+fn prepare_approval_mode_constraint_migration(
+    transaction: &Transaction<'_>,
+) -> Result<bool, McpRegistryPersistenceError> {
+    let Some(columns) = registry_table_columns(transaction, "mcp_registry_servers")? else {
+        return Ok(false);
+    };
+    if !column_names_match(&columns, REGISTRY_SERVER_COLUMNS) {
+        return Ok(false);
+    }
+    let create_sql = transaction
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'mcp_registry_servers'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    if create_sql.contains("'auto'") {
+        return Ok(false);
+    }
+    let invalid_mode_count = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM mcp_registry_servers
+             WHERE approval_mode NOT IN ('prompt', 'deny')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    if invalid_mode_count != 0
+        || registry_table_columns(transaction, APPROVAL_MODE_MIGRATION_BACKUP)?.is_some()
+    {
+        return Err(McpRegistryPersistenceError::CorruptRecord);
+    }
+    transaction
+        .execute_batch(
+            "ALTER TABLE mcp_registry_servers
+                 RENAME TO mcp_registry_servers_approval_mode_prompt_deny_v1;
+             DROP INDEX IF EXISTS mcp_registry_servers_revision;",
+        )
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    Ok(true)
+}
+
+fn finish_approval_mode_constraint_migration(
+    transaction: &Transaction<'_>,
+) -> Result<(), McpRegistryPersistenceError> {
+    let columns = REGISTRY_SERVER_COLUMNS.join(", ");
+    let copy = format!(
+        "INSERT INTO mcp_registry_servers ({columns})
+         SELECT {columns}
+         FROM {APPROVAL_MODE_MIGRATION_BACKUP};
+         DROP TABLE {APPROVAL_MODE_MIGRATION_BACKUP};"
+    );
+    transaction
+        .execute_batch(&copy)
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)
 }
 
@@ -2465,6 +2533,7 @@ fn parse_trust(value: &str) -> Result<McpTrustLevel, McpRegistryPersistenceError
 fn approval_mode_text(mode: McpApprovalMode) -> Result<&'static str, McpRegistryPersistenceError> {
     match mode {
         McpApprovalMode::Prompt => Ok("prompt"),
+        McpApprovalMode::Auto => Ok("auto"),
         McpApprovalMode::Deny => Ok("deny"),
         _ => Err(McpRegistryPersistenceError::InvalidConfig),
     }
@@ -2473,6 +2542,7 @@ fn approval_mode_text(mode: McpApprovalMode) -> Result<&'static str, McpRegistry
 fn parse_approval_mode(value: &str) -> Result<McpApprovalMode, McpRegistryPersistenceError> {
     match value {
         "prompt" => Ok(McpApprovalMode::Prompt),
+        "auto" => Ok(McpApprovalMode::Auto),
         "deny" => Ok(McpApprovalMode::Deny),
         _ => Err(McpRegistryPersistenceError::CorruptRecord),
     }
@@ -2598,6 +2668,140 @@ mod tests {
                     | "tool_arguments"
             )
         }));
+    }
+
+    #[test]
+    fn migration_adds_auto_mode_without_changing_v1_identity_or_authorization() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let prompt_id = McpServerId::new();
+        let deny_id = McpServerId::new();
+        let registry = SqliteMcpRegistry::open(&path).unwrap();
+
+        let prompt = registry
+            .add_persisted(config(prompt_id, "prompt fixture"))
+            .unwrap();
+        let prompt_record = registry.get_persisted(prompt_id).unwrap().unwrap();
+        let file_identity = compute_launch_file_identity_digest(
+            &prompt_record.entry.config,
+            &prompt_record.launch_spec_digest,
+        )
+        .unwrap();
+        registry
+            .authorize_launch(
+                &McpRegistryMutationPrecondition::from_entry(&prompt),
+                &prompt_record.launch_spec_digest,
+                &file_identity,
+                MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                1_785_384_000_000,
+            )
+            .unwrap();
+        let authorized = registry.get_persisted(prompt_id).unwrap().unwrap();
+        let enabled = registry
+            .set_enabled(
+                &McpRegistryMutationPrecondition::from_entry(&authorized.entry),
+                true,
+            )
+            .unwrap();
+        let before = registry.get_persisted(prompt_id).unwrap().unwrap();
+
+        let mut deny_config = config(deny_id, "deny fixture");
+        deny_config.approval_mode = McpApprovalMode::Deny;
+        let deny = registry.add_persisted(deny_config).unwrap();
+        let revision_before_restart = registry.current_revision().unwrap();
+        drop(registry);
+
+        let connection = Connection::open(&path).unwrap();
+        let current_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'mcp_registry_servers'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let legacy_sql = current_sql.replace(
+            "approval_mode IN ('prompt', 'auto', 'deny')",
+            "approval_mode IN ('prompt', 'deny')",
+        );
+        assert_ne!(legacy_sql, current_sql);
+        let columns = REGISTRY_SERVER_COLUMNS.join(", ");
+        connection
+            .execute_batch(
+                "ALTER TABLE mcp_registry_servers
+                     RENAME TO mcp_registry_servers_auto_source;
+                 DROP INDEX mcp_registry_servers_revision;",
+            )
+            .unwrap();
+        connection.execute_batch(&legacy_sql).unwrap();
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO mcp_registry_servers ({columns})
+                 SELECT {columns} FROM mcp_registry_servers_auto_source;
+                 DROP TABLE mcp_registry_servers_auto_source;
+                 CREATE INDEX mcp_registry_servers_revision
+                 ON mcp_registry_servers(registry_revision, server_id);"
+            ))
+            .unwrap();
+        drop(connection);
+
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        assert_eq!(
+            reopened.current_revision().unwrap(),
+            revision_before_restart
+        );
+        let restored_prompt = reopened.get_persisted(prompt_id).unwrap().unwrap();
+        assert_eq!(restored_prompt.entry.config.id, prompt_id);
+        assert_eq!(
+            restored_prompt.entry.config_epoch,
+            before.entry.config_epoch
+        );
+        assert_eq!(
+            restored_prompt.entry.config_digest,
+            before.entry.config_digest
+        );
+        assert_eq!(restored_prompt.entry.revision, enabled.revision);
+        assert!(restored_prompt.entry.config.enabled);
+        assert_eq!(
+            restored_prompt.entry.config.approval_mode,
+            McpApprovalMode::Prompt
+        );
+        assert_eq!(
+            restored_prompt.launch_authorization,
+            before.launch_authorization
+        );
+        let restored_deny = reopened.get_persisted(deny_id).unwrap().unwrap();
+        assert_eq!(restored_deny.entry.config_epoch, deny.config_epoch);
+        assert_eq!(restored_deny.entry.config_digest, deny.config_digest);
+        assert_eq!(restored_deny.entry.revision, deny.revision);
+        assert_eq!(
+            restored_deny.entry.config.approval_mode,
+            McpApprovalMode::Deny
+        );
+
+        let mut auto_config = restored_prompt.entry.config.clone();
+        auto_config.approval_mode = McpApprovalMode::Auto;
+        let updated = match reopened
+            .update_with_precondition(
+                &McpRegistryMutationPrecondition::from_entry(&restored_prompt.entry),
+                auto_config,
+            )
+            .unwrap()
+        {
+            McpRegistryMutation::Updated(entry) => entry,
+            other => panic!("approval-mode change must update the record: {other:?}"),
+        };
+        assert_eq!(updated.config.id, prompt_id);
+        assert_eq!(updated.config.approval_mode, McpApprovalMode::Auto);
+        assert_ne!(updated.config_epoch, before.entry.config_epoch);
+        assert_ne!(updated.config_digest, before.entry.config_digest);
+        assert!(updated.revision > revision_before_restart);
+        let persisted_auto = reopened.get_persisted(prompt_id).unwrap().unwrap();
+        assert_eq!(
+            persisted_auto.entry.config.approval_mode,
+            McpApprovalMode::Auto
+        );
+        assert!(persisted_auto.launch_authorization.is_some());
     }
 
     #[test]

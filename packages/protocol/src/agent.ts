@@ -150,7 +150,7 @@ export type AgentMcpToolRisk =
   | 'destructive_claimed'
   | 'open_world_claimed'
 
-export type AgentMcpApprovalMode = 'prompt' | 'deny'
+export type AgentMcpApprovalMode = 'prompt' | 'auto' | 'deny'
 
 export interface AgentMcpArgumentSummary {
   encodedBytes: number
@@ -183,6 +183,8 @@ export interface AgentMcpToolApprovalSummary {
   scope: AgentMcpServerScope
   rawToolName: string
   modelToolName: string
+  /** Host-owned, bounded explanation that is never forwarded to the MCP Server. */
+  displayReason?: string
   arguments: AgentMcpArgumentSummary
   risk: AgentMcpToolRisk
   external: boolean

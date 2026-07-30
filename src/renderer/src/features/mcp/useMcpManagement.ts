@@ -116,9 +116,11 @@ export function useMcpManagement() {
   const detailsRef = useRef<ReadonlyMap<string, McpServerDetailsView>>(new Map())
   const catalogsRef = useRef<ReadonlyMap<string, McpToolCatalogState>>(new Map())
   const pendingRef = useRef<ReadonlyMap<string, McpServerPendingOperation>>(new Map())
+  const enableFlowRef = useRef<ReadonlySet<string>>(new Set())
   const isAddingRef = useRef(false)
   const mutationEpochRef = useRef(0)
   const refreshDirtyRef = useRef(false)
+  const refreshVisibleRef = useRef(false)
   const refreshLoopRef = useRef<Promise<void> | null>(null)
   const refreshCallbackRef = useRef<() => Promise<McpServerListOutput | null>>(async () => null)
   const eventSequencesByEpochRef = useRef<ReadonlyMap<string, number>>(new Map())
@@ -129,12 +131,14 @@ export function useMcpManagement() {
   const runRefreshLoop = useCallback(async () => {
     while (mountedRef.current && refreshDirtyRef.current) {
       refreshDirtyRef.current = false
+      const showRefreshIndicator = refreshVisibleRef.current
+      refreshVisibleRef.current = false
       const lifecycleEpoch = lifecycleEpochRef.current
       const mutationEpoch = mutationEpochRef.current
       setState((current) => ({
         ...current,
         errorMessage: current.output ? current.errorMessage : null,
-        isRefreshing: Boolean(current.output),
+        isRefreshing: Boolean(current.output) && showRefreshIndicator,
         status: current.output ? 'ready' : 'loading'
       }))
 
@@ -163,26 +167,34 @@ export function useMcpManagement() {
     }
   }, [])
 
-  const refresh = useCallback(async (): Promise<McpServerListOutput | null> => {
-    refreshDirtyRef.current = true
-    if (!refreshLoopRef.current) {
-      const loop = runRefreshLoop().finally(() => {
-        if (refreshLoopRef.current === loop) {
-          refreshLoopRef.current = null
-          if (mountedRef.current && refreshDirtyRef.current) {
-            queueMicrotask(() => {
-              if (mountedRef.current && refreshDirtyRef.current) {
-                void refreshCallbackRef.current()
-              }
-            })
+  const refresh = useCallback(
+    async (showRefreshIndicator = false): Promise<McpServerListOutput | null> => {
+      if (showRefreshIndicator) refreshVisibleRef.current = true
+      refreshDirtyRef.current = true
+      if (!refreshLoopRef.current) {
+        const loop = runRefreshLoop().finally(() => {
+          if (refreshLoopRef.current === loop) {
+            refreshLoopRef.current = null
+            if (mountedRef.current && refreshDirtyRef.current) {
+              queueMicrotask(() => {
+                if (mountedRef.current && refreshDirtyRef.current) {
+                  void refreshCallbackRef.current()
+                }
+              })
+            }
           }
-        }
-      })
-      refreshLoopRef.current = loop
-    }
-    await refreshLoopRef.current
-    return outputRef.current
-  }, [runRefreshLoop])
+        })
+        refreshLoopRef.current = loop
+      }
+      await refreshLoopRef.current
+      return outputRef.current
+    },
+    [runRefreshLoop]
+  )
+  const refreshVisible = useCallback(
+    (): Promise<McpServerListOutput | null> => refresh(true),
+    [refresh]
+  )
   useEffect(() => {
     refreshCallbackRef.current = refresh
   }, [refresh])
@@ -209,6 +221,7 @@ export function useMcpManagement() {
       mountedRef.current = false
       lifecycleEpochRef.current += 1
       refreshDirtyRef.current = false
+      refreshVisibleRef.current = false
       notificationScheduledRef.current = false
       unsubscribe()
     }
@@ -337,13 +350,19 @@ export function useMcpManagement() {
       const identity = serverIdentity(server)
       try {
         const output = await requestMcpLaunchAuthorization(toMcpMutationInput(server))
-        if (!output) return null
+        if (
+          !output.authorized ||
+          output.server.launchAuthorizationState !== 'authorized' ||
+          output.server.trust !== 'userApproved'
+        ) {
+          return null
+        }
         const detailsOutput: McpServerDetailsOutput = {
           schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION,
           registryRevision: output.server.registryRevision,
           server: output.server
         }
-        if (!isMutationResponseValidForIdentity(detailsOutput, identity, false)) {
+        if (!isMutationResponseValidForIdentity(detailsOutput, identity, true)) {
           if (mountedRef.current) await refresh()
           return null
         }
@@ -442,6 +461,32 @@ export function useMcpManagement() {
         refresh
       }),
     [refresh]
+  )
+
+  const setServerEnabled = useCallback(
+    async (server: McpServerListItem, enabled: boolean): Promise<McpServerDetailsView | null> => {
+      if (enableFlowRef.current.has(server.serverId)) return null
+      enableFlowRef.current = new Set(enableFlowRef.current).add(server.serverId)
+      try {
+        if (!enabled) return await disableServer(server)
+
+        let current: McpServerListItem = server
+        if (server.launchAuthorizationState !== 'authorized') {
+          const authorized = await authorizeLaunch(server)
+          if (!authorized || authorized.launchAuthorizationState !== 'authorized') return null
+          current = authorized
+        }
+
+        const enabledServer = await enableServer(current)
+        if (!enabledServer) return null
+        return await startServer(enabledServer)
+      } finally {
+        const next = new Set(enableFlowRef.current)
+        next.delete(server.serverId)
+        enableFlowRef.current = next
+      }
+    },
+    [authorizeLaunch, disableServer, enableServer, startServer]
   )
 
   const stopServer = useCallback(
@@ -698,11 +743,12 @@ export function useMcpManagement() {
     loadDetails,
     loadTools,
     pendingOperations,
-    refresh,
+    refresh: refreshVisible,
     refreshCatalog,
     restartServer,
     selectExecutable: selectMcpExecutable,
     selectWorkingDirectory: selectMcpWorkingDirectory,
+    setServerEnabled,
     startServer,
     state,
     stopServer,
@@ -787,6 +833,27 @@ function isMutationResponseValidForIdentity(
   return allowConfigChange && server.registryRevision > identity.registryRevision
 }
 
+function isMutationResponseValidForOperation(
+  output: McpServerDetailsOutput,
+  identity: ServerIdentity,
+  operation: McpServerPendingOperation
+): boolean {
+  const allowConfigChange =
+    operation === 'disable' || operation === 'enable' || operation === 'update'
+  if (!isMutationResponseValidForIdentity(output, identity, allowConfigChange)) return false
+  if (
+    operation === 'enable' &&
+    (!output.server.enabled ||
+      output.server.trust !== 'userApproved' ||
+      output.server.launchAuthorizationState !== 'authorized')
+  ) {
+    return false
+  }
+  if (operation === 'disable' && output.server.enabled) return false
+  if ((operation === 'start' || operation === 'restart') && !output.server.enabled) return false
+  return true
+}
+
 function mergeDetailsWithFreshSummary(
   details: McpServerDetailsView,
   summary: McpServerListItem
@@ -826,6 +893,17 @@ function shouldUseIncomingServerSnapshot(
     incoming.registryRevision > current.registryRevision ||
     incoming.updatedAtMs > current.updatedAtMs ||
     incoming.catalogGeneration > current.catalogGeneration
+  )
+}
+
+function canUseAuthoritativeRuntimeSnapshot(
+  current: McpServerListItem,
+  incoming: McpServerListItem
+): boolean {
+  return (
+    sameServerRegistryIdentity(current, incoming) &&
+    incoming.updatedAtMs >= current.updatedAtMs &&
+    incoming.catalogGeneration >= current.catalogGeneration
   )
 }
 
@@ -891,7 +969,7 @@ async function runServerDetailsMutation({
   mutationEpochRef.current += 1
   try {
     const output = await mutation()
-    if (!isMutationResponseValidForIdentity(output, responseIdentity, operation === 'update')) {
+    if (!isMutationResponseValidForOperation(output, responseIdentity, operation)) {
       if (mountedRef.current) await refresh()
       return null
     }
@@ -903,7 +981,8 @@ async function runServerDetailsMutation({
         setDetailsById,
         catalogsRef,
         setCatalogsById,
-        output
+        output,
+        true
       )
       if (!applied) {
         await refresh()
@@ -953,7 +1032,8 @@ function applyDetailsOutput(
   setDetails: Dispatch<SetStateAction<ReadonlyMap<string, McpServerDetailsView>>>,
   catalogsRef: MutableRefObject<ReadonlyMap<string, McpToolCatalogState>>,
   setCatalogs: Dispatch<SetStateAction<ReadonlyMap<string, McpToolCatalogState>>>,
-  detailsOutput: McpServerDetailsOutput
+  detailsOutput: McpServerDetailsOutput,
+  acceptAuthoritativeRuntimeSnapshot = false
 ): McpServerDetailsView | null {
   if (detailsOutput.registryRevision < detailsOutput.server.registryRevision) return null
 
@@ -963,7 +1043,14 @@ function applyDetailsOutput(
     return null
   }
   const incomingListItem = detailsToListItem(detailsOutput.server)
-  if (previous && !shouldUseIncomingServerSnapshot(previous, incomingListItem)) {
+  if (
+    previous &&
+    !shouldUseIncomingServerSnapshot(previous, incomingListItem) &&
+    !(
+      acceptAuthoritativeRuntimeSnapshot &&
+      canUseAuthoritativeRuntimeSnapshot(previous, incomingListItem)
+    )
+  ) {
     if (!sameServerConfigIdentity(previous, incomingListItem)) {
       return detailsRef.current.get(previous.serverId) ?? null
     }
@@ -1219,7 +1306,10 @@ function mergeServerListOutput(
   const servers = incoming.servers.map((server) => {
     const existing = current.servers.find((item) => item.serverId === server.serverId)
     if (!existing) return server
-    return shouldUseIncomingServerSnapshot(existing, server) ? server : existing
+    return shouldUseIncomingServerSnapshot(existing, server) ||
+      canUseAuthoritativeRuntimeSnapshot(existing, server)
+      ? server
+      : existing
   })
   if (incoming.registryRevision === current.registryRevision) {
     for (const existing of current.servers) {

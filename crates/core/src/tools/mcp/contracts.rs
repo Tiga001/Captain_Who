@@ -157,6 +157,8 @@ pub struct McpAgentToolAnnotations {
 #[derive(Clone, PartialEq)]
 pub struct McpAgentToolDescriptor {
     pub provenance: AgentMcpToolProvenance,
+    /// Host-owned invocation policy captured with this exact Catalog/config snapshot.
+    pub approval_mode: AgentMcpApprovalMode,
     /// Host-supplied display label. It is normalized and bounded before entering an approval DTO.
     pub server_display_name: String,
     pub description: Option<String>,
@@ -172,6 +174,7 @@ impl fmt::Debug for McpAgentToolDescriptor {
         formatter
             .debug_struct("McpAgentToolDescriptor")
             .field("provenance", &self.provenance)
+            .field("approval_mode", &self.approval_mode)
             .field("server_display_name_bytes", &self.server_display_name.len())
             .field(
                 "description_bytes",

@@ -57,7 +57,7 @@
     "executable": "/owned/fixture",
     "arguments": ["--mode", "fixture"],
     "cwd": "/owned",
-    "approvalMode": "deny"
+    "approvalMode": "auto"
   },
   "listOutput": {
     "schemaVersion": 1,

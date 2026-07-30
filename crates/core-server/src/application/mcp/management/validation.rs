@@ -184,6 +184,7 @@ pub(super) fn validate_editable_fields(
 pub(super) fn approval_mode(value: McpApprovalModeDto) -> McpApprovalMode {
     match value {
         McpApprovalModeDto::Prompt => McpApprovalMode::Prompt,
+        McpApprovalModeDto::Auto => McpApprovalMode::Auto,
         McpApprovalModeDto::Deny => McpApprovalMode::Deny,
     }
 }

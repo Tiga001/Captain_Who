@@ -21,6 +21,7 @@ const service = vi.hoisted(() => ({
   restartServer: vi.fn(),
   selectExecutable: vi.fn(),
   selectWorkingDirectory: vi.fn(),
+  setServerEnabled: vi.fn(),
   showToast: vi.fn(),
   startServer: vi.fn(),
   stopServer: vi.fn(),
@@ -133,6 +134,7 @@ function management(
     restartServer: service.restartServer,
     selectExecutable: service.selectExecutable,
     selectWorkingDirectory: service.selectWorkingDirectory,
+    setServerEnabled: service.setServerEnabled,
     startServer: service.startServer,
     state,
     stopServer: service.stopServer,
@@ -169,6 +171,12 @@ describe('MCP Settings page', () => {
     )
     const screen = await render(<McpSettingsPage />)
     await expect.element(screen.getByText('mcp.empty.title')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'mcp.actions.addServer' }).element()).toHaveClass(
+      'mcp-secondary-button'
+    )
+    expect(screen.getByRole('button', { name: 'mcp.actions.addServer' }).element()).not.toHaveClass(
+      'mcp-primary-button'
+    )
   })
 
   it('renders a safe error and retries through the hook', async () => {
@@ -199,19 +207,23 @@ describe('MCP Settings page', () => {
     )
     const screen = await render(<McpSettingsPage />)
     await screen.getByRole('button', { name: 'mcp.actions.addServer' }).click()
+    expect(screen.getByText('mcp.add.description').query()).toBeNull()
+    expect(screen.getByText('mcp.form.argumentsHelp').query()).toBeNull()
+    expect(screen.getByText('mcp.form.cwdHelp').query()).toBeNull()
     await screen.getByLabelText('mcp.form.name').fill('fixture')
     await screen.getByLabelText('mcp.form.executable').fill('/usr/bin/fixture')
     await screen.getByLabelText('mcp.form.cwd').fill('/tmp')
-    await screen.getByRole('button', { name: 'mcp.actions.saveServer' }).click()
+    const saveButton = screen.getByRole('button', { name: 'mcp.actions.save' })
+    expect(saveButton.element()).toHaveClass('primary-settings-button')
+    await saveButton.click()
     await expect.poll(() => service.addServer.mock.calls.length).toBe(1)
     expect(service.authorizeLaunch).not.toHaveBeenCalled()
     expect(service.enableServer).not.toHaveBeenCalled()
   })
 
-  it('keeps native launch authorization cancellation separate from enable', async () => {
+  it('uses the shared Settings confirmation before the first enable flow', async () => {
     const server = details()
-    service.authorizeLaunch.mockResolvedValue(null)
-    service.enableServer.mockResolvedValue(server)
+    service.setServerEnabled.mockResolvedValue(null)
     service.hook.mockReturnValue(
       management(
         {
@@ -224,17 +236,100 @@ describe('MCP Settings page', () => {
       )
     )
     const screen = await render(<McpSettingsPage />)
-    await screen.getByRole('button', { name: 'mcp.actions.openDetails' }).click()
-    await screen.getByRole('button', { name: 'mcp.actions.authorizeLaunch' }).click()
-    await expect.poll(() => service.authorizeLaunch.mock.calls.length).toBe(1)
-    expect(service.enableServer).not.toHaveBeenCalled()
     await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
-    expect(service.enableServer).toHaveBeenCalledTimes(1)
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+    expect(service.setServerEnabled).not.toHaveBeenCalled()
+    await screen.getByRole('button', { name: 'mcp.actions.enable' }).click()
+    await expect.poll(() => service.setServerEnabled.mock.calls.length).toBe(1)
+    expect(service.setServerEnabled).toHaveBeenCalledWith(toListItem(server), true)
+    await expect.element(screen.getByRole('dialog')).not.toBeInTheDocument()
+    expect(service.authorizeLaunch).not.toHaveBeenCalled()
+    expect(service.enableServer).not.toHaveBeenCalled()
   })
 
-  it('requires confirmation before deleting the authoritative Server row', async () => {
+  it('cancels the shared confirmation without authorizing and hides launch details', async () => {
     const server = details()
-    service.deleteServer.mockResolvedValue(server)
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+    await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
+
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+    expect(screen.getByText('/usr/bin/fixture').query()).toBeNull()
+    await screen.getByText('mcp.actions.cancel', { exact: true }).click()
+    expect(service.setServerEnabled).not.toHaveBeenCalled()
+    await expect.element(screen.getByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('enables an already authorized Server without another confirmation', async () => {
+    const server = details({
+      launchAuthorizationState: 'authorized',
+      state: 'ready',
+      toolCount: 14,
+      trust: 'userApproved'
+    })
+    service.setServerEnabled.mockResolvedValue(server)
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+    const primary = screen.getByText('fixture').element().closest('.mcp-server-row__primary')
+    expect(primary).not.toBeNull()
+    expect(primary).toContainElement(screen.getByText('mcp.state.ready').element())
+    expect(primary?.querySelector('.mcp-server-row__status-dot')).toBeNull()
+    expect(screen.getByText('mcp.tools.count: 14').query()).toBeNull()
+    await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
+
+    await expect.poll(() => service.setServerEnabled.mock.calls.length).toBe(1)
+    expect(screen.getByRole('dialog').query()).toBeNull()
+  })
+
+  it('opens the configuration editor directly without a status or Catalog page', async () => {
+    const server = details()
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+    await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
+    await expect.element(screen.getByLabelText('mcp.form.name')).toHaveValue('fixture')
+    expect(screen.getByText('mcp.edit.description').query()).toBeNull()
+    expect(screen.getByText('mcp.form.argumentsHelp').query()).toBeNull()
+    expect(screen.getByText('mcp.form.cwdHelp').query()).toBeNull()
+    expect(screen.getByText('mcp.catalog.title').query()).toBeNull()
+    expect(screen.getByText('mcp.detail.launchConfiguration').query()).toBeNull()
+    expect(screen.getByText('mcp.detail.technicalDetails').query()).toBeNull()
+    expect(service.loadTools).not.toHaveBeenCalled()
+    expect(service.refreshCatalog).not.toHaveBeenCalled()
+  })
+
+  it('returns to the list when configuration details cannot be loaded', async () => {
+    const server = details()
+    service.loadDetails.mockRejectedValue(new Error('fixed-load-details-failure'))
     service.hook.mockReturnValue(
       management({
         status: 'ready',
@@ -244,6 +339,30 @@ describe('MCP Settings page', () => {
       })
     )
     const screen = await render(<McpSettingsPage />)
+    await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
+    await expect.poll(() => service.showToast.mock.calls.length).toBe(1)
+    await expect
+      .element(screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }))
+      .toBeVisible()
+    expect(screen.getByText('mcp.detail.loading').query()).toBeNull()
+  })
+
+  it('requires confirmation before deleting the authoritative Server row', async () => {
+    const server = details()
+    service.deleteServer.mockResolvedValue(server)
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+    await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
     await screen.getByRole('button', { name: 'mcp.actions.delete' }).click()
     expect(service.deleteServer).not.toHaveBeenCalled()
     await screen.getByRole('button', { name: 'mcp.actions.confirmDelete' }).click()
@@ -268,14 +387,18 @@ describe('MCP Settings page', () => {
       })
     )
     service.hook.mockReturnValue(
-      management({
-        status: 'ready',
-        output: output([server]),
-        errorMessage: null,
-        isRefreshing: false
-      })
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
     )
     const screen = await render(<McpSettingsPage />)
+    await screen.getByRole('button', { name: 'mcp.actions.edit: fixture' }).click()
     await screen.getByRole('button', { name: 'mcp.actions.delete' }).click()
     await screen.getByRole('button', { name: 'mcp.actions.confirmDelete' }).click()
     await expect.poll(() => service.deleteServer.mock.calls.length).toBe(1)

@@ -73,7 +73,10 @@ fn missing_root_type_is_normalized_to_object() {
 
     let definition = registry.definition_for(model_name).unwrap();
     assert_eq!(definition.input_schema["type"], "object");
-    assert_eq!(definition.input_schema["required"], json!(["value"]));
+    assert_eq!(
+        definition.input_schema["required"],
+        json!(["value", "__mycopilot_call_reason"])
+    );
     assert!(registry.mcp_diagnostics().is_empty());
 }
 

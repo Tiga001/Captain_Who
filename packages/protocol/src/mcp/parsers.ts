@@ -760,7 +760,7 @@ function parseMcpToolSummaryView(value: unknown, context: string): McpToolSummar
 }
 
 function parseApprovalMode(value: unknown, context: string): McpApprovalModeView {
-  return expectEnum(value, ['prompt', 'deny'] as const, context)
+  return expectEnum(value, ['prompt', 'auto', 'deny'] as const, context)
 }
 
 function expectDisplayName(value: unknown, context: string): string {

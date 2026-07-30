@@ -118,6 +118,10 @@ fn typed_approval_binds_independent_high_entropy_ids_and_a_safe_argument_summary
     assert_eq!(approval.summary.arguments.number_value_count, 1);
     assert_eq!(approval.summary.arguments.boolean_value_count, 1);
     assert_eq!(approval.summary.arguments.null_value_count, 1);
+    assert_eq!(
+        approval.summary.display_reason.as_deref(),
+        Some("Use this MCP tool to complete the current request.")
+    );
 
     let rendered = serde_json::to_string(&approval).unwrap();
     assert!(!rendered.contains(secret));
@@ -140,6 +144,70 @@ fn typed_approval_binds_independent_high_entropy_ids_and_a_safe_argument_summary
             .expect("raw payload must be sealed before publication")
             .1,
         arguments
+    );
+}
+
+#[test]
+fn host_owned_call_reason_is_displayed_but_never_sealed_or_sent_as_server_arguments() {
+    let model_name = "mcp__fixture__reason_projection";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "reason_projection",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker.clone());
+    let approval = propose(
+        &registry,
+        model_name,
+        json!({
+            (MCP_CALL_REASON_FIELD): "Read the requested fixture file",
+            "path": "fixture.txt",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        approval.summary.display_reason.as_deref(),
+        Some("Read the requested fixture file")
+    );
+    let prepared = invoker.prepared.lock().unwrap();
+    assert_eq!(
+        prepared
+            .get(&approval.identity.invocation_id)
+            .expect("prepared arguments")
+            .1,
+        json!({"path": "fixture.txt"})
+    );
+}
+
+#[test]
+fn host_owned_call_reason_removes_directional_and_invisible_display_controls() {
+    let model_name = "mcp__fixture__safe_reason";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "safe_reason",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker);
+    let approval = propose(
+        &registry,
+        model_name,
+        json!({
+            (MCP_CALL_REASON_FIELD): "Read\u{202e}the\u{2066}fixture\nfile",
+            "path": "fixture.txt",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        approval.summary.display_reason.as_deref(),
+        Some("Read the fixture file")
     );
 }
 

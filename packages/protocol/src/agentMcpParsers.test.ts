@@ -37,7 +37,7 @@ const approval = {
       catalogDigest: 'b'.repeat(64),
       catalogSchemaDigest: 'c'.repeat(64),
       schemaDigest: 'd'.repeat(64),
-      schemaNormalizerVersion: 1
+      schemaNormalizerVersion: 2
     }
   },
   call: {
@@ -52,6 +52,7 @@ const approval = {
     scope: { type: 'user' },
     rawToolName: 'echo_text',
     modelToolName: 'mcp__owned_fixture__echo_text',
+    displayReason: 'Read the requested fixture data',
     arguments: {
       encodedBytes: 24,
       topLevelPropertyCount: 1,
@@ -150,7 +151,7 @@ describe('Round 4 MCP Agent contract', () => {
     ).toThrow(/summary must match/)
   })
 
-  it('requires high-entropy invocation ids and a fresh Prompt approval', () => {
+  it('requires high-entropy invocation ids and mode-consistent call status', () => {
     expect(() =>
       parseAgentMcpToolApproval({
         ...approval,
@@ -164,14 +165,21 @@ describe('Round 4 MCP Agent contract', () => {
       })
     ).toThrow(/must be distinct/)
     expect(() => parseAgentMcpToolApproval({ ...approval, approvalMode: 'deny' })).toThrow(
-      /fresh Prompt/
+      /mode and call status/
     )
     expect(() =>
       parseAgentMcpToolApproval({
         ...approval,
         call: { ...approval.call, approvalStatus: 'approved' }
       })
-    ).toThrow(/fresh Prompt/)
+    ).toThrow(/mode and call status/)
+    expect(
+      parseAgentMcpToolApproval({
+        ...approval,
+        approvalMode: 'auto',
+        call: { ...approval.call, approvalStatus: 'approved' }
+      })
+    ).toMatchObject({ approvalMode: 'auto', call: { approvalStatus: 'approved' } })
   })
 
   it('parses only the safe lifecycle event fields', () => {
