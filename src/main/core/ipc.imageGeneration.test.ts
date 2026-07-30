@@ -42,6 +42,7 @@ describe('Image generation configuration IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       getImageGenerationConfiguration: vi.fn().mockResolvedValue(output),
       updateImageGenerationConfiguration: vi.fn().mockResolvedValue(output),
       setImageGenerationEnabled: vi.fn().mockResolvedValue(output),
@@ -97,6 +98,7 @@ describe('Image generation configuration IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       updateImageGenerationConfiguration
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
@@ -115,6 +117,7 @@ describe('Image generation configuration IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       readImageGenerationArtifact
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => false)

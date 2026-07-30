@@ -612,6 +612,35 @@ impl ToolRegistry {
         self.identities.get(tool_name)
     }
 
+    /// Whether this exact registered Tool identity belongs to an external MCP Server.
+    ///
+    /// Provider-visible names are deliberately not inspected here. A trusted built-in or runtime
+    /// extension may legally use an `mcp__...`-looking name, while an MCP Tool may use any
+    /// provider-safe model name chosen by the catalog adapter.
+    pub(crate) fn is_mcp_tool(&self, tool_name: &str) -> bool {
+        matches!(
+            self.identities.get(tool_name),
+            Some(AgentToolIdentity::Mcp { .. })
+        )
+    }
+
+    /// Removes external MCP definitions from the Renderer event projection.
+    ///
+    /// The caller retains its original definitions for provider payloads, checkpoint validation,
+    /// and execution authorization. MCP catalog details have a separate bounded management
+    /// contract; publishing their untrusted descriptions or schemas through generic Agent events
+    /// would create a second, less constrained Renderer surface.
+    pub(crate) fn renderer_event_definitions(
+        &self,
+        definitions: &[AgentToolDefinition],
+    ) -> Vec<AgentToolDefinition> {
+        definitions
+            .iter()
+            .filter(|definition| !self.is_mcp_tool(&definition.name))
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn checkpoint_persistence(
         &self,
         tool_name: &str,
@@ -1387,6 +1416,11 @@ mod tests {
         registry
             .register_extension_tool("provider-test", Box::new(ProviderBackedExtensionTool))
             .unwrap();
+        assert!(!registry.is_mcp_tool("provider_backed_extension"));
+        assert!(registry
+            .renderer_event_definitions(&registry.definitions())
+            .iter()
+            .any(|definition| definition.name == "provider_backed_extension"));
         let call = AgentToolCall {
             id: "provider-call".to_string(),
             tool: "provider_backed_extension".to_string(),

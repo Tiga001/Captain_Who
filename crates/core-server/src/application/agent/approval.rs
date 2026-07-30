@@ -42,17 +42,6 @@ impl RecoveredMcpApprovalDecision {
         }
     }
 
-    fn safe_message(self) -> &'static str {
-        match self {
-            Self::Rejected => {
-                "The recovered MCP approval was rejected before dispatch; the tool was not invoked."
-            }
-            Self::Cancelled => {
-                "The recovered MCP approval was cancelled before dispatch; the tool was not invoked."
-            }
-        }
-    }
-
     fn run_status(self) -> AgentRunStatus {
         match self {
             Self::Rejected => AgentRunStatus::Failed,
@@ -407,20 +396,6 @@ impl AgentService {
                 ));
             }
         }
-        let tool_result = AgentToolResult {
-            exact_archive_file: None,
-            call_id: approval.identity.call_id.clone(),
-            tool: approval.identity.provenance.model_tool_name.clone(),
-            ok: false,
-            result: Some(serde_json::json!({
-                "type": "mcp_tool",
-                "code": decision.error_code(),
-                "retryable": false,
-                "external": true,
-                "dispatchCertainty": "definitely_not_dispatched",
-            })),
-            error: Some(decision.safe_message().to_string()),
-        };
         Ok(Some(AgentActionExecutionOutput {
             action_id: record.snapshot.action_id,
             action_type: record.snapshot.action_type,
@@ -429,7 +404,10 @@ impl AgentService {
             patch_result: None,
             file_write_result: None,
             command_result: None,
-            tool_result: Some(tool_result),
+            // Renderer learns the terminal MCP state from the typed lifecycle event above and
+            // the approval status. A generic ToolResult would create a second result channel
+            // whose payload contract is neither necessary nor safe for an external Server.
+            tool_result: None,
             agent_output: AgentChatOutput {
                 content: String::new(),
                 status: decision.run_status(),
@@ -996,6 +974,14 @@ impl AgentService {
             drop(inline_continuation_guard);
         });
 
+        let renderer_tool_result = if matches!(
+            record.snapshot.action,
+            AgentProposedAction::McpToolCall { .. }
+        ) {
+            None
+        } else {
+            Some(tool_result)
+        };
         Ok(AgentActionExecutionOutput {
             action_id: record.snapshot.action_id,
             action_type: record.snapshot.action_type,
@@ -1004,7 +990,9 @@ impl AgentService {
             patch_result: execution.patch_result,
             file_write_result: execution.file_write_result,
             command_result: None,
-            tool_result: Some(tool_result),
+            // MCP has a dedicated approval/lifecycle contract. Keep the generic result response
+            // for built-ins and runtime extensions only.
+            tool_result: renderer_tool_result,
             agent_output: AgentChatOutput {
                 content: String::new(),
                 status: AgentRunStatus::Running,

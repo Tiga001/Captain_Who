@@ -29,6 +29,7 @@ const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
+let disposeHostIpc: (() => void) | null = null
 const trustedRendererEntries = new Map<number, string>()
 
 const macWindowChromeOptions =
@@ -191,7 +192,12 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  registerHostIpc(coreServer, terminalBridge, faviconResourceCache, isTrustedRendererEvent)
+  disposeHostIpc = registerHostIpc(
+    coreServer,
+    terminalBridge,
+    faviconResourceCache,
+    isTrustedRendererEvent
+  )
 
   createWindow()
 
@@ -219,6 +225,8 @@ app.on('before-quit', (event) => {
 })
 
 app.on('will-quit', () => {
+  disposeHostIpc?.()
+  disposeHostIpc = null
   disposeAdaptiveAppIcon?.()
   disposeAdaptiveAppIcon = null
   terminalBridge.killNow()

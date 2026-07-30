@@ -2228,6 +2228,21 @@ mod tests {
             registry.exposure(model_name),
             Some(&AgentToolExposure::Dynamic)
         );
+        assert!(registry.is_mcp_tool(model_name));
+        assert!(
+            registry
+                .renderer_event_definitions(&registry.definitions())
+                .iter()
+                .all(|definition| definition.name != model_name),
+            "untrusted MCP descriptions and schemas must not enter generic Renderer events"
+        );
+        assert!(
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name == model_name),
+            "the provider-facing registry must retain the MCP definition"
+        );
     }
 
     #[test]
@@ -2408,6 +2423,17 @@ mod tests {
             Some(&AgentToolIdentity::Builtin {
                 tool_name: model_name.to_string(),
             })
+        );
+        assert!(
+            !registry.is_mcp_tool(model_name),
+            "an mcp__-looking name must not be parsed as MCP authority"
+        );
+        assert!(
+            registry
+                .renderer_event_definitions(&registry.definitions())
+                .iter()
+                .any(|definition| definition.name == model_name),
+            "typed built-in identity remains visible even when its name resembles an MCP namespace"
         );
         assert_eq!(
             registry.mcp_diagnostics(),

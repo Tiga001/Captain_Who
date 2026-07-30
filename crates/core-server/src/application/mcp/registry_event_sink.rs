@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use mycopilot_core::storage::service::McpStartupActionTerminalOutcome;
 use mycopilot_core::AgentMcpServerScope;
 use mycopilot_mcp_client::{McpEvent, McpEventSink, McpRegistryChangeKind, McpServerScope};
+use tokio::sync::broadcast;
 
 use crate::adapters::mcp_runtime::McpRegistrySecurityGate;
 use crate::application::agent::{
@@ -13,6 +14,7 @@ use crate::application::agent::{
 };
 
 const MAX_DEFERRED_INVALIDATIONS: usize = 128;
+const MCP_SAFE_EVENT_CAPACITY: usize = 256;
 const REGISTRY_SECURITY_GATE_ERROR: &str =
     "MCP Registry approval state requires fail-closed reconciliation";
 
@@ -72,10 +74,12 @@ pub(crate) struct McpAgentRegistryEventSink {
     state: Mutex<SinkState>,
     event_watermark: AtomicU64,
     failed_watermark: AtomicU64,
+    safe_events: broadcast::Sender<McpEvent>,
 }
 
 impl McpAgentRegistryEventSink {
     pub(crate) fn new() -> Self {
+        let (safe_events, _) = broadcast::channel(MCP_SAFE_EVENT_CAPACITY);
         Self {
             state: Mutex::new(SinkState {
                 invalidator: None,
@@ -83,7 +87,12 @@ impl McpAgentRegistryEventSink {
             }),
             event_watermark: AtomicU64::new(0),
             failed_watermark: AtomicU64::new(0),
+            safe_events,
         }
+    }
+
+    pub(crate) fn subscribe_safe_events(&self) -> broadcast::Receiver<McpEvent> {
+        self.safe_events.subscribe()
     }
 
     pub(crate) fn bind(&self, agent_service: AgentService) -> Result<(), String> {
@@ -195,9 +204,14 @@ impl Default for McpAgentRegistryEventSink {
 
 impl McpEventSink for McpAgentRegistryEventSink {
     fn emit(&self, event: McpEvent) {
-        if let Some(invalidation) = registry_invalidation(event) {
+        if let Some(invalidation) = registry_invalidation(event.clone()) {
             self.dispatch(invalidation);
         }
+        // `McpEvent` is already a protocol-owned safe projection. A bounded
+        // broadcast channel lets the management notification adapter coalesce
+        // status invalidations without coupling approval invalidation to an
+        // unbounded Renderer queue.
+        let _ = self.safe_events.send(event);
     }
 }
 

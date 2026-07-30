@@ -828,6 +828,12 @@ export function applyAgentEventToChatMessage(
     return removeGuidanceFromChatMessage(message, agentEvent.clientMessageId)
   }
 
+  // Round 5A intentionally does not persist MCP lifecycle data in Renderer chat state. Round 5B
+  // replaces this fail-closed no-op with an explicit allowlist projection.
+  if (agentEvent.type === 'mcp_tool_invocation_state_changed') {
+    return message
+  }
+
   if (agentEvent.type === 'error') {
     const nextStatus = agentEvent.recoverable ? currentRun.status : 'failed'
     const nextRun = settleAgentRunToolActivities(

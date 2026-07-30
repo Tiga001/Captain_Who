@@ -235,6 +235,18 @@ export function withActionApprovalStatus(
   if (action.type === 'tool_call') {
     return { ...action, call: { ...action.call, approvalStatus } }
   }
+  // Round 5A only freezes the safe MCP contract. Round 5B owns the dedicated approval UI.
+  // Updating this already-redacted nested status keeps the temporary reject flow from appearing
+  // perpetually pending without reinterpreting the MCP action as a generic Tool call.
+  if (action.type === 'mcp_tool_call') {
+    return {
+      ...action,
+      approval: {
+        ...action.approval,
+        call: { ...action.approval.call, approvalStatus }
+      }
+    }
+  }
   if (action.type === 'file_write') {
     return { ...action, fileWrite: { ...action.fileWrite, approvalStatus } }
   }

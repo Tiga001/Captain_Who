@@ -54,7 +54,7 @@ use crate::protocol::{
     AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences,
     AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus,
     AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSteerInput, AgentToolApprovalMode,
-    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentWritePermission,
+    AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
 use crate::revision::content_revision;
 use crate::storage::conversation_history_archive_repository::{
@@ -399,14 +399,14 @@ impl AgentRuntime {
         let mut event_stream = AgentEventStream::new(emitter);
         event_stream.emit(AgentEvent::Started {
             run_id: run_id.clone(),
-            tool_definitions: tool_definitions.clone(),
+            tool_definitions: tool_registry.renderer_event_definitions(&tool_definitions),
         });
         event_stream.emit(AgentEvent::ToolSetChanged {
             run_id: run_id.clone(),
             stable_revision: effective_tool_set.stable_revision().to_string(),
             dynamic_revision: effective_tool_set.dynamic_revision().to_string(),
             effective_revision: effective_tool_set.revision().to_string(),
-            tool_definitions: tool_definitions.clone(),
+            tool_definitions: tool_registry.renderer_event_definitions(&tool_definitions),
         });
         let mut emitted_tool_set_revision = effective_tool_set.revision().to_string();
         let transaction_storage = storage.clone();
@@ -572,7 +572,8 @@ impl AgentRuntime {
                             stable_revision: effective_tool_set.stable_revision().to_string(),
                             dynamic_revision: effective_tool_set.dynamic_revision().to_string(),
                             effective_revision: effective_tool_set.revision().to_string(),
-                            tool_definitions: tool_definitions.clone(),
+                            tool_definitions: tool_registry
+                                .renderer_event_definitions(&tool_definitions),
                         });
                         emitted_tool_set_revision = effective_tool_set.revision().to_string();
                     }
@@ -1326,6 +1327,8 @@ impl AgentRuntime {
                     let trace_call = tool_registry.trace_call_projection(&call);
                     let model_call = tool_registry.model_call_projection(&call);
                     let tool_identity = tool_registry.identity(&call.tool).cloned();
+                    let is_mcp_tool =
+                        matches!(tool_identity.as_ref(), Some(AgentToolIdentity::Mcp { .. }));
                     let call_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
@@ -1370,11 +1373,13 @@ impl AgentRuntime {
                         ),
                     ));
                     publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
-                    let event_call = tool_registry.event_call_projection(&call);
-                    event_stream.emit(AgentEvent::ToolCall {
-                        run_id: run_id.clone(),
-                        call: event_call,
-                    });
+                    if !is_mcp_tool {
+                        let event_call = tool_registry.event_call_projection(&call);
+                        event_stream.emit(AgentEvent::ToolCall {
+                            run_id: run_id.clone(),
+                            call: event_call,
+                        });
+                    }
                     if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(
                             run_id,
@@ -1472,12 +1477,14 @@ impl AgentRuntime {
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
-                                event_stream.emit(AgentEvent::ToolResult {
-                                    run_id: run_id.clone(),
-                                    result: redact_tool_result_for_event(
-                                        &tool_registry.event_projection(&result),
-                                    ),
-                                });
+                                if !is_mcp_tool {
+                                    event_stream.emit(AgentEvent::ToolResult {
+                                        run_id: run_id.clone(),
+                                        result: redact_tool_result_for_event(
+                                            &tool_registry.event_projection(&result),
+                                        ),
+                                    });
+                                }
                                 active_context.push(ContextItem::tool_result(
                                     call.id.clone(),
                                     model_observation,
@@ -1771,17 +1778,19 @@ impl AgentRuntime {
                             finish_reason,
                         ));
                     }
-                    let event_result =
-                        redact_tool_result_for_event(&tool_registry.event_projection(&result));
-                    event_stream.emit(AgentEvent::ToolResult {
-                        run_id: run_id.clone(),
-                        result: event_result.clone(),
-                    });
-                    if let Some(draft) = file_draft_from_tool_result(&event_result) {
-                        event_stream.emit(AgentEvent::FileDraftUpdated {
+                    if !is_mcp_tool {
+                        let event_result =
+                            redact_tool_result_for_event(&tool_registry.event_projection(&result));
+                        event_stream.emit(AgentEvent::ToolResult {
                             run_id: run_id.clone(),
-                            draft,
+                            result: event_result.clone(),
                         });
+                        if let Some(draft) = file_draft_from_tool_result(&event_result) {
+                            event_stream.emit(AgentEvent::FileDraftUpdated {
+                                run_id: run_id.clone(),
+                                draft,
+                            });
+                        }
                     }
 
                     active_context.push(

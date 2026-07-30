@@ -245,10 +245,35 @@ async fn agent_service_approval_cas_runs_once_and_keeps_mcp_values_out_of_durabl
         )
         .unwrap();
 
-    let approval_required = wait_for_notification_matching(&mut receiver, |notification| {
-        notification["params"]["type"] == "approval_required"
-    })
-    .await;
+    let (approval_required, pre_approval_events) =
+        wait_for_notification_matching_with_seen(&mut receiver, |notification| {
+            notification["params"]["type"] == "approval_required"
+        })
+        .await;
+    assert!(pre_approval_events.iter().any(|notification| {
+        notification["params"]["type"] == "mcp_tool_invocation_state_changed"
+            && notification["params"]["invocation"]["state"] == "pending_approval"
+    }));
+    assert!(pre_approval_events.iter().all(|notification| {
+        notification["params"]["type"] != "tool_call"
+            || notification["params"]["call"]["tool"] != "mcp__approval_fixture__echo"
+    }));
+    for notification in pre_approval_events.iter().filter(|notification| {
+        matches!(
+            notification["params"]["type"].as_str(),
+            Some("started" | "tool_set_changed")
+        )
+    }) {
+        let definitions = notification["params"]["toolDefinitions"]
+            .as_array()
+            .expect("generic Tool-set event has definitions");
+        assert!(definitions
+            .iter()
+            .all(|definition| definition["name"] != "mcp__approval_fixture__echo"));
+        let rendered = notification.to_string();
+        assert!(!rendered.contains("Repository-owned approval lifecycle fixture"));
+        assert!(!rendered.contains("\"value\":{\"type\":\"string\"}"));
+    }
     let waiting = wait_for_notification_matching(&mut receiver, |notification| {
         notification["params"]["type"] == "done"
             && notification["params"]["status"] == "waiting_for_approval"
@@ -275,20 +300,62 @@ async fn agent_service_approval_cas_runs_once_and_keeps_mcp_values_out_of_durabl
         .approve_action(&turn.run_id, &pending[0].action_id, notifications.clone())
         .unwrap();
     assert_eq!(approved.status, "approved");
+    assert!(
+        approved.tool_result.is_none(),
+        "MCP approval response must not create a generic ToolResult Renderer channel"
+    );
     assert!(service
         .approve_action(&turn.run_id, &pending[0].action_id, notifications.clone(),)
         .is_err());
 
-    let completed = wait_for_notification_matching(&mut receiver, |notification| {
-        notification["params"]["type"] == "done" && notification["params"]["status"] == "completed"
-    })
-    .await;
+    let (completed, post_approval_events) =
+        wait_for_notification_matching_with_seen(&mut receiver, |notification| {
+            notification["params"]["type"] == "done"
+                && notification["params"]["status"] == "completed"
+        })
+        .await;
+    assert!(post_approval_events.iter().any(|notification| {
+        notification["params"]["type"] == "mcp_tool_invocation_state_changed"
+            && notification["params"]["invocation"]["state"] == "completed"
+    }));
+    assert!(post_approval_events.iter().all(|notification| {
+        !matches!(
+            notification["params"]["type"].as_str(),
+            Some("tool_call" | "tool_result")
+        )
+    }));
+    for notification in post_approval_events.iter().filter(|notification| {
+        matches!(
+            notification["params"]["type"].as_str(),
+            Some("started" | "tool_set_changed")
+        )
+    }) {
+        assert!(notification["params"]["toolDefinitions"]
+            .as_array()
+            .expect("continuation Tool-set event has definitions")
+            .iter()
+            .all(|definition| definition["name"] != "mcp__approval_fixture__echo"));
+    }
     assert!(!completed.to_string().contains(ARGUMENT_CANARY));
     assert!(!completed.to_string().contains(RESULT_CANARY));
     let (first_request, second_request) = model_server.await.unwrap();
-    assert!(first_request["tools"].as_array().is_some_and(|tools| tools
-        .iter()
-        .any(|tool| { tool["function"]["name"].as_str() == Some("mcp__approval_fixture__echo") })));
+    let provider_definition = first_request["tools"]
+        .as_array()
+        .and_then(|tools| {
+            tools.iter().find(|tool| {
+                tool["function"]["name"].as_str() == Some("mcp__approval_fixture__echo")
+            })
+        })
+        .expect("provider request retains the MCP Tool definition");
+    assert!(provider_definition["function"]["description"]
+        .as_str()
+        .is_some_and(|description| {
+            description.contains("Repository-owned approval lifecycle fixture")
+        }));
+    assert_eq!(
+        provider_definition["function"]["parameters"]["properties"]["value"]["type"],
+        "string"
+    );
     let encoded = serde_json::to_string(&second_request).unwrap();
     assert!(encoded.contains(RESULT_CANARY));
     assert!(!encoded.contains(ARGUMENT_CANARY));
@@ -440,33 +507,27 @@ async fn wait_for_notification_matching(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
     predicate: impl Fn(&Value) -> bool,
 ) -> Value {
+    wait_for_notification_matching_with_seen(receiver, predicate)
+        .await
+        .0
+}
+
+async fn wait_for_notification_matching_with_seen(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+    predicate: impl Fn(&Value) -> bool,
+) -> (Value, Vec<Value>) {
     let mut seen = Vec::new();
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let notification = receiver.recv().await.expect("notification channel closed");
             if predicate(&notification) {
-                return notification;
+                return (notification, seen);
             }
-            seen.push((
-                notification["params"]["type"]
-                    .as_str()
-                    .unwrap_or("<missing>")
-                    .to_string(),
-                notification["params"]["status"]
-                    .as_str()
-                    .unwrap_or("<missing>")
-                    .to_string(),
-                notification["params"]["code"]
-                    .as_str()
-                    .unwrap_or("<missing>")
-                    .to_string(),
-            ));
+            seen.push(notification);
         }
     })
     .await;
-    result.unwrap_or_else(|_| {
-        panic!("timed out waiting for Agent notification; safe event summary: {seen:?}")
-    })
+    result.expect("timed out waiting for Agent notification")
 }
 
 async fn read_json_request(stream: &mut TcpStream) -> Value {

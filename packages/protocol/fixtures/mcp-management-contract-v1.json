@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 1,
+  "errorCode": -32030,
+  "methods": {
+    "list": "mcp.server.list",
+    "get": "mcp.server.get",
+    "add": "mcp.server.add",
+    "update": "mcp.server.update",
+    "delete": "mcp.server.delete",
+    "prepareLaunchAuthorization": "mcp.server.authorizeLaunch.prepare",
+    "commitLaunchAuthorization": "mcp.server.authorizeLaunch.commit",
+    "enable": "mcp.server.enable",
+    "disable": "mcp.server.disable",
+    "start": "mcp.server.start",
+    "stop": "mcp.server.stop",
+    "restart": "mcp.server.restart",
+    "status": "mcp.server.status",
+    "listTools": "mcp.catalog.tools",
+    "refreshCatalog": "mcp.catalog.refresh",
+    "changed": "mcp.changed"
+  },
+  "listInput": {
+    "schemaVersion": 1
+  },
+  "idInput": {
+    "schemaVersion": 1,
+    "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92"
+  },
+  "mutationInput": {
+    "schemaVersion": 1,
+    "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+    "precondition": {
+      "expectedRegistryRevision": 7,
+      "expectedConfigEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+      "expectedConfigDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "createInput": {
+    "schemaVersion": 1,
+    "displayName": "Owned fixture",
+    "transport": "stdio",
+    "executable": "/owned/fixture",
+    "arguments": ["--mode", "", "value with spaces;$(not-a-shell)"],
+    "cwd": "/owned",
+    "approvalMode": "prompt"
+  },
+  "updateInput": {
+    "schemaVersion": 1,
+    "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+    "precondition": {
+      "expectedRegistryRevision": 7,
+      "expectedConfigEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+      "expectedConfigDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "displayName": "Owned fixture updated",
+    "transport": "stdio",
+    "executable": "/owned/fixture",
+    "arguments": ["--mode", "fixture"],
+    "cwd": "/owned",
+    "approvalMode": "deny"
+  },
+  "listOutput": {
+    "schemaVersion": 1,
+    "registryRevision": 7,
+    "servers": [
+      {
+        "schemaVersion": 1,
+        "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+        "displayName": "Owned fixture",
+        "scope": "user",
+        "source": "userManual",
+        "transport": "stdio",
+        "enabled": false,
+        "trust": "untrusted",
+        "approvalMode": "prompt",
+        "launchAuthorizationState": "required",
+        "state": "disabled",
+        "registryRevision": 7,
+        "configEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+        "configDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalogGeneration": 2,
+        "catalogCompleteness": "complete",
+        "toolCount": 1,
+        "activeCallCount": 0,
+        "updatedAtMs": 1785384000000
+      }
+    ]
+  },
+  "detailsOutput": {
+    "schemaVersion": 1,
+    "registryRevision": 7,
+    "server": {
+      "schemaVersion": 1,
+      "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+      "displayName": "Owned fixture",
+      "scope": "user",
+      "source": "userManual",
+      "transport": "stdio",
+      "enabled": false,
+      "trust": "untrusted",
+      "approvalMode": "prompt",
+      "launchAuthorizationState": "required",
+      "state": "disabled",
+      "registryRevision": 7,
+      "configEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+      "configDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "catalogGeneration": 2,
+      "catalogCompleteness": "complete",
+      "toolCount": 1,
+      "activeCallCount": 0,
+      "updatedAtMs": 1785384000000,
+      "executable": "/owned/fixture",
+      "arguments": ["--mode", "", "value with spaces;$(not-a-shell)"],
+      "cwd": "/owned",
+      "protocol": {
+        "protocolVersion": "2026-07-28",
+        "lifecycle": "discover"
+      },
+      "capabilities": {
+        "tools": true,
+        "resources": false,
+        "prompts": false,
+        "logging": false,
+        "completion": false
+      },
+      "createdAtMs": 1785383940000
+    }
+  },
+  "authorization": {
+    "preview": {
+      "schemaVersion": 1,
+      "authorizationId": "8e9a3118-88f4-4a53-9dba-82f89232d07e",
+      "expiresAtMs": 1785384060000,
+      "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+      "displayName": "Owned fixture",
+      "executable": "/owned/fixture",
+      "arguments": ["--mode", "", "value with spaces;$(not-a-shell)"],
+      "cwd": "/owned",
+      "launchSpecDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "precondition": {
+        "expectedRegistryRevision": 7,
+        "expectedConfigEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+        "expectedConfigDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "commitInput": {
+      "schemaVersion": 1,
+      "authorizationId": "8e9a3118-88f4-4a53-9dba-82f89232d07e",
+      "precondition": {
+        "expectedRegistryRevision": 7,
+        "expectedConfigEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+        "expectedConfigDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "result": {
+      "schemaVersion": 1,
+      "authorized": true,
+      "server": {
+        "schemaVersion": 1,
+        "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+        "displayName": "Owned fixture",
+        "scope": "user",
+        "source": "userManual",
+        "transport": "stdio",
+        "enabled": false,
+        "trust": "userApproved",
+        "approvalMode": "prompt",
+        "launchAuthorizationState": "authorized",
+        "state": "disabled",
+        "registryRevision": 7,
+        "configEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+        "configDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "catalogGeneration": 2,
+        "catalogCompleteness": "complete",
+        "toolCount": 1,
+        "activeCallCount": 0,
+        "updatedAtMs": 1785384000000,
+        "executable": "/owned/fixture",
+        "arguments": ["--mode", "", "value with spaces;$(not-a-shell)"],
+        "cwd": "/owned",
+        "protocol": {
+          "protocolVersion": "2026-07-28",
+          "lifecycle": "discover"
+        },
+        "capabilities": {
+          "tools": true,
+          "resources": false,
+          "prompts": false,
+          "logging": false,
+          "completion": false
+        },
+        "createdAtMs": 1785383940000
+      }
+    }
+  },
+  "catalog": {
+    "input": {
+      "schemaVersion": 1,
+      "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+      "limit": 50
+    },
+    "output": {
+      "schemaVersion": 1,
+      "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+      "catalogGeneration": 2,
+      "catalogCompleteness": "complete",
+      "tools": [
+        {
+          "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+          "rawName": "echo_text",
+          "modelName": "mcp__owned_fixture__echo_text",
+          "routable": true,
+          "disabled": false,
+          "schemaDigestPrefix": "0123456789ab",
+          "description": "Echo text.",
+          "descriptionTruncated": false,
+          "diagnosticCodes": [],
+          "catalogGeneration": 2,
+          "catalogCompleteness": "complete"
+        }
+      ]
+    }
+  },
+  "error": {
+    "schemaVersion": 1,
+    "type": "mcpManagement",
+    "operation": "enable",
+    "code": "authorizationRequired",
+    "recovery": "requestLaunchAuthorization",
+    "message": "Authorize the current launch configuration.",
+    "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+    "currentRegistryRevision": 7
+  },
+  "changed": {
+    "schemaVersion": 1,
+    "sourceEpoch": "d8346f56-c0f2-4e9d-b394-74dfd9e959e1",
+    "sequence": 9,
+    "registryRevision": 7,
+    "kind": "stateChanged",
+    "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+    "state": "ready"
+  },
+  "resyncChanged": {
+    "schemaVersion": 1,
+    "sourceEpoch": "d8346f56-c0f2-4e9d-b394-74dfd9e959e1",
+    "sequence": 10,
+    "registryRevision": 7,
+    "kind": "resyncRequired"
+  }
+}

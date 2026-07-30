@@ -7,8 +7,11 @@ use crate::application::mcp::approval_payload_store::MCP_APPROVAL_CREDENTIAL_SER
 use crate::application::mcp::approval_payload_store::{
     durable_mcp_payload_store_or_process_only, McpApprovalPayloadStore,
 };
+use crate::application::mcp::authorized_stdio_connector::AuthorizedMcpStdioConnector;
+use crate::application::mcp::management::McpManagementService;
 use crate::application::mcp::registry_event_sink::McpAgentRegistryEventSink;
 use crate::application::mcp::sqlite_envelope_repository::SqliteMcpApprovalEnvelopeRepository;
+use crate::application::mcp::sqlite_registry::SqliteMcpRegistry;
 
 const MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -88,6 +91,7 @@ pub(crate) struct CoreServerBootstrap {
     pub(crate) agent_service: AgentService,
     pub(crate) skill_services: SkillServices,
     pub(crate) git_review_service: Arc<GitReviewService>,
+    pub(crate) mcp_registry: Arc<SqliteMcpRegistry>,
     // Fields drop in declaration order. Keep this owner last so the database lock outlives every
     // service and SQLite connection above it. File-effect deletion barriers are process-local;
     // this OS lock makes one core-server the authoritative lifecycle owner for the exact DB.
@@ -112,6 +116,10 @@ impl CoreServerBootstrap {
         let storage =
             Arc::new(StorageService::open(&database_path).map_err(|error| {
                 io::Error::other(format!("failed to initialize storage: {error}"))
+            })?);
+        let mcp_registry =
+            Arc::new(SqliteMcpRegistry::open(&database_path).map_err(|_| {
+                io::Error::other("failed to initialize the persistent MCP Registry")
             })?);
         let image_generation_configuration = Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
@@ -233,6 +241,7 @@ impl CoreServerBootstrap {
             agent_service,
             skill_services,
             git_review_service,
+            mcp_registry,
             _database_instance_lock: database_instance_lock,
         })
     }
@@ -257,23 +266,26 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
                 "failed to reconcile interrupted image-generation Agent audits: {error}"
             ))
         })?;
-    // Round 3 deliberately starts with an empty in-memory Registry. The stdio policy authorizes
-    // no executable, so constructing the optional MCP subsystem cannot launch an unknown Server.
-    // Future persisted settings will populate this Registry through an explicit authorization
-    // boundary; the process-owned Manager and adapter can remain unchanged.
-    let mcp_registry = InMemoryMcpRegistry::shared();
+    // The persistent Registry has already migrated and reconciled before the
+    // runtime begins. The connector performs one final exact launch-spec
+    // authorization check immediately before every stdio spawn.
+    let mcp_registry = Arc::clone(&bootstrap.mcp_registry);
     let mcp_connector: Arc<dyn McpConnector> =
-        Arc::new(McpStdioConnector::new(McpStdioPolicy::default()));
+        Arc::new(AuthorizedMcpStdioConnector::new(Arc::clone(&mcp_registry)));
     let mcp_event_sink = Arc::new(McpAgentRegistryEventSink::new());
     let mcp_manager = Arc::new(
         McpConnectionManager::new(
-            mcp_registry,
+            mcp_registry.clone(),
             mcp_connector,
             mcp_event_sink.clone(),
             McpManagerPolicy::default(),
         )
         .map_err(|_| io::Error::other("failed to initialize the MCP connection manager"))?,
     );
+    let mcp_management = Arc::new(McpManagementService::new(
+        Arc::clone(&mcp_registry),
+        Arc::clone(&mcp_manager),
+    ));
     let mcp_payload_store = mcp_approval_payload_store(Arc::clone(&bootstrap.storage));
     let _ = mcp_payload_store.reconcile_expired(mycopilot_core::storage::now_ms());
     let mcp_bridge = Arc::new(
@@ -324,6 +336,11 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         image_artifact_outbound_rx,
         finish_outbound_rx,
     ));
+    let mcp_changed_notifier = tokio::spawn(run_mcp_changed_notifier(
+        mcp_event_sink.subscribe_safe_events(),
+        Arc::clone(&mcp_management),
+        outbound_tx.clone(),
+    ));
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let skill_acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -335,6 +352,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         skill_acquisition: &skill_acquisition_dispatcher,
         image_generation_configuration: &image_generation_configuration_dispatcher,
     };
+    let mcp_management_tasks = Arc::new(McpManagementRequestTracker::new());
 
     let input_result = run_request_loop(
         BufReader::new(io::stdin()),
@@ -345,6 +363,11 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
             image_generation_artifact_read_admission: Arc::new(Semaphore::new(
                 DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
             )),
+            mcp_management: Some(Arc::clone(&mcp_management)),
+            mcp_management_admission: Arc::new(Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_MCP_MANAGEMENT_REQUESTS,
+            )),
+            mcp_management_tasks: Arc::clone(&mcp_management_tasks),
         },
         &agent_service,
         bootstrap.skill_services.clone(),
@@ -357,6 +380,9 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     )
     .await;
 
+    mcp_management.begin_shutdown();
+    mcp_changed_notifier.abort();
+    let _ = mcp_changed_notifier.await;
     // Optional connection discovery must never delay admission or outlive Host shutdown.
     // Aborting this coordinator does not replace Manager cleanup; stop_all below remains the
     // process-owned close authority for every connection that reached the Manager.
@@ -376,6 +402,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         image_generation_configuration_dispatcher_result,
         image_generation_execution_shutdown,
         (cancelled_runs, timed_out),
+        mcp_management_requests_shutdown,
         mcp_shutdown,
     ) = tokio::join!(
         git_dispatcher.shutdown(),
@@ -386,6 +413,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
             .image_generation_execution
             .shutdown(Duration::from_secs(2)),
         agent_service.shutdown_active_runs(Duration::from_secs(2)),
+        mcp_management_tasks.shutdown(Duration::from_secs(2)),
         mcp_manager.shutdown(Duration::from_secs(2))
     );
 
@@ -442,6 +470,17 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     }
     if mcp_shutdown_failures > 0 {
         eprintln!("{mcp_shutdown_failures} MCP server(s) did not shut down cleanly");
+    }
+    if mcp_management_requests_shutdown.forced {
+        eprintln!(
+            "MCP management request shutdown reached its deadline; remaining requests were aborted"
+        );
+    }
+    if mcp_management_requests_shutdown.task_failures > 0 {
+        eprintln!(
+            "{} MCP management request task(s) did not join cleanly",
+            mcp_management_requests_shutdown.task_failures
+        );
     }
     match &mcp_action_invalidation {
         Ok(summary) if summary.payload_invalidation_failures > 0 => eprintln!(

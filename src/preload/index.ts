@@ -6,6 +6,7 @@ import { createGitIpcBridge } from './GitIpcBridge'
 import { createSkillsIpcBridge } from './SkillsIpcBridge'
 import { createOfficeIpcBridge } from './OfficeIpcBridge'
 import { createImageGenerationIpcBridge } from './ImageGenerationIpcBridge'
+import { createMcpIpcBridge } from './McpIpcBridge'
 import { createStorageIpcBridge } from './StorageIpcBridge'
 import { createTerminalIpcBridge } from './TerminalIpcBridge'
 import { createWorkspaceFilesIpcBridge } from './WorkspaceFilesIpcBridge'
@@ -25,6 +26,7 @@ const host: HostApi = {
   },
   git: createGitIpcBridge(ipcRenderer),
   imageGeneration: createImageGenerationIpcBridge(ipcRenderer),
+  mcp: createMcpIpcBridge(ipcRenderer),
   office: createOfficeIpcBridge(ipcRenderer),
   resources: {
     resolveFavicon: (input) => ipcRenderer.invoke(HOST_CHANNELS.resources.resolveFavicon, input)

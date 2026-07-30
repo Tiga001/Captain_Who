@@ -19,9 +19,10 @@ use mycopilot_mcp_client::{
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use serde::Deserialize;
-use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const FIXTURE_MODE: &str = "--mycopilot-owned-mcp-fixture";
 
@@ -94,6 +95,7 @@ async fn main() {
     }
 
     runtime_tool_registry_bridge_manager_stdio_fixture_chain().await;
+    persistent_registry_core_rpc_stdio_fixture_chain().await;
 }
 
 async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
@@ -297,6 +299,353 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
             .active_call_count,
         0
     );
+}
+
+async fn persistent_registry_core_rpc_stdio_fixture_chain() {
+    let fixture_dir = tempfile::tempdir().expect("create persistent MCP fixture directory");
+    let database = fixture_dir.path().join("storage.sqlite");
+    let call_marker = fixture_dir.path().join("management-call-marker");
+    let executable = std::env::current_exe().expect("resolve repository-owned fixture executable");
+
+    let mut first_host = CoreRpcHarness::spawn(&database, fixture_dir.path()).await;
+    let added = first_host
+        .request(
+            "mcp.server.add",
+            json!({
+                "schemaVersion": 1,
+                "displayName": "repository-owned persistent fixture",
+                "transport": "stdio",
+                "executable": executable.to_string_lossy(),
+                "arguments": [
+                    FIXTURE_MODE,
+                    call_marker.to_string_lossy()
+                ],
+                "cwd": fixture_dir.path().to_string_lossy(),
+                "approvalMode": "prompt"
+            }),
+        )
+        .await;
+    assert!(added.get("error").is_none(), "MCP add must succeed");
+    let added_server = &added["result"]["server"];
+    assert_eq!(added_server["enabled"], false);
+    assert_eq!(added_server["trust"], "untrusted");
+    assert_eq!(added_server["launchAuthorizationState"], "required");
+    let server_id = required_string(added_server, "serverId");
+
+    let preview = first_host
+        .request(
+            "mcp.server.authorizeLaunch.prepare",
+            mutation_params(added_server),
+        )
+        .await;
+    assert!(
+        preview.get("error").is_none(),
+        "launch authorization preview must succeed"
+    );
+    let preview_result = &preview["result"];
+    assert_eq!(
+        preview_result["serverId"].as_str(),
+        Some(server_id.as_str())
+    );
+    assert_eq!(
+        preview_result["arguments"],
+        json!([FIXTURE_MODE, call_marker.to_string_lossy().into_owned()])
+    );
+
+    let committed = first_host
+        .request(
+            "mcp.server.authorizeLaunch.commit",
+            json!({
+                "schemaVersion": 1,
+                "authorizationId": required_string(preview_result, "authorizationId"),
+                "precondition": preview_result["precondition"].clone()
+            }),
+        )
+        .await;
+    assert!(
+        committed.get("error").is_none(),
+        "launch authorization commit must succeed"
+    );
+    let authorized_server = &committed["result"]["server"];
+    assert_eq!(authorized_server["enabled"], false);
+    assert_eq!(authorized_server["trust"], "userApproved");
+    assert_eq!(authorized_server["launchAuthorizationState"], "authorized");
+
+    let enabled = first_host
+        .request("mcp.server.enable", mutation_params(authorized_server))
+        .await;
+    assert!(enabled.get("error").is_none(), "enable must succeed");
+    let enabled_server = &enabled["result"]["server"];
+    assert_eq!(enabled_server["enabled"], true);
+
+    let started = first_host
+        .request("mcp.server.start", mutation_params(enabled_server))
+        .await;
+    assert!(
+        started.get("error").is_none(),
+        "authorized fixture start must succeed"
+    );
+    let started_server = &started["result"]["server"];
+    assert_eq!(started_server["state"], "ready");
+
+    let tools = first_host
+        .request(
+            "mcp.catalog.tools",
+            json!({
+                "schemaVersion": 1,
+                "serverId": server_id,
+                "limit": 100
+            }),
+        )
+        .await;
+    assert!(
+        tools.get("error").is_none(),
+        "fixture tool discovery must succeed"
+    );
+    assert!(tools["result"]["tools"]
+        .as_array()
+        .is_some_and(|tools| tools.iter().any(|tool| {
+            tool["rawName"].as_str() == Some("echo_text")
+                && tool.get("inputSchema").is_none()
+                && tool.get("annotations").is_none()
+                && tool.get("_meta").is_none()
+        })));
+    assert!(
+        !call_marker.exists(),
+        "management discovery must never invoke an MCP tool"
+    );
+
+    let refreshed = first_host
+        .request("mcp.catalog.refresh", mutation_params(started_server))
+        .await;
+    assert!(
+        refreshed.get("error").is_none(),
+        "fixture Catalog refresh must succeed"
+    );
+    let persisted_identity = (
+        required_string(started_server, "serverId"),
+        required_string(started_server, "configEpoch"),
+        required_string(started_server, "configDigest"),
+        started_server["registryRevision"]
+            .as_u64()
+            .expect("persisted Registry revision"),
+    );
+    first_host.shutdown().await;
+
+    let mut restarted_host = CoreRpcHarness::spawn(&database, fixture_dir.path()).await;
+    let restored = restarted_host
+        .request(
+            "mcp.server.get",
+            json!({
+                "schemaVersion": 1,
+                "serverId": persisted_identity.0
+            }),
+        )
+        .await;
+    assert!(
+        restored.get("error").is_none(),
+        "persisted server must survive Host restart"
+    );
+    let restored_server = &restored["result"]["server"];
+    assert_eq!(
+        restored_server["serverId"].as_str(),
+        Some(persisted_identity.0.as_str())
+    );
+    assert_eq!(
+        restored_server["configEpoch"].as_str(),
+        Some(persisted_identity.1.as_str())
+    );
+    assert_eq!(
+        restored_server["configDigest"].as_str(),
+        Some(persisted_identity.2.as_str())
+    );
+    assert_eq!(
+        restored_server["registryRevision"].as_u64(),
+        Some(persisted_identity.3)
+    );
+    assert_eq!(restored_server["enabled"], true);
+    assert_eq!(restored_server["launchAuthorizationState"], "authorized");
+
+    // `start_enabled` may already be negotiating. A duplicate typed start is
+    // deliberately coalesced by the Manager and gives this E2E an authoritative
+    // Ready boundary without timing sleeps.
+    let restored_started = restarted_host
+        .request("mcp.server.start", mutation_params(restored_server))
+        .await;
+    assert!(
+        restored_started.get("error").is_none(),
+        "restored exact authorization must start the fixture"
+    );
+    let restored_started_server = &restored_started["result"]["server"];
+    assert_eq!(restored_started_server["state"], "ready");
+
+    let restarted = restarted_host
+        .request(
+            "mcp.server.restart",
+            mutation_params(restored_started_server),
+        )
+        .await;
+    assert!(
+        restarted.get("error").is_none(),
+        "fixture restart must succeed"
+    );
+    let restarted_server = &restarted["result"]["server"];
+    assert_eq!(restarted_server["state"], "ready");
+
+    let deleted = restarted_host
+        .request("mcp.server.delete", mutation_params(restarted_server))
+        .await;
+    assert!(
+        deleted.get("error").is_none(),
+        "fixture deletion and process cleanup must succeed"
+    );
+    assert_eq!(deleted["result"]["server"]["enabled"], false);
+    assert_eq!(deleted["result"]["server"]["state"], "disabled");
+
+    let list = restarted_host
+        .request("mcp.server.list", json!({ "schemaVersion": 1 }))
+        .await;
+    assert_eq!(list["result"]["servers"], json!([]));
+    assert!(
+        list["result"]["registryRevision"]
+            .as_u64()
+            .is_some_and(|revision| revision > persisted_identity.3),
+        "global Registry revision must remain monotonic across restart"
+    );
+    assert!(
+        !call_marker.exists(),
+        "management lifecycle must not bypass per-tool approval"
+    );
+    restarted_host.shutdown().await;
+}
+
+struct CoreRpcHarness {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: tokio::io::Lines<BufReader<ChildStdout>>,
+    stderr: tokio::task::JoinHandle<Vec<u8>>,
+    next_id: u64,
+}
+
+impl CoreRpcHarness {
+    async fn spawn(database: &Path, isolated_root: &Path) -> Self {
+        let home = isolated_root.join("home");
+        let app_data = isolated_root.join("app-data");
+        let xdg_data = isolated_root.join("xdg-data");
+        std::fs::create_dir_all(&home).expect("create isolated test home");
+        std::fs::create_dir_all(&app_data).expect("create isolated test app data");
+        std::fs::create_dir_all(&xdg_data).expect("create isolated test XDG data");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_core-server"))
+            .env_clear()
+            .env("MYCOPILOT_STORAGE_DB", database)
+            .env("HOME", home)
+            .env("APPDATA", app_data)
+            .env("XDG_DATA_HOME", xdg_data)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn repository core-server");
+        let stdin = child.stdin.take().expect("core-server stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("core-server stdout")).lines();
+        let child_stderr = child.stderr.take().expect("core-server stderr");
+        let stderr = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            child_stderr
+                .take((64 * 1024 + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
+                .expect("read bounded test core-server stderr");
+            bytes
+        });
+        let mut harness = Self {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            next_id: 1,
+        };
+        let ping = harness.request("core.ping", json!({})).await;
+        assert_eq!(ping["result"]["message"], "pong");
+        harness
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).expect("test RPC ID capacity");
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        self.stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .expect("write core-server JSON-RPC request");
+        self.stdin
+            .flush()
+            .await
+            .expect("flush core-server JSON-RPC request");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let line = tokio::time::timeout_at(deadline, self.stdout.next_line())
+                .await
+                .expect("core-server response before test deadline")
+                .expect("read core-server stdout")
+                .expect("core-server stdout remained open");
+            let response: Value =
+                serde_json::from_str(&line).expect("decode core-server JSON-RPC output");
+            if response["id"].as_u64() == Some(id) {
+                return response;
+            }
+            assert!(
+                response.get("id").is_none() && response.get("method").is_some(),
+                "unexpected core-server JSON-RPC response"
+            );
+        }
+    }
+
+    async fn shutdown(mut self) {
+        let response = self.request("core.shutdown", json!({})).await;
+        assert!(
+            response.get("error").is_none(),
+            "core shutdown must succeed"
+        );
+        drop(self.stdin);
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), self.child.wait())
+            .await
+            .expect("core-server exits before shutdown deadline")
+            .expect("wait for core-server");
+        let stderr = self.stderr.await.expect("join core-server stderr reader");
+        assert!(status.success(), "core-server must exit successfully");
+        assert!(
+            stderr.len() <= 64 * 1024,
+            "test core-server stderr exceeded the safe retained limit"
+        );
+    }
+}
+
+fn mutation_params(server: &Value) -> Value {
+    json!({
+        "schemaVersion": 1,
+        "serverId": required_string(server, "serverId"),
+        "precondition": {
+            "expectedRegistryRevision": server["registryRevision"]
+                .as_u64()
+                .expect("server Registry revision"),
+            "expectedConfigEpoch": required_string(server, "configEpoch"),
+            "expectedConfigDigest": required_string(server, "configDigest")
+        }
+    })
+}
+
+fn required_string(value: &Value, key: &str) -> String {
+    value[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("missing string field {key}"))
+        .to_string()
 }
 
 fn only_mcp_approval(actions: &[AgentProposedAction]) -> AgentMcpToolApproval {

@@ -47,6 +47,19 @@ import type {
   ImageGenerationStatus,
   ImageGenerationUpdateConfigurationInput,
   ImageGenerationUpdateConfigurationOutput,
+  McpCatalogToolsPageInput,
+  McpCatalogToolsPageOutput,
+  McpChangedNotification,
+  McpLaunchAuthorizationCommitInput,
+  McpLaunchAuthorizationPreview,
+  McpLaunchAuthorizationResult,
+  McpManagementErrorData,
+  McpServerCreateInput,
+  McpServerDetailsOutput,
+  McpServerIdInput,
+  McpServerListOutput,
+  McpServerMutationInput,
+  McpServerUpdateInput,
   ChatSearchInput,
   ChatSearchResult,
   SkillInstallationCommitOutput,
@@ -100,6 +113,9 @@ import {
   AGENT_REJECT_ACTION_METHOD,
   AGENT_START_CONVERSATION_TURN_METHOD,
   AGENT_STEER_RUN_METHOD,
+  parseAgentActionExecutionOutputForHost,
+  parseAgentEventForHost,
+  parsePendingAgentActionSnapshotsForHost,
   parseSkillInstallationCommitOutput,
   parseSkillInstallationPreview,
   parseSkillInspectionErrorData,
@@ -120,6 +136,37 @@ import {
   IMAGE_GENERATION_GET_STATUS_METHOD,
   IMAGE_GENERATION_SET_ENABLED_METHOD,
   IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
+  MCP_CATALOG_REFRESH_METHOD,
+  MCP_CATALOG_TOOLS_METHOD,
+  MCP_CHANGED_NOTIFICATION_METHOD,
+  MCP_MANAGEMENT_ERROR_CODE,
+  MCP_MANAGEMENT_SCHEMA_VERSION,
+  MCP_SERVER_ADD_METHOD,
+  MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD,
+  MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD,
+  MCP_SERVER_DELETE_METHOD,
+  MCP_SERVER_DISABLE_METHOD,
+  MCP_SERVER_ENABLE_METHOD,
+  MCP_SERVER_GET_METHOD,
+  MCP_SERVER_LIST_METHOD,
+  MCP_SERVER_RESTART_METHOD,
+  MCP_SERVER_START_METHOD,
+  MCP_SERVER_STATUS_METHOD,
+  MCP_SERVER_STOP_METHOD,
+  MCP_SERVER_UPDATE_METHOD,
+  parseMcpCatalogToolsPageInput,
+  parseMcpCatalogToolsPageOutput,
+  parseMcpChangedNotification,
+  parseMcpLaunchAuthorizationCommitInput,
+  parseMcpLaunchAuthorizationPreview,
+  parseMcpLaunchAuthorizationResult,
+  parseMcpManagementErrorData,
+  parseMcpServerCreateInput,
+  parseMcpServerDetailsOutput,
+  parseMcpServerIdInput,
+  parseMcpServerListOutput,
+  parseMcpServerMutationInput,
+  parseMcpServerUpdateInput,
   parseImageGenerationConfigurationErrorData,
   IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
   IMAGE_GENERATION_READ_ARTIFACT_METHOD,
@@ -269,6 +316,29 @@ function rethrowValidatedImageGenerationArtifactError(error: unknown): never {
   throw Object.assign(new Error(data.message), {
     name: 'ImageGenerationArtifactError',
     code: IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+    data
+  })
+}
+
+function rethrowValidatedMcpManagementError(error: unknown): never {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    Array.isArray(error) ||
+    !('code' in error) ||
+    error.code !== MCP_MANAGEMENT_ERROR_CODE
+  ) {
+    throw error
+  }
+
+  const data: McpManagementErrorData = parseMcpManagementErrorData(
+    'data' in error ? error.data : undefined
+  )
+  // Only the bounded, protocol-validated Host projection may cross Main. Core/Server messages can
+  // contain process details and are deliberately not forwarded.
+  throw Object.assign(new Error(data.message), {
+    name: 'McpManagementError',
+    code: MCP_MANAGEMENT_ERROR_CODE,
     data
   })
 }
@@ -429,6 +499,142 @@ export class CoreServer {
       .catch(rethrowValidatedImageGenerationArtifactError)
   }
 
+  listMcpServers(): Promise<McpServerListOutput> {
+    return this.rpc
+      .request<unknown, { schemaVersion: typeof MCP_MANAGEMENT_SCHEMA_VERSION }>(
+        MCP_SERVER_LIST_METHOD,
+        { schemaVersion: MCP_MANAGEMENT_SCHEMA_VERSION }
+      )
+      .then(parseMcpServerListOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  getMcpServer(input: McpServerIdInput): Promise<McpServerDetailsOutput> {
+    const request = parseMcpServerIdInput(input)
+    return this.rpc
+      .request<unknown, McpServerIdInput>(MCP_SERVER_GET_METHOD, request)
+      .then(parseMcpServerDetailsOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  addMcpServer(input: McpServerCreateInput): Promise<McpServerDetailsOutput> {
+    const request = parseMcpServerCreateInput(input)
+    return this.rpc
+      .request<unknown, McpServerCreateInput>(MCP_SERVER_ADD_METHOD, request)
+      .then(parseMcpServerDetailsOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  updateMcpServer(input: McpServerUpdateInput): Promise<McpServerDetailsOutput> {
+    const request = parseMcpServerUpdateInput(input)
+    return this.rpc
+      .request<unknown, McpServerUpdateInput>(MCP_SERVER_UPDATE_METHOD, request)
+      .then(parseMcpServerDetailsOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  deleteMcpServer(input: McpServerMutationInput): Promise<McpServerDetailsOutput> {
+    const request = parseMcpServerMutationInput(input)
+    return this.rpc
+      .request<unknown, McpServerMutationInput>(MCP_SERVER_DELETE_METHOD, request)
+      .then(parseMcpServerDetailsOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  prepareMcpLaunchAuthorization(
+    input: McpServerMutationInput
+  ): Promise<McpLaunchAuthorizationPreview> {
+    const request = parseMcpServerMutationInput(input)
+    return this.rpc
+      .request<unknown, McpServerMutationInput>(MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD, request)
+      .then(parseMcpLaunchAuthorizationPreview)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  commitMcpLaunchAuthorization(
+    input: McpLaunchAuthorizationCommitInput
+  ): Promise<McpLaunchAuthorizationResult> {
+    const request = parseMcpLaunchAuthorizationCommitInput(input)
+    return this.rpc
+      .request<unknown, McpLaunchAuthorizationCommitInput>(
+        MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD,
+        request
+      )
+      .then(parseMcpLaunchAuthorizationResult)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  enableMcpServer(input: McpServerMutationInput): Promise<McpServerDetailsOutput> {
+    return this.mutateMcpServer(MCP_SERVER_ENABLE_METHOD, input)
+  }
+
+  disableMcpServer(input: McpServerMutationInput): Promise<McpServerDetailsOutput> {
+    return this.mutateMcpServer(MCP_SERVER_DISABLE_METHOD, input)
+  }
+
+  startMcpServer(input: McpServerMutationInput): Promise<McpServerDetailsOutput> {
+    return this.mutateMcpServer(MCP_SERVER_START_METHOD, input)
+  }
+
+  stopMcpServer(input: McpServerMutationInput): Promise<McpServerDetailsOutput> {
+    return this.mutateMcpServer(MCP_SERVER_STOP_METHOD, input)
+  }
+
+  restartMcpServer(input: McpServerMutationInput): Promise<McpServerDetailsOutput> {
+    return this.mutateMcpServer(MCP_SERVER_RESTART_METHOD, input)
+  }
+
+  getMcpServerStatus(input: McpServerIdInput): Promise<McpServerDetailsOutput> {
+    const request = parseMcpServerIdInput(input)
+    return this.rpc
+      .request<unknown, McpServerIdInput>(MCP_SERVER_STATUS_METHOD, request)
+      .then(parseMcpServerDetailsOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  listMcpTools(input: McpCatalogToolsPageInput): Promise<McpCatalogToolsPageOutput> {
+    const request = parseMcpCatalogToolsPageInput(input)
+    return this.rpc
+      .request<unknown, McpCatalogToolsPageInput>(MCP_CATALOG_TOOLS_METHOD, request)
+      .then(parseMcpCatalogToolsPageOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  refreshMcpCatalog(input: McpServerMutationInput): Promise<McpCatalogToolsPageOutput> {
+    const request = parseMcpServerMutationInput(input)
+    return this.rpc
+      .request<unknown, McpServerMutationInput>(MCP_CATALOG_REFRESH_METHOD, request)
+      .then(parseMcpCatalogToolsPageOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
+  onMcpChanged(handler: (event: McpChangedNotification) => void): () => void {
+    return this.rpc.onNotification(MCP_CHANGED_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseMcpChangedNotification(params))
+      } catch {
+        // Do not log protocol bodies or parser errors: either may contain rejected private data.
+        console.warn('Ignored invalid mcp.changed notification')
+      }
+    })
+  }
+
+  private mutateMcpServer(
+    method:
+      | typeof MCP_SERVER_ENABLE_METHOD
+      | typeof MCP_SERVER_DISABLE_METHOD
+      | typeof MCP_SERVER_START_METHOD
+      | typeof MCP_SERVER_STOP_METHOD
+      | typeof MCP_SERVER_RESTART_METHOD,
+    input: McpServerMutationInput
+  ): Promise<McpServerDetailsOutput> {
+    const request = parseMcpServerMutationInput(input)
+    return this.rpc
+      .request<unknown, McpServerMutationInput>(method, request)
+      .then(parseMcpServerDetailsOutput)
+      .catch(rethrowValidatedMcpManagementError)
+  }
+
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {
     return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnInput>(
       AGENT_START_CONVERSATION_TURN_METHOD,
@@ -457,21 +663,21 @@ export class CoreServer {
   }
 
   listPendingActions(): Promise<PendingAgentActionSnapshot[]> {
-    return this.rpc.request<PendingAgentActionSnapshot[]>(AGENT_LIST_PENDING_ACTIONS_METHOD)
+    return this.rpc
+      .request<unknown>(AGENT_LIST_PENDING_ACTIONS_METHOD)
+      .then(parsePendingAgentActionSnapshotsForHost)
   }
 
   approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput> {
-    return this.rpc.request<AgentActionExecutionOutput, AgentActionIdRequest>(
-      AGENT_APPROVE_ACTION_METHOD,
-      input
-    )
+    return this.rpc
+      .request<unknown, AgentActionIdRequest>(AGENT_APPROVE_ACTION_METHOD, input)
+      .then(parseAgentActionExecutionOutputForHost)
   }
 
   rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput> {
-    return this.rpc.request<AgentActionExecutionOutput, AgentRejectActionRequest>(
-      AGENT_REJECT_ACTION_METHOD,
-      input
-    )
+    return this.rpc
+      .request<unknown, AgentRejectActionRequest>(AGENT_REJECT_ACTION_METHOD, input)
+      .then(parseAgentActionExecutionOutputForHost)
   }
 
   cancelAction(input: AgentActionIdRequest): Promise<boolean> {
@@ -507,9 +713,14 @@ export class CoreServer {
   }
 
   onAgentEvent(handler: (event: AgentEvent) => void): () => void {
-    return this.rpc.onNotification(AGENT_EVENT_NOTIFICATION_METHOD, (params) =>
-      handler(params as AgentEvent)
-    )
+    return this.rpc.onNotification(AGENT_EVENT_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseAgentEventForHost(params))
+      } catch {
+        // MCP event rejection must not echo the rejected payload or a parser diagnostic.
+        console.warn('Ignored invalid Agent event')
+      }
+    })
   }
 
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]> {

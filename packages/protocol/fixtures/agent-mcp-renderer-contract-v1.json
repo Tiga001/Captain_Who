@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "approvalRequired": {
+    "type": "approval_required",
+    "runId": "run-owned",
+    "action": {
+      "type": "mcp_tool_call",
+      "approval": {
+        "identity": {
+          "actionId": "94c2f39c-ddaa-49bb-a3ef-8756053d68c8",
+          "invocationId": "a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f",
+          "runId": "run-owned",
+          "callId": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "provenance": {
+            "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+            "scope": {
+              "type": "user"
+            },
+            "rawToolName": "echo_text",
+            "modelToolName": "mcp__owned_fixture__echo_text",
+            "configEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+            "registryRevision": 7,
+            "configDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "catalogGeneration": 2,
+            "catalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "catalogSchemaDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "schemaDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "schemaNormalizerVersion": 1
+          }
+        },
+        "call": {
+          "id": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tool": "mcp__owned_fixture__echo_text",
+          "args": {},
+          "approvalStatus": "required"
+        },
+        "summary": {
+          "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+          "serverDisplayName": "Owned fixture",
+          "scope": {
+            "type": "user"
+          },
+          "rawToolName": "echo_text",
+          "modelToolName": "mcp__owned_fixture__echo_text",
+          "arguments": {
+            "encodedBytes": 24,
+            "topLevelPropertyCount": 1,
+            "stringValueCount": 1,
+            "numberValueCount": 0,
+            "booleanValueCount": 0,
+            "nullValueCount": 0,
+            "objectValueCount": 1,
+            "arrayValueCount": 0,
+            "maxDepth": 2,
+            "truncated": false
+          },
+          "risk": "side_effects_possible",
+          "external": true
+        },
+        "approvalMode": "prompt",
+        "payloadPersistence": "process_only",
+        "createdAt": 1753843200000,
+        "expiresAt": 1753844100000
+      }
+    }
+  },
+  "lifecycle": {
+    "type": "mcp_tool_invocation_state_changed",
+    "runId": "run-owned",
+    "invocation": {
+      "actionId": "94c2f39c-ddaa-49bb-a3ef-8756053d68c8",
+      "invocationId": "a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f",
+      "callId": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+      "serverDisplayName": "Owned fixture",
+      "rawToolName": "echo_text",
+      "modelToolName": "mcp__owned_fixture__echo_text",
+      "external": true,
+      "state": "running",
+      "dispatchCertainty": "possibly_dispatched",
+      "outputTruncated": false
+    }
+  },
+  "done": {
+    "type": "done",
+    "runId": "run-owned",
+    "success": true,
+    "status": "waiting_for_approval",
+    "content": "External MCP approval is required.",
+    "proposedActions": [
+      {
+        "type": "mcp_tool_call",
+        "approval": {
+          "identity": {
+            "actionId": "94c2f39c-ddaa-49bb-a3ef-8756053d68c8",
+            "invocationId": "a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f",
+            "runId": "run-owned",
+            "callId": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "provenance": {
+              "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+              "scope": {
+                "type": "user"
+              },
+              "rawToolName": "echo_text",
+              "modelToolName": "mcp__owned_fixture__echo_text",
+              "configEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+              "registryRevision": 7,
+              "configDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "catalogGeneration": 2,
+              "catalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "catalogSchemaDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "schemaDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "schemaNormalizerVersion": 1
+            }
+          },
+          "call": {
+            "id": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "tool": "mcp__owned_fixture__echo_text",
+            "args": {},
+            "approvalStatus": "required"
+          },
+          "summary": {
+            "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+            "serverDisplayName": "Owned fixture",
+            "scope": {
+              "type": "user"
+            },
+            "rawToolName": "echo_text",
+            "modelToolName": "mcp__owned_fixture__echo_text",
+            "arguments": {
+              "encodedBytes": 24,
+              "topLevelPropertyCount": 1,
+              "stringValueCount": 1,
+              "numberValueCount": 0,
+              "booleanValueCount": 0,
+              "nullValueCount": 0,
+              "objectValueCount": 1,
+              "arrayValueCount": 0,
+              "maxDepth": 2,
+              "truncated": false
+            },
+            "risk": "side_effects_possible",
+            "external": true
+          },
+          "approvalMode": "prompt",
+          "payloadPersistence": "process_only",
+          "createdAt": 1753843200000,
+          "expiresAt": 1753844100000
+        }
+      }
+    ]
+  }
+}

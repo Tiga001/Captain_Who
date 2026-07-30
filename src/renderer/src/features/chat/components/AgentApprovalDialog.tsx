@@ -20,7 +20,10 @@ interface AgentApprovalDialogProps {
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
 }
 
+const MCP_APPROVAL_PLACEHOLDER = 'External MCP operation UI is not connected yet.'
+
 function getApprovalFallbackTitle(action: AgentProposedAction, t: Translate) {
+  if (action.type === 'mcp_tool_call') return MCP_APPROVAL_PLACEHOLDER
   if (action.type === 'command') return t('agent.approval.dialog.commandTitle')
   if (action.type === 'diff') return t('agent.approval.dialog.diffTitle')
   if (action.type === 'file_write') return t('agent.approval.dialog.fileWriteTitle')
@@ -50,6 +53,7 @@ function getApprovalFallbackTitle(action: AgentProposedAction, t: Translate) {
 }
 
 function getApprovalRequest(action: AgentProposedAction, t: Translate) {
+  if (action.type === 'mcp_tool_call') return MCP_APPROVAL_PLACEHOLDER
   if (action.type === 'diff') return action.diff.summary ?? action.diff.patch
   if (action.type === 'file_write')
     return action.fileWrite.summary ?? getApprovalFallbackTitle(action, t)
@@ -64,6 +68,7 @@ function getApprovalRequest(action: AgentProposedAction, t: Translate) {
 }
 
 function getApprovalCode(action: AgentProposedAction) {
+  if (action.type === 'mcp_tool_call') return 'MCP'
   if (action.type === 'command') return action.command.command
   if (action.type === 'diff') return action.diff.filePath
   if (action.type === 'file_write') return action.fileWrite.filePath
@@ -98,6 +103,7 @@ function getApprovalCode(action: AgentProposedAction) {
 }
 
 function getApprovalPolicyHint(action: AgentProposedAction, t: Translate) {
+  if (action.type === 'mcp_tool_call') return MCP_APPROVAL_PLACEHOLDER
   if (action.type === 'command') return t('agent.approval.dialog.commandPolicyHint')
   if (action.type === 'diff') return t('agent.approval.dialog.diffPolicyHint')
   if (action.type === 'file_write') return t('agent.approval.dialog.diffPolicyHint')
@@ -127,6 +133,7 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
   const policyHint = getApprovalPolicyHint(action, t)
   const rememberPrefix = getRememberCommandPrefix(action)
   const showRememberChoice = canRememberForRun(action)
+  const mcpUiPending = action.type === 'mcp_tool_call'
 
   useEffect(() => {
     setRejectMessage('')
@@ -134,7 +141,7 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
   }, [action, messageId])
 
   const approve = (rememberForRun = false) => {
-    if (isSubmitting) return
+    if (isSubmitting || mcpUiPending) return
     setIsSubmitting(true)
     onApprove?.(messageId, action, { rememberForRun })
   }
@@ -168,7 +175,7 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
       <button
         className="agent-approval-dialog__choice"
         data-choice="primary"
-        disabled={isSubmitting}
+        disabled={isSubmitting || mcpUiPending}
         onClick={() => approve(false)}
         type="button"
       >

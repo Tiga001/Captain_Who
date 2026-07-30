@@ -781,6 +781,187 @@ fn office_status_contract_is_strict_and_uses_the_stable_method() {
 }
 
 #[test]
+fn mcp_management_contract_is_strict_and_separates_launch_arguments() {
+    assert_eq!(MCP_SERVER_ADD_METHOD, "mcp.server.add");
+    assert_eq!(
+        MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD,
+        "mcp.server.authorizeLaunch.prepare"
+    );
+    assert_eq!(
+        MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD,
+        "mcp.server.authorizeLaunch.commit"
+    );
+    assert_eq!(MCP_CHANGED_NOTIFICATION_METHOD, "mcp.changed");
+
+    let request = serde_json::json!({
+        "schemaVersion": MCP_MANAGEMENT_SCHEMA_VERSION,
+        "displayName": "owned fixture",
+        "transport": "stdio",
+        "executable": "/owned/fixture",
+        "arguments": ["--mode", "", "value with spaces;$(not-a-shell)"],
+        "cwd": "/owned",
+        "approvalMode": "prompt"
+    });
+    let parsed: McpServerCreateInput =
+        serde_json::from_value(request.clone()).expect("valid MCP create input");
+    assert_eq!(parsed.arguments[1], "");
+    assert_eq!(parsed.arguments[2], "value with spaces;$(not-a-shell)");
+    assert_eq!(serde_json::to_value(parsed).unwrap(), request);
+
+    let mut with_environment = request.clone();
+    with_environment["environment"] = serde_json::json!({"TOKEN": "must-not-cross"});
+    assert!(serde_json::from_value::<McpServerCreateInput>(with_environment).is_err());
+
+    let mut with_client_id = request.clone();
+    with_client_id["serverId"] = serde_json::json!("client-controlled");
+    assert!(serde_json::from_value::<McpServerCreateInput>(with_client_id).is_err());
+
+    let mut shell_command = request;
+    shell_command["command"] = serde_json::json!("fixture --mode value");
+    assert!(serde_json::from_value::<McpServerCreateInput>(shell_command).is_err());
+}
+
+#[test]
+fn mcp_management_matches_the_shared_rust_typescript_golden_contract() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/mcp-management-contract-v1.json"
+    ))
+    .expect("shared MCP management contract fixture");
+
+    assert_eq!(
+        fixture["schemaVersion"], MCP_MANAGEMENT_SCHEMA_VERSION,
+        "MCP management schema version drifted"
+    );
+    assert_eq!(
+        fixture["errorCode"], MCP_MANAGEMENT_ERROR_CODE,
+        "MCP management JSON-RPC error code drifted"
+    );
+    let methods = &fixture["methods"];
+    for (key, expected) in [
+        ("list", MCP_SERVER_LIST_METHOD),
+        ("get", MCP_SERVER_GET_METHOD),
+        ("add", MCP_SERVER_ADD_METHOD),
+        ("update", MCP_SERVER_UPDATE_METHOD),
+        ("delete", MCP_SERVER_DELETE_METHOD),
+        (
+            "prepareLaunchAuthorization",
+            MCP_SERVER_AUTHORIZE_LAUNCH_PREPARE_METHOD,
+        ),
+        (
+            "commitLaunchAuthorization",
+            MCP_SERVER_AUTHORIZE_LAUNCH_COMMIT_METHOD,
+        ),
+        ("enable", MCP_SERVER_ENABLE_METHOD),
+        ("disable", MCP_SERVER_DISABLE_METHOD),
+        ("start", MCP_SERVER_START_METHOD),
+        ("stop", MCP_SERVER_STOP_METHOD),
+        ("restart", MCP_SERVER_RESTART_METHOD),
+        ("status", MCP_SERVER_STATUS_METHOD),
+        ("listTools", MCP_CATALOG_TOOLS_METHOD),
+        ("refreshCatalog", MCP_CATALOG_REFRESH_METHOD),
+        ("changed", MCP_CHANGED_NOTIFICATION_METHOD),
+    ] {
+        assert_eq!(
+            methods[key], expected,
+            "MCP method fixture drifted at {key}"
+        );
+    }
+
+    assert_wire_round_trip::<McpServerListInput>(&fixture["listInput"]);
+    assert_wire_round_trip::<McpServerIdInput>(&fixture["idInput"]);
+    assert_wire_round_trip::<McpServerMutationInput>(&fixture["mutationInput"]);
+    assert_wire_round_trip::<McpServerCreateInput>(&fixture["createInput"]);
+    assert_wire_round_trip::<McpServerUpdateInput>(&fixture["updateInput"]);
+    assert_wire_round_trip::<McpServerListOutput>(&fixture["listOutput"]);
+    assert_wire_round_trip::<McpServerDetailsOutput>(&fixture["detailsOutput"]);
+    let mut unknown_lifecycle = fixture["detailsOutput"].clone();
+    unknown_lifecycle["server"]["protocol"]["lifecycle"] = serde_json::json!("serverExtension");
+    assert!(
+        serde_json::from_value::<McpServerDetailsOutput>(unknown_lifecycle).is_err(),
+        "an unknown protocol lifecycle must be rejected"
+    );
+    assert_wire_round_trip::<McpLaunchAuthorizationPreview>(&fixture["authorization"]["preview"]);
+    assert_wire_round_trip::<McpLaunchAuthorizationCommitInput>(
+        &fixture["authorization"]["commitInput"],
+    );
+    assert_wire_round_trip::<McpLaunchAuthorizationResult>(&fixture["authorization"]["result"]);
+    assert_wire_round_trip::<McpCatalogToolsPageInput>(&fixture["catalog"]["input"]);
+    let mut null_catalog_cursor = fixture["catalog"]["input"].clone();
+    null_catalog_cursor["cursor"] = Value::Null;
+    assert!(
+        serde_json::from_value::<McpCatalogToolsPageInput>(null_catalog_cursor).is_err(),
+        "an explicitly null Host cursor must be rejected"
+    );
+    assert_wire_round_trip::<McpCatalogToolsPageOutput>(&fixture["catalog"]["output"]);
+    assert_wire_round_trip::<McpManagementErrorData>(&fixture["error"]);
+    assert_wire_round_trip::<McpChangedNotification>(&fixture["changed"]);
+    assert_wire_round_trip::<McpChangedNotification>(&fixture["resyncChanged"]);
+    let mut resync_with_fake_server = fixture["resyncChanged"].clone();
+    resync_with_fake_server["serverId"] =
+        Value::String("ce18d23c-e74f-4e89-8695-ce1e7c60ec92".to_string());
+    assert!(
+        serde_json::from_value::<McpChangedNotification>(resync_with_fake_server).is_err(),
+        "a global resync must not claim a Server identity"
+    );
+}
+
+#[test]
+fn mcp_launch_commit_cannot_replace_the_frozen_launch_spec() {
+    let input = serde_json::json!({
+        "schemaVersion": MCP_MANAGEMENT_SCHEMA_VERSION,
+        "authorizationId": "8e9a3118-88f4-4a53-9dba-82f89232d07e",
+        "precondition": {
+            "expectedRegistryRevision": 7,
+            "expectedConfigEpoch": "41818332-0842-4d2e-808f-175b70eb4628",
+            "expectedConfigDigest": "a".repeat(64)
+        }
+    });
+    let parsed: McpLaunchAuthorizationCommitInput =
+        serde_json::from_value(input.clone()).expect("valid MCP authorization commit");
+    assert_eq!(serde_json::to_value(parsed).unwrap(), input);
+
+    let mut forged = input;
+    forged["trust"] = serde_json::json!("userApproved");
+    forged["executable"] = serde_json::json!("/different/program");
+    assert!(serde_json::from_value::<McpLaunchAuthorizationCommitInput>(forged).is_err());
+}
+
+#[test]
+fn mcp_safe_catalog_projection_rejects_schema_and_server_metadata() {
+    let tool = serde_json::json!({
+        "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
+        "rawName": "echo_text",
+        "modelName": "mcp__owned_fixture__echo_text",
+        "routable": true,
+        "disabled": false,
+        "schemaDigestPrefix": "0123456789ab",
+        "description": "Echo text.",
+        "descriptionTruncated": false,
+        "diagnosticCodes": [],
+        "catalogGeneration": 2,
+        "catalogCompleteness": "complete"
+    });
+    let parsed: McpToolSummaryView =
+        serde_json::from_value(tool.clone()).expect("valid safe MCP tool projection");
+    assert_eq!(serde_json::to_value(parsed).unwrap(), tool);
+
+    for forbidden in [
+        "inputSchema",
+        "outputSchema",
+        "_meta",
+        "annotations",
+        "cursor",
+    ] {
+        let mut unsafe_tool = tool.clone();
+        unsafe_tool[forbidden] = serde_json::json!({"secret": "canary"});
+        assert!(
+            serde_json::from_value::<McpToolSummaryView>(unsafe_tool).is_err(),
+            "{forbidden} must not cross the management boundary"
+        );
+    }
+}
+
+#[test]
 fn disabled_skill_activation_has_a_stable_reject_selection_contract() {
     let data = SkillActivationErrorData {
         error_type: "skillActivation",

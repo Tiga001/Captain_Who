@@ -133,9 +133,119 @@ export interface AgentMcpToolProvenance {
   scope: AgentMcpServerScope
   rawToolName: string
   modelToolName: string
+  configEpoch: string
+  registryRevision: number
   configDigest: string
   catalogGeneration: number
   catalogDigest: string
+  catalogSchemaDigest: string
+  schemaDigest: string
+  schemaNormalizerVersion: number
+}
+
+export type AgentMcpToolRisk =
+  | 'unknown'
+  | 'read_only_claimed'
+  | 'side_effects_possible'
+  | 'destructive_claimed'
+  | 'open_world_claimed'
+
+export type AgentMcpApprovalMode = 'prompt' | 'deny'
+
+export interface AgentMcpArgumentSummary {
+  encodedBytes: number
+  topLevelPropertyCount: number
+  stringValueCount: number
+  numberValueCount: number
+  booleanValueCount: number
+  nullValueCount: number
+  objectValueCount: number
+  arrayValueCount: number
+  maxDepth: number
+  truncated: boolean
+}
+
+/**
+ * Renderer-safe invocation identity. The Host-only arguments digest is deliberately removed at
+ * the Rust serialization boundary because low-entropy argument values could be brute-forced.
+ */
+export interface AgentMcpToolInvocationIdentity {
+  actionId: string
+  invocationId: string
+  runId: string
+  callId: string
+  provenance: AgentMcpToolProvenance
+}
+
+export interface AgentMcpToolApprovalSummary {
+  serverId: string
+  serverDisplayName: string
+  scope: AgentMcpServerScope
+  rawToolName: string
+  modelToolName: string
+  arguments: AgentMcpArgumentSummary
+  risk: AgentMcpToolRisk
+  external: boolean
+}
+
+export type AgentMcpApprovalPayloadPersistence = 'process_only' | 'durable_authenticated_envelope'
+
+export interface AgentMcpToolApproval {
+  identity: AgentMcpToolInvocationIdentity
+  call: AgentToolCall
+  summary: AgentMcpToolApprovalSummary
+  approvalMode: AgentMcpApprovalMode
+  payloadPersistence: AgentMcpApprovalPayloadPersistence
+  createdAt: number
+  expiresAt: number
+}
+
+export type AgentMcpToolInvocationState =
+  | 'pending_approval'
+  | 'approved'
+  | 'dispatching'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'rejected'
+  | 'expired'
+  | 'payload_unavailable'
+  | 'policy_denied'
+  | 'outcome_unknown'
+
+export type AgentMcpToolInvocationOutcome =
+  | 'succeeded'
+  | 'tool_error'
+  | 'output_too_large'
+  | 'transport_error'
+  | 'timed_out'
+  | 'cancelled'
+  | 'rejected'
+  | 'expired'
+  | 'payload_unavailable'
+  | 'policy_denied'
+  | 'outcome_unknown'
+
+export type AgentMcpDispatchCertainty =
+  'definitely_not_dispatched' | 'possibly_dispatched' | 'response_received'
+
+export interface AgentMcpToolInvocationEvent {
+  actionId: string
+  invocationId: string
+  callId: string
+  serverId: string
+  serverDisplayName: string
+  rawToolName: string
+  modelToolName: string
+  external: boolean
+  state: AgentMcpToolInvocationState
+  dispatchCertainty: AgentMcpDispatchCertainty
+  outcome?: AgentMcpToolInvocationOutcome
+  isError?: boolean
+  errorCode?: string
+  durationMs?: number
+  outputTruncated: boolean
 }
 
 export type AgentToolIdentity =
@@ -1418,6 +1528,7 @@ export interface AgentOfficeOperationRequest {
 
 export type AgentProposedAction =
   | { type: 'tool_call'; call: AgentToolCall }
+  | { type: 'mcp_tool_call'; approval: AgentMcpToolApproval }
   | { type: 'diff'; diff: AgentDiffProposal }
   | { type: 'file_write'; fileWrite: AgentFileWriteProposal }
   | { type: 'command'; command: AgentCommandRequest }
@@ -1501,6 +1612,11 @@ export type AgentEvent =
     }
   | { type: 'tool_call'; runId: string; call: AgentToolCall }
   | { type: 'tool_result'; runId: string; result: AgentToolResult }
+  | {
+      type: 'mcp_tool_invocation_state_changed'
+      runId: string
+      invocation: AgentMcpToolInvocationEvent
+    }
   | { type: 'todo_updated'; runId: string; todo: AgentTodoState }
   | {
       type: 'skill_activated'

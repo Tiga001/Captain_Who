@@ -17,6 +17,7 @@ import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 import { registerAgentIpc } from './ipc/agentIpc'
 import { registerGitIpc } from './ipc/gitIpc'
 import { registerSkillsIpc } from './ipc/skillsIpc'
+import { registerMcpIpc } from './ipc/mcpIpc'
 import { registerCoreServiceIpc } from './ipc/serviceIpc'
 import { registerStorageIpc } from './ipc/storageIpc'
 import { registerTerminalIpc } from './ipc/terminalIpc'
@@ -273,7 +274,7 @@ export function registerHostIpc(
   terminalBridge: TerminalBridge,
   faviconResourceCache: FaviconResourceCache,
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean
-): void {
+): () => void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
   const workspaceFilesService = new WorkspaceFilesService((projectId) =>
     getProjectPath(coreServer, projectId)
@@ -283,6 +284,7 @@ export function registerHostIpc(
   registerCoreServiceIpc(ipcMain, coreServer)
   registerAgentIpc(ipcMain, coreServer)
   registerSkillsIpc(ipcMain, coreServer, selectInstallationDirectory)
+  const disposeMcpIpc = registerMcpIpc(ipcMain, coreServer)
   registerGitIpc(ipcMain, coreServer)
   registerStorageIpc(ipcMain, coreServer, {
     loadImageFile,
@@ -316,4 +318,5 @@ export function registerHostIpc(
   ipcMain.handle(HOST_CHANNELS.resources.resolveFavicon, (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )
+  return disposeMcpIpc
 }

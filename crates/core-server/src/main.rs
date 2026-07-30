@@ -87,10 +87,7 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{AgentSteerRunInput, AgentUsageClearInput, AgentUsageSummaryInput};
-use mycopilot_mcp_client::{
-    InMemoryMcpRegistry, McpConnectionManager, McpConnector, McpManagerPolicy, McpStdioConnector,
-    McpStdioPolicy,
-};
+use mycopilot_mcp_client::{McpConnectionManager, McpConnector, McpManagerPolicy};
 use mycopilot_protocol_rs::{
     error, error_with_data, success, AgentActionIdRequest, AgentCancelRunRequest,
     AgentCancelRunResponse, AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest,
@@ -185,6 +182,11 @@ fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServic
         image_generation_artifact_read_admission: Arc::new(Semaphore::new(
             DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
         )),
+        mcp_management: None,
+        mcp_management_admission: Arc::new(Semaphore::new(
+            DEFAULT_MAX_CONCURRENT_MCP_MANAGEMENT_REQUESTS,
+        )),
+        mcp_management_tasks: Arc::new(McpManagementRequestTracker::new()),
         storage,
     }
 }

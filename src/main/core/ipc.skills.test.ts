@@ -90,6 +90,7 @@ describe('Skill management IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       resolveSkillInstallationSource
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
@@ -118,6 +119,7 @@ describe('Skill management IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       cancelSkillSourceResolution
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
@@ -156,6 +158,7 @@ describe('Skill management IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       uninstallSkill
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
@@ -189,6 +192,7 @@ describe('Office status IPC registration', () => {
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
+      onMcpChanged: vi.fn(() => vi.fn()),
       getOfficeStatus
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => true)

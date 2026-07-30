@@ -4,10 +4,101 @@ use mycopilot_core::{
     AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement,
     AgentCommandRuntimeProfile, AgentCommandRuntimeProvider, AgentCommandRuntimeRequest,
     AgentCommandRuntimeResolvedPackage, AgentContextCheckpointItem, AgentContextCheckpointToolCall,
-    AgentRunCheckpoint, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
+    AgentMcpToolInvocationEvent, AgentRunCheckpoint, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
     AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
+
+#[test]
+fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../../../packages/protocol/fixtures/agent-mcp-renderer-contract-v1.json"
+    ))
+    .expect("shared MCP Renderer contract fixture");
+    assert_eq!(fixture["schemaVersion"], 1);
+
+    // The Host-only identity includes the argument digest. The shared Renderer fixture
+    // intentionally omits it, so restore that one internal field before deserializing the typed
+    // Rust action and exercise the production notification projection.
+    let mut internal_action = fixture["approvalRequired"]["action"].clone();
+    internal_action["approval"]["identity"]["argumentsDigest"] = Value::String("e".repeat(64));
+    let action: AgentProposedAction =
+        serde_json::from_value(internal_action).expect("typed internal MCP action");
+    let call_id = fixture["approvalRequired"]["action"]["approval"]["identity"]["callId"]
+        .as_str()
+        .expect("fixture call id")
+        .to_string();
+    let action_id = fixture["approvalRequired"]["action"]["approval"]["identity"]["actionId"]
+        .as_str()
+        .expect("fixture action id")
+        .to_string();
+    let checkpoint = AgentRunCheckpoint {
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        run_id: "run-owned".to_string(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
+        run_context: None,
+        model_capabilities: ModelCapabilities::default(),
+        run_world_state: crate::test_run_world_state(),
+        pending_action_id: Some(action_id),
+        pending_tool_call_id: call_id,
+        conversation_trace_items: Vec::new(),
+        conversation_model_context_items: Vec::new(),
+        next_conversation_trace_sequence: 0,
+        conversation_trace_truncated: false,
+    };
+
+    let approval = agent_event_notification(AgentEvent::ApprovalRequired {
+        run_id: "run-owned".to_string(),
+        action: Box::new(action.clone()),
+        checkpoint: Box::new(checkpoint),
+    });
+    assert_eq!(approval["params"], fixture["approvalRequired"]);
+
+    let invocation: AgentMcpToolInvocationEvent =
+        serde_json::from_value(fixture["lifecycle"]["invocation"].clone())
+            .expect("typed lifecycle fixture");
+    let lifecycle = agent_event_notification(AgentEvent::McpToolInvocationStateChanged {
+        run_id: "run-owned".to_string(),
+        invocation,
+    });
+    assert_eq!(lifecycle["params"], fixture["lifecycle"]);
+
+    let done = agent_event_notification(AgentEvent::Done {
+        run_id: "run-owned".to_string(),
+        success: true,
+        status: Some(AgentRunStatus::WaitingForApproval),
+        content: Some("External MCP approval is required.".to_string()),
+        usage: None,
+        finish_reason: None,
+        proposed_actions: vec![action],
+    });
+    assert_eq!(done["params"], fixture["done"]);
+
+    let rendered = serde_json::to_string(&fixture).unwrap();
+    for forbidden in [
+        "argumentsDigest",
+        "rawArguments",
+        "rawResult",
+        "structuredContent",
+        "stderr",
+        "payloadRef",
+        "ciphertext",
+        "\"type\":\"tool_call\"",
+        "\"type\":\"tool_result\"",
+        "toolDefinitions",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "shared Renderer contract leaked forbidden field `{forbidden}`"
+        );
+    }
+}
 
 #[test]
 fn command_tool_call_projects_only_the_model_visible_runtime_profile() {

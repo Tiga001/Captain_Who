@@ -1,6 +1,84 @@
 use super::*;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex as StdMutex;
+use tokio::task::JoinSet;
 
 pub(crate) const DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS: usize = 2;
+pub(crate) const DEFAULT_MAX_CONCURRENT_MCP_MANAGEMENT_REQUESTS: usize = 16;
+
+/// Owns every asynchronous MCP management request accepted by the stdio request loop.
+///
+/// The semaphore bounds concurrent work, while this tracker gives shutdown an explicit owner for
+/// already-admitted tasks. Completed tasks are reaped on admission, so a long-running Host does
+/// not accumulate detached `JoinHandle`s. Shutdown first closes admission, then gives accepted
+/// requests a bounded grace period before aborting and joining any remainder.
+pub(crate) struct McpManagementRequestTracker {
+    accepting: AtomicBool,
+    tasks: StdMutex<JoinSet<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct McpManagementRequestShutdown {
+    pub(crate) forced: bool,
+    pub(crate) task_failures: usize,
+}
+
+impl McpManagementRequestTracker {
+    pub(crate) fn new() -> Self {
+        Self {
+            accepting: AtomicBool::new(true),
+            tasks: StdMutex::new(JoinSet::new()),
+        }
+    }
+
+    pub(crate) fn try_spawn<F>(&self, task: F) -> Result<(), F>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(task);
+        }
+        let mut tasks = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+        while tasks.try_join_next().is_some() {}
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(task);
+        }
+        tasks.spawn(task);
+        Ok(())
+    }
+
+    pub(crate) async fn shutdown(&self, grace: Duration) -> McpManagementRequestShutdown {
+        self.accepting.store(false, Ordering::Release);
+        let mut tasks = {
+            let mut owned = self.tasks.lock().unwrap_or_else(|error| error.into_inner());
+            std::mem::replace(&mut *owned, JoinSet::new())
+        };
+        let deadline = tokio::time::Instant::now() + grace;
+        let mut forced = false;
+        let mut task_failures = 0_usize;
+        while !tasks.is_empty() {
+            match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(_))) => task_failures = task_failures.saturating_add(1),
+                Ok(None) => break,
+                Err(_) => {
+                    forced = true;
+                    tasks.abort_all();
+                    while let Some(result) = tasks.join_next().await {
+                        if result.is_err() {
+                            task_failures = task_failures.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        McpManagementRequestShutdown {
+            forced,
+            task_failures,
+        }
+    }
+}
 
 pub(crate) struct ImageArtifactOutbound {
     pub(crate) message: Value,
@@ -32,6 +110,10 @@ pub(crate) struct CoreRequestServices {
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
     pub(crate) image_generation_artifacts: Arc<ManagedImageGenerationArtifactStore>,
     pub(crate) image_generation_artifact_read_admission: Arc<Semaphore>,
+    pub(crate) mcp_management:
+        Option<Arc<crate::application::mcp::management::McpManagementService>>,
+    pub(crate) mcp_management_admission: Arc<Semaphore>,
+    pub(crate) mcp_management_tasks: Arc<McpManagementRequestTracker>,
 }
 
 fn is_blocking_read_method(method: &str) -> bool {
@@ -73,6 +155,9 @@ where
     let image_generation_artifacts = services.image_generation_artifacts;
     let image_generation_artifact_read_admission =
         services.image_generation_artifact_read_admission;
+    let mcp_management = services.mcp_management;
+    let mcp_management_admission = services.mcp_management_admission;
+    let mcp_management_tasks = services.mcp_management_tasks;
     let outbound = outbounds.normal;
     let image_artifact_outbound = outbounds.image_artifact;
     let mut lines = input.lines();
@@ -102,6 +187,40 @@ where
         }
 
         if request.jsonrpc == "2.0" {
+            if is_mcp_management_method(&request.method) {
+                let request_id = request.id.clone();
+                let request_method = request.method.clone();
+                let Some(request_service) = mcp_management.as_ref().cloned() else {
+                    enqueue_outbound(
+                        outbound,
+                        mcp_management_unavailable_response(request_id, &request.method),
+                    )?;
+                    continue;
+                };
+                let permit = match Arc::clone(&mcp_management_admission).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        enqueue_outbound(
+                            outbound,
+                            mcp_management_unavailable_response(request_id, &request.method),
+                        )?;
+                        continue;
+                    }
+                };
+                let request_outbound = outbound.clone();
+                let request_task = async move {
+                    let _permit = permit;
+                    let response = handle_mcp_management_request(request_service, request).await;
+                    let _ = enqueue_outbound(&request_outbound, response);
+                };
+                if mcp_management_tasks.try_spawn(request_task).is_err() {
+                    enqueue_outbound(
+                        outbound,
+                        mcp_management_unavailable_response(request_id, &request_method),
+                    )?;
+                }
+                continue;
+            }
             if request.method == IMAGE_GENERATION_READ_ARTIFACT_METHOD {
                 let request_id = request.id.clone();
                 let permit = match Arc::clone(&image_generation_artifact_read_admission)
@@ -334,6 +453,55 @@ where
         enqueue_outbound(outbound, response)?;
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod mcp_management_task_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_joins_completed_management_requests_and_closes_admission() {
+        let tracker = McpManagementRequestTracker::new();
+        assert!(
+            tracker.try_spawn(async {}).is_ok(),
+            "open tracker accepts a bounded request"
+        );
+
+        let report = tracker.shutdown(Duration::from_secs(1)).await;
+        assert_eq!(
+            report,
+            McpManagementRequestShutdown {
+                forced: false,
+                task_failures: 0,
+            }
+        );
+        assert!(
+            tracker.try_spawn(async {}).is_err(),
+            "shutdown permanently closes management admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_and_joins_a_request_that_exceeds_the_grace_period() {
+        let tracker = McpManagementRequestTracker::new();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        assert!(
+            tracker
+                .try_spawn(async move {
+                    let _ = entered_tx.send(());
+                    std::future::pending::<()>().await;
+                })
+                .is_ok(),
+            "open tracker accepts a bounded request"
+        );
+        entered_rx
+            .await
+            .expect("management request entered its pending phase");
+
+        let report = tracker.shutdown(Duration::ZERO).await;
+        assert!(report.forced);
+        assert_eq!(report.task_failures, 1);
+    }
 }
 
 pub(crate) async fn run_outbound_writer<W>(

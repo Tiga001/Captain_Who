@@ -2262,13 +2262,13 @@ async fn reconcile_registry_change(inner: &Weak<ManagerInner>, change: McpRegist
         Ok(Some(record))
             if record.revision == change.revision && record.config_epoch == change.config_epoch =>
         {
-            reconcile_registry_record(&manager, record, change.kind).await;
+            reconcile_registry_record(&manager, record).await;
         }
         Ok(Some(_)) => {
             // A newer committed revision already supersedes this notification.
         }
         Ok(None) if change.kind == McpRegistryChangeKind::Removed => {
-            stop_and_forget_removed(&manager, change.server_id).await;
+            stop_and_forget_removed_change(&manager, &change).await;
         }
         Ok(None) | Err(_) => {}
     }
@@ -2295,19 +2295,15 @@ async fn reconcile_registry_snapshot(inner: &Weak<ManagerInner>) {
         .unwrap_or_default();
     for server_id in managed_ids {
         if !registered.contains(&server_id) {
-            stop_and_forget_removed(&manager, server_id).await;
+            stop_and_forget_unregistered(&manager, server_id).await;
         }
     }
     for record in records {
-        reconcile_registry_record(&manager, record, McpRegistryChangeKind::Updated).await;
+        reconcile_registry_record(&manager, record).await;
     }
 }
 
-async fn reconcile_registry_record(
-    manager: &McpConnectionManager,
-    record: McpRegistryEntry,
-    change_kind: McpRegistryChangeKind,
-) {
+async fn reconcile_registry_record(manager: &McpConnectionManager, record: McpRegistryEntry) {
     let Ok(Some(entry)) = manager.get_entry(record.config.id) else {
         // Adding a registry entry alone never launches a process. The host must
         // call start/start_enabled, preserving install vs. connect separation.
@@ -2343,16 +2339,74 @@ async fn reconcile_registry_record(
             | McpServerState::Degraded
             | McpServerState::Error
     );
-    if (change_kind == McpRegistryChangeKind::Added || config_changed) && active_or_failed {
+    // An Added notification can race an explicit start that has already adopted
+    // this exact Registry incarnation. Restart only when the managed entry was
+    // actually bound to a different configuration identity.
+    if config_changed && active_or_failed {
         let _ = manager.restart(record.config.id).await;
     }
 }
 
-async fn stop_and_forget_removed(manager: &McpConnectionManager, server_id: McpServerId) {
-    if let Ok(Some(entry)) = manager.get_entry(server_id) {
-        if let Ok(mut state) = entry.state.lock() {
+async fn stop_and_forget_removed_change(
+    manager: &McpConnectionManager,
+    change: &McpRegistryChange,
+) {
+    let server_id = change.server_id;
+    let Ok(Some(entry)) = manager.get_entry(server_id) else {
+        return;
+    };
+    let should_stop = {
+        let Ok(mut state) = entry.state.lock() else {
+            return;
+        };
+        let identity_matches = state.status.server_id == server_id
+            && state.status.config_epoch == change.config_epoch
+            && state.status.config_digest == change.config_digest
+            && state.status.registry_revision < change.revision;
+        let should_stop =
+            identity_matches && matches!(manager.inner.registry.get(server_id), Ok(None));
+        if should_stop {
             state.removed = true;
         }
+        should_stop
+    };
+    if should_stop {
+        let _ = manager
+            .stop_entry(server_id, Arc::clone(&entry), true)
+            .await;
+        manager.remove_managed_entry_if_same(server_id, &entry);
+    }
+}
+
+async fn stop_and_forget_unregistered(manager: &McpConnectionManager, server_id: McpServerId) {
+    let Ok(Some(entry)) = manager.get_entry(server_id) else {
+        return;
+    };
+    let expected = {
+        let Ok(state) = entry.state.lock() else {
+            return;
+        };
+        (
+            state.status.config_epoch,
+            state.status.registry_revision,
+            state.status.config_digest.clone(),
+        )
+    };
+    let should_stop = {
+        let Ok(mut state) = entry.state.lock() else {
+            return;
+        };
+        let identity_matches = state.status.config_epoch == expected.0
+            && state.status.registry_revision == expected.1
+            && state.status.config_digest == expected.2;
+        let should_stop =
+            identity_matches && matches!(manager.inner.registry.get(server_id), Ok(None));
+        if should_stop {
+            state.removed = true;
+        }
+        should_stop
+    };
+    if should_stop {
         let _ = manager
             .stop_entry(server_id, Arc::clone(&entry), true)
             .await;
@@ -2769,6 +2823,85 @@ mod tests {
             request_timeout_ms: 60_000,
             shutdown_timeout_ms: 2_000,
         }
+    }
+
+    #[tokio::test]
+    async fn added_reconciliation_does_not_restart_the_same_registry_incarnation() {
+        let registry = InMemoryMcpRegistry::shared();
+        let server_id = McpServerId::new();
+        let registered = registry.add(test_config(server_id)).unwrap();
+        let manager = test_manager(registry);
+        let entry = Arc::new(ManagedEntry::new(&registered));
+        {
+            let mut state = entry.state.lock().unwrap();
+            state.status.state = McpServerState::Error;
+        }
+        manager
+            .inner
+            .entries
+            .lock()
+            .unwrap()
+            .insert(server_id, Arc::clone(&entry));
+
+        reconcile_registry_record(&manager, registered).await;
+
+        let state = entry.state.lock().unwrap();
+        assert_eq!(state.epoch, 0);
+        assert_eq!(state.status.state, McpServerState::Error);
+        assert!(!state.connect_inflight);
+        assert!(!state.refresh_inflight);
+    }
+
+    #[tokio::test]
+    async fn stale_removed_change_cannot_stop_a_readded_registry_incarnation() {
+        let registry = InMemoryMcpRegistry::shared();
+        let server_id = McpServerId::new();
+        let config = test_config(server_id);
+        let first = registry.add(config.clone()).unwrap();
+        let first_removed = registry.remove(server_id).unwrap().unwrap();
+        let readded = registry.add(config).unwrap();
+        let readded_removed = registry.remove(server_id).unwrap().unwrap();
+        assert_eq!(first_removed.config_epoch, first.config_epoch);
+        assert_ne!(readded.config_epoch, first.config_epoch);
+
+        let manager = test_manager(registry);
+        let entry = Arc::new(ManagedEntry::new(&readded));
+        manager
+            .inner
+            .entries
+            .lock()
+            .unwrap()
+            .insert(server_id, Arc::clone(&entry));
+        let stale_change = McpRegistryChange {
+            revision: first_removed.revision,
+            kind: McpRegistryChangeKind::Removed,
+            server_id,
+            scope: first_removed.config.scope,
+            enabled: first_removed.config.enabled,
+            config_digest: first_removed.config_digest,
+            config_epoch: first_removed.config_epoch,
+        };
+
+        stop_and_forget_removed_change(&manager, &stale_change).await;
+
+        assert!(manager
+            .get_entry(server_id)
+            .unwrap()
+            .is_some_and(|current| Arc::ptr_eq(&current, &entry)));
+        assert!(!entry.state.lock().unwrap().removed);
+
+        let current_change = McpRegistryChange {
+            revision: readded_removed.revision,
+            kind: McpRegistryChangeKind::Removed,
+            server_id,
+            scope: readded_removed.config.scope,
+            enabled: readded_removed.config.enabled,
+            config_digest: readded_removed.config_digest,
+            config_epoch: readded_removed.config_epoch,
+        };
+        stop_and_forget_removed_change(&manager, &current_change).await;
+        assert!(manager.get_entry(server_id).unwrap().is_none());
+        assert!(entry.state.lock().unwrap().removed);
     }
 
     #[tokio::test]

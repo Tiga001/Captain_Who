@@ -2284,6 +2284,11 @@ pub enum AgentProposedAction {
     rename_all_fields = "camelCase"
 )]
 pub enum AgentEvent {
+    /// Starts a Renderer-facing Agent event stream.
+    ///
+    /// `tool_definitions` contains only built-in and Runtime Extension definitions. External MCP
+    /// definitions remain in the provider request contract and are exposed to Renderer only
+    /// through the bounded MCP management catalog.
     Started {
         run_id: String,
         tool_definitions: Vec<AgentToolDefinition>,
@@ -2292,6 +2297,10 @@ pub enum AgentEvent {
     ///
     /// The registry may contain additional implementations, but only these definitions are both
     /// visible to the model and executable for calls produced under this revision.
+    ///
+    /// Renderer event serialization further omits definitions with typed MCP identity. The
+    /// revisions still describe the authoritative full model contract; Renderer must use the MCP
+    /// management catalog for bounded external Tool metadata.
     ToolSetChanged {
         run_id: String,
         stable_revision: String,
@@ -2380,10 +2389,18 @@ pub enum AgentEvent {
         message: String,
         created_at: i64,
     },
+    /// Generic built-in or Runtime Extension Tool call.
+    ///
+    /// MCP calls use `ApprovalRequired::McpToolCall` plus
+    /// `McpToolInvocationStateChanged`; they are never duplicated here.
     ToolCall {
         run_id: String,
         call: AgentToolCall,
     },
+    /// Generic built-in or Runtime Extension Tool result.
+    ///
+    /// MCP results remain in the internal trace/model continuation and are represented to
+    /// Renderer only by the bounded typed invocation lifecycle.
     ToolResult {
         run_id: String,
         result: AgentToolResult,

@@ -45,6 +45,16 @@ import type {
   ImageGenerationStatus,
   ImageGenerationUpdateConfigurationInput,
   ImageGenerationUpdateConfigurationOutput,
+  McpCatalogToolsPageInput,
+  McpCatalogToolsPageOutput,
+  McpChangedNotification,
+  McpLaunchAuthorizationResult,
+  McpServerCreateInput,
+  McpServerDetailsOutput,
+  McpServerIdInput,
+  McpServerListOutput,
+  McpServerMutationInput,
+  McpServerUpdateInput,
   ResourceFaviconRequest,
   ResourceFaviconResponse,
   ChatSearchInput,
@@ -212,6 +222,39 @@ export interface SkillsHostApi {
   onChanged(handler: (event: SkillsChangedNotification) => void): () => void
 }
 
+/** Explicit, context-isolated MCP management surface. It intentionally has no direct callTool. */
+export interface McpHostApi {
+  listServers(): Promise<HostInvocationResult<McpServerListOutput>>
+  getServer(input: McpServerIdInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  addServer(input: McpServerCreateInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  updateServer(input: McpServerUpdateInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  deleteServer(input: McpServerMutationInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  requestLaunchAuthorization(
+    input: McpServerMutationInput
+  ): Promise<HostInvocationResult<McpLaunchAuthorizationResult | null>>
+  enableServer(input: McpServerMutationInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  disableServer(
+    input: McpServerMutationInput
+  ): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  startServer(input: McpServerMutationInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  stopServer(input: McpServerMutationInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  restartServer(
+    input: McpServerMutationInput
+  ): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  getStatus(input: McpServerIdInput): Promise<HostInvocationResult<McpServerDetailsOutput>>
+  listTools(
+    input: McpCatalogToolsPageInput
+  ): Promise<HostInvocationResult<McpCatalogToolsPageOutput>>
+  refreshCatalog(
+    input: McpServerMutationInput
+  ): Promise<HostInvocationResult<McpCatalogToolsPageOutput>>
+  /** Native single-file picker. It neither reads nor executes the selected file. */
+  selectExecutable(): Promise<string | null>
+  /** Native single-directory picker. It neither reads nor starts anything in the directory. */
+  selectWorkingDirectory(): Promise<string | null>
+  onChanged(handler: (event: McpChangedNotification) => void): () => void
+}
+
 export interface GitHostApi {
   inspectRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection>
   getReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary>
@@ -288,6 +331,7 @@ export interface HostApi {
   browser: BrowserHostApi
   git: GitHostApi
   imageGeneration: ImageGenerationHostApi
+  mcp: McpHostApi
   office: OfficeHostApi
   resources: ResourcesHostApi
   search: SearchHostApi

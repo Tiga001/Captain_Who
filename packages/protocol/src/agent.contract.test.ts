@@ -75,9 +75,14 @@ const toolIdentities = [
       scope: { type: 'project', projectId: 'project-fixture' },
       rawToolName: 'add_numbers',
       modelToolName: 'mcp__fixture_7f4a2d91__add_numbers',
+      configEpoch: '11111111-1111-4111-8111-111111111111',
+      registryRevision: 8,
       configDigest: 'a'.repeat(64),
       catalogGeneration: 4,
-      catalogDigest: 'b'.repeat(64)
+      catalogDigest: 'b'.repeat(64),
+      catalogSchemaDigest: 'c'.repeat(64),
+      schemaDigest: 'd'.repeat(64),
+      schemaNormalizerVersion: 1
     }
   }
 ] satisfies AgentToolIdentity[]
@@ -133,9 +138,14 @@ describe('Agent tool identity contract', () => {
           scope: { type: 'project', projectId: 'project-fixture' },
           rawToolName: 'add_numbers',
           modelToolName: 'mcp__fixture_7f4a2d91__add_numbers',
+          configEpoch: '11111111-1111-4111-8111-111111111111',
+          registryRevision: 8,
           configDigest: 'a'.repeat(64),
           catalogGeneration: 4,
-          catalogDigest: 'b'.repeat(64)
+          catalogDigest: 'b'.repeat(64),
+          catalogSchemaDigest: 'c'.repeat(64),
+          schemaDigest: 'd'.repeat(64),
+          schemaNormalizerVersion: 1
         }
       }
     ])

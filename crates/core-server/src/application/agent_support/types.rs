@@ -117,7 +117,20 @@ pub struct AgentActionExecutionOutput {
     pub command_result: Option<AgentCommandExecutionResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<AgentToolResult>,
+    #[serde(serialize_with = "serialize_renderer_safe_agent_output")]
     pub agent_output: AgentChatOutput,
+}
+
+fn serialize_renderer_safe_agent_output<S>(
+    output: &AgentChatOutput,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut value = serde_json::to_value(output).map_err(serde::ser::Error::custom)?;
+    redact_renderer_mcp_binding_fields(&mut value);
+    value.serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize)]

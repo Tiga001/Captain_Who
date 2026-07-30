@@ -89,6 +89,17 @@ impl fmt::Debug for McpRegistrySubscription {
 }
 
 impl McpRegistrySubscription {
+    /// Builds a subscription from a Registry-owned change broadcaster.
+    ///
+    /// This keeps the receiver field private while allowing storage adapters in
+    /// a host crate to implement [`McpRegistry`] without exposing mutation
+    /// access through the subscription API.
+    pub fn from_sender(sender: &broadcast::Sender<McpRegistryChange>) -> Self {
+        Self {
+            receiver: sender.subscribe(),
+        }
+    }
+
     pub async fn recv(&mut self) -> Result<McpRegistryChange, McpRegistrySubscriptionError> {
         match self.receiver.recv().await {
             Ok(change) => Ok(change),
@@ -273,9 +284,7 @@ impl McpRegistry for InMemoryMcpRegistry {
     }
 
     fn subscribe(&self) -> McpRegistrySubscription {
-        McpRegistrySubscription {
-            receiver: self.changes.subscribe(),
-        }
+        McpRegistrySubscription::from_sender(&self.changes)
     }
 }
 

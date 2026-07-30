@@ -606,6 +606,10 @@ fn assert_recovered_approved_terminal_decision(cancelled: bool) {
             .unwrap();
         assert_eq!(output.status, "rejected");
         assert_eq!(output.agent_output.status, AgentRunStatus::Failed);
+        assert!(
+            output.tool_result.is_none(),
+            "recovered MCP rejection is represented by its typed lifecycle, not generic ToolResult"
+        );
         let lifecycle = receiver.try_recv().expect("rejection lifecycle event");
         let rendered = lifecycle.to_string();
         assert!(rendered.contains("definitely_not_dispatched"));

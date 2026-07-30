@@ -48,6 +48,25 @@ export const HOST_CHANNELS = {
     setEnabled: 'host:imageGeneration.setEnabled',
     updateConfiguration: 'host:imageGeneration.updateConfiguration'
   },
+  mcp: {
+    addServer: 'host:mcp.addServer',
+    changed: 'host:mcp.changed',
+    deleteServer: 'host:mcp.deleteServer',
+    disableServer: 'host:mcp.disableServer',
+    enableServer: 'host:mcp.enableServer',
+    getServer: 'host:mcp.getServer',
+    getStatus: 'host:mcp.getStatus',
+    listServers: 'host:mcp.listServers',
+    listTools: 'host:mcp.listTools',
+    refreshCatalog: 'host:mcp.refreshCatalog',
+    requestLaunchAuthorization: 'host:mcp.requestLaunchAuthorization',
+    restartServer: 'host:mcp.restartServer',
+    selectExecutable: 'host:mcp.selectExecutable',
+    selectWorkingDirectory: 'host:mcp.selectWorkingDirectory',
+    startServer: 'host:mcp.startServer',
+    stopServer: 'host:mcp.stopServer',
+    updateServer: 'host:mcp.updateServer'
+  },
   office: {
     getStatus: 'host:office.getStatus'
   },
