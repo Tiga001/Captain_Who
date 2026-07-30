@@ -60,6 +60,7 @@ import { ImageGenerationArtifactsCard } from './ImageGenerationArtifactsCard'
 import { hostImageArtifactResolver } from '../../imageGeneration/artifacts/hostImageArtifactResolver'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
+import { McpToolActivity } from './toolActivities/McpToolActivity'
 import { ContextCompactionActivity } from './toolActivities/ContextCompactionActivity'
 import { ConversationHistoryToolActivity } from './toolActivities/ConversationHistoryToolActivity'
 import { FileWriteToolActivityGroup } from './toolActivities/FileWriteToolActivity'
@@ -402,9 +403,17 @@ function AgentTimelineItemView({
     return <GuidanceTimelineItemView item={item} />
   }
 
+  if (item.type === 'mcp_tool_call') {
+    const invocation = run.mcpInvocations?.find(
+      (candidate) => candidate.invocationId === item.invocationId
+    )
+    return <McpToolActivity invocation={invocation} />
+  }
+
   if (item.type === 'tool_call') {
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return null
+    const mcpInvocation = run.mcpInvocations?.find((candidate) => candidate.callId === call.id)
     const webActivity = run.webSearchActivities?.find((candidate) => candidate.callId === call.id)
     const readActivity = run.readActivities?.find((candidate) => candidate.callId === call.id)
     const diff =
@@ -420,6 +429,7 @@ function AgentTimelineItemView({
         cancelled={settledStatus === 'cancelled'}
         call={call}
         diff={diff}
+        mcpInvocation={mcpInvocation}
         projectId={projectId}
         previousTodoResult={previousTodoResult}
         readActivity={readActivity}

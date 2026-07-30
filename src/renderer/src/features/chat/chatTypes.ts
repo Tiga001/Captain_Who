@@ -5,6 +5,10 @@ import type {
   AgentFileDraftSnapshot,
   AgentFileWritePreview,
   AgentInputAttachment,
+  AgentMcpDispatchCertainty,
+  AgentMcpServerScope,
+  AgentMcpToolInvocationOutcome,
+  AgentMcpToolInvocationState,
   AgentProposedAction,
   AgentRunStatus,
   AgentStateSnapshot,
@@ -96,10 +100,37 @@ export interface ChatCommandOutputPreview {
   chunks: ChatCommandOutputChunk[]
 }
 
+/**
+ * Renderer-owned, allowlisted projection of an MCP invocation.
+ *
+ * Keep this separate from AgentToolCall/AgentToolResult: those generic DTOs can contain arguments
+ * and result bodies, while MCP activity is intentionally limited to lifecycle and provenance
+ * metadata that is safe to retain in chat state.
+ */
+export interface ChatMcpToolInvocationView {
+  actionId: string
+  invocationId: string
+  callId: string
+  serverId: string
+  serverDisplayName: string
+  scope?: AgentMcpServerScope
+  rawToolName: string
+  modelToolName: string
+  external: true
+  state: AgentMcpToolInvocationState
+  dispatchCertainty: AgentMcpDispatchCertainty
+  outcome?: AgentMcpToolInvocationOutcome
+  isError?: boolean
+  errorCode?: string
+  durationMs?: number
+  outputTruncated: boolean
+}
+
 export type ChatAgentTimelineItem =
   | { id: string; type: 'message'; content: string; streamId?: string }
   | ChatGuidanceTimelineItem
   | { id: string; type: 'tool_call'; callId: string }
+  | { id: string; type: 'mcp_tool_call'; invocationId: string }
   | {
       id: string
       type: 'context_compaction'
@@ -133,6 +164,8 @@ export interface ChatAgentRunView {
   fileWritePreviews?: ChatFileWritePreview[]
   /** Ephemeral live process output. Final ToolResults remain the durable source of truth. */
   commandOutputPreviews?: Record<string, ChatCommandOutputPreview>
+  /** Safe lifecycle-only MCP views. Never store MCP arguments or result bodies here. */
+  mcpInvocations?: ChatMcpToolInvocationView[]
   messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
   timeline: ChatAgentTimelineItem[]
   state?: AgentStateSnapshot

@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   Archive,
   ArrowLeft,
+  Cable,
   Clock,
   Gauge,
   Monitor,
@@ -13,6 +14,7 @@ import {
   UserCircle,
   WandSparkles
 } from 'lucide-react'
+import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { isMacOS } from '../../lib/platform'
 import type { AppProject } from '../../config/projectConfig'
@@ -20,6 +22,7 @@ import type { TranslationKey } from '../../config/frontendTranslations'
 import type { ChatConversation } from '../chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../storage/storageClient'
 import { getTranslucentSidebarOpacityPercent } from '../storage/storageClient'
+import { McpSettingsPage } from '../mcp/McpSettingsPage'
 import { AppearanceSettingsPage } from './pages/AppearanceSettingsPage'
 import { ArchivedConversationsSettingsPage } from './pages/ArchivedConversationsSettingsPage'
 import { ConfigurationSettingsPage } from './pages/ConfigurationSettingsPage'
@@ -54,6 +57,7 @@ export type SettingsPageId =
   | 'personalization'
   | 'usageBilling'
   | 'skills'
+  | 'mcp'
   | 'environment'
   | 'archivedConversations'
 
@@ -79,6 +83,7 @@ const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsNavItem[
     titleKey: 'settings.group.coding',
     items: [
       { id: 'skills', labelKey: 'settings.page.skills', icon: WandSparkles },
+      { id: 'mcp', labelKey: 'settings.page.mcp', icon: Cable },
       { id: 'environment', labelKey: 'settings.page.environment', icon: Monitor }
     ]
   },
@@ -99,6 +104,7 @@ function SettingsContent({
   conversations,
   onDeleteArchivedConversations,
   onDeleteConversation,
+  onMcpDirtyChange,
   onRemoveProject,
   onUnarchiveConversation,
   onUiPreferencesChange,
@@ -109,6 +115,7 @@ function SettingsContent({
   conversations: ChatConversation[]
   onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
+  onMcpDirtyChange: (dirty: boolean) => void
   onRemoveProject: (projectId: string) => Promise<boolean>
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
@@ -152,6 +159,10 @@ function SettingsContent({
 
   if (activePage === 'skills') {
     return <SkillsSettingsPage />
+  }
+
+  if (activePage === 'mcp') {
+    return <McpSettingsPage onDirtyChange={onMcpDirtyChange} />
   }
 
   if (activePage === 'environment') {
@@ -263,7 +274,43 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const { t } = useFrontendConfig()
   const [activePage, setActivePage] = useState<SettingsPageId>(initialPage)
+  const [mcpDirty, setMcpDirty] = useState(false)
+  const [pendingNavigation, setPendingNavigation] = useState<
+    { type: 'back' } | { type: 'page'; page: SettingsPageId } | null
+  >(null)
   const pageRef = useRef<HTMLDivElement>(null)
+  const handleMcpDirtyChange = useCallback((dirty: boolean) => {
+    setMcpDirty(dirty)
+  }, [])
+
+  const requestPage = (page: SettingsPageId) => {
+    if (page === activePage) return
+    if (activePage === 'mcp' && mcpDirty) {
+      setPendingNavigation({ type: 'page', page })
+      return
+    }
+    setActivePage(page)
+  }
+
+  const requestBack = () => {
+    if (activePage === 'mcp' && mcpDirty) {
+      setPendingNavigation({ type: 'back' })
+      return
+    }
+    onBack()
+  }
+
+  const confirmPendingNavigation = () => {
+    const navigation = pendingNavigation
+    setPendingNavigation(null)
+    setMcpDirty(false)
+    if (!navigation) return
+    if (navigation.type === 'back') {
+      onBack()
+      return
+    }
+    setActivePage(navigation.page)
+  }
 
   useEffect(() => {
     setActivePage(initialPage)
@@ -294,7 +341,7 @@ export function SettingsPage({
       }}
     >
       <div className="settings-page__drag-region" data-drag-region />
-      <SettingsNavigation activePage={activePage} onBack={onBack} onSelectPage={setActivePage} />
+      <SettingsNavigation activePage={activePage} onBack={requestBack} onSelectPage={requestPage} />
 
       <main className="settings-content" aria-label={t('settings.content')}>
         <div className="settings-content__inner">
@@ -304,6 +351,7 @@ export function SettingsPage({
             projects={projects}
             onDeleteArchivedConversations={onDeleteArchivedConversations}
             onDeleteConversation={onDeleteConversation}
+            onMcpDirtyChange={handleMcpDirtyChange}
             onRemoveProject={onRemoveProject}
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}
@@ -311,6 +359,16 @@ export function SettingsPage({
           />
         </div>
       </main>
+      {pendingNavigation && (
+        <ConfirmationDialog
+          cancelLabel={t('mcp.actions.cancel')}
+          confirmLabel={t('mcp.unsaved.discard')}
+          description={t('mcp.unsaved.description')}
+          onCancel={() => setPendingNavigation(null)}
+          onConfirm={confirmPendingNavigation}
+          title={t('mcp.unsaved.title')}
+        />
+      )}
     </div>
   )
 }

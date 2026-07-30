@@ -1,6 +1,10 @@
 import type { AgentDiffProposal, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ReactElement } from 'react'
-import type { ChatReadActivity, ChatWebSearchActivity } from '../../chatTypes'
+import type {
+  ChatMcpToolInvocationView,
+  ChatReadActivity,
+  ChatWebSearchActivity
+} from '../../chatTypes'
 import type { ChatAgentRunView } from '../../chatTypes'
 import { isReadActivityTool } from '../../agentReadActivities'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
@@ -17,6 +21,7 @@ import { WorkspaceMapToolActivity } from './WorkspaceMapToolActivity'
 import { OfficeToolActivity } from './OfficeToolActivity'
 import { ImageGenerationToolActivity } from './ImageGenerationToolActivity'
 import { SkillScriptToolActivity } from './SkillToolActivity'
+import { McpToolActivity } from './McpToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
@@ -25,6 +30,7 @@ interface AgentToolActivityProps {
   webActivity?: ChatWebSearchActivity
   call: AgentToolCall
   diff?: AgentDiffProposal
+  mcpInvocation?: ChatMcpToolInvocationView
   projectId?: string | null
   previousTodoResult?: AgentToolResult
   result?: AgentToolResult
@@ -39,6 +45,7 @@ export function AgentToolActivity({
   webActivity,
   call,
   diff,
+  mcpInvocation,
   projectId,
   previousTodoResult,
   result,
@@ -46,6 +53,10 @@ export function AgentToolActivity({
   settledStatus,
   showImageGenerationPreview
 }: AgentToolActivityProps): ReactElement {
+  if (mcpInvocation) {
+    return <McpToolActivity invocation={mcpInvocation} />
+  }
+
   if (call.tool === 'attachments_list' || call.tool === 'attachments_list_project') {
     return (
       <AttachmentListToolActivity

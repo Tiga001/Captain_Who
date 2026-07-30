@@ -220,6 +220,236 @@
   outline-offset: 2px;
 }
 
+.mcp-tool-approval-card {
+  display: grid;
+  width: 100%;
+  max-height: min(70vh, 680px);
+  padding: 16px;
+  gap: 12px;
+  overflow-y: auto;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-card);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-composer);
+  box-shadow: var(--mc-shadow-composer);
+  -webkit-app-region: no-drag;
+}
+
+.mcp-tool-approval-card__header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mcp-tool-approval-card__header > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.mcp-tool-approval-card__header h2,
+.mcp-tool-approval-card__arguments h3 {
+  margin: 0;
+  color: var(--mc-color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.mcp-tool-approval-card__header h2 {
+  font-size: var(--mc-font-size-base);
+  font-weight: var(--mc-font-weight-heavy);
+  line-height: 1.35;
+}
+
+.mcp-tool-approval-card__arguments h3 {
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-heavy);
+}
+
+.mcp-tool-approval-card__external,
+.mcp-tool-approval-card__state {
+  width: fit-content;
+  padding: 3px 8px;
+  color: var(--mc-color-source-badge-text);
+  background: var(--mc-color-source-badge-background);
+  border-radius: var(--mc-radius-pill);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-heavy);
+  line-height: 1.35;
+}
+
+.mcp-tool-approval-card__state {
+  flex: 0 0 auto;
+  max-width: 42%;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.mcp-tool-approval-card__state[data-terminal='true'] {
+  color: var(--mc-color-text-danger);
+  background: var(--mc-color-surface-danger-soft);
+}
+
+.mcp-tool-approval-card__risk,
+.mcp-tool-approval-card__blocked,
+.mcp-tool-approval-card__policy,
+.mcp-tool-approval-card__truncated {
+  margin: 0;
+  padding: 9px 11px;
+  color: var(--mc-color-text-secondary);
+  background: var(--mc-color-surface-neutral-subtle);
+  border-radius: var(--mc-radius-lg);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-relaxed);
+  overflow-wrap: anywhere;
+}
+
+.mcp-tool-approval-card__risk {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mcp-tool-approval-card__risk[data-elevated='true'],
+.mcp-tool-approval-card__blocked {
+  color: var(--mc-color-text-danger);
+  background: var(--mc-color-surface-danger-soft);
+}
+
+.mcp-tool-approval-card__identity,
+.mcp-tool-approval-card__metadata,
+.mcp-tool-approval-card__arguments dl {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  gap: 7px 14px;
+}
+
+.mcp-tool-approval-card__identity,
+.mcp-tool-approval-card__metadata {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mcp-tool-approval-card__identity > div,
+.mcp-tool-approval-card__metadata > div,
+.mcp-tool-approval-card__arguments dl > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mcp-tool-approval-card dt {
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: 1.3;
+}
+
+.mcp-tool-approval-card dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
+  overflow-wrap: anywhere;
+}
+
+.mcp-tool-approval-card__arguments {
+  display: grid;
+  padding: 10px 11px;
+  gap: 9px;
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-lg);
+}
+
+.mcp-tool-approval-card__arguments dl {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mcp-tool-approval-card__truncated {
+  padding: 6px 8px;
+  background: var(--mc-color-surface-info-subtle);
+}
+
+.mcp-tool-approval-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcp-tool-approval-card__actions button,
+.mcp-tool-approval-card__reject button {
+  min-height: 36px;
+  padding: 0 14px;
+  color: var(--mc-color-button-secondary-text);
+  background: var(--mc-color-button-secondary-bg);
+  border: 0;
+  border-radius: var(--mc-radius-pill);
+  font: inherit;
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-heavy);
+  cursor: pointer;
+}
+
+.mcp-tool-approval-card__actions button:first-child {
+  color: var(--mc-color-button-primary-text);
+  background: var(--mc-color-button-primary-bg);
+}
+
+.mcp-tool-approval-card__actions button:hover:not(:disabled),
+.mcp-tool-approval-card__reject button:hover:not(:disabled) {
+  background: var(--mc-color-button-secondary-bg-hover);
+}
+
+.mcp-tool-approval-card__actions button:first-child:hover:not(:disabled) {
+  background: var(--mc-color-button-primary-bg-hover);
+}
+
+.mcp-tool-approval-card__actions button:focus-visible,
+.mcp-tool-approval-card__reject button:focus-visible,
+.mcp-tool-approval-card__reject input:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.mcp-tool-approval-card button:disabled,
+.mcp-tool-approval-card input:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.mcp-tool-approval-card__reject {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-tool-approval-card__reject > label {
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+}
+
+.mcp-tool-approval-card__reject > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.mcp-tool-approval-card__reject input {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-input);
+  border: 1px solid var(--mc-color-border-default);
+  border-radius: var(--mc-radius-lg);
+  font: inherit;
+  font-size: var(--mc-font-size-sm);
+}
+
 .chat-conversation-page__composer {
   display: grid;
   justify-items: stretch;
@@ -241,5 +471,24 @@
 
   .chat-message--user .chat-message__body {
     max-width: min(82%, 620px);
+  }
+
+  .mcp-tool-approval-card__header {
+    display: grid;
+  }
+
+  .mcp-tool-approval-card__state {
+    max-width: 100%;
+    text-align: left;
+  }
+
+  .mcp-tool-approval-card__identity,
+  .mcp-tool-approval-card__metadata,
+  .mcp-tool-approval-card__arguments dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mcp-tool-approval-card__reject > div {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

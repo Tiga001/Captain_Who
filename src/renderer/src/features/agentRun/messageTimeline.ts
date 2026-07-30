@@ -5,6 +5,27 @@ export function removeTransientToolTimelineItems(timeline: ChatAgentTimelineItem
   return timeline
 }
 
+export function upsertMcpInvocationTimelineItem(
+  timeline: ChatAgentTimelineItem[],
+  invocationId: string,
+  callId: string
+): ChatAgentTimelineItem[] {
+  const id = `mcp-invocation-${invocationId}`
+  const withoutGenericCall = timeline.filter(
+    (item) => item.type !== 'tool_call' || item.callId !== callId
+  )
+
+  if (withoutGenericCall.some((item) => item.id === id)) {
+    return withoutGenericCall.map((item) =>
+      item.id === id && item.type === 'mcp_tool_call'
+        ? { id, type: 'mcp_tool_call', invocationId }
+        : item
+    )
+  }
+
+  return [...withoutGenericCall, { id, type: 'mcp_tool_call', invocationId }]
+}
+
 export function appendMessageDeltaToTimeline(
   run: ChatAgentRunView,
   delta: string,

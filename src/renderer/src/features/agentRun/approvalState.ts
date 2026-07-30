@@ -21,6 +21,10 @@ export function updateToolCallApprovalStatus(
   action: AgentProposedAction,
   approvalStatus: AgentApprovalStatus
 ) {
+  if (action.type === 'mcp_tool_call') {
+    return toolCalls.filter((call) => call.id !== action.approval.identity.callId)
+  }
+
   const actionId = getAgentActionId(action)
   const actionCall = getActionToolCall(withActionApprovalStatus(action, approvalStatus))
 
@@ -127,6 +131,8 @@ export function createRejectedToolResult(
   action: AgentProposedAction,
   message?: string
 ): AgentToolResult | null {
+  if (action.type === 'mcp_tool_call') return null
+
   const call = getActionToolCall(action)
   if (!call) return null
 

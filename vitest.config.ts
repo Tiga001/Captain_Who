@@ -12,6 +12,7 @@ const terminalMainTests = 'src/main/terminal'
 const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
 const skillsTests = 'src/renderer/src/features/skills/__tests__'
+const mcpTests = 'src/renderer/src/features/mcp/__tests__'
 const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
 const protocolTests = 'packages/protocol/src'
@@ -56,6 +57,7 @@ export default defineConfig({
             `${terminalPreloadTests}/**/*.test.ts`,
             `${terminalRendererTests}/**/*.test.ts`,
             `${skillsTests}/**/*.test.ts`,
+            `${mcpTests}/**/*.test.ts`,
             `${appTests}/**/*.test.ts`,
             `${chatTests}/**/*.test.ts`,
             `${protocolTests}/**/*.test.ts`
@@ -75,6 +77,7 @@ export default defineConfig({
             `${appTests}/**/*.browser.test.tsx`,
             `${chatTests}/**/*.browser.test.tsx`,
             `${skillsTests}/**/*.browser.test.tsx`,
+            `${mcpTests}/**/*.browser.test.tsx`,
             `${gitReviewTests}/**/*.browser.test.tsx`,
             `${rightSidebarTests}/**/*.browser.test.tsx`,
             `${filesTests}/**/*.browser.test.tsx`

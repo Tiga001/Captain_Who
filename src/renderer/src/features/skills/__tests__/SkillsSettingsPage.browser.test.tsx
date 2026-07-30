@@ -82,6 +82,16 @@ vi.mock('../../settings/pages/ProfileSettingsPage', () => ({
 vi.mock('../../settings/pages/UsageBillingSettingsPage', () => ({
   UsageBillingSettingsPage: () => <div>usage-page</div>
 }))
+vi.mock('../../mcp/McpSettingsPage', () => ({
+  McpSettingsPage: ({ onDirtyChange }: { onDirtyChange?: (dirty: boolean) => void }) => (
+    <div>
+      <span>mcp-page</span>
+      <button onClick={() => onDirtyChange?.(true)} type="button">
+        make-mcp-dirty
+      </button>
+    </div>
+  )
+}))
 
 const [{ SkillsSettingsPage }, { SettingsPage }] = await Promise.all([
   import('../../settings/pages/SkillsSettingsPage'),
@@ -344,11 +354,12 @@ beforeEach(() => {
 
 describe('Skills settings navigation and management inventory', () => {
   it('shows Skills in the Coding navigation and opens the page', async () => {
+    const onBack = vi.fn()
     const screen = await render(
       <SettingsPage
         conversations={[]}
         initialPage="environment"
-        onBack={vi.fn()}
+        onBack={onBack}
         onDeleteArchivedConversations={vi.fn()}
         onDeleteConversation={vi.fn()}
         onRemoveProject={vi.fn().mockResolvedValue(true)}
@@ -388,6 +399,24 @@ describe('Skills settings navigation and management inventory', () => {
     await expect
       .element(screen.getByRole('heading', { level: 1, name: 'settings.page.skills' }))
       .toBeVisible()
+
+    await screen.getByRole('button', { name: 'settings.page.mcp' }).click()
+    await expect.element(screen.getByText('mcp-page')).toBeVisible()
+    await screen.getByRole('button', { name: 'make-mcp-dirty' }).click()
+    await screen.getByRole('button', { name: 'settings.page.environment' }).click()
+    await expect.element(screen.getByRole('heading', { name: 'mcp.unsaved.title' })).toBeVisible()
+    await screen.getByText('mcp.actions.cancel', { exact: true }).click()
+    await expect.element(screen.getByText('mcp-page')).toBeVisible()
+
+    await screen.getByRole('button', { name: 'settings.page.environment' }).click()
+    await screen.getByRole('button', { name: 'mcp.unsaved.discard' }).click()
+    await expect.element(screen.getByText('environment-page')).toBeVisible()
+
+    await screen.getByRole('button', { name: 'settings.page.mcp' }).click()
+    await screen.getByRole('button', { name: 'make-mcp-dirty' }).click()
+    await screen.getByRole('button', { name: 'settings.backToApp' }).click()
+    await screen.getByRole('button', { name: 'mcp.unsaved.discard' }).click()
+    expect(onBack).toHaveBeenCalledTimes(1)
   })
 
   it('renders loading and empty states', async () => {

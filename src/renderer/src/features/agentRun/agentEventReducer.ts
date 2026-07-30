@@ -4,6 +4,8 @@ import type {
   AgentChatOutput,
   AgentEvent,
   AgentFileWritePreview,
+  AgentMcpToolApproval,
+  AgentMcpToolInvocationEvent,
   AgentProposedAction
 } from '@mycopilot/protocol'
 import type {
@@ -13,6 +15,7 @@ import type {
   ChatCommandOutputPreview,
   ChatFileWritePreview,
   ChatGuidanceTimelineItem,
+  ChatMcpToolInvocationView,
   ChatMessage,
   ChatQueuedMessage
 } from '../chat/chatTypes'
@@ -47,7 +50,8 @@ import {
   getFinalTimeline,
   getMessageContentAfterDelta,
   getRunResponseTimestamps,
-  removeTransientToolTimelineItems
+  removeTransientToolTimelineItems,
+  upsertMcpInvocationTimelineItem
 } from './messageTimeline'
 
 const MAX_LIVE_COMMAND_OUTPUT_CHARS = 256 * 1024
@@ -73,6 +77,7 @@ function createAgentRun(
     messageStreamCheckpoints: {},
     webSearchActivities: [],
     readActivities: [],
+    mcpInvocations: [],
     timeline: []
   }
 }
@@ -162,6 +167,197 @@ function upsertById<T>(items: T[], nextItem: T, getId: (item: T) => string) {
   }
 
   return items.map((item, index) => (index === itemIndex ? nextItem : item))
+}
+
+const MCP_TERMINAL_STATES = new Set<ChatMcpToolInvocationView['state']>([
+  'completed',
+  'failed',
+  'cancelled',
+  'rejected',
+  'expired',
+  'payload_unavailable',
+  'policy_denied',
+  'outcome_unknown'
+])
+
+const MCP_STATE_RANK: Record<ChatMcpToolInvocationView['state'], number> = {
+  pending_approval: 0,
+  approved: 1,
+  dispatching: 2,
+  running: 3,
+  completed: 4,
+  failed: 4,
+  cancelled: 4,
+  rejected: 4,
+  expired: 4,
+  payload_unavailable: 4,
+  policy_denied: 4,
+  outcome_unknown: 4
+}
+
+/**
+ * Project the wire event field-by-field. Do not spread the event into Renderer state: future
+ * protocol fields must remain absent until this allowlist is deliberately reviewed.
+ */
+function projectMcpInvocationEvent(event: AgentMcpToolInvocationEvent): ChatMcpToolInvocationView {
+  return {
+    actionId: event.actionId,
+    invocationId: event.invocationId,
+    callId: event.callId,
+    serverId: event.serverId,
+    serverDisplayName: event.serverDisplayName,
+    rawToolName: event.rawToolName,
+    modelToolName: event.modelToolName,
+    external: true,
+    state: event.state,
+    dispatchCertainty: event.dispatchCertainty,
+    outcome: event.outcome,
+    isError: event.isError,
+    errorCode: event.errorCode,
+    durationMs: event.durationMs,
+    outputTruncated: event.outputTruncated
+  }
+}
+
+function projectMcpScope(scope: AgentMcpToolApproval['identity']['provenance']['scope']) {
+  switch (scope.type) {
+    case 'project':
+      return { type: 'project' as const, projectId: scope.projectId }
+    case 'plugin':
+      return { type: 'plugin' as const, pluginId: scope.pluginId }
+    case 'builtin':
+      return { type: 'builtin' as const }
+    case 'managed':
+      return { type: 'managed' as const }
+    case 'user':
+      return { type: 'user' as const }
+  }
+}
+
+/**
+ * The typed MCP approval is the earliest authoritative callId-to-invocation association. Its
+ * model-facing call uses a redacted argument projection, which is intentionally not retained.
+ */
+function projectMcpApproval(approval: AgentMcpToolApproval): ChatMcpToolInvocationView {
+  return {
+    actionId: approval.identity.actionId,
+    invocationId: approval.identity.invocationId,
+    callId: approval.identity.callId,
+    serverId: approval.summary.serverId,
+    serverDisplayName: approval.summary.serverDisplayName,
+    scope: projectMcpScope(approval.identity.provenance.scope),
+    rawToolName: approval.summary.rawToolName,
+    modelToolName: approval.summary.modelToolName,
+    external: true,
+    state: 'pending_approval',
+    dispatchCertainty: 'definitely_not_dispatched',
+    outputTruncated: false
+  }
+}
+
+function isSameMcpInvocationIdentity(
+  current: ChatMcpToolInvocationView,
+  next: ChatMcpToolInvocationView
+) {
+  return (
+    current.invocationId === next.invocationId &&
+    current.actionId === next.actionId &&
+    current.callId === next.callId &&
+    current.serverId === next.serverId &&
+    current.rawToolName === next.rawToolName &&
+    current.modelToolName === next.modelToolName &&
+    current.external === next.external
+  )
+}
+
+function chooseMcpInvocationUpdate(
+  current: ChatMcpToolInvocationView,
+  next: ChatMcpToolInvocationView
+): ChatMcpToolInvocationView {
+  if (!isSameMcpInvocationIdentity(current, next)) return current
+  const currentWithScope =
+    current.scope || !next.scope
+      ? current
+      : {
+          actionId: current.actionId,
+          invocationId: current.invocationId,
+          callId: current.callId,
+          serverId: current.serverId,
+          serverDisplayName: current.serverDisplayName,
+          scope: projectMcpScope(next.scope),
+          rawToolName: current.rawToolName,
+          modelToolName: current.modelToolName,
+          external: true as const,
+          state: current.state,
+          dispatchCertainty: current.dispatchCertainty,
+          outcome: current.outcome,
+          isError: current.isError,
+          errorCode: current.errorCode,
+          durationMs: current.durationMs,
+          outputTruncated: current.outputTruncated
+        }
+  if (MCP_TERMINAL_STATES.has(current.state)) return currentWithScope
+  if (MCP_STATE_RANK[next.state] <= MCP_STATE_RANK[current.state]) return currentWithScope
+
+  return {
+    actionId: next.actionId,
+    invocationId: next.invocationId,
+    callId: next.callId,
+    serverId: next.serverId,
+    serverDisplayName: currentWithScope.serverDisplayName,
+    scope: currentWithScope.scope,
+    rawToolName: next.rawToolName,
+    modelToolName: next.modelToolName,
+    external: true,
+    state: next.state,
+    dispatchCertainty: next.dispatchCertainty,
+    outcome: next.outcome,
+    isError: next.isError,
+    errorCode: next.errorCode,
+    durationMs: next.durationMs,
+    outputTruncated: next.outputTruncated
+  }
+}
+
+function upsertMcpInvocationView(
+  current: ChatMcpToolInvocationView[],
+  next: ChatMcpToolInvocationView
+) {
+  const existingIndex = current.findIndex(
+    (candidate) => candidate.invocationId === next.invocationId
+  )
+  if (existingIndex < 0) return [...current, next]
+
+  const selected = chooseMcpInvocationUpdate(current[existingIndex], next)
+  if (selected === current[existingIndex]) return current
+  return current.map((candidate, index) => (index === existingIndex ? selected : candidate))
+}
+
+function addMcpApprovalViews(
+  run: ChatAgentRunView,
+  actions: AgentProposedAction[]
+): Pick<ChatAgentRunView, 'mcpInvocations' | 'timeline' | 'toolCalls' | 'toolResults'> {
+  const approvals = actions.filter(
+    (action): action is Extract<AgentProposedAction, { type: 'mcp_tool_call' }> =>
+      action.type === 'mcp_tool_call'
+  )
+  let mcpInvocations = run.mcpInvocations ?? []
+  let timeline = run.timeline
+  const mcpCallIds = new Set<string>()
+
+  approvals.forEach((action) => {
+    const next = projectMcpApproval(action.approval)
+    mcpInvocations = upsertMcpInvocationView(mcpInvocations, next)
+    timeline = upsertMcpInvocationTimelineItem(timeline, next.invocationId, next.callId)
+    mcpCallIds.add(next.callId)
+  })
+
+  return {
+    mcpInvocations,
+    timeline,
+    toolCalls: run.toolCalls.filter((call) => !mcpCallIds.has(call.id)),
+    toolResults: run.toolResults.filter((result) => !mcpCallIds.has(result.callId))
+  }
 }
 
 function appendCommandOutputChunk(
@@ -400,6 +596,7 @@ function settlePendingContextCompactions(
 export function shouldTouchConversationForAgentEvent(agentEvent: AgentEvent) {
   if (agentEvent.type === 'done') return true
   if (agentEvent.type === 'approval_required') return true
+  if (agentEvent.type === 'mcp_tool_invocation_state_changed') return true
   if (
     agentEvent.type === 'guidance_queued' ||
     agentEvent.type === 'guidance_applied' ||
@@ -629,6 +826,28 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'tool_call') {
+    const mcpInvocation = currentRun.mcpInvocations?.find(
+      (candidate) => candidate.callId === agentEvent.call.id
+    )
+    if (mcpInvocation) {
+      return {
+        ...message,
+        status: 'pending',
+        agentRun: {
+          ...currentRun,
+          toolCalls: currentRun.toolCalls.filter((call) => call.id !== mcpInvocation.callId),
+          toolResults: currentRun.toolResults.filter(
+            (result) => result.callId !== mcpInvocation.callId
+          ),
+          timeline: upsertMcpInvocationTimelineItem(
+            currentRun.timeline,
+            mcpInvocation.invocationId,
+            mcpInvocation.callId
+          )
+        }
+      }
+    }
+
     const runWithCleanTimeline = {
       ...currentRun,
       timeline: removeTransientToolTimelineItems(currentRun.timeline)
@@ -649,6 +868,14 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'tool_result') {
+    if (
+      currentRun.mcpInvocations?.some((candidate) => candidate.callId === agentEvent.result.callId)
+    ) {
+      // MCP lifecycle is the only Renderer source of truth. Generic results can contain raw
+      // bodies and must never enter chat state once the typed call identity is known.
+      return message
+    }
+
     const nextRun: ChatAgentRunView = {
       ...currentRun,
       status: 'running',
@@ -728,6 +955,20 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'approval_required') {
+    if (agentEvent.action.type === 'mcp_tool_call') {
+      const mcpProjection = addMcpApprovalViews(currentRun, [agentEvent.action])
+      return {
+        ...message,
+        status: 'pending',
+        agentRun: {
+          ...currentRun,
+          status: 'waiting_for_approval',
+          approvals: upsertAgentAction(currentRun.approvals, agentEvent.action),
+          ...mcpProjection
+        }
+      }
+    }
+
     const call = getActionToolCall(agentEvent.action)
     const timeline = call
       ? appendToolCallToTimeline(currentRun, call.id)
@@ -828,10 +1069,27 @@ export function applyAgentEventToChatMessage(
     return removeGuidanceFromChatMessage(message, agentEvent.clientMessageId)
   }
 
-  // Round 5A intentionally does not persist MCP lifecycle data in Renderer chat state. Round 5B
-  // replaces this fail-closed no-op with an explicit allowlist projection.
   if (agentEvent.type === 'mcp_tool_invocation_state_changed') {
-    return message
+    const projected = projectMcpInvocationEvent(agentEvent.invocation)
+    const mcpInvocations = upsertMcpInvocationView(currentRun.mcpInvocations ?? [], projected)
+    const selected =
+      mcpInvocations.find((candidate) => candidate.invocationId === projected.invocationId) ??
+      projected
+
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        mcpInvocations,
+        toolCalls: currentRun.toolCalls.filter((call) => call.id !== selected.callId),
+        toolResults: currentRun.toolResults.filter((result) => result.callId !== selected.callId),
+        timeline: upsertMcpInvocationTimelineItem(
+          currentRun.timeline,
+          selected.invocationId,
+          selected.callId
+        )
+      }
+    }
   }
 
   if (agentEvent.type === 'error') {
@@ -871,6 +1129,13 @@ export function applyAgentEventToChatMessage(
     finalContent && !currentRun.firstResponseAt
       ? (completedAt ?? Date.now())
       : currentRun.firstResponseAt
+  const mcpProjection = addMcpApprovalViews(
+    {
+      ...currentRun,
+      timeline: getFinalTimeline(currentRun, agentEvent.content)
+    },
+    proposedActions
+  )
 
   const nextRun = settleAgentRunToolActivities(
     {
@@ -887,7 +1152,7 @@ export function applyAgentEventToChatMessage(
       usage: agentEvent.usage ?? currentRun.usage,
       finishReason: agentEvent.finishReason,
       approvals: getApprovalsForStatus(nextStatus, currentRun.approvals, proposedActions),
-      timeline: getFinalTimeline(currentRun, agentEvent.content)
+      ...mcpProjection
     },
     nextStatus,
     completedAt ?? Date.now()
@@ -919,6 +1184,13 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
     nextContent && nextContent !== THINKING_PLACEHOLDER && !currentRun.firstResponseAt
       ? (outputCompletedAt ?? Date.now())
       : currentRun.firstResponseAt
+  const mcpProjection = addMcpApprovalViews(
+    {
+      ...currentRun,
+      timeline: getFinalTimeline(currentRun, outputFinalContent)
+    },
+    output.proposedActions
+  )
 
   const nextRun = settleAgentRunToolActivities(
     {
@@ -934,7 +1206,7 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
       usage: output.usage ?? currentRun.usage,
       finishReason: output.finishReason,
       approvals: getApprovalsForStatus(output.status, currentRun.approvals, output.proposedActions),
-      timeline: getFinalTimeline(currentRun, outputFinalContent)
+      ...mcpProjection
     },
     output.status,
     outputCompletedAt ?? Date.now()
@@ -959,6 +1231,7 @@ export function applyAgentActionDecisionToChatMessage(
   const approvalStatus: AgentApprovalStatus = decision === 'approved' ? 'approved' : 'rejected'
   const rejectedToolResult =
     decision === 'rejected' ? createRejectedToolResult(action, rejectionMessage) : null
+  const mcpCallId = action.type === 'mcp_tool_call' ? action.approval.identity.callId : undefined
   const runWithDecision = normalizeAgentRunToolActivities({
     ...currentRun,
     status: 'running',
@@ -966,10 +1239,14 @@ export function applyAgentActionDecisionToChatMessage(
     toolCalls: updateToolCallApprovalStatus(currentRun.toolCalls, action, approvalStatus),
     toolResults: rejectedToolResult
       ? upsertById(currentRun.toolResults, rejectedToolResult, (result) => result.callId)
-      : currentRun.toolResults,
+      : mcpCallId
+        ? currentRun.toolResults.filter((result) => result.callId !== mcpCallId)
+        : currentRun.toolResults,
     diffs: updateDiffApprovalStatus(currentRun.diffs, action, approvalStatus),
     fileDrafts: updateFileDraftApprovalStatus(currentRun.fileDrafts ?? [], action, approvalStatus),
-    timeline: removeTransientToolTimelineItems(currentRun.timeline)
+    timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
+      (item) => item.type !== 'tool_call' || item.callId !== mcpCallId
+    )
   })
 
   return {
@@ -991,6 +1268,39 @@ export function applyAgentActionExecutionToChatMessage(
     execution.agentOutput.events.length === 0
       ? { ...outputRun, status: 'starting' }
       : outputRun
+  const originalMcpApproval = message.agentRun?.approvals.find(
+    (action) =>
+      action.type === 'mcp_tool_call' && action.approval.identity.actionId === execution.actionId
+  )
+  const mcpInvocation = currentRun.mcpInvocations?.find(
+    (candidate) => candidate.actionId === execution.actionId
+  )
+  const mcpCallId =
+    mcpInvocation?.callId ??
+    (originalMcpApproval?.type === 'mcp_tool_call'
+      ? originalMcpApproval.approval.identity.callId
+      : undefined)
+
+  if (execution.actionType === 'mcp_tool_call' || mcpCallId) {
+    const nextRun = normalizeAgentRunToolActivities({
+      ...currentRun,
+      approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      toolCalls: mcpCallId
+        ? currentRun.toolCalls.filter((call) => call.id !== mcpCallId)
+        : currentRun.toolCalls,
+      toolResults: mcpCallId
+        ? currentRun.toolResults.filter((result) => result.callId !== mcpCallId)
+        : currentRun.toolResults,
+      timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
+        (item) => item.type !== 'tool_call' || item.callId !== mcpCallId
+      )
+    })
+
+    return {
+      ...messageWithAgentOutput,
+      agentRun: nextRun
+    }
+  }
 
   if (!execution.toolResult) {
     const nextRun = normalizeAgentRunToolActivities({

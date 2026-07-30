@@ -58,7 +58,7 @@ export function useAgentActionDecisionHandlers({
           )
         },
         onError: (error) => {
-          console.error('Failed to approve agent action', error)
+          logAgentActionDecisionError('approve', action, error)
         },
         onMissingRunId: () => {
           console.warn('Cannot approve agent action without a run id', { actionId, messageId })
@@ -87,7 +87,7 @@ export function useAgentActionDecisionHandlers({
           )
         },
         onError: (error) => {
-          console.error('Failed to reject agent action', error)
+          logAgentActionDecisionError('reject', action, error)
         },
         onMissingRunId: () => {
           console.warn('Cannot reject agent action without a run id', { actionId, messageId })
@@ -117,7 +117,7 @@ export function useAgentActionDecisionHandlers({
           )
         },
         onError: (error) => {
-          console.error('Failed to cancel agent action', error)
+          logAgentActionDecisionError('cancel', action, error)
         },
         onMissingRunId: () => {
           console.warn('Cannot cancel agent action without a run id', { actionId, messageId })
@@ -135,4 +135,18 @@ export function useAgentActionDecisionHandlers({
     handleCancelAgentAction,
     handleRejectAgentAction
   }
+}
+
+function logAgentActionDecisionError(
+  operation: 'approve' | 'cancel' | 'reject',
+  action: AgentProposedAction,
+  error: unknown
+): void {
+  if (action.type === 'mcp_tool_call') {
+    // MCP failures may carry Host error details. Keep the entire Error/cause/stack out of
+    // Renderer logs; the dedicated approval UI receives only the protocol's safe lifecycle view.
+    console.error(`Failed to ${operation} external MCP action`)
+    return
+  }
+  console.error(`Failed to ${operation} agent action`, error)
 }

@@ -90,7 +90,13 @@ function getPendingApprovalTarget(conversation: ChatConversation) {
     if (action) {
       return {
         action,
-        messageId: message.id
+        messageId: message.id,
+        mcpInvocationState:
+          action.type === 'mcp_tool_call'
+            ? run.mcpInvocations?.find(
+                (invocation) => invocation.invocationId === action.approval.identity.invocationId
+              )?.state
+            : undefined
       }
     }
   }
@@ -413,8 +419,10 @@ export function ChatConversationPage({
         )}
         {pendingApprovalTarget ? (
           <AgentApprovalDialog
+            mcpInvocationState={pendingApprovalTarget.mcpInvocationState}
             target={pendingApprovalTarget}
             onApprove={onApproveAgentAction}
+            onCancel={onCancelAgentAction}
             onReject={onRejectAgentAction}
           />
         ) : (

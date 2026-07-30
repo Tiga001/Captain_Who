@@ -1,5 +1,5 @@
 import { X } from 'lucide-react'
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
 import './ConfirmationDialog.css'
 
@@ -10,6 +10,7 @@ interface ConfirmationDialogProps {
   confirmLabel: string
   confirmVariant?: ConfirmationDialogVariant
   description?: string
+  fallbackFocusRef?: RefObject<HTMLElement | null>
   onCancel: () => void
   onConfirm: () => void | Promise<void>
   title: string
@@ -20,6 +21,7 @@ export function ConfirmationDialog({
   confirmLabel,
   confirmVariant = 'danger',
   description,
+  fallbackFocusRef,
   onCancel,
   onConfirm,
   title
@@ -27,10 +29,47 @@ export function ConfirmationDialog({
   const titleId = useId()
   const descriptionId = useId()
   const [isConfirming, setIsConfirming] = useState(false)
+  const confirmingRef = useRef(false)
+  const cardRef = useRef<HTMLElement>(null)
+  const cancelButtonRef = useRef<HTMLButtonElement>(null)
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    previouslyFocusedRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const fallbackFocus = fallbackFocusRef?.current ?? null
+    const frameId = window.requestAnimationFrame(() => cancelButtonRef.current?.focus())
+
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      const previous = previouslyFocusedRef.current
+      if (previous?.isConnected) {
+        previous.focus()
+      } else {
+        fallbackFocus?.focus()
+      }
+    }
+  }, [fallbackFocusRef])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !isConfirming) onCancel()
+      if (event.key !== 'Tab') return
+
+      const focusable = Array.from(
+        cardRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []
+      )
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      const active = document.activeElement
+      if (event.shiftKey && active === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault()
+        first.focus()
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -38,13 +77,15 @@ export function ConfirmationDialog({
   }, [isConfirming, onCancel])
 
   const confirm = async () => {
-    if (isConfirming) return
+    if (confirmingRef.current) return
+    confirmingRef.current = true
     setIsConfirming(true)
     try {
       await onConfirm()
     } catch (error) {
       console.error('Confirmation action failed', error)
     } finally {
+      confirmingRef.current = false
       setIsConfirming(false)
     }
   }
@@ -58,6 +99,7 @@ export function ConfirmationDialog({
       }}
     >
       <section
+        ref={cardRef}
         className="app-confirm-dialog__card"
         role="dialog"
         aria-modal="true"
@@ -78,6 +120,7 @@ export function ConfirmationDialog({
         {description && <p id={descriptionId}>{description}</p>}
         <div className="app-confirm-dialog__actions">
           <button
+            ref={cancelButtonRef}
             className="app-confirm-dialog__button app-confirm-dialog__button--cancel"
             type="button"
             disabled={isConfirming}
