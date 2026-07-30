@@ -10,13 +10,19 @@ use serde::{Deserialize, Serialize};
 /// unconfigured runtime.
 pub const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ModelConnectionConfig {
     pub api_url: String,
     pub api_token: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+impl std::fmt::Debug for ModelConnectionConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ModelConnectionConfig([REDACTED])")
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfigRecord {
     /// Opaque identifier sent verbatim as the provider API's `model` value.
@@ -35,7 +41,13 @@ pub struct ModelConfigRecord {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+impl std::fmt::Debug for ModelConfigRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ModelConfigRecord([REDACTED])")
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelSettingsRecord {
     pub api_url: String,
@@ -43,6 +55,29 @@ pub struct ModelSettingsRecord {
     pub search_mode: String,
     pub tavily_api_key: String,
     pub models: Vec<ModelConfigRecord>,
+}
+
+impl std::fmt::Debug for ModelSettingsRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ModelSettingsRecord([REDACTED])")
+    }
+}
+
+/// Host-only snapshot of model settings and the opaque identity of the exact saved revision.
+///
+/// `configuration_revision` is deliberately not part of [`ModelSettingsRecord`], which is also
+/// used by Renderer-facing settings APIs. A new random revision is generated for every successful
+/// settings save, including saves whose visible values happen to be identical.
+#[derive(Clone)]
+pub struct ModelSettingsSnapshot {
+    pub settings: ModelSettingsRecord,
+    pub configuration_revision: String,
+}
+
+impl std::fmt::Debug for ModelSettingsSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ModelSettingsSnapshot([REDACTED])")
+    }
 }
 
 /// Credential-free persisted state for one image-generation provider profile.
@@ -468,7 +503,7 @@ pub struct AgentUsageRecordInsert {
     pub estimated_cost: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentActionAuditRecord {
     pub action_id: String,
     pub run_id: String,
@@ -493,6 +528,12 @@ pub struct AgentActionAuditRecord {
     pub decision_source: Option<String>,
 }
 
+impl std::fmt::Debug for AgentActionAuditRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentActionAuditRecord([REDACTED])")
+    }
+}
+
 /// Persisted file-producing action whose process outcome cannot be proven after restart.
 ///
 /// An `executing` claim is intentionally treated as effects-may-have-occurred. Conversation or
@@ -505,7 +546,7 @@ pub struct AgentUnsettledFileEffect {
     pub action_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AgentPendingActionRecord {
     pub action_id: String,
     pub run_id: String,
@@ -525,6 +566,36 @@ pub struct AgentPendingActionRecord {
     pub agent_input_json: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for AgentPendingActionRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentPendingActionRecord([REDACTED])")
+    }
+}
+
+/// Authenticated ciphertext envelope for one pending MCP approval payload.
+///
+/// Core storage accepts only the opaque invocation/action binding, the AEAD nonce and ciphertext,
+/// the digest of Host-reconstructed authenticated metadata, and lifecycle timestamps. It cannot
+/// accept raw MCP arguments, the authenticated metadata itself, encryption-key references, or a
+/// serializable plaintext payload type.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpApprovalEnvelopeRecord {
+    pub invocation_id: String,
+    pub action_id: String,
+    pub envelope_version: i64,
+    pub nonce_base64: String,
+    pub ciphertext_base64: String,
+    pub aad_digest: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+impl std::fmt::Debug for McpApprovalEnvelopeRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("McpApprovalEnvelopeRecord([REDACTED])")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,4 +656,108 @@ pub struct AgentFileDraftOperationRecord {
     pub operation: String,
     pub payload_hash: String,
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    const CANARY: &str = "STORAGE_DEBUG_SECRET_CANARY";
+
+    #[test]
+    fn sensitive_agent_storage_records_have_constant_redacted_debug() {
+        let audit = AgentActionAuditRecord {
+            action_id: CANARY.to_string(),
+            run_id: CANARY.to_string(),
+            conversation_id: Some(CANARY.to_string()),
+            assistant_message_id: Some(CANARY.to_string()),
+            action_type: CANARY.to_string(),
+            tool_name: CANARY.to_string(),
+            decision: Some(CANARY.to_string()),
+            status: CANARY.to_string(),
+            action_json: CANARY.to_string(),
+            patch_result_json: Some(CANARY.to_string()),
+            command_result_json: Some(CANARY.to_string()),
+            tool_result_json: Some(CANARY.to_string()),
+            error: Some(CANARY.to_string()),
+            created_at: 1,
+            decided_at: Some(2),
+            completed_at: Some(3),
+            effective_permissions_json: Some(CANARY.to_string()),
+            path_scope: Some(CANARY.to_string()),
+            command_cwd_scope: Some(CANARY.to_string()),
+            blocked_reason: Some(CANARY.to_string()),
+            decision_source: Some(CANARY.to_string()),
+        };
+        let pending = AgentPendingActionRecord {
+            action_id: CANARY.to_string(),
+            run_id: CANARY.to_string(),
+            conversation_id: Some(CANARY.to_string()),
+            assistant_message_id: Some(CANARY.to_string()),
+            action_type: CANARY.to_string(),
+            tool_name: CANARY.to_string(),
+            tool_call_id: Some(CANARY.to_string()),
+            status: CANARY.to_string(),
+            target_status: Some(CANARY.to_string()),
+            action_json: CANARY.to_string(),
+            agent_input_json: CANARY.to_string(),
+            created_at: 1,
+            updated_at: 2,
+        };
+
+        assert_eq!(format!("{audit:?}"), "AgentActionAuditRecord([REDACTED])");
+        assert_eq!(
+            format!("{pending:?}"),
+            "AgentPendingActionRecord([REDACTED])"
+        );
+        assert!(!format!("{audit:?}{pending:?}").contains(CANARY));
+    }
+
+    #[test]
+    fn mcp_envelope_record_debug_never_exposes_ciphertext_or_identity() {
+        let envelope = McpApprovalEnvelopeRecord {
+            invocation_id: CANARY.to_string(),
+            action_id: CANARY.to_string(),
+            envelope_version: 1,
+            nonce_base64: CANARY.to_string(),
+            ciphertext_base64: CANARY.to_string(),
+            aad_digest: CANARY.to_string(),
+            created_at: 1,
+            expires_at: 2,
+        };
+
+        let rendered = format!("{envelope:?}");
+        assert_eq!(rendered, "McpApprovalEnvelopeRecord([REDACTED])");
+        assert!(!rendered.contains(CANARY));
+    }
+
+    #[test]
+    fn model_configuration_debug_is_write_only_for_credentials() {
+        let model = ModelConfigRecord {
+            id: "test-model".to_string(),
+            display_name: "Test Model".to_string(),
+            api_url_override: Some("https://example.test/v1".to_string()),
+            api_token_override: Some(CANARY.to_string()),
+            supports_image: false,
+            context_window_tokens: Some(128_000),
+            input_price: "0".to_string(),
+            output_price: "0".to_string(),
+            enabled: true,
+        };
+        let settings = ModelSettingsRecord {
+            api_url: "https://example.test/v1".to_string(),
+            api_token: CANARY.to_string(),
+            search_mode: "tavily".to_string(),
+            tavily_api_key: CANARY.to_string(),
+            models: vec![model.clone()],
+        };
+        let connection = ModelConnectionConfig {
+            api_url: "https://example.test/v1".to_string(),
+            api_token: CANARY.to_string(),
+        };
+
+        let rendered = format!("{model:?}{settings:?}{connection:?}");
+        assert!(!rendered.contains(CANARY));
+        assert!(!rendered.contains("example.test"));
+    }
 }

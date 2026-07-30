@@ -1,15 +1,16 @@
 use std::collections::BTreeSet;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use mycopilot_mcp_client::{
     InMemoryMcpRegistry, McpCancellationToken, McpCatalogCompleteness, McpConnectionManager,
-    McpConnectionState, McpConnector, McpContentBlock, McpEnvBinding, McpErrorKind, McpEvent,
-    McpLifecycleKind, McpManagerPolicy, McpPeer, McpPeerNotificationState, McpRegistry,
-    McpServerConfig, McpServerId, McpServerScope, McpStdioConfig, McpStdioConnector,
-    McpStdioPolicy, McpToolCall, McpTransportConfig, McpTrustLevel,
+    McpConnectionState, McpConnector, McpContentBlock, McpDispatchCertainty, McpEnvBinding,
+    McpErrorKind, McpEvent, McpLifecycleKind, McpManagerPolicy, McpOutcomeUnknownReason, McpPeer,
+    McpPeerNotificationState, McpRegistry, McpServerConfig, McpServerId, McpServerScope,
+    McpStdioConfig, McpStdioConnector, McpStdioPolicy, McpToolCall, McpTransportConfig,
+    McpTrustLevel,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
@@ -31,11 +32,56 @@ const EXIT_AFTER_NEGOTIATION_FIXTURE: &str = "--fixture-exit-after-negotiation";
 const STDERR_FIXTURE: &str = "--fixture-stderr-flood";
 const STDOUT_FIXTURE: &str = "--fixture-stdout-flood";
 const UNCOOPERATIVE_FIXTURE: &str = "--fixture-uncooperative-close";
+#[cfg(unix)]
+const UNCOOPERATIVE_DYNAMIC_FIXTURE: &str = "--fixture-uncooperative-dynamic-close";
+#[cfg(unix)]
+const TERM_AWARE_FIXTURE: &str = "--fixture-term-aware-close";
 const UNRESPONSIVE_FIXTURE: &str = "--fixture-unresponsive-after-negotiation";
 const PROTOCOL_EOF_FIXTURE: &str = "--fixture-protocol-eof-alive";
+#[cfg(unix)]
+const FORKED_DESCENDANT_FIXTURE: &str = "--fixture-forked-descendant";
 const ENV_PARENT: &str = "--fixture-env-parent";
 const ENV_PROBE: &str = "--fixture-env-probe";
 const FORBIDDEN_TEST_ENV: &str = "MYCOPILOT_MCP_FORBIDDEN_TEST_VALUE";
+
+#[cfg(unix)]
+static TERM_RECEIVED: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static FIXTURE_DESCENDANT_PID: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_sigterm(_signal: libc::c_int) {
+    TERM_RECEIVED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn spawn_owned_fixture_descendant() {
+    // Install SIGTERM ignore before fork so the post-fork child only performs async-signal-safe
+    // syscalls. The leader restores its prior disposition immediately after fork.
+    // SAFETY: this runs only inside the isolated repository-owned fixture process.
+    let previous = unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
+    assert_ne!(previous, libc::SIG_ERR, "install fixture SIGTERM handler");
+    // SAFETY: the child branch calls only close/pause after a multithreaded fork and never returns
+    // to Rust or Tokio. It exists solely to exercise process-group containment.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        // SAFETY: these are the inherited standard descriptors in the isolated fixture child.
+        unsafe {
+            libc::close(libc::STDIN_FILENO);
+            libc::close(libc::STDOUT_FILENO);
+            libc::close(libc::STDERR_FILENO);
+            loop {
+                libc::pause();
+            }
+        }
+    }
+    // SAFETY: restore the leader's original disposition before serving MCP.
+    unsafe {
+        libc::signal(libc::SIGTERM, previous);
+    }
+    assert!(pid > 0, "fork repository-owned fixture descendant");
+    FIXTURE_DESCENDANT_PID.store(pid, Ordering::SeqCst);
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct EchoInput {
@@ -57,6 +103,17 @@ struct AddOutput {
 struct StructuredOutput {
     status: String,
     value: i64,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct FixtureProcessOutput {
+    pid: u32,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+struct FixtureDescendantOutput {
+    pid: i32,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -118,6 +175,29 @@ impl FixtureServer {
         Json(StructuredOutput {
             status: "ok".to_string(),
             value: 7,
+        })
+    }
+
+    #[tool(
+        name = "fixture_process_id",
+        description = "Return the repository-owned fixture process identifier",
+        annotations(read_only_hint = true)
+    )]
+    async fn fixture_process_id(&self) -> Json<FixtureProcessOutput> {
+        Json(FixtureProcessOutput {
+            pid: std::process::id(),
+        })
+    }
+
+    #[cfg(unix)]
+    #[tool(
+        name = "fixture_descendant_pid",
+        description = "Return the repository-owned descendant process identifier",
+        annotations(read_only_hint = true)
+    )]
+    async fn fixture_descendant_pid(&self) -> Json<FixtureDescendantOutput> {
+        Json(FixtureDescendantOutput {
+            pid: FIXTURE_DESCENDANT_PID.load(Ordering::SeqCst),
         })
     }
 
@@ -236,7 +316,7 @@ impl ServerHandler for DynamicFixtureServer {
         )
         .with_server_info(Implementation::new(
             "mycopilot-owned-dynamic-fixture",
-            "1.0.0",
+            format!("fixture-pid:{}", std::process::id()),
         ))
     }
 
@@ -321,6 +401,12 @@ async fn main() {
             std::future::pending::<()>().await;
         }
         Some(UNCOOPERATIVE_FIXTURE) => {
+            #[cfg(unix)]
+            // SAFETY: this repository-owned child fixture intentionally ignores
+            // SIGTERM so the connector's final SIGKILL/reap path is exercised.
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            }
             let service = FixtureServer::new()
                 .serve(rmcp::transport::stdio())
                 .await
@@ -330,6 +416,52 @@ async fn main() {
                 .await
                 .expect("wait for uncooperative fixture transport close");
             std::future::pending::<()>().await;
+        }
+        #[cfg(unix)]
+        Some(UNCOOPERATIVE_DYNAMIC_FIXTURE) => {
+            // SAFETY: this repository-owned child fixture intentionally ignores SIGTERM so close
+            // must settle both its active notification reader and final SIGKILL/reap path.
+            unsafe {
+                libc::signal(libc::SIGTERM, libc::SIG_IGN);
+            }
+            let service = DynamicFixtureServer::new(true)
+                .serve(rmcp::transport::stdio())
+                .await
+                .expect("start uncooperative dynamic owned fixture");
+            service
+                .waiting()
+                .await
+                .expect("wait for uncooperative dynamic fixture transport close");
+            std::future::pending::<()>().await;
+        }
+        #[cfg(unix)]
+        Some(TERM_AWARE_FIXTURE) => {
+            TERM_RECEIVED.store(false, Ordering::SeqCst);
+            // SAFETY: installs a minimal async-signal-safe handler in the
+            // isolated repository-owned fixture process.
+            unsafe {
+                libc::signal(
+                    libc::SIGTERM,
+                    record_sigterm as *const () as libc::sighandler_t,
+                );
+            }
+            let service = FixtureServer::new()
+                .serve(rmcp::transport::stdio())
+                .await
+                .expect("start TERM-aware owned fixture");
+            service
+                .waiting()
+                .await
+                .expect("wait for TERM-aware fixture transport close");
+            while !TERM_RECEIVED.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let mut stderr = tokio::io::stderr();
+            stderr
+                .write_all(b"owned fixture received SIGTERM\n")
+                .await
+                .expect("write TERM fixture diagnostic");
+            stderr.flush().await.expect("flush TERM fixture diagnostic");
         }
         Some(UNRESPONSIVE_FIXTURE) => {
             let service = FixtureServer::new()
@@ -358,6 +490,11 @@ async fn main() {
                 libc::close(libc::STDOUT_FILENO);
             }
             std::future::pending::<()>().await;
+        }
+        #[cfg(unix)]
+        Some(FORKED_DESCENDANT_FIXTURE) => {
+            spawn_owned_fixture_descendant();
+            serve_fixture(false).await;
         }
         Some(ENV_PARENT) => run_environment_parent().await,
         Some(ENV_PROBE) => {
@@ -457,6 +594,16 @@ async fn run_integration_suite() {
     protocol_eof_is_reported_while_the_child_remains_alive().await;
     close_reaps_server_process().await;
     forced_close_terminates_uncooperative_owned_fixture().await;
+    #[cfg(unix)]
+    dropped_handle_force_kills_and_reaps_uncooperative_owned_fixture().await;
+    #[cfg(unix)]
+    close_settles_notification_and_reader_tasks_before_reporting_closed().await;
+    #[cfg(unix)]
+    graceful_close_uses_term_before_kill().await;
+    #[cfg(unix)]
+    normal_shutdown_terminates_forked_descendant().await;
+    #[cfg(unix)]
+    exited_leader_still_terminates_forked_descendant().await;
     manager_shutdown_force_reaps_uncooperative_owned_fixture().await;
     stderr_is_continuously_drained_and_bounded().await;
     oversized_protocol_line_is_rejected().await;
@@ -741,7 +888,15 @@ async fn timeout_sends_protocol_cancellation() {
         .call_tool(slow, McpCancellationToken::new())
         .await
         .expect_err("slow tool should time out");
-    assert_eq!(error.kind, McpErrorKind::Timeout);
+    assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::PossiblyDispatched)
+    );
+    assert_eq!(
+        error.outcome_unknown_reason,
+        Some(McpOutcomeUnknownReason::TimedOut)
+    );
     wait_for_slow_status(&client, true).await;
     let echo = call(&client, "echo_text", json!({"text": "still-ready"}))
         .await
@@ -774,7 +929,15 @@ async fn explicit_cancellation_reaches_server() {
         .await
         .expect("join cancelled tool task")
         .expect_err("slow tool should be cancelled");
-    assert_eq!(error.kind, McpErrorKind::Cancelled);
+    assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::PossiblyDispatched)
+    );
+    assert_eq!(
+        error.outcome_unknown_reason,
+        Some(McpOutcomeUnknownReason::Cancelled)
+    );
     wait_for_slow_status(&client, true).await;
     client.close().await.expect("close cancellation fixture");
 }
@@ -804,7 +967,15 @@ async fn cancellation_stays_bounded_under_transport_backpressure() {
         .expect("cancellation must remain bounded")
         .expect("join backpressured call")
         .expect_err("backpressured call must be cancelled");
-    assert_eq!(error.kind, McpErrorKind::Cancelled);
+    assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::PossiblyDispatched)
+    );
+    assert_eq!(
+        error.outcome_unknown_reason,
+        Some(McpOutcomeUnknownReason::Cancelled)
+    );
     let _ = client.close().await;
 }
 
@@ -878,6 +1049,8 @@ async fn forced_close_terminates_uncooperative_owned_fixture() {
         .connect(&config)
         .await
         .expect("connect uncooperative owned fixture");
+    #[cfg(unix)]
+    let fixture_pid = fixture_process_id(&client).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(20), client.close())
             .await
@@ -889,6 +1062,133 @@ async fn forced_close_terminates_uncooperative_owned_fixture() {
         .await
         .expect("resume, force terminate, and reap uncooperative owned fixture");
     assert_eq!(client.connection_state(), McpConnectionState::Closed);
+    #[cfg(unix)]
+    assert_child_was_reaped(fixture_pid);
+}
+
+#[cfg(unix)]
+async fn dropped_handle_force_kills_and_reaps_uncooperative_owned_fixture() {
+    let mut config = fixture_config(UNCOOPERATIVE_FIXTURE);
+    config.shutdown_timeout_ms = 150;
+    let client = fixture_connector()
+        .connect(&config)
+        .await
+        .expect("connect dropped uncooperative owned fixture");
+    let fixture_pid = fixture_process_id(&client).await;
+
+    drop(client);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            // SAFETY: signal 0 performs existence/permission checking without delivering a signal.
+            let result = unsafe { libc::kill(fixture_pid, 0) };
+            if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("detached stdio supervisor must force-kill and reap its owned child");
+    assert_child_was_reaped(fixture_pid);
+}
+
+#[cfg(unix)]
+async fn close_settles_notification_and_reader_tasks_before_reporting_closed() {
+    let mut config = fixture_config(UNCOOPERATIVE_DYNAMIC_FIXTURE);
+    config.shutdown_timeout_ms = 150;
+    let client = fixture_connector()
+        .connect(&config)
+        .await
+        .expect("connect uncooperative dynamic owned fixture");
+    assert_eq!(
+        client.subscribe_signals().snapshot().notification_state,
+        McpPeerNotificationState::Active
+    );
+    let fixture_pid = client
+        .protocol_snapshot()
+        .server
+        .as_ref()
+        .and_then(|server| server.version.strip_prefix("fixture-pid:"))
+        .and_then(|pid| pid.parse::<libc::pid_t>().ok())
+        .expect("dynamic fixture version must carry its owned child pid");
+
+    client
+        .close()
+        .await
+        .expect("close must settle auxiliary tasks and reap the uncooperative child");
+    assert_eq!(client.connection_state(), McpConnectionState::Closed);
+    assert_child_was_reaped(fixture_pid);
+}
+
+#[cfg(unix)]
+async fn graceful_close_uses_term_before_kill() {
+    let mut config = fixture_config(TERM_AWARE_FIXTURE);
+    config.shutdown_timeout_ms = 100;
+    let client = fixture_connector()
+        .connect(&config)
+        .await
+        .expect("connect TERM-aware owned fixture");
+    client
+        .close()
+        .await
+        .expect("TERM-aware fixture should be reaped cleanly");
+    let snapshot = client.stderr_snapshot().await;
+    assert!(snapshot.retained.contains("[mcp stderr omitted]"));
+    assert!(!snapshot.retained.contains("owned fixture received SIGTERM"));
+}
+
+#[cfg(unix)]
+async fn normal_shutdown_terminates_forked_descendant() {
+    let mut config = fixture_config(FORKED_DESCENDANT_FIXTURE);
+    config.shutdown_timeout_ms = 150;
+    let client = fixture_connector()
+        .connect(&config)
+        .await
+        .expect("connect repository-owned forked-descendant fixture");
+    let leader_pid = fixture_process_id(&client).await;
+    let descendant_pid = fixture_descendant_pid(&client).await;
+    assert_fixture_process_group(leader_pid, descendant_pid);
+
+    client
+        .close()
+        .await
+        .expect("normal shutdown must terminate descendant and reap leader");
+
+    assert_child_was_reaped(leader_pid);
+    wait_for_process_to_disappear(descendant_pid).await;
+}
+
+#[cfg(unix)]
+async fn exited_leader_still_terminates_forked_descendant() {
+    let mut config = fixture_config(FORKED_DESCENDANT_FIXTURE);
+    config.shutdown_timeout_ms = 150;
+    let client = fixture_connector()
+        .connect(&config)
+        .await
+        .expect("connect leader-exit forked-descendant fixture");
+    let leader_pid = fixture_process_id(&client).await;
+    let descendant_pid = fixture_descendant_pid(&client).await;
+    assert_fixture_process_group(leader_pid, descendant_pid);
+
+    // Kill only the leader. The TERM-ignoring descendant must subsequently be found and killed via
+    // the immutable spawn-time process-group identity.
+    // SAFETY: leader_pid belongs to this repository-owned fixture.
+    assert_eq!(unsafe { libc::kill(leader_pid, libc::SIGTERM) }, 0);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if client.connection_state() == McpConnectionState::Failed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("leader exit must be observed");
+
+    wait_for_process_to_disappear(descendant_pid).await;
+    let _ = client.close().await;
+    assert_child_was_reaped(leader_pid);
 }
 
 async fn manager_shutdown_force_reaps_uncooperative_owned_fixture() {
@@ -1074,6 +1374,7 @@ fn fixture_config(mode: &str) -> McpServerConfig {
         display_name: "repository-owned MCP fixture".to_string(),
         scope: McpServerScope::Builtin,
         trust: McpTrustLevel::Builtin,
+        approval_mode: mycopilot_mcp_client::McpApprovalMode::Prompt,
         enabled: true,
         transport: McpTransportConfig::Stdio(McpStdioConfig {
             program: std::env::current_exe().expect("integration test executable"),
@@ -1098,6 +1399,90 @@ async fn call(
             McpCancellationToken::new(),
         )
         .await
+}
+
+#[cfg(unix)]
+async fn fixture_process_id(client: &Arc<mycopilot_mcp_client::McpClientHandle>) -> libc::pid_t {
+    let result = call(client, "fixture_process_id", json!({}))
+        .await
+        .expect("read repository-owned fixture process identifier");
+    let pid = result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("pid"))
+        .and_then(Value::as_u64)
+        .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        .expect("fixture process identifier must fit pid_t");
+    assert!(pid > 0);
+    pid
+}
+
+#[cfg(unix)]
+async fn fixture_descendant_pid(
+    client: &Arc<mycopilot_mcp_client::McpClientHandle>,
+) -> libc::pid_t {
+    let result = call(client, "fixture_descendant_pid", json!({}))
+        .await
+        .expect("read repository-owned fixture descendant identifier");
+    let pid = result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("pid"))
+        .and_then(Value::as_i64)
+        .and_then(|pid| libc::pid_t::try_from(pid).ok())
+        .expect("fixture descendant identifier must fit pid_t");
+    assert!(pid > 0);
+    pid
+}
+
+#[cfg(unix)]
+fn assert_fixture_process_group(leader_pid: libc::pid_t, descendant_pid: libc::pid_t) {
+    // SAFETY: both identifiers came from the repository-owned fixture.
+    let descendant_group = unsafe { libc::getpgid(descendant_pid) };
+    assert_eq!(
+        descendant_group, leader_pid,
+        "fixture descendant must inherit the isolated leader process group"
+    );
+}
+
+#[cfg(unix)]
+async fn wait_for_process_to_disappear(pid: libc::pid_t) {
+    let disappeared = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            // SAFETY: signal 0 only probes the repository-owned fixture process.
+            let result = unsafe { libc::kill(pid, 0) };
+            if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if disappeared.is_err() {
+        // Best-effort test cleanup before reporting the containment failure.
+        // SAFETY: pid belongs to the repository-owned descendant.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        panic!("repository-owned fixture descendant remained after MCP cleanup");
+    }
+}
+
+#[cfg(unix)]
+fn assert_child_was_reaped(pid: libc::pid_t) {
+    let mut status = 0;
+    // SAFETY: `pid` came from the repository-owned direct child. WNOHANG never blocks and the
+    // status pointer is valid for the duration of this call.
+    let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    assert_eq!(
+        result, -1,
+        "the stdio supervisor must reap the child before close returns"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD),
+        "a reaped direct child must no longer be waitable by the host"
+    );
 }
 
 async fn wait_for_slow_status(

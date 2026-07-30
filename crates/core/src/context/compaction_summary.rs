@@ -156,7 +156,7 @@ pub enum ContextCompactionSourceItem {
         cursor: ContextJournalCursor,
         run_id: String,
         created_at: i64,
-        item: ConversationTurnTraceItem,
+        item: Box<ConversationTurnTraceItem>,
     },
 }
 
@@ -469,7 +469,7 @@ mod tests {
                     cursor: ContextJournalCursor::trace_item("assistant-current", 1),
                     run_id: "run-1".to_string(),
                     created_at: 1,
-                    item: ConversationTurnTraceItem::ToolCall {
+                    item: Box::new(ConversationTurnTraceItem::ToolCall {
                         sequence: 1,
                         call_id: "call-1".to_string(),
                         tool: "read_file".to_string(),
@@ -477,13 +477,13 @@ mod tests {
                         operation: serde_json::json!({ "path": "README.md" }),
                         approval_status: crate::AgentApprovalStatus::NotRequired,
                         truncated: false,
-                    },
+                    }),
                 },
                 ContextCompactionSourceItem::TraceItem {
                     cursor: cursor.clone(),
                     run_id: "run-1".to_string(),
                     created_at: 2,
-                    item: ConversationTurnTraceItem::ToolResult {
+                    item: Box::new(ConversationTurnTraceItem::ToolResult {
                         sequence: 2,
                         call_id: "call-1".to_string(),
                         tool: "read_file".to_string(),
@@ -494,7 +494,7 @@ mod tests {
                         error: None,
                         truncated: false,
                         archive: Default::default(),
-                    },
+                    }),
                 },
             ],
         };
@@ -530,7 +530,7 @@ mod tests {
                 cursor,
                 run_id: "run-1".to_string(),
                 created_at: 1,
-                item: ConversationTurnTraceItem::ToolCall {
+                item: Box::new(ConversationTurnTraceItem::ToolCall {
                     sequence: 1,
                     call_id: "call-1".to_string(),
                     tool: "read_file".to_string(),
@@ -538,7 +538,7 @@ mod tests {
                     operation: serde_json::json!({ "path": "README.md" }),
                     approval_status: crate::AgentApprovalStatus::NotRequired,
                     truncated: false,
-                },
+                }),
             }],
         };
 

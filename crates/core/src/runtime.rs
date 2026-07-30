@@ -509,6 +509,9 @@ impl AgentRuntime {
                 if tool_batch.take_suppressed_narration() {
                     active_context.push(suppressed_narration_context_item());
                 }
+                if let Some(count) = tool_batch.take_deferred_external_tool_call_count() {
+                    active_context.push(deferred_external_tool_calls_context_item(count));
+                }
                 if tool_batch.is_empty()
                     && next_model_request_index > self.max_tool_iterations
                     && !empty_model_action_repair_pending
@@ -1400,10 +1403,13 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .enrich_tool_call(&action);
-                                publish_trace_snapshot(
+                                if let Err(error) = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
-                                )?;
+                                ) {
+                                    let _ = tool_registry.invalidate_proposed_action(&action);
+                                    return Err(error);
+                                }
                                 action
                             }
                             Err(error) => {
@@ -1491,6 +1497,7 @@ impl AgentRuntime {
                             }
                         };
                         if cancellation_token.is_cancelled() {
+                            let _ = tool_registry.invalidate_proposed_action(&action);
                             return Ok(cancelled_output(
                                 run_id,
                                 event_stream,
@@ -1506,7 +1513,22 @@ impl AgentRuntime {
                                 diff: diff.clone(),
                             });
                         }
-                        let checkpoint = {
+                        if matches!(&action, AgentProposedAction::McpToolCall { .. }) {
+                            tool_batch.defer_external_calls(|queued| {
+                                matches!(
+                                    tool_registry.identity(&queued.call.name),
+                                    Some(crate::protocol::AgentToolIdentity::Mcp { .. })
+                                )
+                            });
+                        }
+                        let extension_snapshots = match runtime_extensions.snapshots() {
+                            Ok(snapshots) => snapshots,
+                            Err(error) => {
+                                let _ = tool_registry.invalidate_proposed_action(&action);
+                                return Err(error);
+                            }
+                        };
+                        let checkpoint_result = {
                             let trace = conversation_trace
                                 .lock()
                                 .unwrap_or_else(|error| error.into_inner());
@@ -1516,7 +1538,7 @@ impl AgentRuntime {
                                     context: &active_context,
                                     next_model_request_index,
                                     tool_batch: &tool_batch,
-                                    extension_snapshots: runtime_extensions.snapshots()?,
+                                    extension_snapshots,
                                     pending_tool_call_id: &call.id,
                                     conversation_trace: &trace,
                                     tool_set: &effective_tool_set,
@@ -1524,8 +1546,41 @@ impl AgentRuntime {
                                     model_capabilities,
                                     run_world_state: run_world_state.snapshot(),
                                 },
-                            )?
+                            )
                         };
+                        let mut checkpoint = match checkpoint_result {
+                            Ok(checkpoint) => checkpoint,
+                            Err(error) => {
+                                let _ = tool_registry.invalidate_proposed_action(&action);
+                                return Err(error);
+                            }
+                        };
+                        if let AgentProposedAction::McpToolCall { approval } = &action {
+                            checkpoint.pending_action_id =
+                                Some(approval.identity.action_id.clone());
+                            let invocation = match crate::tools::mcp_tool_invocation_event(
+                                approval,
+                                crate::tools::McpToolInvocationEventUpdate {
+                                    state: crate::protocol::AgentMcpToolInvocationState::PendingApproval,
+                                    dispatch_certainty: crate::protocol::AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                                    outcome: None,
+                                    is_error: None,
+                                    error_code: None,
+                                    duration_ms: None,
+                                    output_truncated: false,
+                                },
+                            ) {
+                                Ok(invocation) => invocation,
+                                Err(error) => {
+                                    let _ = tool_registry.invalidate_proposed_action(&action);
+                                    return Err(error);
+                                }
+                            };
+                            event_stream.emit(AgentEvent::McpToolInvocationStateChanged {
+                                run_id: run_id.clone(),
+                                invocation,
+                            });
+                        }
                         event_stream.emit(AgentEvent::ApprovalRequired {
                             run_id: run_id.clone(),
                             action: Box::new(action.clone()),

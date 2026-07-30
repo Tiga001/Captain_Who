@@ -7,13 +7,16 @@ pub use crate::application::agent_support::{
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
     AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus, PendingAgentActionSnapshot,
 };
+use crate::application::mcp::approval_payload_store::{
+    McpApprovalStartupInspector, McpApprovalStartupPayloadState,
+};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider};
 use mycopilot_core::command::{
@@ -49,7 +52,8 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcome;
 use mycopilot_core::storage::service::{
     AgentPendingActionSettlementInspection, AgentRunGuidanceStoreOutcome,
-    AgentRunGuidanceTransitionOutcome, StorageService,
+    AgentRunGuidanceTransitionOutcome, McpActionTerminalizationRequest,
+    McpStartupActionTerminalOutcome, StorageService,
 };
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
@@ -57,30 +61,33 @@ use mycopilot_core::{
     conversation_context_configuration_revision,
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
     create_conversation_context_state, failed_conversation_trace_without_items,
-    inspect_context_window_with_tool_projection, next_run_id,
-    prepare_context_window_tool_projection, project_persisted_continuation_for_archive,
-    project_persisted_continuation_for_model, project_persisted_continuation_observation,
-    send_chat_with_host_services, terminalize_interrupted_conversation_trace,
-    AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus,
-    AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentContextBaseline,
-    AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
+    inspect_context_window_with_tool_projection, mcp_tool_invocation_event,
+    mcp_tool_result_from_approved_invocation, next_run_id, prepare_context_window_tool_projection,
+    project_persisted_continuation_for_archive, project_persisted_continuation_for_model,
+    project_persisted_continuation_observation, send_chat_with_host_services,
+    terminalize_interrupted_conversation_trace, AgentApprovalDecision, AgentApprovalDecisionStatus,
+    AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput,
+    AgentContextBaseline, AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
     AgentContextCompactionGenerationOutput, AgentContextCompactionGenerationRequest,
     AgentContextCompactionModelGenerator, AgentContextCompactionPrepareOutcome,
     AgentContextCompactionServices, AgentContextWindowObserver, AgentContextWindowSnapshot,
     AgentContextWindowToolProjection, AgentConversationContextState,
     AgentConversationTraceObserver, AgentError, AgentEvent, AgentEventEmitter, AgentGuidanceStatus,
-    AgentHostActionExecutor, AgentModelRequestObserver, AgentPatchResult, AgentProposedAction,
-    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,
-    AgentSearchConfig, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
-    AgentSkillMaterializationResultStatus, AgentSkillScriptRequest, AgentSkillScriptResult,
-    AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
-    AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
-    ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, McpToolCatalogContext,
-    McpToolInvoker, McpToolRuntime, ModelCapabilities,
+    AgentHostActionExecutor, AgentMcpDispatchCertainty, AgentMcpServerScope,
+    AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState, AgentModelRequestObserver,
+    AgentPatchResult, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
+    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig, AgentSkillMaterializationRequest,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
+    AgentSkillScriptRequest, AgentSkillScriptResult, AgentSteerEnqueueOutcome, AgentSteerInput,
+    AgentSteerInputQueue, AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode,
+    AgentSteerRunResultStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    ContextJournalCursor, ConversationModelContextItem, ConversationTraceSnapshot,
+    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
+    McpToolRuntime, ModelCapabilities,
 };
+use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -90,6 +97,7 @@ mod completion;
 mod context_compaction;
 mod context_window;
 mod pending_action_store;
+mod persisted_resume_input;
 mod run_lifecycle;
 mod steering;
 mod turn;
@@ -98,6 +106,7 @@ mod usage;
 use action_execution::*;
 use completion::*;
 use pending_action_store::*;
+use persisted_resume_input::*;
 use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
 
 #[cfg(test)]
@@ -125,6 +134,79 @@ type ContextCompactionSummaryGenerator = Arc<
         + Send
         + Sync,
 >;
+
+type McpApprovalClock = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+/// Typed Host selector for invalidating approvals owned by one MCP configuration source.
+///
+/// Scope, configuration identity, Registry revision, and Catalog generation are optional narrowing
+/// predicates for source removal and delayed lifecycle events. The stable Server ID always remains
+/// the primary identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct McpActionInvalidationTarget {
+    pub(crate) server_id: McpServerId,
+    pub(crate) scope: Option<AgentMcpServerScope>,
+    pub(crate) source_config_digest: Option<McpConfigDigest>,
+    pub(crate) source_config_epoch: Option<McpConfigEpoch>,
+    pub(crate) prior_to_registry_revision: Option<u64>,
+    pub(crate) prior_to_catalog_generation: Option<u64>,
+}
+
+impl McpActionInvalidationTarget {
+    pub(crate) fn server(server_id: McpServerId) -> Self {
+        Self {
+            server_id,
+            scope: None,
+            source_config_digest: None,
+            source_config_epoch: None,
+            prior_to_registry_revision: None,
+            prior_to_catalog_generation: None,
+        }
+    }
+
+    pub(crate) fn with_scope(mut self, scope: AgentMcpServerScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    pub(crate) fn with_source_config_digest(mut self, digest: McpConfigDigest) -> Self {
+        self.source_config_digest = Some(digest);
+        self
+    }
+
+    pub(crate) fn with_source_config_epoch(mut self, epoch: McpConfigEpoch) -> Self {
+        self.source_config_epoch = Some(epoch);
+        self
+    }
+
+    pub(crate) fn prior_to_registry_revision(mut self, revision: u64) -> Self {
+        self.prior_to_registry_revision = Some(revision);
+        self
+    }
+
+    pub(crate) fn prior_to_catalog_generation(mut self, generation: u64) -> Self {
+        self.prior_to_catalog_generation = Some(generation);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct McpActionInvalidationSummary {
+    pub(crate) terminalized_before_dispatch: usize,
+    pub(crate) terminalized_outcome_unknown: usize,
+    pub(crate) payload_invalidation_attempts: usize,
+    pub(crate) payload_invalidation_failures: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct McpApprovalExpiryReconciliation {
+    pub(crate) cutoff_ms: i64,
+    pub(crate) candidates: usize,
+    pub(crate) terminalized: usize,
+    pub(crate) status_cas_conflicts: usize,
+    pub(crate) payload_invalidation_attempts: usize,
+    pub(crate) payload_invalidation_failures: usize,
+}
 
 type OfficeEngineResolver = Arc<dyn Fn() -> Arc<dyn OfficeEngine> + Send + Sync + 'static>;
 
@@ -303,6 +385,7 @@ pub struct AgentService {
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveRunControl>>>,
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
+    startup_recoverable_mcp_approvals: Arc<Mutex<HashSet<String>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
     running_context_window_snapshots: Arc<Mutex<HashMap<String, AgentContextWindowSnapshot>>>,
@@ -313,6 +396,8 @@ pub struct AgentService {
     image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
     mcp_tool_invoker: Option<Arc<dyn McpToolInvoker>>,
+    mcp_startup_inspector: Option<Arc<dyn McpApprovalStartupInspector>>,
+    mcp_approval_clock: McpApprovalClock,
     process_runs: CommandRunState,
     deletion_lifecycle: Arc<Mutex<DeletionLifecycleState>>,
     file_effects: Arc<FileEffectTracker>,
@@ -336,16 +421,14 @@ impl AgentService {
         storage: Arc<StorageService>,
         reconcile_orphaned_traces: bool,
     ) -> Result<Self, String> {
+        // The Host must validate its versioned, secret-free resume projection before Core's
+        // generic interrupted-action reconciler parses any persisted input. This includes
+        // approved/executing rows, which the reconciler will otherwise make terminal and hide
+        // from the later pending-row loader.
+        retire_unsafe_active_pending_agent_inputs(&storage)?;
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
-        if reconcile_orphaned_traces {
-            storage
-                .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())
-                .map_err(|error| {
-                    format!("failed to reconcile orphaned conversation traces: {error}")
-                })?;
-        }
         let interrupted_guidances = storage
             .list_queued_agent_run_guidances()
             .map_err(|error| format!("failed to list interrupted agent run guidance: {error}"))?;
@@ -378,12 +461,26 @@ impl AgentService {
                 &effect.action_id,
             );
         }
-        Ok(Self {
+        let startup_recoverable_mcp_approvals = pending_actions
+            .iter()
+            .filter(|(_, record)| {
+                record.snapshot.status == PendingActionStatus::Approved
+                    && matches!(
+                        record.snapshot.action,
+                        AgentProposedAction::McpToolCall { .. }
+                    )
+            })
+            .map(|(storage_id, _)| storage_id.clone())
+            .collect::<HashSet<_>>();
+        let service = Self {
             storage,
             skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             pending_actions: Arc::new(Mutex::new(pending_actions)),
+            startup_recoverable_mcp_approvals: Arc::new(Mutex::new(
+                startup_recoverable_mcp_approvals,
+            )),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             running_context_window_snapshots: Arc::new(Mutex::new(HashMap::new())),
@@ -394,10 +491,25 @@ impl AgentService {
             image_generation_execution: None,
             artifact_runtime,
             mcp_tool_invoker: None,
+            mcp_startup_inspector: None,
+            mcp_approval_clock: Arc::new(now_ms),
             process_runs: CommandRunState::default(),
             deletion_lifecycle: Arc::new(Mutex::new(DeletionLifecycleState::default())),
             file_effects,
-        })
+        };
+        if reconcile_orphaned_traces {
+            service.reconcile_startup_mcp_actions()?;
+            service
+                .storage
+                .reconcile_orphaned_in_progress_conversation_turn_traces(
+                    &HashSet::new(),
+                    service.mcp_approval_now_ms(),
+                )
+                .map_err(|error| {
+                    format!("failed to reconcile orphaned conversation traces: {error}")
+                })?;
+        }
+        Ok(service)
     }
 
     #[cfg(test)]
@@ -428,6 +540,476 @@ impl AgentService {
     pub(crate) fn with_mcp_tool_invoker(mut self, invoker: Arc<dyn McpToolInvoker>) -> Self {
         self.mcp_tool_invoker = Some(invoker);
         self
+    }
+
+    pub(crate) fn with_mcp_startup_inspector(
+        mut self,
+        inspector: Arc<dyn McpApprovalStartupInspector>,
+    ) -> Self {
+        self.mcp_startup_inspector = Some(inspector);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_mcp_approval_clock(
+        mut self,
+        clock: impl Fn() -> i64 + Send + Sync + 'static,
+    ) -> Self {
+        self.mcp_approval_clock = Arc::new(clock);
+        self
+    }
+
+    fn mcp_approval_now_ms(&self) -> i64 {
+        (self.mcp_approval_clock)()
+    }
+
+    /// Applies MCP-specific startup semantics before request admission.
+    ///
+    /// Pending/approved invocations are recoverable only when an authenticated durable payload is
+    /// available. Process-only or missing payloads are definitely not dispatched. An `executing`
+    /// row already crossed the durable dispatch boundary, so it is terminalized as outcome unknown
+    /// without consulting or consuming the payload.
+    pub(crate) fn reconcile_startup_mcp_actions(&self) -> Result<usize, String> {
+        let now = self.mcp_approval_now_ms();
+        let candidates = {
+            let pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            pending_actions
+                .iter()
+                .filter(|(_, record)| {
+                    matches!(
+                        record.snapshot.action,
+                        AgentProposedAction::McpToolCall { .. }
+                    )
+                })
+                .map(|(storage_id, record)| (storage_id.clone(), record.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        let mut reconciled = 0_usize;
+        for (storage_id, record) in candidates {
+            let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
+                continue;
+            };
+            let terminal_outcome = match record.snapshot.status {
+                PendingActionStatus::Executing => {
+                    Some(McpStartupActionTerminalOutcome::OutcomeUnknown)
+                }
+                PendingActionStatus::Pending | PendingActionStatus::Approved => {
+                    if approval.expires_at <= now {
+                        Some(McpStartupActionTerminalOutcome::Expired)
+                    } else {
+                        match self
+                            .mcp_startup_inspector
+                            .as_ref()
+                            .map(|inspector| inspector.inspect_startup_payload(approval))
+                            .unwrap_or(McpApprovalStartupPayloadState::Unavailable)
+                        {
+                            McpApprovalStartupPayloadState::DurableAvailable => None,
+                            McpApprovalStartupPayloadState::Expired => {
+                                Some(McpStartupActionTerminalOutcome::Expired)
+                            }
+                            McpApprovalStartupPayloadState::Unavailable => {
+                                Some(McpStartupActionTerminalOutcome::PayloadUnavailable)
+                            }
+                        }
+                    }
+                }
+                PendingActionStatus::Rejected
+                | PendingActionStatus::Cancelled
+                | PendingActionStatus::Completed
+                | PendingActionStatus::Failed => None,
+            };
+            let Some(terminal_outcome) = terminal_outcome else {
+                continue;
+            };
+            let expected_status = pending_status_label(record.snapshot.status);
+            if self
+                .storage
+                .terminalize_mcp_agent_action_on_startup(
+                    &storage_id,
+                    expected_status,
+                    terminal_outcome,
+                    now,
+                )
+                .map_err(|_| {
+                    format!(
+                        "failed to reconcile MCP startup action {}",
+                        record.snapshot.action_id
+                    )
+                })?
+            {
+                self.pending_actions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&storage_id);
+                self.startup_recoverable_mcp_approvals
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&storage_id);
+                reconciled = reconciled.saturating_add(1);
+            }
+        }
+        self.storage
+            .reconcile_mcp_approval_envelopes(now)
+            .map_err(|_| "failed to reconcile MCP approval payload envelopes".to_string())?;
+        Ok(reconciled)
+    }
+
+    /// Expires pre-dispatch MCP approvals against one injected wall-clock snapshot.
+    ///
+    /// The in-memory lock serializes this tick with AgentService approval transitions. SQLite
+    /// still performs the authoritative status CAS so another process or a stale service cannot
+    /// retire an action that crossed into `executing`. Payload invalidation runs only after the
+    /// durable terminal transition commits.
+    pub(crate) fn reconcile_expired_mcp_approvals(
+        &self,
+    ) -> Result<McpApprovalExpiryReconciliation, String> {
+        let now = self.mcp_approval_now_ms();
+        let mut summary = McpApprovalExpiryReconciliation {
+            cutoff_ms: now,
+            ..Default::default()
+        };
+        let (retired, storage_error) = {
+            let mut pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let candidates = pending_actions
+                .iter()
+                .filter_map(|(storage_id, record)| {
+                    if !matches!(
+                        record.snapshot.status,
+                        PendingActionStatus::Pending | PendingActionStatus::Approved
+                    ) {
+                        return None;
+                    }
+                    let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action
+                    else {
+                        return None;
+                    };
+                    (approval.expires_at <= now).then(|| storage_id.clone())
+                })
+                .collect::<Vec<_>>();
+            summary.candidates = candidates.len();
+            let mut retired = Vec::with_capacity(candidates.len());
+            let mut storage_error = None;
+            for storage_id in candidates {
+                let Some(record) = pending_actions.get(&storage_id).cloned() else {
+                    continue;
+                };
+                let expected_status = pending_status_label(record.snapshot.status);
+                let changed = match self.storage.terminalize_mcp_agent_action_on_startup(
+                    &storage_id,
+                    expected_status,
+                    McpStartupActionTerminalOutcome::Expired,
+                    now,
+                ) {
+                    Ok(changed) => changed,
+                    Err(_) => {
+                        storage_error = Some(format!(
+                            "failed to expire MCP approval {}",
+                            record.snapshot.action_id
+                        ));
+                        break;
+                    }
+                };
+                if !changed {
+                    summary.status_cas_conflicts = summary.status_cas_conflicts.saturating_add(1);
+                    continue;
+                }
+                pending_actions.remove(&storage_id);
+                self.startup_recoverable_mcp_approvals
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .remove(&storage_id);
+                summary.terminalized = summary.terminalized.saturating_add(1);
+                retired.push(record);
+            }
+            (retired, storage_error)
+        };
+
+        for record in retired {
+            summary.payload_invalidation_attempts =
+                summary.payload_invalidation_attempts.saturating_add(1);
+            let invalidated = self.mcp_tool_invoker.as_ref().is_some_and(|invoker| {
+                let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
+                    return false;
+                };
+                invoker
+                    .invalidate_prepared_approval(&approval.identity)
+                    .is_ok()
+            });
+            if !invalidated {
+                summary.payload_invalidation_failures =
+                    summary.payload_invalidation_failures.saturating_add(1);
+            }
+        }
+        if let Some(error) = storage_error {
+            return Err(error);
+        }
+        Ok(summary)
+    }
+
+    /// Invalidates every active approval bound to one typed MCP Server/source selector.
+    ///
+    /// Pending and approved actions are definitely pre-dispatch and receive the requested safe
+    /// terminal reason. Executing actions have crossed the durable dispatch boundary and are
+    /// always terminalized as outcome-unknown. Durable rows and envelopes commit as one batch;
+    /// process-owned payload deletion is attempted once per action after that commit.
+    pub(crate) fn invalidate_mcp_actions_for_server(
+        &self,
+        target: &McpActionInvalidationTarget,
+        reason: McpStartupActionTerminalOutcome,
+    ) -> Result<McpActionInvalidationSummary, String> {
+        let server_id = target.server_id.to_string();
+        self.invalidate_mcp_actions_matching(
+            reason,
+            "failed to atomically invalidate MCP approvals for the selected Server",
+            |approval| {
+                let provenance = &approval.identity.provenance;
+                provenance.server_id == server_id
+                    && target
+                        .scope
+                        .as_ref()
+                        .is_none_or(|scope| scope == &provenance.scope)
+                    && target
+                        .source_config_digest
+                        .as_ref()
+                        .is_none_or(|digest| digest.as_str() == provenance.config_digest)
+                    && target
+                        .source_config_epoch
+                        .as_ref()
+                        .is_none_or(|epoch| epoch.to_string() == provenance.config_epoch)
+                    && target
+                        .prior_to_registry_revision
+                        .is_none_or(|revision| provenance.registry_revision < revision)
+                    && target
+                        .prior_to_catalog_generation
+                        .is_none_or(|generation| provenance.catalog_generation < generation)
+            },
+        )
+    }
+
+    /// Invalidates all active MCP approvals after the Registry subscriber reports a gap.
+    ///
+    /// A current Registry snapshot cannot identify a configuration source which was removed in a
+    /// skipped notification, so narrowing this operation would be unsafe.
+    pub(crate) fn invalidate_all_mcp_actions(
+        &self,
+        reason: McpStartupActionTerminalOutcome,
+    ) -> Result<McpActionInvalidationSummary, String> {
+        self.invalidate_mcp_actions_matching(
+            reason,
+            "failed to atomically invalidate MCP approvals after a Registry event gap",
+            |_| true,
+        )
+    }
+
+    fn invalidate_mcp_actions_matching(
+        &self,
+        reason: McpStartupActionTerminalOutcome,
+        storage_error: &'static str,
+        matches_approval: impl Fn(&mycopilot_core::AgentMcpToolApproval) -> bool,
+    ) -> Result<McpActionInvalidationSummary, String> {
+        if !matches!(
+            reason,
+            McpStartupActionTerminalOutcome::PolicyDenied
+                | McpStartupActionTerminalOutcome::PayloadUnavailable
+        ) {
+            return Err("invalid pre-dispatch MCP invalidation reason".to_string());
+        }
+        let now = self.mcp_approval_now_ms();
+        let selected = {
+            let mut pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let selected = pending_actions
+                .iter()
+                .filter_map(|(storage_id, record)| {
+                    let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action
+                    else {
+                        return None;
+                    };
+                    if !matches_approval(approval) {
+                        return None;
+                    }
+                    let outcome = match record.snapshot.status {
+                        PendingActionStatus::Pending | PendingActionStatus::Approved => reason,
+                        PendingActionStatus::Executing => {
+                            McpStartupActionTerminalOutcome::OutcomeUnknown
+                        }
+                        PendingActionStatus::Rejected
+                        | PendingActionStatus::Cancelled
+                        | PendingActionStatus::Completed
+                        | PendingActionStatus::Failed => return None,
+                    };
+                    Some((storage_id.clone(), record.clone(), outcome))
+                })
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Ok(McpActionInvalidationSummary::default());
+            }
+            let requests = selected
+                .iter()
+                .map(
+                    |(storage_id, record, outcome)| McpActionTerminalizationRequest {
+                        action_id: storage_id.clone(),
+                        expected_status: pending_status_label(record.snapshot.status).to_string(),
+                        outcome: *outcome,
+                    },
+                )
+                .collect::<Vec<_>>();
+            self.storage
+                .terminalize_mcp_agent_actions(&requests, now)
+                .map_err(|_| storage_error.to_string())?;
+            for (storage_id, _, _) in &selected {
+                pending_actions.remove(storage_id);
+            }
+            let mut recoverable = self
+                .startup_recoverable_mcp_approvals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            for (storage_id, _, _) in &selected {
+                recoverable.remove(storage_id);
+            }
+            selected
+        };
+
+        let mut summary = McpActionInvalidationSummary::default();
+        for (_, record, outcome) in selected {
+            match outcome {
+                McpStartupActionTerminalOutcome::OutcomeUnknown => {
+                    summary.terminalized_outcome_unknown =
+                        summary.terminalized_outcome_unknown.saturating_add(1);
+                }
+                McpStartupActionTerminalOutcome::PayloadUnavailable
+                | McpStartupActionTerminalOutcome::Expired
+                | McpStartupActionTerminalOutcome::PolicyDenied
+                | McpStartupActionTerminalOutcome::Rejected
+                | McpStartupActionTerminalOutcome::Cancelled => {
+                    summary.terminalized_before_dispatch =
+                        summary.terminalized_before_dispatch.saturating_add(1);
+                }
+            }
+            summary.payload_invalidation_attempts =
+                summary.payload_invalidation_attempts.saturating_add(1);
+            let invalidated = self.mcp_tool_invoker.as_ref().is_some_and(|invoker| {
+                let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
+                    return false;
+                };
+                invoker
+                    .invalidate_prepared_approval(&approval.identity)
+                    .is_ok()
+            });
+            if !invalidated {
+                summary.payload_invalidation_failures =
+                    summary.payload_invalidation_failures.saturating_add(1);
+            }
+            self.process_runs.cancel(&record.storage_id);
+            if let Some(token) = self
+                .cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&record.snapshot.run_id)
+            {
+                token.cancel();
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Settles process-bound approvals when the Host is about to discard their payload store.
+    ///
+    /// A future authenticated durable store reports `DurableAvailable` and is left untouched.
+    /// Groups are narrowed by Server, scope and source digest so one configuration source cannot
+    /// retire another source's pending approvals.
+    pub(crate) fn invalidate_process_bound_mcp_actions_before_shutdown(
+        &self,
+    ) -> Result<McpActionInvalidationSummary, String> {
+        let approvals = {
+            let pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            pending_actions
+                .values()
+                .filter_map(|record| {
+                    if !matches!(
+                        record.snapshot.status,
+                        PendingActionStatus::Pending | PendingActionStatus::Approved
+                    ) {
+                        return None;
+                    }
+                    let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action
+                    else {
+                        return None;
+                    };
+                    Some(approval.as_ref().clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut groups = Vec::<(
+            McpActionInvalidationTarget,
+            Vec<mycopilot_core::AgentMcpToolApproval>,
+        )>::new();
+        for approval in approvals {
+            let provenance = &approval.identity.provenance;
+            let server_id = provenance
+                .server_id
+                .parse::<McpServerId>()
+                .map_err(|_| "active MCP approval has an invalid Server identity".to_string())?;
+            let source_config_digest = provenance
+                .config_digest
+                .parse::<McpConfigDigest>()
+                .map_err(|_| "active MCP approval has an invalid source digest".to_string())?;
+            let target = McpActionInvalidationTarget::server(server_id)
+                .with_scope(provenance.scope.clone())
+                .with_source_config_digest(source_config_digest);
+            match groups
+                .iter_mut()
+                .find(|(candidate, _)| candidate == &target)
+            {
+                Some((_, group)) => group.push(approval),
+                None => groups.push((target, vec![approval])),
+            }
+        }
+
+        let mut total = McpActionInvalidationSummary::default();
+        for (target, approvals) in groups {
+            let survives_restart = approvals.iter().any(|approval| {
+                self.mcp_startup_inspector
+                    .as_ref()
+                    .is_some_and(|inspector| {
+                        inspector.inspect_startup_payload(approval)
+                            == McpApprovalStartupPayloadState::DurableAvailable
+                    })
+            });
+            if survives_restart {
+                continue;
+            }
+            let summary = self.invalidate_mcp_actions_for_server(
+                &target,
+                McpStartupActionTerminalOutcome::PayloadUnavailable,
+            )?;
+            total.terminalized_before_dispatch = total
+                .terminalized_before_dispatch
+                .saturating_add(summary.terminalized_before_dispatch);
+            total.terminalized_outcome_unknown = total
+                .terminalized_outcome_unknown
+                .saturating_add(summary.terminalized_outcome_unknown);
+            total.payload_invalidation_attempts = total
+                .payload_invalidation_attempts
+                .saturating_add(summary.payload_invalidation_attempts);
+            total.payload_invalidation_failures = total
+                .payload_invalidation_failures
+                .saturating_add(summary.payload_invalidation_failures);
+        }
+        Ok(total)
     }
 
     fn capture_mcp_tool_runtime(&self, input: &AgentChatInput) -> Option<McpToolRuntime> {

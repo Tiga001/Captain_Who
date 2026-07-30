@@ -726,7 +726,7 @@ fn list_journal_entries(
                                 } => *created_at,
                                 _ => created_at,
                             },
-                            item: item.clone(),
+                            item: Box::new(item.clone()),
                         });
                     }
                 }

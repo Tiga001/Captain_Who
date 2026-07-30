@@ -98,10 +98,15 @@ use filesystem::{
 use limits::*;
 use mcp::McpAgentTool;
 pub use mcp::{
-    McpAgentToolAnnotations, McpAgentToolDescriptor, McpOmittedContentKind, McpToolCatalogContext,
-    McpToolContentBlock, McpToolDiagnosticCode, McpToolInvocation, McpToolInvocationFuture,
+    mcp_normalized_input_schema_identity, mcp_tool_arguments_digest, mcp_tool_invocation_event,
+    mcp_tool_result_from_approved_invocation, mcp_tool_result_persistence_projection,
+    validate_mcp_approval_arguments, McpAgentToolAnnotations, McpAgentToolDescriptor,
+    McpApprovedToolInvocation, McpNormalizedInputSchemaIdentity, McpOmittedContentKind,
+    McpRuntimeProjectionLimits, McpToolApprovalRequest, McpToolCatalogContext, McpToolContentBlock,
+    McpToolDiagnosticCode, McpToolInvocationEventUpdate, McpToolInvocationFuture,
     McpToolInvocationResult, McpToolInvoker, McpToolRegistrationDiagnostic, McpToolRuntime,
-    MCP_RUNTIME_MAX_CATALOG_BYTES, MCP_RUNTIME_MAX_TOOL_DEFINITIONS,
+    MCP_INPUT_SCHEMA_NORMALIZER_VERSION, MCP_RUNTIME_MAX_CATALOG_BYTES,
+    MCP_RUNTIME_MAX_TOOL_DEFINITIONS,
 };
 
 /// Rebuilds the model-only projection for a host result restored after approval.
@@ -319,6 +324,10 @@ impl AgentToolHandler {
         call: &AgentToolCall,
     ) -> AgentResult<AgentProposedAction> {
         self.tool().proposed_action(context, call)
+    }
+
+    fn invalidate_proposed_action(&self, action: &AgentProposedAction) -> AgentResult<()> {
+        self.tool().invalidate_proposed_action(action)
     }
 
     fn requires_approval_for_call(&self, args: &Value) -> bool {
@@ -630,6 +639,38 @@ impl ToolRegistry {
         tool.proposed_action(context, call)
     }
 
+    /// Releases Host resources prepared while constructing an action that never reached a durable
+    /// pending boundary.
+    pub(crate) fn invalidate_proposed_action(
+        &self,
+        action: &AgentProposedAction,
+    ) -> AgentResult<()> {
+        let tool_name = match action {
+            AgentProposedAction::McpToolCall { approval } => {
+                approval.identity.provenance.model_tool_name.as_str()
+            }
+            AgentProposedAction::ToolCall { call } => call.tool.as_str(),
+            AgentProposedAction::Diff { .. } => "apply_patch",
+            AgentProposedAction::FileWrite { .. } => "write_file",
+            AgentProposedAction::Command { .. } => "run_command",
+            AgentProposedAction::SkillMaterialization { .. } => "skills_materialize_resource",
+            AgentProposedAction::SkillScript { .. } => "skills_run_script",
+            AgentProposedAction::OfficeOperation { office_operation } => {
+                match office_operation.prepared.request.document_kind {
+                    crate::office::OfficeDocumentKind::Document => "office_document",
+                    crate::office::OfficeDocumentKind::Spreadsheet => "office_spreadsheet",
+                    crate::office::OfficeDocumentKind::Presentation => "office_presentation",
+                }
+            }
+        };
+        let Some(tool) = self.tools.get(tool_name) else {
+            return Err(AgentError::new(format!(
+                "无法释放未知工具 `{tool_name}` 的待审批资源。"
+            )));
+        };
+        tool.invalidate_proposed_action(action)
+    }
+
     pub fn execute(&self, context: &ToolExecutionContext, call: &AgentToolCall) -> AgentToolResult {
         if let Err(error) = context.check_cancelled() {
             return AgentToolResult {
@@ -833,7 +874,7 @@ impl ToolRegistry {
         let invoker = runtime.invoker();
         let caller = runtime.catalog_context().clone();
         for descriptor in runtime.tools().iter().cloned() {
-            let provenance = descriptor.provenance.clone();
+            let descriptor_provenance = descriptor.provenance.clone();
             let tool = match McpAgentTool::prepare(descriptor, Arc::clone(&invoker), caller.clone())
             {
                 Ok(tool) => tool,
@@ -842,6 +883,7 @@ impl ToolRegistry {
                     continue;
                 }
             };
+            let provenance = tool.provenance().clone();
             if self
                 .register_handler(
                     format!("mcp:{}", provenance.server_id),
@@ -852,7 +894,9 @@ impl ToolRegistry {
                 )
                 .is_err()
             {
-                diagnostics.push(McpToolRegistrationDiagnostic::name_collision(&provenance));
+                diagnostics.push(McpToolRegistrationDiagnostic::name_collision(
+                    &descriptor_provenance,
+                ));
             }
         }
         self.mcp_diagnostics = diagnostics;
@@ -1025,6 +1069,10 @@ pub(crate) trait AgentTool: Send + Sync {
         call: &AgentToolCall,
     ) -> AgentResult<AgentProposedAction> {
         Ok(AgentProposedAction::ToolCall { call: call.clone() })
+    }
+
+    fn invalidate_proposed_action(&self, _action: &AgentProposedAction) -> AgentResult<()> {
+        Ok(())
     }
 
     fn requires_approval_for_call(&self, _args: &Value) -> bool {

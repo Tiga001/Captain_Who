@@ -1,5 +1,47 @@
 use super::transport::*;
 use super::*;
+
+#[test]
+fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
+    const CANARY: &str = "LLM_DEBUG_SECRET_CANARY";
+    let tool_call = LlmToolCall {
+        id: "call-safe-id".to_string(),
+        name: "mcp__fixture__echo".to_string(),
+        args: json!({"neutral": CANARY}),
+    };
+    let message = LlmMessage::assistant(CANARY, vec![tool_call.clone()]);
+    let request = LlmChatRequest {
+        api_url: "https://example.test/v1/chat/completions".to_string(),
+        api_token: CANARY.to_string(),
+        model: "test-model".to_string(),
+        api_style: AgentApiStyle::OpenAiCompatible,
+        max_tokens: 100,
+        temperature: 0.0,
+        stream: false,
+        messages: vec![message.clone()],
+        tools: Vec::new(),
+    };
+    let response = LlmChatResponse {
+        content: CANARY.to_string(),
+        tool_calls: vec![tool_call.clone()],
+        usage: None,
+        finish_reason: None,
+    };
+    let image = LlmImage {
+        mime_type: "image/png".to_string(),
+        data_base64: CANARY.to_string(),
+    };
+    let stream = LlmStreamEvent::ToolInputProgress {
+        tool_call_index: 0,
+        tool: "mcp__fixture__echo".to_string(),
+        input_delta: CANARY.to_string(),
+        received_bytes: CANARY.len() as u64,
+    };
+
+    let rendered = format!("{request:?}{response:?}{message:?}{image:?}{tool_call:?}{stream:?}");
+    assert!(!rendered.contains(CANARY));
+    assert!(!rendered.contains("example.test"));
+}
 use crate::context::{
     format_message_created_at, ContextAssembler, ContextAssemblyInput, ContextAttachments,
     ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,

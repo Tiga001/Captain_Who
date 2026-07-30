@@ -659,10 +659,14 @@ pub(super) fn restore_input_checkpoint(
     match (checkpoint, continuation, approval_decision) {
         (None, None, None) => Ok(None),
         (Some(checkpoint), Some(continuation), Some(decision)) => {
-            if decision.action_id != continuation.call.id {
+            let expected_action_id = expected_approval_action_id(
+                checkpoint.pending_action_id.as_deref(),
+                &checkpoint.pending_tool_call_id,
+            );
+            if decision.action_id != expected_action_id {
                 return Err(AgentError::new(format!(
-                    "审批决定 `{}` 与工具续跑 `{}` 不一致。",
-                    decision.action_id, continuation.call.id
+                    "审批决定 `{}` 与冻结动作 `{expected_action_id}` 不一致。",
+                    decision.action_id,
                 )));
             }
             restore_run_checkpoint_with_model_projection(
@@ -681,10 +685,29 @@ pub(super) fn restore_input_checkpoint(
     }
 }
 
+fn expected_approval_action_id<'a>(
+    pending_action_id: Option<&'a str>,
+    pending_tool_call_id: &'a str,
+) -> &'a str {
+    pending_action_id.unwrap_or(pending_tool_call_id)
+}
+
 pub(super) fn suppressed_narration_context_item() -> ContextItem {
     ContextItem::text(
         LlmMessageRole::System,
         "The text emitted alongside the preceding tool calls was not shown to the user because file transactions were unsettled. Do not assume the user saw it. Continue the transaction protocol and generate new text only after every draft has a finish or abort outcome.",
+        ContextSource::RuntimeGuard,
+        ContextScope::Run,
+        ContextRetention::Retained,
+    )
+}
+
+pub(super) fn deferred_external_tool_calls_context_item(count: u32) -> ContextItem {
+    ContextItem::text(
+        LlmMessageRole::System,
+        format!(
+            "MCP_DEFERRED_CALLS_NEED_REPREPARE count={count}. These additional external tool calls from the earlier model response were not executed or persisted because each MCP invocation requires its own one-time preparation and approval. If they are still needed, issue fresh tool calls now, one approval boundary at a time. Do not assume any deferred call ran."
+        ),
         ContextSource::RuntimeGuard,
         ContextScope::Run,
         ContextRetention::Retained,
@@ -833,6 +856,23 @@ fn assemble_initial_context_with_skill_overlays(
             images: attachment_context.images,
         },
     })
+}
+
+#[cfg(test)]
+mod approval_identity_tests {
+    use super::expected_approval_action_id;
+
+    #[test]
+    fn mcp_action_identity_is_independent_while_legacy_actions_fall_back_to_call_identity() {
+        assert_eq!(
+            expected_approval_action_id(Some("mcp-action-uuid"), "model-call-id"),
+            "mcp-action-uuid"
+        );
+        assert_eq!(
+            expected_approval_action_id(None, "model-call-id"),
+            "model-call-id"
+        );
+    }
 }
 
 #[cfg(test)]

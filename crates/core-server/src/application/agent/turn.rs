@@ -102,6 +102,7 @@ impl AgentService {
                         "The agent run is waiting for approval and no longer accepts guidance.",
                         &emitter_notifications,
                     ) {
+                        emitter_service.invalidate_mcp_pending_payload(action);
                         emitter_terminal_event_gate.discard();
                         *emitter_pending_store_failure
                             .lock()
@@ -113,6 +114,7 @@ impl AgentService {
                     if let Err(error) =
                         emitter_service.refresh_agent_input_attachment_library(&mut agent_input)
                     {
+                        emitter_service.invalidate_mcp_pending_payload(action);
                         emitter_terminal_event_gate.discard();
                         *emitter_pending_store_failure
                             .lock()
@@ -129,6 +131,7 @@ impl AgentService {
                         Ok(true) => {}
                         Ok(false) => return,
                         Err(error) => {
+                            emitter_service.invalidate_mcp_pending_payload(action);
                             emitter_terminal_event_gate.discard();
                             *emitter_pending_store_failure
                                 .lock()

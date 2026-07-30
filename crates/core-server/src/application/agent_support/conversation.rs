@@ -27,9 +27,10 @@ pub(crate) fn prepare_conversation_turn(
         return Err("modelId 不能为空。".to_string().into());
     }
 
-    let settings = storage
-        .load_model_settings()?
+    let settings_snapshot = storage
+        .load_model_settings_snapshot()?
         .ok_or_else(|| "请先配置模型 API。".to_string())?;
+    let settings = settings_snapshot.settings;
 
     let model = settings
         .models
@@ -198,6 +199,7 @@ pub(crate) fn prepare_conversation_turn(
     let agent_input = AgentChatInput {
         api_url: connection.api_url,
         api_token: connection.api_token,
+        provider_configuration_revision: Some(settings_snapshot.configuration_revision),
         model: model.id.clone(),
         model_capabilities,
         api_style: None,

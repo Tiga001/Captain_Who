@@ -76,6 +76,21 @@ impl FromStr for McpCatalogDigest {
     }
 }
 
+impl FromStr for McpSchemaDigest {
+    type Err = McpError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(McpError::config("invalid MCP schema digest"));
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+
 pub fn config_digest(config: &McpServerConfig) -> Result<McpConfigDigest, McpError> {
     let mut normalized = config.clone();
     match &mut normalized.transport {
@@ -183,7 +198,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{McpEnvBinding, McpServerId, McpServerScope, McpStdioConfig, McpTrustLevel};
+    use crate::{
+        McpApprovalMode, McpEnvBinding, McpServerId, McpServerScope, McpStdioConfig, McpTrustLevel,
+    };
 
     fn config(environment: Vec<McpEnvBinding>) -> McpServerConfig {
         McpServerConfig {
@@ -191,6 +208,7 @@ mod tests {
             display_name: "digest fixture".to_string(),
             scope: McpServerScope::User,
             trust: McpTrustLevel::UserApproved,
+            approval_mode: McpApprovalMode::Prompt,
             enabled: true,
             transport: McpTransportConfig::Stdio(McpStdioConfig {
                 program: PathBuf::from("/owned/fixture"),
@@ -224,6 +242,17 @@ mod tests {
     }
 
     #[test]
+    fn approval_policy_is_part_of_the_config_digest() {
+        let prompt = config(Vec::new());
+        let mut deny = prompt.clone();
+        deny.approval_mode = McpApprovalMode::Deny;
+        assert_ne!(
+            config_digest(&prompt).unwrap(),
+            config_digest(&deny).unwrap()
+        );
+    }
+
+    #[test]
     fn canonical_schema_digest_ignores_object_key_order() {
         let left = json!({"type": "object", "properties": {"b": {"type":"string"}, "a": {"type":"number"}}});
         let right = json!({"properties": {"a": {"type":"number"}, "b": {"type":"string"}}, "type": "object"});
@@ -238,8 +267,10 @@ mod tests {
         let digest = "0123456789abcdef".repeat(4);
         assert_eq!(digest.parse::<McpConfigDigest>().unwrap().as_str(), digest);
         assert_eq!(digest.parse::<McpCatalogDigest>().unwrap().as_str(), digest);
+        assert_eq!(digest.parse::<McpSchemaDigest>().unwrap().as_str(), digest);
         assert!("A".repeat(64).parse::<McpConfigDigest>().is_err());
         assert!("0".repeat(63).parse::<McpConfigDigest>().is_err());
         assert!("g".repeat(64).parse::<McpCatalogDigest>().is_err());
+        assert!("g".repeat(64).parse::<McpSchemaDigest>().is_err());
     }
 }

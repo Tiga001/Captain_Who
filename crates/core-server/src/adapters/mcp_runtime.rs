@@ -1,110 +1,125 @@
-use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use mycopilot_core::{
-    AgentCancellationToken, AgentError, AgentMcpServerScope, AgentMcpToolProvenance, AgentResult,
-    McpAgentToolAnnotations, McpAgentToolDescriptor, McpOmittedContentKind, McpToolCatalogContext,
-    McpToolContentBlock, McpToolInvocation, McpToolInvocationFuture, McpToolInvocationResult,
-    McpToolInvoker, McpToolRegistrationDiagnostic, MCP_RUNTIME_MAX_CATALOG_BYTES,
-    MCP_RUNTIME_MAX_TOOL_DEFINITIONS,
+    mcp_normalized_input_schema_identity, validate_mcp_approval_arguments, AgentCancellationToken,
+    AgentError, AgentMcpApprovalMode, AgentMcpApprovalPayloadPersistence, AgentMcpServerScope,
+    AgentMcpToolApproval, AgentMcpToolInvocationIdentity, AgentMcpToolProvenance, AgentResult,
+    McpAgentToolAnnotations, McpAgentToolDescriptor, McpApprovedToolInvocation,
+    McpOmittedContentKind, McpRuntimeProjectionLimits, McpToolApprovalRequest,
+    McpToolCatalogContext, McpToolContentBlock, McpToolInvocationFuture, McpToolInvocationResult,
+    McpToolInvoker, McpToolRegistrationDiagnostic,
 };
 use mycopilot_mcp_client::{
-    McpCancellationToken, McpCatalogCompleteness, McpCatalogDigest, McpCatalogTool,
-    McpCatalogToolCall, McpConfigDigest, McpConnectionManager, McpContentBlock,
-    McpEmbeddedResource, McpError, McpErrorKind, McpResourceLink, McpServerId, McpServerScope,
-    McpServerState, McpToolAnnotations, McpToolId, McpToolResult, McpTrustLevel,
+    McpActiveCallId, McpApprovalMode, McpCancellationToken, McpCatalogCompleteness,
+    McpCatalogDigest, McpCatalogTool, McpCatalogToolCall, McpCatalogToolCallIdentity,
+    McpConfigDigest, McpConfigEpoch, McpConnectionManager, McpContentBlock, McpDispatchCertainty,
+    McpEmbeddedResource, McpError, McpErrorKind, McpInvocationId, McpModelCallId, McpResourceLink,
+    McpSchemaDigest, McpServerId, McpServerScope, McpServerState, McpToolAnnotations, McpToolId,
+    McpToolResult, McpTrustLevel,
 };
+use sha2::{Digest, Sha256};
 
-const MAX_MIME_TYPE_BYTES: usize = 128;
+use crate::application::mcp::approval_payload_store::{
+    InMemoryMcpApprovalPayloadStore, McpApprovalInvocationId, McpApprovalPayload,
+    McpApprovalPayloadAad, McpApprovalPayloadPersistence, McpApprovalPayloadStore,
+    McpApprovalPayloadStoreError, McpApprovalStartupInspector, McpApprovalStartupPayloadState,
+};
 const MAX_RETAINED_DIAGNOSTICS: usize = 1_024;
-const MAX_MCP_BRIDGE_CONTENT_BLOCKS: usize = 128;
-const MAX_MCP_BRIDGE_TEXT_BYTES: usize = 16 * 1_024;
-const MAX_MCP_BRIDGE_STRUCTURED_BYTES: usize = 8 * 1_024;
-const MAX_MCP_BRIDGE_STRUCTURED_DEPTH: usize = 32;
-const MAX_MCP_BRIDGE_STRUCTURED_NODES: usize = 4_096;
-const MCP_CANCELLATION_SETTLE_GRACE: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct McpAuthorizedToolSnapshot {
-    server_id: String,
-    raw_tool_name: String,
-    config_digest: String,
-    catalog_generation: u64,
-    catalog_digest: String,
+/// Host-only fail-closed gate for Registry approval reconciliation.
+///
+/// The protocol-neutral bridge depends only on this narrow capability. The
+/// production Registry event sink supplies the sticky implementation.
+pub(crate) trait McpRegistrySecurityGate: Send + Sync {
+    fn ensure_reconciled(&self) -> Result<(), String>;
 }
-
-impl McpAuthorizedToolSnapshot {
-    fn from_provenance(provenance: &AgentMcpToolProvenance) -> Self {
-        Self {
-            server_id: provenance.server_id.clone(),
-            raw_tool_name: provenance.raw_tool_name.clone(),
-            config_digest: provenance.config_digest.clone(),
-            catalog_generation: provenance.catalog_generation,
-            catalog_digest: provenance.catalog_digest.clone(),
-        }
-    }
-}
-
-/// Host-owned invoke authorization. Connection trust and Server annotations never populate this
-/// policy implicitly.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct McpToolAuthorizationPolicy {
-    unapproved_read_only: BTreeSet<McpAuthorizedToolSnapshot>,
-}
-
-impl McpToolAuthorizationPolicy {
-    pub(crate) fn deny_all() -> Self {
-        Self::default()
-    }
-
-    /// Add one Host-authorized immutable catalog snapshot.
-    ///
-    /// This is deliberately not inferred from Server annotations or connection trust. The future
-    /// settings/approval layer can construct this policy from its own authorization records; the
-    /// current production bootstrap keeps the empty deny-all policy.
-    #[allow(dead_code)] // Production grant loading arrives with the persisted authorization round.
-    pub(crate) fn allow_unapproved_read_only(
-        mut self,
-        provenance: &AgentMcpToolProvenance,
-    ) -> Self {
-        self.unapproved_read_only
-            .insert(McpAuthorizedToolSnapshot::from_provenance(provenance));
-        self
-    }
-
-    fn allows_unapproved_read_only(&self, provenance: &AgentMcpToolProvenance) -> bool {
-        self.unapproved_read_only
-            .contains(&McpAuthorizedToolSnapshot::from_provenance(provenance))
-    }
-}
-
 /// Process-owned adapter from the MCP protocol subsystem into the Agent Runtime's stable,
 /// protocol-neutral invocation boundary.
 ///
 /// The bridge owns no MCP connection. Every invocation is revalidated by the shared Connection
 /// Manager against the immutable provenance captured for the current Agent run.
-pub(crate) struct McpRuntimeBridge {
+pub struct McpRuntimeBridge {
     manager: Arc<McpConnectionManager>,
-    authorization: Arc<McpToolAuthorizationPolicy>,
+    payloads: Arc<dyn McpApprovalPayloadStore>,
+    registry_security_gate: Arc<dyn McpRegistrySecurityGate>,
+    projection_limits: McpRuntimeProjectionLimits,
     diagnostics: Mutex<Vec<McpToolRegistrationDiagnostic>>,
 }
 
+struct OpenMcpRegistrySecurityGate;
+
+impl McpRegistrySecurityGate for OpenMcpRegistrySecurityGate {
+    fn ensure_reconciled(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 impl McpRuntimeBridge {
-    pub(crate) fn new(manager: Arc<McpConnectionManager>) -> Self {
-        Self::with_authorization(manager, Arc::new(McpToolAuthorizationPolicy::deny_all()))
+    #[allow(dead_code)] // Repository fixtures use the explicit process-only constructor.
+    pub fn new(manager: Arc<McpConnectionManager>) -> Self {
+        Self::with_payload_store(
+            manager,
+            Arc::new(InMemoryMcpApprovalPayloadStore::default()),
+        )
     }
 
-    pub(crate) fn with_authorization(
+    pub(crate) fn with_payload_store(
         manager: Arc<McpConnectionManager>,
-        authorization: Arc<McpToolAuthorizationPolicy>,
+        payloads: Arc<dyn McpApprovalPayloadStore>,
     ) -> Self {
-        Self {
+        Self::with_payload_store_projection_limits_and_security_gate(
             manager,
-            authorization,
+            payloads,
+            McpRuntimeProjectionLimits::default(),
+            Arc::new(OpenMcpRegistrySecurityGate),
+        )
+        .expect("the built-in MCP runtime projection policy must remain valid")
+    }
+
+    #[allow(dead_code)] // Used by the production binary; the narrow fixture library has no Registry sink.
+    pub(crate) fn with_payload_store_and_registry_security_gate(
+        manager: Arc<McpConnectionManager>,
+        payloads: Arc<dyn McpApprovalPayloadStore>,
+        registry_security_gate: Arc<dyn McpRegistrySecurityGate>,
+    ) -> Self {
+        Self::with_payload_store_projection_limits_and_security_gate(
+            manager,
+            payloads,
+            McpRuntimeProjectionLimits::default(),
+            registry_security_gate,
+        )
+        .expect("the built-in MCP runtime projection policy must remain valid")
+    }
+
+    #[allow(dead_code)] // Exercised by binary-side Host policy tests.
+    pub(crate) fn with_payload_store_and_projection_limits(
+        manager: Arc<McpConnectionManager>,
+        payloads: Arc<dyn McpApprovalPayloadStore>,
+        projection_limits: McpRuntimeProjectionLimits,
+    ) -> AgentResult<Self> {
+        Self::with_payload_store_projection_limits_and_security_gate(
+            manager,
+            payloads,
+            projection_limits,
+            Arc::new(OpenMcpRegistrySecurityGate),
+        )
+    }
+
+    fn with_payload_store_projection_limits_and_security_gate(
+        manager: Arc<McpConnectionManager>,
+        payloads: Arc<dyn McpApprovalPayloadStore>,
+        projection_limits: McpRuntimeProjectionLimits,
+        registry_security_gate: Arc<dyn McpRegistrySecurityGate>,
+    ) -> AgentResult<Self> {
+        projection_limits.validate()?;
+        Ok(Self {
+            manager,
+            payloads,
+            registry_security_gate,
+            projection_limits,
             diagnostics: Mutex::new(Vec::new()),
-        }
+        })
     }
 
     #[cfg(test)]
@@ -115,10 +130,21 @@ impl McpRuntimeBridge {
             .clone()
     }
 
-    fn authorize_invocation(&self, invocation: &McpToolInvocation) -> AgentResult<()> {
-        let server_id = McpServerId::from_str(&invocation.provenance.server_id)
+    fn revalidate_approval(
+        &self,
+        approval: &AgentMcpToolApproval,
+        caller: Option<&McpToolCatalogContext>,
+    ) -> AgentResult<()> {
+        self.ensure_registry_reconciled()?;
+        let provenance = &approval.identity.provenance;
+        if approval.approval_mode != AgentMcpApprovalMode::Prompt {
+            return Err(policy_error("mcp.approval_policy_denied"));
+        }
+        let server_id = McpServerId::from_str(&provenance.server_id)
             .map_err(|_| stale_tool_error("mcp.invalid_server_identity"))?;
-        let expected_digest = McpConfigDigest::from_str(&invocation.provenance.config_digest)
+        let expected_epoch = McpConfigEpoch::from_str(&provenance.config_epoch)
+            .map_err(|_| stale_tool_error("mcp.invalid_config_epoch"))?;
+        let expected_digest = McpConfigDigest::from_str(&provenance.config_digest)
             .map_err(|_| stale_tool_error("mcp.invalid_config_digest"))?;
         let status = self
             .manager
@@ -133,27 +159,100 @@ impl McpRuntimeBridge {
         if !status.enabled
             || status.state != McpServerState::Ready
             || status.trust == McpTrustLevel::Untrusted
+            || status.approval_mode != McpApprovalMode::Prompt
             || status.catalog_completeness != McpCatalogCompleteness::Complete
+            || status.config_epoch != expected_epoch
+            || status.registry_revision != provenance.registry_revision
             || status.config_digest != expected_digest
-            || status.catalog_generation != invocation.provenance.catalog_generation
+            || status.catalog_generation != provenance.catalog_generation
             || catalog
                 .content_digest
                 .as_ref()
                 .map(ToString::to_string)
                 .as_deref()
-                != Some(invocation.provenance.catalog_digest.as_str())
-            || !scope_matches_provenance(&status.scope, &invocation.provenance.scope)
-            || !scope_visible_to_context(&status.scope, &invocation.caller)
-            || !self
-                .authorization
-                .allows_unapproved_read_only(&invocation.provenance)
+                != Some(provenance.catalog_digest.as_str())
+            || !scope_matches_provenance(&status.scope, &provenance.scope)
+            || caller.is_some_and(|caller| !scope_visible_to_context(&status.scope, caller))
+            || catalog.server_id != server_id
+            || catalog.completeness != McpCatalogCompleteness::Complete
+            || catalog.source_config_epoch != Some(expected_epoch)
+            || catalog.source_registry_revision != Some(provenance.registry_revision)
+            || catalog.source_config_digest.as_ref() != Some(&expected_digest)
         {
-            return Err(AgentError::structured(
-                "mcp.invoke_not_authorized",
-                "The MCP tool is not authorized for this Agent run.",
+            return Err(stale_tool_error("mcp.approval_snapshot_stale"));
+        }
+        let tool = catalog
+            .tools
+            .iter()
+            .find(|tool| {
+                tool.id.server_id == server_id && tool.raw_name == provenance.raw_tool_name
+            })
+            .ok_or_else(|| stale_tool_error("mcp.approval_tool_missing"))?;
+        if !tool.routable
+            || tool.id.raw_name != provenance.raw_tool_name
+            || tool.model_name != provenance.model_tool_name
+            || tool.schema_digest.to_string() != provenance.catalog_schema_digest
+        {
+            return Err(stale_tool_error("mcp.approval_tool_drift"));
+        }
+        let normalized_identity =
+            mcp_normalized_input_schema_identity(&tool.model_name, &tool.descriptor.input_schema)
+                .map_err(|_| stale_tool_error("mcp.approval_tool_schema_invalid"))?;
+        if normalized_identity.schema_digest != provenance.schema_digest
+            || normalized_identity.normalizer_version != provenance.schema_normalizer_version
+        {
+            return Err(stale_tool_error("mcp.approval_tool_schema_drift"));
+        }
+        Ok(())
+    }
+
+    fn ensure_registry_reconciled(&self) -> AgentResult<()> {
+        self.registry_security_gate
+            .ensure_reconciled()
+            .map_err(|_| {
+                AgentError::structured(
+                    "mcp.registry_reconciliation_required",
+                    "MCP approvals are temporarily blocked pending a fail-closed Registry reconciliation.",
+                    serde_json::json!({
+                        "type": "mcp_registry",
+                        "code": "registryReconciliationRequired",
+                        "retryable": false,
+                    }),
+                )
+            })
+    }
+
+    fn current_payload_persistence(&self) -> AgentResult<AgentMcpApprovalPayloadPersistence> {
+        match self.payloads.persistence() {
+            McpApprovalPayloadPersistence::ProcessOnly => {
+                Ok(AgentMcpApprovalPayloadPersistence::ProcessOnly)
+            }
+            McpApprovalPayloadPersistence::DurableAuthenticatedEnvelope => {
+                Ok(AgentMcpApprovalPayloadPersistence::DurableAuthenticatedEnvelope)
+            }
+            McpApprovalPayloadPersistence::Unavailable => Err(AgentError::structured(
+                "mcp.approval_payload_unavailable",
+                "The MCP approval payload store is unavailable.",
                 serde_json::json!({
-                    "type": "mcp_tool",
-                    "code": "invokeNotAuthorized",
+                    "type": "mcp_approval",
+                    "code": "payloadStoreUnavailable",
+                    "retryable": false,
+                }),
+            )),
+        }
+    }
+
+    fn ensure_payload_persistence_matches(
+        &self,
+        approval: &AgentMcpToolApproval,
+    ) -> AgentResult<()> {
+        if self.current_payload_persistence()? != approval.payload_persistence {
+            return Err(AgentError::structured(
+                "mcp.approval_payload_binding_changed",
+                "The MCP approval payload persistence binding changed.",
+                serde_json::json!({
+                    "type": "mcp_approval",
+                    "code": "payloadPersistenceChanged",
                     "retryable": false,
                 }),
             ));
@@ -162,8 +261,39 @@ impl McpRuntimeBridge {
     }
 }
 
+impl McpApprovalStartupInspector for McpRuntimeBridge {
+    fn inspect_startup_payload(
+        &self,
+        approval: &AgentMcpToolApproval,
+    ) -> McpApprovalStartupPayloadState {
+        if approval.expires_at <= mycopilot_core::storage::now_ms() {
+            return McpApprovalStartupPayloadState::Expired;
+        }
+        if approval.payload_persistence
+            != AgentMcpApprovalPayloadPersistence::DurableAuthenticatedEnvelope
+            || self.payloads.persistence()
+                != McpApprovalPayloadPersistence::DurableAuthenticatedEnvelope
+        {
+            return McpApprovalStartupPayloadState::Unavailable;
+        }
+        let Ok(invocation_id) =
+            McpApprovalInvocationId::parse(approval.identity.invocation_id.clone())
+        else {
+            return McpApprovalStartupPayloadState::Unavailable;
+        };
+        match self.payloads.load(&invocation_id, &approval_aad(approval)) {
+            Ok(_) => McpApprovalStartupPayloadState::DurableAvailable,
+            Err(McpApprovalPayloadStoreError::PayloadExpired) => {
+                McpApprovalStartupPayloadState::Expired
+            }
+            Err(_) => McpApprovalStartupPayloadState::Unavailable,
+        }
+    }
+}
+
 impl McpToolInvoker for McpRuntimeBridge {
     fn catalog(&self, context: &McpToolCatalogContext) -> AgentResult<Vec<McpAgentToolDescriptor>> {
+        self.ensure_registry_reconciled()?;
         let statuses = self.manager.list_statuses().map_err(map_catalog_error)?;
         let mut tools = Vec::new();
         let mut catalog_tool_count = 0_usize;
@@ -172,6 +302,7 @@ impl McpToolInvoker for McpRuntimeBridge {
             if !status.enabled
                 || status.state != McpServerState::Ready
                 || status.trust == McpTrustLevel::Untrusted
+                || status.approval_mode != McpApprovalMode::Prompt
                 || status.catalog_completeness != McpCatalogCompleteness::Complete
                 || !scope_visible_to_context(&status.scope, context)
             {
@@ -194,11 +325,14 @@ impl McpToolInvoker for McpRuntimeBridge {
             if !current_status.enabled
                 || current_status.state != McpServerState::Ready
                 || current_status.catalog_completeness != McpCatalogCompleteness::Complete
+                || current_status.config_epoch != status.config_epoch
+                || current_status.registry_revision != status.registry_revision
                 || current_status.config_digest != status.config_digest
                 || current_status.catalog_generation != catalog.generation
                 || current_status.scope != status.scope
                 || current_status.trust != status.trust
                 || current_status.trust == McpTrustLevel::Untrusted
+                || current_status.approval_mode != McpApprovalMode::Prompt
                 || !scope_visible_to_context(&current_status.scope, context)
             {
                 continue;
@@ -208,6 +342,8 @@ impl McpToolInvoker for McpRuntimeBridge {
             };
             if catalog.server_id != status.server_id
                 || catalog.completeness != McpCatalogCompleteness::Complete
+                || catalog.source_config_epoch != Some(current_status.config_epoch)
+                || catalog.source_registry_revision != Some(current_status.registry_revision)
                 || catalog.source_config_digest.as_ref() != Some(&current_status.config_digest)
                 || catalog.generation == 0
             {
@@ -221,21 +357,39 @@ impl McpToolInvoker for McpRuntimeBridge {
                 if tool.id.server_id != status.server_id || tool.raw_name != tool.id.raw_name {
                     continue;
                 }
-                reserve_catalog_budget(&tool, &mut catalog_tool_count, &mut catalog_bytes)?;
+                reserve_catalog_budget(
+                    &tool,
+                    &mut catalog_tool_count,
+                    &mut catalog_bytes,
+                    &self.projection_limits,
+                )?;
+                let normalized_identity = mcp_normalized_input_schema_identity(
+                    &tool.model_name,
+                    &tool.descriptor.input_schema,
+                )
+                .ok();
                 let provenance = AgentMcpToolProvenance {
                     server_id: status.server_id.to_string(),
                     scope: scope.clone(),
                     raw_tool_name: tool.raw_name,
                     model_tool_name: tool.model_name,
+                    config_epoch: current_status.config_epoch.to_string(),
+                    registry_revision: current_status.registry_revision,
                     config_digest: current_status.config_digest.to_string(),
                     catalog_generation: catalog.generation,
                     catalog_digest: catalog_digest.clone(),
+                    catalog_schema_digest: tool.schema_digest.to_string(),
+                    schema_digest: normalized_identity
+                        .as_ref()
+                        .map(|identity| identity.schema_digest.clone())
+                        .unwrap_or_default(),
+                    schema_normalizer_version: normalized_identity
+                        .map(|identity| identity.normalizer_version)
+                        .unwrap_or_default(),
                 };
                 tools.push(McpAgentToolDescriptor {
-                    host_allows_unapproved_read_only_invocation: self
-                        .authorization
-                        .allows_unapproved_read_only(&provenance),
                     provenance,
+                    server_display_name: current_status.display_name.clone(),
                     description: tool.descriptor.description,
                     input_schema: tool.descriptor.input_schema,
                     output_schema: tool.descriptor.output_schema,
@@ -257,31 +411,95 @@ impl McpToolInvoker for McpRuntimeBridge {
         Ok(tools)
     }
 
-    fn invoke<'a>(
+    fn prepare_approval(
+        &self,
+        request: McpToolApprovalRequest,
+    ) -> AgentResult<AgentMcpToolApproval> {
+        let (mut approval, arguments, caller) = request.into_parts();
+        validate_mcp_approval_arguments(&approval, &arguments)?;
+        self.revalidate_approval(&approval, Some(&caller))?;
+        approval.payload_persistence = self.current_payload_persistence()?;
+        let invocation_id = McpApprovalInvocationId::parse(approval.identity.invocation_id.clone())
+            .map_err(map_payload_error)?;
+        let aad = approval_aad(&approval);
+        let payload = McpApprovalPayload::from_json(&arguments).map_err(map_payload_error)?;
+        self.payloads
+            .seal(&invocation_id, aad, payload)
+            .map_err(map_payload_error)?;
+        Ok(approval)
+    }
+
+    fn invalidate_prepared_approval(
+        &self,
+        identity: &AgentMcpToolInvocationIdentity,
+    ) -> AgentResult<()> {
+        let invocation_id = McpApprovalInvocationId::parse(identity.invocation_id.clone())
+            .map_err(map_payload_error)?;
+        self.payloads
+            .delete(&invocation_id)
+            .map(|_| ())
+            .map_err(map_payload_error)
+    }
+
+    fn revalidate_approved(&self, approval: &AgentMcpToolApproval) -> AgentResult<()> {
+        self.revalidate_approval(approval, None)?;
+        self.ensure_payload_persistence_matches(approval)?;
+        let invocation_id = McpApprovalInvocationId::parse(approval.identity.invocation_id.clone())
+            .map_err(map_payload_error)?;
+        let aad = approval_aad(approval);
+        let payload = self
+            .payloads
+            .load(&invocation_id, &aad)
+            .map_err(map_payload_error)?;
+        payload
+            .with_json(|arguments| validate_mcp_approval_arguments(approval, arguments))
+            .map_err(map_payload_error)?
+    }
+
+    fn invoke_approved<'a>(
         &'a self,
-        invocation: McpToolInvocation,
+        invocation: McpApprovedToolInvocation,
         cancellation: AgentCancellationToken,
     ) -> McpToolInvocationFuture<'a> {
         Box::pin(async move {
             cancellation.check()?;
-            self.authorize_invocation(&invocation)?;
-            let request = catalog_call(&invocation)?;
+            let approval = invocation.approval;
+            self.revalidate_approval(&approval, None)?;
+            self.ensure_payload_persistence_matches(&approval)?;
+            let invocation_id =
+                McpApprovalInvocationId::parse(approval.identity.invocation_id.clone())
+                    .map_err(map_payload_error)?;
+            let aad = approval_aad(&approval);
+            let payload = self
+                .payloads
+                .consume(&invocation_id, &aad)
+                .map_err(map_payload_error)?;
+            let arguments = payload.with_json(Clone::clone).map_err(map_payload_error)?;
+            validate_mcp_approval_arguments(&approval, &arguments)?;
+            cancellation.check()?;
+            let request = catalog_call(&approval, arguments)?;
+            let active_id = active_call_id(&approval)?;
+            self.ensure_registry_reconciled()?;
             let mcp_cancellation = McpCancellationToken::new();
-            let call = self
-                .manager
-                .call_catalog_tool(request, mcp_cancellation.clone());
+            let call = self.manager.call_catalog_tool_identified(
+                active_id,
+                request,
+                mcp_cancellation.clone(),
+            );
             tokio::pin!(call);
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => {
                     mcp_cancellation.cancel();
-                    // Keep polling the protocol future after signalling cancellation so the MCP
-                    // client can issue its cancellation notification instead of merely dropping
-                    // the request handle. A faulty peer cannot hold Agent cancellation forever.
-                    let _ = tokio::time::timeout(MCP_CANCELLATION_SETTLE_GRACE, &mut call).await;
-                    Err(AgentError::cancelled())
+                    map_tool_result(
+                        call.await.map_err(map_invocation_error)?,
+                        &self.projection_limits,
+                    )
                 }
-                result = &mut call => map_tool_result(result.map_err(map_invocation_error)?),
+                result = &mut call => map_tool_result(
+                    result.map_err(map_invocation_error)?,
+                    &self.projection_limits,
+                ),
             }
         })
     }
@@ -300,6 +518,7 @@ fn reserve_catalog_budget(
     tool: &McpCatalogTool,
     tool_count: &mut usize,
     bytes: &mut usize,
+    limits: &McpRuntimeProjectionLimits,
 ) -> AgentResult<()> {
     let next_count = tool_count.checked_add(1).ok_or_else(catalog_budget_error)?;
     let mut next_bytes = bytes
@@ -317,7 +536,7 @@ fn reserve_catalog_budget(
             .checked_add(encoded.len())
             .ok_or_else(catalog_budget_error)?;
     }
-    if next_count > MCP_RUNTIME_MAX_TOOL_DEFINITIONS || next_bytes > MCP_RUNTIME_MAX_CATALOG_BYTES {
+    if next_count > limits.max_tool_definitions || next_bytes > limits.max_catalog_bytes {
         return Err(catalog_budget_error());
     }
     *tool_count = next_count;
@@ -337,31 +556,44 @@ fn catalog_budget_error() -> AgentError {
     )
 }
 
-fn catalog_call(invocation: &McpToolInvocation) -> AgentResult<McpCatalogToolCall> {
-    let server_id = McpServerId::from_str(&invocation.provenance.server_id)
+fn catalog_call(
+    approval: &AgentMcpToolApproval,
+    arguments: serde_json::Value,
+) -> AgentResult<McpCatalogToolCall> {
+    let provenance = &approval.identity.provenance;
+    let server_id = McpServerId::from_str(&provenance.server_id)
         .map_err(|_| stale_tool_error("mcp.invalid_server_identity"))?;
-    let config_digest = McpConfigDigest::from_str(&invocation.provenance.config_digest)
+    let config_epoch = McpConfigEpoch::from_str(&provenance.config_epoch)
+        .map_err(|_| stale_tool_error("mcp.invalid_config_epoch"))?;
+    let config_digest = McpConfigDigest::from_str(&provenance.config_digest)
         .map_err(|_| stale_tool_error("mcp.invalid_config_digest"))?;
-    let catalog_digest = McpCatalogDigest::from_str(&invocation.provenance.catalog_digest)
+    let catalog_digest = McpCatalogDigest::from_str(&provenance.catalog_digest)
         .map_err(|_| stale_tool_error("mcp.invalid_catalog_digest"))?;
-    if invocation.provenance.raw_tool_name.trim().is_empty()
-        || invocation.provenance.model_tool_name.trim().is_empty()
-        || invocation.provenance.catalog_generation == 0
+    let catalog_schema_digest = McpSchemaDigest::from_str(&provenance.catalog_schema_digest)
+        .map_err(|_| stale_tool_error("mcp.invalid_catalog_schema_digest"))?;
+    if provenance.raw_tool_name.trim().is_empty()
+        || provenance.model_tool_name.trim().is_empty()
+        || provenance.registry_revision == 0
+        || provenance.catalog_generation == 0
     {
         return Err(stale_tool_error("mcp.invalid_tool_identity"));
     }
-    Ok(McpCatalogToolCall {
-        tool_id: McpToolId {
-            server_id,
-            raw_name: invocation.provenance.raw_tool_name.clone(),
+    Ok(McpCatalogToolCall::new(
+        McpCatalogToolCallIdentity {
+            tool_id: McpToolId {
+                server_id,
+                raw_name: provenance.raw_tool_name.clone(),
+            },
+            expected_config_epoch: config_epoch,
+            expected_registry_revision: provenance.registry_revision,
+            expected_config_digest: config_digest,
+            expected_catalog_generation: provenance.catalog_generation,
+            expected_catalog_digest: catalog_digest,
+            expected_schema_digest: catalog_schema_digest,
+            expected_model_name: provenance.model_tool_name.clone(),
         },
-        expected_config_digest: config_digest,
-        expected_catalog_generation: invocation.provenance.catalog_generation,
-        expected_catalog_digest: catalog_digest,
-        expected_model_name: invocation.provenance.model_tool_name.clone(),
-        arguments: invocation.arguments.clone(),
-        timeout_ms: None,
-    })
+        arguments,
+    ))
 }
 
 fn scope_visible_to_context(scope: &McpServerScope, context: &McpToolCatalogContext) -> bool {
@@ -424,15 +656,14 @@ fn map_annotations(annotations: Option<McpToolAnnotations>) -> McpAgentToolAnnot
     })
 }
 
-fn map_tool_result(result: McpToolResult) -> AgentResult<McpToolInvocationResult> {
+fn map_tool_result(
+    result: McpToolResult,
+    limits: &McpRuntimeProjectionLimits,
+) -> AgentResult<McpToolInvocationResult> {
     let mut content = Vec::new();
-    let mut remaining_text_bytes = MAX_MCP_BRIDGE_TEXT_BYTES;
-    let mut truncated_at_source = result.content.len() > MAX_MCP_BRIDGE_CONTENT_BLOCKS;
-    for block in result
-        .content
-        .into_iter()
-        .take(MAX_MCP_BRIDGE_CONTENT_BLOCKS)
-    {
+    let mut remaining_text_bytes = limits.max_model_text_bytes;
+    let mut truncated_at_source = result.content.len() > limits.max_content_blocks;
+    for block in result.content.into_iter().take(limits.max_content_blocks) {
         match block {
             McpContentBlock::Text { mut text } => {
                 if text.len() > remaining_text_bytes {
@@ -442,11 +673,13 @@ fn map_tool_result(result: McpToolResult) -> AgentResult<McpToolInvocationResult
                 remaining_text_bytes = remaining_text_bytes.saturating_sub(text.len());
                 content.push(McpToolContentBlock::Text { text });
             }
-            block => content.push(map_content_block(block)),
+            block => content.push(map_content_block(block, limits)),
         }
     }
     let structured_content = match result.structured_content {
-        Some(structured) if structured_content_within_limits(&structured) => Some(structured),
+        Some(structured) if structured_content_within_limits(&structured, limits) => {
+            Some(structured)
+        }
         Some(_) => {
             truncated_at_source = true;
             Some(serde_json::json!({
@@ -466,20 +699,23 @@ fn map_tool_result(result: McpToolResult) -> AgentResult<McpToolInvocationResult
     })
 }
 
-fn map_content_block(content: McpContentBlock) -> McpToolContentBlock {
+fn map_content_block(
+    content: McpContentBlock,
+    limits: &McpRuntimeProjectionLimits,
+) -> McpToolContentBlock {
     match content {
         McpContentBlock::Text { mut text } => {
-            truncate_string_bytes(&mut text, MAX_MCP_BRIDGE_TEXT_BYTES);
+            truncate_string_bytes(&mut text, limits.max_model_text_bytes);
             McpToolContentBlock::Text { text }
         }
         McpContentBlock::Image { data, mime_type } => McpToolContentBlock::Omitted {
             kind: McpOmittedContentKind::Image,
-            mime_type: safe_mime_type(Some(mime_type)),
+            mime_type: safe_mime_type(Some(mime_type), limits),
             encoded_bytes: Some(saturating_u64(data.len())),
         },
         McpContentBlock::Audio { data, mime_type } => McpToolContentBlock::Omitted {
             kind: McpOmittedContentKind::Audio,
-            mime_type: safe_mime_type(Some(mime_type)),
+            mime_type: safe_mime_type(Some(mime_type), limits),
             encoded_bytes: Some(saturating_u64(data.len())),
         },
         McpContentBlock::EmbeddedResource { resource } => {
@@ -493,11 +729,11 @@ fn map_content_block(content: McpContentBlock) -> McpToolContentBlock {
             };
             McpToolContentBlock::Omitted {
                 kind: McpOmittedContentKind::EmbeddedResource,
-                mime_type: safe_mime_type(mime_type),
+                mime_type: safe_mime_type(mime_type, limits),
                 encoded_bytes: Some(saturating_u64(content_bytes)),
             }
         }
-        McpContentBlock::ResourceLink { resource } => map_resource_link(resource),
+        McpContentBlock::ResourceLink { resource } => map_resource_link(resource, limits),
         _ => McpToolContentBlock::Omitted {
             kind: McpOmittedContentKind::EmbeddedResource,
             mime_type: None,
@@ -517,62 +753,79 @@ fn truncate_string_bytes(value: &mut String, max_bytes: usize) {
     value.truncate(boundary);
 }
 
-fn structured_content_within_limits(value: &serde_json::Value) -> bool {
-    fn visit(
-        value: &serde_json::Value,
-        depth: usize,
-        nodes: &mut usize,
-        bytes: &mut usize,
-    ) -> bool {
-        if depth > MAX_MCP_BRIDGE_STRUCTURED_DEPTH
-            || *nodes >= MAX_MCP_BRIDGE_STRUCTURED_NODES
-            || *bytes > MAX_MCP_BRIDGE_STRUCTURED_BYTES
-        {
+fn structured_content_within_limits(
+    value: &serde_json::Value,
+    limits: &McpRuntimeProjectionLimits,
+) -> bool {
+    let mut pending = vec![(value, 1_usize)];
+    let mut nodes = 0_usize;
+    let mut estimated_bytes = 0_usize;
+    while let Some((value, depth)) = pending.pop() {
+        if depth > limits.max_model_structured_depth {
             return false;
         }
-        *nodes += 1;
+        let Some(next_nodes) = nodes.checked_add(1) else {
+            return false;
+        };
+        nodes = next_nodes;
+        if nodes > limits.max_model_structured_nodes {
+            return false;
+        }
         match value {
-            serde_json::Value::Object(object) => object.iter().all(|(key, value)| {
-                *bytes = bytes.saturating_add(key.len());
-                *bytes <= MAX_MCP_BRIDGE_STRUCTURED_BYTES && visit(value, depth + 1, nodes, bytes)
-            }),
-            serde_json::Value::Array(array) => array
-                .iter()
-                .all(|value| visit(value, depth + 1, nodes, bytes)),
+            serde_json::Value::Object(object) => {
+                for (key, child) in object.iter().rev() {
+                    let Some(next_bytes) = estimated_bytes.checked_add(key.len()) else {
+                        return false;
+                    };
+                    estimated_bytes = next_bytes;
+                    pending.push((child, depth.saturating_add(1)));
+                }
+            }
+            serde_json::Value::Array(array) => pending.extend(
+                array
+                    .iter()
+                    .rev()
+                    .map(|child| (child, depth.saturating_add(1))),
+            ),
             serde_json::Value::String(value) => {
-                *bytes = bytes.saturating_add(value.len());
-                *bytes <= MAX_MCP_BRIDGE_STRUCTURED_BYTES
+                let Some(next_bytes) = estimated_bytes.checked_add(value.len()) else {
+                    return false;
+                };
+                estimated_bytes = next_bytes;
             }
             serde_json::Value::Number(_) => {
-                *bytes = bytes.saturating_add(32);
-                *bytes <= MAX_MCP_BRIDGE_STRUCTURED_BYTES
+                estimated_bytes = estimated_bytes.saturating_add(32);
             }
             serde_json::Value::Bool(_) | serde_json::Value::Null => {
-                *bytes = bytes.saturating_add(8);
-                *bytes <= MAX_MCP_BRIDGE_STRUCTURED_BYTES
+                estimated_bytes = estimated_bytes.saturating_add(8);
             }
         }
+        if estimated_bytes > limits.max_model_structured_bytes {
+            return false;
+        }
     }
-
-    let mut nodes = 0;
-    let mut bytes = 0;
-    visit(value, 0, &mut nodes, &mut bytes)
-        && serde_json::to_vec(value)
-            .is_ok_and(|encoded| encoded.len() <= MAX_MCP_BRIDGE_STRUCTURED_BYTES)
+    serde_json::to_vec(value)
+        .is_ok_and(|encoded| encoded.len() <= limits.max_model_structured_bytes)
 }
 
-fn map_resource_link(resource: McpResourceLink) -> McpToolContentBlock {
+fn map_resource_link(
+    resource: McpResourceLink,
+    limits: &McpRuntimeProjectionLimits,
+) -> McpToolContentBlock {
     McpToolContentBlock::Omitted {
         kind: McpOmittedContentKind::ResourceLink,
-        mime_type: safe_mime_type(resource.mime_type),
+        mime_type: safe_mime_type(resource.mime_type, limits),
         encoded_bytes: resource.size,
     }
 }
 
-fn safe_mime_type(mime_type: Option<String>) -> Option<String> {
+fn safe_mime_type(
+    mime_type: Option<String>,
+    limits: &McpRuntimeProjectionLimits,
+) -> Option<String> {
     let value = mime_type?;
     if value.is_empty()
-        || value.len() > MAX_MIME_TYPE_BYTES
+        || value.len() > limits.max_mime_type_bytes
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'\"' | b'\\'))
@@ -586,6 +839,104 @@ fn saturating_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+fn approval_aad(approval: &AgentMcpToolApproval) -> McpApprovalPayloadAad {
+    let identity = &approval.identity;
+    let provenance = &identity.provenance;
+    let raw_tool_name_digest = lower_sha256(provenance.raw_tool_name.as_bytes());
+    McpApprovalPayloadAad {
+        run_id: identity.run_id.clone(),
+        action_id: identity.action_id.clone(),
+        call_id: identity.call_id.clone(),
+        server_id: provenance.server_id.clone(),
+        config_epoch: provenance.config_epoch.clone(),
+        registry_revision: provenance.registry_revision,
+        config_digest: provenance.config_digest.clone(),
+        catalog_digest: provenance.catalog_digest.clone(),
+        catalog_generation: provenance.catalog_generation,
+        raw_tool_name_digest,
+        schema_digest: provenance.schema_digest.clone(),
+        arguments_digest: identity.arguments_digest.clone(),
+        payload_persistence: approval.payload_persistence,
+        created_at_ms: approval.created_at,
+        expires_at_ms: approval.expires_at,
+    }
+}
+
+fn active_call_id(approval: &AgentMcpToolApproval) -> AgentResult<McpActiveCallId> {
+    let server_id = McpServerId::from_str(&approval.identity.provenance.server_id)
+        .map_err(|_| stale_tool_error("mcp.invalid_server_identity"))?;
+    let invocation_id = McpInvocationId::from_str(&approval.identity.invocation_id)
+        .map_err(|_| stale_tool_error("mcp.invalid_invocation_identity"))?;
+    let model_call_id = McpModelCallId::from_str(&approval.identity.call_id)
+        .map_err(|_| stale_tool_error("mcp.invalid_model_call_identity"))?;
+    Ok(McpActiveCallId::new(
+        server_id,
+        invocation_id,
+        model_call_id,
+    ))
+}
+
+fn lower_sha256(value: &[u8]) -> String {
+    let digest = Sha256::digest(value);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn map_payload_error(error: McpApprovalPayloadStoreError) -> AgentError {
+    let (code, reason) = match error {
+        McpApprovalPayloadStoreError::PayloadAlreadyExists => {
+            ("mcp.approval_payload_replay", "payloadAlreadyExists")
+        }
+        McpApprovalPayloadStoreError::PayloadNotFound => {
+            ("mcp.approval_payload_unavailable", "payloadNotFound")
+        }
+        McpApprovalPayloadStoreError::PayloadExpired => {
+            ("mcp.approval_payload_expired", "payloadExpired")
+        }
+        McpApprovalPayloadStoreError::BindingMismatch
+        | McpApprovalPayloadStoreError::AuthenticationFailed => {
+            ("mcp.approval_payload_binding_invalid", "bindingInvalid")
+        }
+        McpApprovalPayloadStoreError::InvalidInvocationId
+        | McpApprovalPayloadStoreError::InvalidMetadata
+        | McpApprovalPayloadStoreError::InvalidPayload
+        | McpApprovalPayloadStoreError::InvalidEnvelope => {
+            ("mcp.approval_payload_invalid", "payloadInvalid")
+        }
+        McpApprovalPayloadStoreError::Unavailable
+        | McpApprovalPayloadStoreError::CredentialUnavailable
+        | McpApprovalPayloadStoreError::RepositoryUnavailable
+        | McpApprovalPayloadStoreError::RandomnessUnavailable => {
+            ("mcp.approval_payload_store_unavailable", "storeUnavailable")
+        }
+    };
+    AgentError::structured(
+        code,
+        "The sealed MCP approval payload is unavailable or invalid.",
+        serde_json::json!({
+            "type": "mcp_approval",
+            "code": reason,
+            "retryable": false,
+        }),
+    )
+}
+
+fn policy_error(code: &'static str) -> AgentError {
+    AgentError::structured(
+        code,
+        "The MCP server approval policy denies this invocation.",
+        serde_json::json!({
+            "type": "mcp_approval",
+            "code": "approvalPolicyDenied",
+            "retryable": false,
+        }),
+    )
+}
+
 fn map_catalog_error(_error: McpError) -> AgentError {
     AgentError::structured(
         "mcp.catalog_unavailable",
@@ -595,14 +946,59 @@ fn map_catalog_error(_error: McpError) -> AgentError {
 }
 
 fn map_invocation_error(error: McpError) -> AgentError {
+    let dispatch_certainty = error
+        .dispatch_certainty
+        .unwrap_or(McpDispatchCertainty::DefinitelyNotDispatched);
+    if error.kind == McpErrorKind::OutcomeUnknown
+        || !matches!(
+            dispatch_certainty,
+            McpDispatchCertainty::DefinitelyNotDispatched | McpDispatchCertainty::ResponseReceived
+        )
+    {
+        return AgentError::structured(
+            "mcp.tool_outcome_unknown",
+            "The MCP request may have reached the server, but its outcome is unknown.",
+            serde_json::json!({
+                "type": "mcp_tool",
+                "code": "outcomeUnknown",
+                "retryable": false,
+                "dispatchCertainty": dispatch_certainty_label(
+                    McpDispatchCertainty::PossiblyDispatched
+                ),
+                "reason": safe_outcome_unknown_reason(error.outcome_unknown_reason),
+            }),
+        );
+    }
+    let dispatch_certainty = dispatch_certainty_label(dispatch_certainty);
+    let retryable = dispatch_certainty == "definitely_not_dispatched";
     match error.kind {
         McpErrorKind::Cancelled => AgentError::cancelled(),
+        McpErrorKind::OutputTooLarge => AgentError::structured(
+            "mcp.tool_output_too_large",
+            "The MCP server returned a Tool response that exceeded Host output limits.",
+            serde_json::json!({
+                "type": "mcp_tool",
+                "code": "outputTooLarge",
+                "retryable": false,
+                "dispatchCertainty": dispatch_certainty,
+            }),
+        ),
         McpErrorKind::Timeout => AgentError::structured(
             "mcp.tool_timeout",
             "The MCP tool invocation timed out.",
-            serde_json::json!({"retryable": true}),
+            serde_json::json!({
+                "retryable": retryable,
+                "dispatchCertainty": dispatch_certainty,
+            }),
         ),
-        McpErrorKind::Config => stale_tool_error("mcp.tool_snapshot_stale"),
+        McpErrorKind::Config => AgentError::structured(
+            "mcp.tool_snapshot_stale",
+            "The MCP tool definition is stale or invalid; refresh the tool catalog and retry.",
+            serde_json::json!({
+                "retryable": retryable,
+                "dispatchCertainty": dispatch_certainty,
+            }),
+        ),
         McpErrorKind::Spawn
         | McpErrorKind::Negotiation
         | McpErrorKind::Protocol
@@ -610,13 +1006,48 @@ fn map_invocation_error(error: McpError) -> AgentError {
         | McpErrorKind::Shutdown => AgentError::structured(
             "mcp.tool_unavailable",
             "The MCP tool is temporarily unavailable.",
-            serde_json::json!({"retryable": true}),
+            serde_json::json!({
+                "retryable": retryable,
+                "dispatchCertainty": dispatch_certainty,
+            }),
         ),
+        McpErrorKind::OutcomeUnknown => unreachable!("handled above"),
         _ => AgentError::structured(
             "mcp.tool_unavailable",
             "The MCP tool is temporarily unavailable.",
-            serde_json::json!({"retryable": true}),
+            serde_json::json!({
+                "retryable": retryable,
+                "dispatchCertainty": dispatch_certainty,
+            }),
         ),
+    }
+}
+
+fn dispatch_certainty_label(certainty: McpDispatchCertainty) -> &'static str {
+    match certainty {
+        McpDispatchCertainty::DefinitelyNotDispatched => "definitely_not_dispatched",
+        McpDispatchCertainty::PossiblyDispatched => "possibly_dispatched",
+        McpDispatchCertainty::ResponseReceived => "response_received",
+        _ => "possibly_dispatched",
+    }
+}
+
+fn safe_outcome_unknown_reason(
+    reason: Option<mycopilot_mcp_client::McpOutcomeUnknownReason>,
+) -> &'static str {
+    use mycopilot_mcp_client::McpOutcomeUnknownReason;
+    match reason {
+        Some(McpOutcomeUnknownReason::Cancelled) => "cancelled",
+        Some(McpOutcomeUnknownReason::TimedOut) => "timed_out",
+        Some(McpOutcomeUnknownReason::Shutdown) => "shutdown",
+        Some(McpOutcomeUnknownReason::ServerStopped) => "server_stopped",
+        Some(McpOutcomeUnknownReason::ServerRestarted) => "server_restarted",
+        Some(McpOutcomeUnknownReason::ServerRemoved) => "server_removed",
+        Some(McpOutcomeUnknownReason::ServerExited) => "server_exited",
+        Some(McpOutcomeUnknownReason::TransportClosed) => "transport_closed",
+        Some(McpOutcomeUnknownReason::ProtocolFailure) => "protocol_failure",
+        None => "unknown",
+        Some(_) => "unknown",
     }
 }
 
@@ -624,16 +1055,23 @@ fn stale_tool_error(code: &'static str) -> AgentError {
     AgentError::structured(
         code,
         "The MCP tool definition is stale or invalid; refresh the tool catalog and retry.",
-        serde_json::json!({"retryable": true}),
+        serde_json::json!({
+            "retryable": true,
+            "dispatchCertainty": "definitely_not_dispatched",
+        }),
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use mycopilot_core::image_generation::InMemoryCredentialStore;
     use mycopilot_core::{
-        send_chat_with_host_services, AgentApiStyle, AgentChatInput, AgentChatMessage,
-        AgentEventEmitter, AgentRunContext, AgentRuntimeHostServices, AgentToolIdentity,
-        ConversationTraceSnapshot, ConversationTurnTraceItem, McpToolRuntime, ModelCapabilities,
+        mcp_tool_arguments_digest, send_chat_with_host_services, AgentApiStyle,
+        AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentEventEmitter,
+        AgentMcpArgumentSummary, AgentMcpToolApprovalSummary, AgentMcpToolRisk,
+        AgentProposedAction, AgentRunContext, AgentRuntimeHostServices, AgentToolCall,
+        ConversationTraceSnapshot, McpToolRuntime, ModelCapabilities,
     };
     use mycopilot_mcp_client::{
         BoxMcpFuture, InMemoryMcpRegistry, McpCapabilitySnapshot, McpConnectionState, McpConnector,
@@ -644,10 +1082,15 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
+    use crate::application::mcp::approval_payload_store::{
+        DurableMcpApprovalPayloadStore, InMemoryMcpApprovalEnvelopeRepository,
+        UnavailableMcpApprovalPayloadStore,
+    };
 
     async fn read_json_request(stream: &mut TcpStream) -> serde_json::Value {
         let mut request = Vec::new();
@@ -836,6 +1279,7 @@ mod tests {
                 project_id: "project-fixture".to_string(),
             },
             trust: McpTrustLevel::Managed,
+            approval_mode: McpApprovalMode::Prompt,
             enabled: true,
             transport: McpTransportConfig::Stdio(McpStdioConfig {
                 program: PathBuf::from("/owned/fixture"),
@@ -852,48 +1296,6 @@ mod tests {
     fn project_context() -> McpToolCatalogContext {
         McpToolCatalogContext {
             project_id: Some("project-fixture".to_string()),
-        }
-    }
-
-    fn runtime_input(api_url: String, suffix: &str) -> AgentChatInput {
-        AgentChatInput {
-            api_url,
-            api_token: "owned-fixture-token".to_string(),
-            model: "owned-fixture-model".to_string(),
-            model_capabilities: ModelCapabilities::default(),
-            api_style: Some(AgentApiStyle::OpenAiCompatible),
-            context_window_tokens: Some(128_000),
-            context_window_indicator_enabled: false,
-            max_tokens: Some(4_096),
-            temperature: None,
-            stream: Some(false),
-            context: Some(AgentRunContext {
-                conversation_id: Some(format!("conversation-{suffix}")),
-                project_id: Some("project-fixture".to_string()),
-                workspace: None,
-                attachment_library: None,
-                permissions: Default::default(),
-            }),
-            search_config: None,
-            prompt_preferences: None,
-            approval_decision: None,
-            tool_continuation: None,
-            attachments: Vec::new(),
-            resume_checkpoint: None,
-            assistant_message_id: Some(format!("assistant-{suffix}")),
-            context_compaction_summary: None,
-            goal: None,
-            world_state_records: Vec::new(),
-            skill_activation: None,
-            skill_discovery: None,
-            messages: vec![AgentChatMessage {
-                message_id: Some(format!("user-{suffix}")),
-                role: "user".to_string(),
-                content: "Call the owned MCP fixture.".to_string(),
-                created_at: Some(1),
-                conversation_turn_trace: None,
-                conversation_model_context_items: Vec::new(),
-            }],
         }
     }
 
@@ -914,23 +1316,223 @@ mod tests {
                 .unwrap(),
         );
         manager.start(server_id).await.unwrap();
-        let denied_bridge = McpRuntimeBridge::new(Arc::clone(&manager));
-        let provenance = denied_bridge
-            .catalog(&project_context())
-            .unwrap()
-            .remove(0)
-            .provenance;
-        let authorization = Arc::new(
-            McpToolAuthorizationPolicy::deny_all().allow_unapproved_read_only(&provenance),
-        );
         (
-            Arc::new(McpRuntimeBridge::with_authorization(
-                Arc::clone(&manager),
-                authorization,
-            )),
+            Arc::new(McpRuntimeBridge::new(Arc::clone(&manager))),
             manager,
             peer,
         )
+    }
+
+    fn seal_test_approval(
+        bridge: &McpRuntimeBridge,
+        provenance: AgentMcpToolProvenance,
+        arguments: serde_json::Value,
+        call_id: &str,
+    ) -> AgentMcpToolApproval {
+        let call_id = format!("tc1_{}", URL_SAFE_NO_PAD.encode(Sha256::digest(call_id)));
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+            .unwrap_or(1);
+        let approval = AgentMcpToolApproval {
+            identity: AgentMcpToolInvocationIdentity {
+                action_id: uuid::Uuid::new_v4().to_string(),
+                invocation_id: uuid::Uuid::new_v4().to_string(),
+                run_id: "owned-adapter-test-run".to_string(),
+                call_id: call_id.clone(),
+                provenance: provenance.clone(),
+                arguments_digest: mcp_tool_arguments_digest(&arguments).unwrap(),
+            },
+            call: AgentToolCall {
+                id: call_id,
+                tool: provenance.model_tool_name.clone(),
+                args: json!({}),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+            summary: AgentMcpToolApprovalSummary {
+                server_id: provenance.server_id.clone(),
+                server_display_name: "owned fixture".to_string(),
+                scope: provenance.scope.clone(),
+                raw_tool_name: provenance.raw_tool_name.clone(),
+                model_tool_name: provenance.model_tool_name.clone(),
+                arguments: AgentMcpArgumentSummary {
+                    encoded_bytes: serde_json::to_vec(&arguments).unwrap().len() as u64,
+                    top_level_property_count: arguments
+                        .as_object()
+                        .map_or(0, |object| object.len() as u64),
+                    string_value_count: 0,
+                    number_value_count: 0,
+                    boolean_value_count: 0,
+                    null_value_count: 0,
+                    object_value_count: 1,
+                    array_value_count: 0,
+                    max_depth: 1,
+                    truncated: false,
+                },
+                risk: AgentMcpToolRisk::ReadOnlyClaimed,
+                external: true,
+            },
+            approval_mode: AgentMcpApprovalMode::Prompt,
+            payload_persistence: AgentMcpApprovalPayloadPersistence::ProcessOnly,
+            created_at,
+            expires_at: created_at.saturating_add(60_000),
+        };
+        validate_mcp_approval_arguments(&approval, &arguments).unwrap();
+        let invocation_id =
+            McpApprovalInvocationId::parse(approval.identity.invocation_id.clone()).unwrap();
+        let payload = McpApprovalPayload::from_json(&arguments).unwrap();
+        bridge
+            .payloads
+            .seal(&invocation_id, approval_aad(&approval), payload)
+            .unwrap();
+        approval
+    }
+
+    struct ClosedRegistrySecurityGate;
+
+    impl McpRegistrySecurityGate for ClosedRegistrySecurityGate {
+        fn ensure_reconciled(&self) -> Result<(), String> {
+            Err("fixed test gate is closed".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn frozen_payload_persistence_must_match_the_current_backend() {
+        let (process_bridge, manager, _) = ready_bridge().await;
+        let descriptor = process_bridge
+            .catalog(&project_context())
+            .unwrap()
+            .remove(0);
+        let process_approval = seal_test_approval(
+            &process_bridge,
+            descriptor.provenance,
+            json!({"text": "backend-binding"}),
+            "payload-backend-binding",
+        );
+        assert_eq!(
+            process_bridge.current_payload_persistence().unwrap(),
+            AgentMcpApprovalPayloadPersistence::ProcessOnly
+        );
+        process_bridge
+            .revalidate_approved(&process_approval)
+            .expect("a process-only approval remains valid in its originating process");
+        assert_eq!(
+            process_bridge.inspect_startup_payload(&process_approval),
+            McpApprovalStartupPayloadState::Unavailable,
+            "process-only payloads are never restart-recoverable"
+        );
+
+        let mut forged_durable = process_approval.clone();
+        forged_durable.payload_persistence =
+            AgentMcpApprovalPayloadPersistence::DurableAuthenticatedEnvelope;
+        assert_eq!(
+            process_bridge
+                .revalidate_approved(&forged_durable)
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_payload_binding_changed")
+        );
+
+        let repository = Arc::new(InMemoryMcpApprovalEnvelopeRepository::default());
+        let credentials = Arc::new(InMemoryCredentialStore::default());
+        let (durable_store, _) =
+            DurableMcpApprovalPayloadStore::provision(repository, credentials).unwrap();
+        let durable_bridge =
+            McpRuntimeBridge::with_payload_store(Arc::clone(&manager), Arc::new(durable_store));
+        assert_eq!(
+            durable_bridge.current_payload_persistence().unwrap(),
+            AgentMcpApprovalPayloadPersistence::DurableAuthenticatedEnvelope
+        );
+        assert_eq!(
+            durable_bridge
+                .revalidate_approved(&process_approval)
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_payload_binding_changed")
+        );
+        assert_eq!(
+            durable_bridge.inspect_startup_payload(&process_approval),
+            McpApprovalStartupPayloadState::Unavailable
+        );
+        assert_eq!(
+            durable_bridge.inspect_startup_payload(&forged_durable),
+            McpApprovalStartupPayloadState::Unavailable,
+            "a durable marker alone cannot recover a payload from another backend"
+        );
+
+        let unavailable_bridge = McpRuntimeBridge::with_payload_store(
+            Arc::clone(&manager),
+            Arc::new(UnavailableMcpApprovalPayloadStore),
+        );
+        assert_eq!(
+            unavailable_bridge
+                .current_payload_persistence()
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_payload_unavailable")
+        );
+
+        let _ = manager.stop_all().await;
+    }
+
+    #[tokio::test]
+    async fn closed_registry_security_gate_blocks_catalog_and_dispatch_without_consuming_payload() {
+        let (healthy_bridge, manager, peer) = ready_bridge().await;
+        let descriptor = healthy_bridge
+            .catalog(&project_context())
+            .unwrap()
+            .remove(0);
+        let payloads: Arc<dyn McpApprovalPayloadStore> =
+            Arc::new(InMemoryMcpApprovalPayloadStore::default());
+        let blocked_bridge =
+            McpRuntimeBridge::with_payload_store_projection_limits_and_security_gate(
+                Arc::clone(&manager),
+                Arc::clone(&payloads),
+                McpRuntimeProjectionLimits::default(),
+                Arc::new(ClosedRegistrySecurityGate),
+            )
+            .unwrap();
+        let approval = seal_test_approval(
+            &blocked_bridge,
+            descriptor.provenance,
+            json!({"text": "must-not-dispatch"}),
+            "closed-registry-gate",
+        );
+        let invocation_id =
+            McpApprovalInvocationId::parse(approval.identity.invocation_id.clone()).unwrap();
+        let aad = approval_aad(&approval);
+
+        let catalog_error = blocked_bridge
+            .catalog(&project_context())
+            .expect_err("a closed Registry security gate must hide the external catalog");
+        assert_eq!(
+            catalog_error.code(),
+            Some("mcp.registry_reconciliation_required")
+        );
+        let dispatch_error = blocked_bridge
+            .invoke_approved(
+                McpApprovedToolInvocation {
+                    approval: approval.clone(),
+                },
+                AgentCancellationToken::new(),
+            )
+            .await
+            .expect_err("a closed Registry security gate must reject dispatch");
+        assert_eq!(
+            dispatch_error.code(),
+            Some("mcp.registry_reconciliation_required")
+        );
+        assert!(
+            payloads.load(&invocation_id, &aad).is_ok(),
+            "fail-closed denial must occur before one-time payload consumption"
+        );
+        assert!(peer
+            .calls
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty());
+        manager.stop_all().await;
     }
 
     #[tokio::test]
@@ -940,18 +1542,20 @@ mod tests {
         let tool = manager.catalog(server_id).unwrap().unwrap().tools[0].clone();
         let mut tool_count = 0;
         let mut bytes = 0;
-        for _ in 0..MCP_RUNTIME_MAX_TOOL_DEFINITIONS {
-            reserve_catalog_budget(&tool, &mut tool_count, &mut bytes).unwrap();
+        let limits = McpRuntimeProjectionLimits::default();
+        for _ in 0..limits.max_tool_definitions {
+            reserve_catalog_budget(&tool, &mut tool_count, &mut bytes, &limits).unwrap();
         }
-        let error = reserve_catalog_budget(&tool, &mut tool_count, &mut bytes).unwrap_err();
+        let error =
+            reserve_catalog_budget(&tool, &mut tool_count, &mut bytes, &limits).unwrap_err();
         assert_eq!(error.code(), Some("mcp.catalog_budget_exceeded"));
 
         let mut oversized = tool;
         oversized.descriptor.input_schema = json!({
             "type": "object",
-            "description": "x".repeat(MCP_RUNTIME_MAX_CATALOG_BYTES + 1),
+            "description": "x".repeat(limits.max_catalog_bytes + 1),
         });
-        let error = reserve_catalog_budget(&oversized, &mut 0, &mut 0).unwrap_err();
+        let error = reserve_catalog_budget(&oversized, &mut 0, &mut 0, &limits).unwrap_err();
         assert_eq!(error.code(), Some("mcp.catalog_budget_exceeded"));
         manager.stop_all().await;
     }
@@ -964,6 +1568,15 @@ mod tests {
         let descriptor = catalog.into_iter().next().unwrap();
         assert_eq!(descriptor.provenance.raw_tool_name, "raw/echo");
         assert!(descriptor.provenance.model_tool_name.starts_with("mcp__"));
+        let status = manager.list_statuses().unwrap().remove(0);
+        assert_eq!(
+            descriptor.provenance.config_epoch,
+            status.config_epoch.to_string()
+        );
+        assert_eq!(
+            descriptor.provenance.registry_revision,
+            status.registry_revision
+        );
         assert_eq!(
             descriptor.provenance.scope,
             AgentMcpServerScope::Project {
@@ -973,13 +1586,15 @@ mod tests {
         assert_eq!(descriptor.annotations.read_only_hint, Some(true));
         assert!(descriptor.output_schema.is_some());
 
+        let approval = seal_test_approval(
+            &bridge,
+            descriptor.provenance,
+            json!({"text": "hello"}),
+            "provider-adapter-call-1",
+        );
         let result = bridge
-            .invoke(
-                McpToolInvocation {
-                    provenance: descriptor.provenance,
-                    arguments: json!({"text": "hello"}),
-                    caller: project_context(),
-                },
+            .invoke_approved(
+                McpApprovedToolInvocation { approval },
                 AgentCancellationToken::new(),
             )
             .await
@@ -1008,34 +1623,91 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_trust_does_not_replace_tool_authorization_or_project_scope() {
-        let (authorized_bridge, manager, _) = ready_bridge().await;
-        assert!(authorized_bridge
+    async fn final_revalidation_checks_raw_and_normalized_schema_identities_independently() {
+        let (bridge, manager, peer) = ready_bridge().await;
+        let descriptor = bridge.catalog(&project_context()).unwrap().remove(0);
+        assert_ne!(
+            descriptor.provenance.catalog_schema_digest,
+            descriptor.provenance.schema_digest
+        );
+        let approval = seal_test_approval(
+            &bridge,
+            descriptor.provenance,
+            json!({"text": "identity"}),
+            "provider-adapter-schema-identity",
+        );
+        bridge.revalidate_approved(&approval).unwrap();
+
+        let mut raw_drift = approval.clone();
+        raw_drift.identity.provenance.catalog_schema_digest = "f".repeat(64);
+        assert_eq!(
+            bridge.revalidate_approved(&raw_drift).unwrap_err().code(),
+            Some("mcp.approval_tool_drift")
+        );
+
+        let mut normalized_drift = approval.clone();
+        normalized_drift.identity.provenance.schema_digest = "e".repeat(64);
+        assert_eq!(
+            bridge
+                .revalidate_approved(&normalized_drift)
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_tool_schema_drift")
+        );
+
+        let mut epoch_drift = approval.clone();
+        epoch_drift.identity.provenance.config_epoch = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            bridge.revalidate_approved(&epoch_drift).unwrap_err().code(),
+            Some("mcp.approval_snapshot_stale")
+        );
+
+        let mut revision_drift = approval.clone();
+        revision_drift.identity.provenance.registry_revision += 1;
+        assert_eq!(
+            bridge
+                .revalidate_approved(&revision_drift)
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_snapshot_stale")
+        );
+
+        let mut normalizer_drift = approval;
+        normalizer_drift
+            .identity
+            .provenance
+            .schema_normalizer_version += 1;
+        assert_eq!(
+            bridge
+                .revalidate_approved(&normalizer_drift)
+                .unwrap_err()
+                .code(),
+            Some("mcp.approval_tool_schema_drift")
+        );
+        assert!(
+            peer.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "schema identity revalidation must never dispatch"
+        );
+        let _ = manager.stop_all().await;
+    }
+
+    #[tokio::test]
+    async fn server_scope_is_revalidated_independently_of_connection_trust() {
+        let (bridge, manager, _) = ready_bridge().await;
+        assert!(bridge
             .catalog(&McpToolCatalogContext::default())
             .unwrap()
             .is_empty());
-        assert!(authorized_bridge
+        assert!(bridge
             .catalog(&McpToolCatalogContext {
                 project_id: Some("different-project".to_string()),
             })
             .unwrap()
             .is_empty());
-
-        let denied_bridge = McpRuntimeBridge::new(Arc::clone(&manager));
-        let descriptor = denied_bridge.catalog(&project_context()).unwrap().remove(0);
-        assert!(!descriptor.host_allows_unapproved_read_only_invocation);
-        let error = denied_bridge
-            .invoke(
-                McpToolInvocation {
-                    provenance: descriptor.provenance,
-                    arguments: json!({"text": "denied"}),
-                    caller: project_context(),
-                },
-                AgentCancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Some("mcp.invoke_not_authorized"));
+        assert_eq!(bridge.catalog(&project_context()).unwrap().len(), 1);
         let _ = manager.stop_all().await;
     }
 
@@ -1044,6 +1716,12 @@ mod tests {
         let (bridge, manager, peer) = ready_bridge().await;
         peer.wait_for_cancellation.store(true, Ordering::SeqCst);
         let descriptor = bridge.catalog(&project_context()).unwrap().remove(0);
+        let approval = seal_test_approval(
+            &bridge,
+            descriptor.provenance,
+            json!({"text": "cancel"}),
+            "provider-adapter-cancel-call",
+        );
         let cancellation = AgentCancellationToken::new();
         let trigger = cancellation.clone();
         tokio::spawn(async move {
@@ -1051,96 +1729,155 @@ mod tests {
             trigger.cancel();
         });
         let error = bridge
-            .invoke(
-                McpToolInvocation {
-                    provenance: descriptor.provenance,
-                    arguments: json!({"text": "cancel"}),
-                    caller: project_context(),
-                },
-                cancellation,
-            )
+            .invoke_approved(McpApprovedToolInvocation { approval }, cancellation)
             .await
             .unwrap_err();
-        assert!(error.is_cancelled());
+        assert_eq!(error.code(), Some("mcp.tool_outcome_unknown"));
         assert!(peer.cancellation_seen.load(Ordering::SeqCst));
         let _ = manager.stop_all().await;
     }
 
-    #[tokio::test]
-    async fn registry_runtime_cancellation_settles_through_the_mcp_bridge() {
-        let (bridge, manager, peer) = ready_bridge().await;
-        peer.wait_for_cancellation.store(true, Ordering::SeqCst);
-        let model_name = bridge
-            .catalog(&project_context())
-            .unwrap()
-            .remove(0)
-            .provenance
-            .model_tool_name;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let _ = read_json_request(&mut stream).await;
-            write_json_response(
-                &mut stream,
-                json!({
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": null,
-                            "tool_calls": [{
-                                "id": "provider-cancel-call",
-                                "type": "function",
-                                "function": {
-                                    "name": model_name,
-                                    "arguments": "{\"text\":\"wait\"}"
-                                }
-                            }]
-                        },
-                        "finish_reason": "tool_calls"
-                    }]
-                }),
-            )
-            .await;
-        });
-
-        let invoker: Arc<dyn McpToolInvoker> = bridge.clone();
-        let host_services = AgentRuntimeHostServices::new().with_mcp_tools(
-            McpToolRuntime::capture_for_context(invoker, project_context()),
+    #[test]
+    fn authoritative_oversized_response_is_non_retryable_not_outcome_unknown() {
+        let error = map_invocation_error(McpError::output_too_large(
+            "MCP tools/call",
+            "fixture response exceeded limit",
+        ));
+        assert_eq!(error.code(), Some("mcp.tool_output_too_large"));
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("retryable"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
         );
-        let cancellation = AgentCancellationToken::new();
-        let run_cancellation = cancellation.clone();
-        let run = tokio::spawn(async move {
-            send_chat_with_host_services(
-                runtime_input(
-                    format!("http://{address}/v1/chat/completions"),
-                    "mcp-cancel-e2e",
-                ),
-                "run-mcp-cancel-e2e".to_string(),
-                Arc::new(|_| {}),
-                run_cancellation,
-                host_services,
+    }
+
+    #[test]
+    fn invocation_error_projection_preserves_safe_dispatch_certainty() {
+        let possibly_dispatched = map_invocation_error(
+            McpError::protocol("untrusted fixture diagnostic")
+                .with_dispatch_certainty(McpDispatchCertainty::PossiblyDispatched),
+        );
+        assert_eq!(possibly_dispatched.code(), Some("mcp.tool_outcome_unknown"));
+        assert_eq!(
+            possibly_dispatched
+                .details()
+                .and_then(|details| details.get("dispatchCertainty"))
+                .and_then(serde_json::Value::as_str),
+            Some("possibly_dispatched")
+        );
+        assert_eq!(
+            possibly_dispatched
+                .details()
+                .and_then(|details| details.get("retryable"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+
+        let response_received = map_invocation_error(
+            McpError::protocol("another untrusted fixture diagnostic")
+                .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived),
+        );
+        assert_eq!(response_received.code(), Some("mcp.tool_unavailable"));
+        assert_eq!(
+            response_received
+                .details()
+                .and_then(|details| details.get("dispatchCertainty"))
+                .and_then(serde_json::Value::as_str),
+            Some("response_received")
+        );
+        assert_eq!(
+            response_received
+                .details()
+                .and_then(|details| details.get("retryable"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn bridge_rejects_deep_structured_content_before_recursive_encoding() {
+        let limits = McpRuntimeProjectionLimits::default();
+        let mut value = serde_json::Value::Null;
+        for _ in 0..limits.max_model_structured_depth {
+            value = serde_json::json!({"nested": value});
+        }
+        assert!(!structured_content_within_limits(
+            &serde_json::json!({"root": value}),
+            &limits,
+        ));
+    }
+
+    #[test]
+    fn bridge_result_projection_uses_the_host_owned_limits() {
+        let limits = McpRuntimeProjectionLimits {
+            max_model_text_bytes: 4,
+            max_content_blocks: 1,
+            ..McpRuntimeProjectionLimits::default()
+        };
+        limits.validate().unwrap();
+
+        let mapped = map_tool_result(
+            McpToolResult {
+                content: vec![
+                    McpContentBlock::Text {
+                        text: "abcdef".to_string(),
+                    },
+                    McpContentBlock::Text {
+                        text: "not retained".to_string(),
+                    },
+                ],
+                structured_content: None,
+                is_error: false,
+            },
+            &limits,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped.content,
+            vec![McpToolContentBlock::Text {
+                text: "abcd".to_string(),
+            }]
+        );
+        assert!(mapped.truncated_at_source);
+    }
+
+    #[tokio::test]
+    async fn sealed_approval_payload_is_consumed_at_most_once() {
+        let (bridge, manager, peer) = ready_bridge().await;
+        let descriptor = bridge.catalog(&project_context()).unwrap().remove(0);
+        let approval = seal_test_approval(
+            &bridge,
+            descriptor.provenance,
+            json!({"text": "once"}),
+            "provider-adapter-once-call",
+        );
+        bridge
+            .invoke_approved(
+                McpApprovedToolInvocation {
+                    approval: approval.clone(),
+                },
+                AgentCancellationToken::new(),
             )
             .await
-        });
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while !peer.call_started.load(Ordering::SeqCst) {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "owned MCP call did not start"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        cancellation.cancel();
-        let output = tokio::time::timeout(Duration::from_secs(2), run)
-            .await
-            .expect("Agent cancellation must settle")
-            .unwrap()
             .unwrap();
-        server.await.unwrap();
 
-        assert_eq!(output.status, mycopilot_core::AgentRunStatus::Cancelled);
-        assert!(peer.cancellation_seen.load(Ordering::SeqCst));
+        let error = bridge
+            .invoke_approved(
+                McpApprovedToolInvocation { approval },
+                AgentCancellationToken::new(),
+            )
+            .await
+            .expect_err("a consumed approval payload must not replay");
+        assert_eq!(error.code(), Some("mcp.approval_payload_unavailable"));
+        assert_eq!(
+            peer.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            1
+        );
         let _ = manager.stop_all().await;
     }
 
@@ -1164,45 +1901,33 @@ mod tests {
         let requests_for_server = Arc::clone(&requests);
         let response_model_name = model_name.clone();
         let server = tokio::spawn(async move {
-            for request_index in 0..2 {
+            for _ in 0..1 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let request = read_json_request(&mut stream).await;
                 requests_for_server
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .push(request);
-                let response = if request_index == 0 {
-                    json!({
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": null,
-                                "tool_calls": [{
-                                    "id": "provider-fixture-call",
-                                    "type": "function",
-                                    "function": {
-                                        "name": response_model_name,
-                                        "arguments": format!(
-                                            "{{\"text\":\"runtime request\",\"api_token\":\"{}\"}}",
-                                            MODEL_PRIVATE_ARGUMENT
-                                        )
-                                    }
-                                }]
-                            },
-                            "finish_reason": "tool_calls"
-                        }]
-                    })
-                } else {
-                    json!({
-                        "choices": [{
-                            "message": {
-                                "role": "assistant",
-                                "content": "MCP fixture completed."
-                            },
-                            "finish_reason": "stop"
-                        }]
-                    })
-                };
+                let response = json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "provider-fixture-call",
+                                "type": "function",
+                                "function": {
+                                    "name": response_model_name,
+                                    "arguments": format!(
+                                        "{{\"text\":\"runtime request\",\"api_token\":\"{}\"}}",
+                                        MODEL_PRIVATE_ARGUMENT
+                                    )
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                });
                 write_json_response(&mut stream, response).await;
             }
         });
@@ -1210,6 +1935,7 @@ mod tests {
         let input = AgentChatInput {
             api_url: format!("http://{address}/v1/chat/completions"),
             api_token: "owned-fixture-token".to_string(),
+            provider_configuration_revision: None,
             model: "owned-fixture-model".to_string(),
             model_capabilities: ModelCapabilities::default(),
             api_style: Some(AgentApiStyle::OpenAiCompatible),
@@ -1273,63 +1999,53 @@ mod tests {
         .unwrap();
         server.await.unwrap();
 
-        assert_eq!(output.content, "MCP fixture completed.");
+        assert_eq!(
+            output.status,
+            mycopilot_core::AgentRunStatus::WaitingForApproval
+        );
         {
             let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
-            assert_eq!(requests.len(), 2);
+            assert_eq!(requests.len(), 1);
             assert!(requests[0]["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|tool| tool["function"]["name"] == model_name));
-            let tool_message = requests[1]["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|message| message["role"] == "tool")
-                .expect("second request contains the MCP tool result");
-            let tool_content: serde_json::Value =
-                serde_json::from_str(tool_message["content"].as_str().unwrap()).unwrap();
-            assert_eq!(tool_content["structuredContent"], json!({"sum": 3}));
-            assert!(
-                tool_message["content"]
-                    .as_str()
-                    .unwrap()
-                    .contains(MCP_PRIVATE_RESULT),
-                "the live model turn receives the bounded MCP result"
-            );
-            assert!(
-                tool_content.get("provenance").is_none(),
-                "typed MCP routing provenance stays in the trace, not model content"
-            );
-            assert!(
-                !requests[1].to_string().contains(MODEL_PRIVATE_ARGUMENT),
-                "credential-shaped MCP arguments are not replayed into model context"
-            );
         }
-
-        {
-            let calls = peer.calls.lock().unwrap_or_else(|error| error.into_inner());
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].name, "raw/echo");
-            assert_eq!(
-                calls[0].arguments,
-                json!({
-                    "text": "runtime request",
-                    "api_token": MODEL_PRIVATE_ARGUMENT,
-                })
-            );
-        }
-
-        let trace = output
-            .conversation_turn_trace
-            .expect("runtime produces an MCP trace");
-        assert!(trace.truncated);
-        let durable_trace = serde_json::to_string(&trace).unwrap();
-        assert!(!durable_trace.contains(MODEL_PRIVATE_ARGUMENT));
         assert!(
-            !durable_trace.contains(MCP_PRIVATE_RESULT),
-            "MCP output remains transient and is not copied into durable model context"
+            peer.calls
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty(),
+            "Prompt mode must stop at a prepared approval before dispatch"
+        );
+        let approval = match output.proposed_actions.as_slice() {
+            [AgentProposedAction::McpToolCall { approval }] => approval.as_ref().clone(),
+            actions => panic!("expected one typed MCP approval, got {actions:?}"),
+        };
+        assert!(approval
+            .call
+            .args
+            .as_object()
+            .is_some_and(|args| args.is_empty()));
+        let invocation_id =
+            McpApprovalInvocationId::parse(approval.identity.invocation_id.clone()).unwrap();
+        let sealed = bridge
+            .payloads
+            .load(&invocation_id, &approval_aad(&approval))
+            .expect("prepare_approval seals the transient argument payload");
+        assert!(!format!("{sealed:?}").contains(MODEL_PRIVATE_ARGUMENT));
+        sealed
+            .with_json(|arguments| {
+                assert_eq!(arguments["api_token"], MODEL_PRIVATE_ARGUMENT);
+            })
+            .unwrap();
+
+        let durable_output = serde_json::to_string(&output).unwrap();
+        assert!(!durable_output.contains(MODEL_PRIVATE_ARGUMENT));
+        assert!(
+            !durable_output.contains(MCP_PRIVATE_RESULT),
+            "no MCP output exists before the approved invocation"
         );
         {
             let trace_snapshots = trace_snapshots
@@ -1344,33 +2060,22 @@ mod tests {
             .unwrap();
             assert!(!serialized_snapshots.contains(MODEL_PRIVATE_ARGUMENT));
             assert!(!serialized_snapshots.contains(MCP_PRIVATE_RESULT));
-            assert!(trace_snapshots
-                .last()
-                .expect("runtime publishes a final MCP trace snapshot")
-                .model_context_items
-                .iter()
-                .any(|item| item.content.contains("externalToolOutputNotPersisted")));
         }
-        assert!(trace.items.iter().any(|item| matches!(
-            item,
-            ConversationTurnTraceItem::ToolCall {
-                provenance: Some(AgentToolIdentity::Mcp { provenance }),
-                ..
-            } if provenance.raw_tool_name == "raw/echo"
-                && provenance.model_tool_name == model_name
-        )));
         let _ = manager.stop_all().await;
     }
 
     #[test]
     fn resource_uri_and_binary_content_are_not_retained() {
-        let mapped = map_content_block(McpContentBlock::EmbeddedResource {
-            resource: McpEmbeddedResource::Blob {
-                uri: "https://secret.invalid/private".to_string(),
-                mime_type: Some("application/octet-stream".to_string()),
-                data: "private-base64".to_string(),
+        let mapped = map_content_block(
+            McpContentBlock::EmbeddedResource {
+                resource: McpEmbeddedResource::Blob {
+                    uri: "https://secret.invalid/private".to_string(),
+                    mime_type: Some("application/octet-stream".to_string()),
+                    data: "private-base64".to_string(),
+                },
             },
-        });
+            &McpRuntimeProjectionLimits::default(),
+        );
         assert_eq!(
             mapped,
             McpToolContentBlock::Omitted {

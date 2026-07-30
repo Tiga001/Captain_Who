@@ -491,7 +491,7 @@ impl ContinuitySelector {
             }
             ContextCompactionSourceItem::TraceItem { cursor, item, .. } => {
                 if matches!(
-                    item,
+                    &**item,
                     ConversationTurnTraceItem::ToolCall { tool, .. }
                         | ConversationTurnTraceItem::ToolResult { tool, .. }
                         if is_continuity_excluded_tool(tool)
@@ -499,7 +499,7 @@ impl ContinuitySelector {
                     return;
                 }
                 increment(&mut self.archived_counts, COUNT_TRACE_ITEMS);
-                match item {
+                match &**item {
                     ConversationTurnTraceItem::AssistantNarration { .. } => {
                         increment(&mut self.archived_counts, COUNT_NARRATION);
                     }
@@ -797,7 +797,7 @@ mod tests {
                 cursor: ContextJournalCursor::trace_item("assistant-1", index * 2),
                 run_id: "run-1".to_string(),
                 created_at: 2_000,
-                item: ConversationTurnTraceItem::ToolCall {
+                item: Box::new(ConversationTurnTraceItem::ToolCall {
                     sequence: index * 2,
                     call_id: format!("call-{index}"),
                     tool: "read_file".to_string(),
@@ -805,13 +805,13 @@ mod tests {
                     operation: json!({ "path": format!("file-{index}.txt") }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
-                },
+                }),
             },
             ContextCompactionSourceItem::TraceItem {
                 cursor: ContextJournalCursor::trace_item("assistant-1", index * 2 + 1),
                 run_id: "run-1".to_string(),
                 created_at: 2_000,
-                item: ConversationTurnTraceItem::ToolResult {
+                item: Box::new(ConversationTurnTraceItem::ToolResult {
                     sequence: index * 2 + 1,
                     call_id: format!("call-{index}"),
                     tool: "read_file".to_string(),
@@ -823,7 +823,7 @@ mod tests {
                         .then(|| "failed".to_string()),
                     truncated: false,
                     archive: Default::default(),
-                },
+                }),
             },
         ]
     }
@@ -1011,7 +1011,7 @@ mod tests {
                         cursor: ContextJournalCursor::trace_item("assistant-1", 0),
                         run_id: "run-1".to_string(),
                         created_at: 1,
-                        item: ConversationTurnTraceItem::ToolCall {
+                        item: Box::new(ConversationTurnTraceItem::ToolCall {
                             sequence: 0,
                             call_id: "transient-call".to_string(),
                             tool: tool.to_string(),
@@ -1019,13 +1019,13 @@ mod tests {
                             operation: json!({}),
                             approval_status: AgentApprovalStatus::NotRequired,
                             truncated: false,
-                        },
+                        }),
                     },
                     ContextCompactionSourceItem::TraceItem {
                         cursor,
                         run_id: "run-1".to_string(),
                         created_at: 1,
-                        item: ConversationTurnTraceItem::ToolResult {
+                        item: Box::new(ConversationTurnTraceItem::ToolResult {
                             sequence: 1,
                             call_id: "transient-call".to_string(),
                             tool: tool.to_string(),
@@ -1036,7 +1036,7 @@ mod tests {
                             error: None,
                             truncated: false,
                             archive: Default::default(),
-                        },
+                        }),
                     },
                 ],
             })

@@ -27,7 +27,7 @@ use stream::parse_sse_response;
 #[cfg(test)]
 use stream::{process_sse_frame, LlmStreamAccumulator};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct LlmChatRequest {
     pub api_url: String,
     pub api_token: String,
@@ -40,7 +40,13 @@ pub(crate) struct LlmChatRequest {
     pub tools: Vec<AgentToolDefinition>,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for LlmChatRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LlmChatRequest([REDACTED])")
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct LlmChatResponse {
     pub content: String,
     pub tool_calls: Vec<LlmToolCall>,
@@ -48,7 +54,13 @@ pub(crate) struct LlmChatResponse {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for LlmChatResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LlmChatResponse([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub(crate) struct LlmMessage {
     pub role: LlmMessageRole,
     pub content: String,
@@ -57,6 +69,12 @@ pub(crate) struct LlmMessage {
     pub tool_calls: Vec<LlmToolCall>,
     pub is_error: bool,
     pub placement: LlmMessagePlacement,
+}
+
+impl std::fmt::Debug for LlmMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LlmMessage([REDACTED])")
+    }
 }
 
 impl LlmMessage {
@@ -140,10 +158,16 @@ impl LlmMessagePlacement {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct LlmImage {
     pub mime_type: String,
     pub data_base64: String,
+}
+
+impl std::fmt::Debug for LlmImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LlmImage([REDACTED])")
+    }
 }
 
 impl LlmMessageRole {
@@ -157,14 +181,20 @@ impl LlmMessageRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) struct LlmToolCall {
     pub id: String,
     pub name: String,
     pub args: Value,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for LlmToolCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LlmToolCall([REDACTED])")
+    }
+}
+
+#[derive(Clone)]
 pub(crate) enum LlmStreamEvent {
     AttemptStarted {
         attempt: usize,
@@ -186,6 +216,12 @@ pub(crate) enum LlmStreamEvent {
         reason: String,
     },
     Committed,
+}
+
+impl std::fmt::Debug for LlmStreamEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("LlmStreamEvent([REDACTED])")
+    }
 }
 
 pub(crate) fn detect_api_style(api_url: &str) -> AgentApiStyle {

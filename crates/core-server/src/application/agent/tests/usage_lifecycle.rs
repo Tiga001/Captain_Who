@@ -297,6 +297,14 @@ fn failed_project_deletion_releases_the_command_finalization_barrier() {
 fn pending_approval_persists_full_run_checkpoint() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "secret",
+        "disabled",
+        "",
+    );
     let service = AgentService::new(storage.clone());
     let base_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
@@ -309,6 +317,7 @@ fn pending_approval_persists_full_run_checkpoint() {
     let run_checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-checkpoint".to_string(),
+        pending_action_id: None,
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
                 role: "system".to_string(),
@@ -346,6 +355,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         ],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
@@ -397,6 +407,6 @@ fn pending_approval_persists_full_run_checkpoint() {
     );
     assert!(record.agent_input.messages.is_empty());
     assert!(record.agent_input.attachments.is_empty());
-    assert!(record.agent_input.api_token.is_empty());
+    assert!(!record.agent_input.api_token.is_empty());
     assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
 }

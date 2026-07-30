@@ -1,14 +1,29 @@
-use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord};
+use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord, ModelSettingsSnapshot};
 use crate::storage::now_ms;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use uuid::Uuid;
+
+const MODEL_SETTINGS_REVISION_PREFIX: &str = "model-settings-v1:";
 
 pub fn load_model_settings(
-    connection: &Connection,
+    connection: &mut Connection,
 ) -> rusqlite::Result<Option<ModelSettingsRecord>> {
-    let settings = connection
+    Ok(load_model_settings_snapshot(connection)?.map(|snapshot| snapshot.settings))
+}
+
+pub fn load_model_settings_snapshot(
+    connection: &mut Connection,
+) -> rusqlite::Result<Option<ModelSettingsSnapshot>> {
+    let transaction = connection.transaction()?;
+    let settings = transaction
         .query_row(
             "
-            SELECT api_url, api_token, search_mode, tavily_api_key
+            SELECT
+                api_url,
+                api_token,
+                search_mode,
+                tavily_api_key,
+                configuration_revision
             FROM model_provider_settings
             WHERE id = 'default'
             ",
@@ -19,21 +34,32 @@ pub fn load_model_settings(
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((api_url, api_token, search_mode, tavily_api_key)) = settings else {
+    let Some((api_url, api_token, search_mode, tavily_api_key, configuration_revision)) = settings
+    else {
+        transaction.commit()?;
         return Ok(None);
     };
+    if !is_model_settings_revision(&configuration_revision) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
 
-    Ok(Some(ModelSettingsRecord {
-        api_url,
-        api_token,
-        search_mode,
-        tavily_api_key,
-        models: load_models(connection)?,
+    let models = load_models(&transaction)?;
+    transaction.commit()?;
+    Ok(Some(ModelSettingsSnapshot {
+        settings: ModelSettingsRecord {
+            api_url,
+            api_token,
+            search_mode,
+            tavily_api_key,
+            models,
+        },
+        configuration_revision,
     }))
 }
 
@@ -42,6 +68,7 @@ pub fn save_model_settings(
     settings: ModelSettingsRecord,
 ) -> rusqlite::Result<()> {
     let timestamp = now_ms();
+    let configuration_revision = new_model_settings_revision();
     let transaction = connection.transaction()?;
 
     transaction.execute(
@@ -52,14 +79,16 @@ pub fn save_model_settings(
             api_token,
             search_mode,
             tavily_api_key,
+            configuration_revision,
             updated_at
         )
-        VALUES ('default', ?1, ?2, ?3, ?4, ?5)
+        VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6)
         ON CONFLICT(id) DO UPDATE SET
             api_url = excluded.api_url,
             api_token = excluded.api_token,
             search_mode = excluded.search_mode,
             tavily_api_key = excluded.tavily_api_key,
+            configuration_revision = excluded.configuration_revision,
             updated_at = excluded.updated_at
         ",
         params![
@@ -67,6 +96,7 @@ pub fn save_model_settings(
             &settings.api_token,
             &settings.search_mode,
             &settings.tavily_api_key,
+            configuration_revision,
             timestamp
         ],
     )?;
@@ -111,7 +141,7 @@ pub fn save_model_settings(
     transaction.commit()
 }
 
-fn load_models(connection: &Connection) -> rusqlite::Result<Vec<ModelConfigRecord>> {
+fn load_models(connection: &Transaction<'_>) -> rusqlite::Result<Vec<ModelConfigRecord>> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -146,4 +176,16 @@ fn load_models(connection: &Connection) -> rusqlite::Result<Vec<ModelConfigRecor
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     Ok(models)
+}
+
+fn new_model_settings_revision() -> String {
+    format!("{MODEL_SETTINGS_REVISION_PREFIX}{}", Uuid::new_v4())
+}
+
+pub fn is_model_settings_revision(value: &str) -> bool {
+    let Some(raw_uuid) = value.strip_prefix(MODEL_SETTINGS_REVISION_PREFIX) else {
+        return false;
+    };
+    Uuid::parse_str(raw_uuid)
+        .is_ok_and(|uuid| uuid.get_version_num() == 4 && uuid.to_string() == raw_uuid)
 }

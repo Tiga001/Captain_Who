@@ -3,6 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::{McpDispatchCertainty, McpOutcomeUnknownReason};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -11,8 +13,10 @@ pub enum McpErrorKind {
     Spawn,
     Negotiation,
     Protocol,
+    OutputTooLarge,
     Timeout,
     Cancelled,
+    OutcomeUnknown,
     ServerExited,
     Shutdown,
 }
@@ -27,6 +31,10 @@ pub struct McpError {
     pub operation: Option<String>,
     pub timeout_ms: Option<u64>,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_certainty: Option<McpDispatchCertainty>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_unknown_reason: Option<McpOutcomeUnknownReason>,
 }
 
 impl McpError {
@@ -44,6 +52,14 @@ impl McpError {
 
     pub fn protocol(message: impl Into<String>) -> Self {
         Self::new(McpErrorKind::Protocol, message)
+            .with_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
+    }
+
+    pub fn output_too_large(operation: impl Into<String>, message: impl Into<String>) -> Self {
+        let mut error = Self::new(McpErrorKind::OutputTooLarge, message);
+        error.operation = Some(operation.into());
+        error.dispatch_certainty = Some(McpDispatchCertainty::ResponseReceived);
+        error
     }
 
     pub fn timeout(operation: impl Into<String>, timeout_ms: u64) -> Self {
@@ -54,6 +70,8 @@ impl McpError {
             operation: Some(operation),
             timeout_ms: Some(timeout_ms),
             exit_code: None,
+            dispatch_certainty: Some(McpDispatchCertainty::DefinitelyNotDispatched),
+            outcome_unknown_reason: None,
         }
     }
 
@@ -65,6 +83,27 @@ impl McpError {
             operation: Some(operation),
             timeout_ms: None,
             exit_code: None,
+            dispatch_certainty: Some(McpDispatchCertainty::DefinitelyNotDispatched),
+            outcome_unknown_reason: None,
+        }
+    }
+
+    pub fn outcome_unknown(
+        operation: impl Into<String>,
+        reason: McpOutcomeUnknownReason,
+        certainty: McpDispatchCertainty,
+    ) -> Self {
+        let operation = operation.into();
+        Self {
+            kind: McpErrorKind::OutcomeUnknown,
+            message: format!(
+                "{operation} was interrupted after dispatch; the server outcome is unknown"
+            ),
+            operation: Some(operation),
+            timeout_ms: None,
+            exit_code: None,
+            dispatch_certainty: Some(certainty),
+            outcome_unknown_reason: Some(reason),
         }
     }
 
@@ -75,11 +114,19 @@ impl McpError {
             operation: None,
             timeout_ms: None,
             exit_code,
+            dispatch_certainty: Some(McpDispatchCertainty::DefinitelyNotDispatched),
+            outcome_unknown_reason: None,
         }
     }
 
     pub fn shutdown(message: impl Into<String>) -> Self {
         Self::new(McpErrorKind::Shutdown, message)
+            .with_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
+    }
+
+    pub fn with_dispatch_certainty(mut self, certainty: McpDispatchCertainty) -> Self {
+        self.dispatch_certainty = Some(certainty);
+        self
     }
 
     fn new(kind: McpErrorKind, message: impl Into<String>) -> Self {
@@ -89,6 +136,8 @@ impl McpError {
             operation: None,
             timeout_ms: None,
             exit_code: None,
+            dispatch_certainty: None,
+            outcome_unknown_reason: None,
         }
     }
 }
@@ -100,8 +149,10 @@ impl fmt::Display for McpErrorKind {
             Self::Spawn => "spawn",
             Self::Negotiation => "negotiation",
             Self::Protocol => "protocol",
+            Self::OutputTooLarge => "output_too_large",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
+            Self::OutcomeUnknown => "outcome_unknown",
             Self::ServerExited => "server_exited",
             Self::Shutdown => "shutdown",
         };

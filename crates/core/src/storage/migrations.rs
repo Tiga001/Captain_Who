@@ -7,6 +7,7 @@ const REMOVE_INITIAL_DEMO_PROFILE_TASK: &str = "remove_initial_demo_profile";
 const CLEAR_PLACEHOLDER_TAVILY_KEY_TASK: &str = "clear_placeholder_tavily_key";
 const CLEAR_INITIAL_API_URL_TASK: &str = "clear_initial_api_url";
 const REMOVE_RETIRED_BUNDLED_SKILL_TASK: &str = "remove_retired_bundled_skill_v1";
+const SCRUB_LEGACY_AGENT_ACTION_PAYLOADS_TASK: &str = "scrub_legacy_agent_action_payloads_v1";
 const RETIRED_BUNDLED_SKILL_ID: &str = "bundled:application:repository-evidence-auditor";
 const INITIAL_API_URL: &str = "https://zju.smartml.cn/userapi/v1/model/v1/chat/completions";
 
@@ -1316,6 +1317,69 @@ fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
     transaction.commit()
 }
 
+/// Removes payload-bearing columns from action rows which predate the versioned safe projections.
+///
+/// The maintenance marker is created in the same transaction as the scrub, so every row present
+/// before this release is handled exactly once. Current non-terminal rows remain available for
+/// Host startup reconciliation, which owns their status transition and sealed-payload cleanup.
+/// Terminal pending rows and audit-only receipts have no resumable payload and are scrubbed with
+/// direct SQL: no untrusted JSON is deserialized, formatted, or returned to application code.
+fn scrub_legacy_agent_action_payloads(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    let already_completed = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM maintenance_tasks WHERE id = ?1)",
+        [SCRUB_LEGACY_AGENT_ACTION_PAYLOADS_TASK],
+        |row| row.get::<_, bool>(0),
+    )?;
+
+    if !already_completed {
+        transaction.execute(
+            "
+            UPDATE agent_pending_actions
+            SET action_json = '{}',
+                agent_input_json = '{}'
+            WHERE status IN ('rejected', 'cancelled', 'completed', 'failed')
+            ",
+            [],
+        )?;
+        transaction.execute(
+            "
+            UPDATE agent_action_audit
+            SET action_json = '{}',
+                patch_result_json = NULL,
+                command_result_json = NULL,
+                tool_result_json = NULL,
+                error = NULL,
+                effective_permissions_json = NULL,
+                path_scope = NULL,
+                command_cwd_scope = NULL,
+                blocked_reason = NULL
+            WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM agent_pending_actions AS pending
+                    WHERE pending.action_id = agent_action_audit.action_id
+                )
+               OR EXISTS (
+                    SELECT 1
+                    FROM agent_pending_actions AS pending
+                    WHERE pending.action_id = agent_action_audit.action_id
+                      AND pending.status IN ('rejected', 'cancelled', 'completed', 'failed')
+                )
+            ",
+            [],
+        )?;
+        transaction.execute(
+            "
+            INSERT INTO maintenance_tasks (id, completed_at)
+            VALUES (?1, CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+            ",
+            [SCRUB_LEGACY_AGENT_ACTION_PAYLOADS_TASK],
+        )?;
+    }
+
+    transaction.commit()
+}
+
 fn remove_retired_bundled_skill_from_drafts(
     transaction: &rusqlite::Transaction<'_>,
 ) -> rusqlite::Result<()> {
@@ -1696,6 +1760,18 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             agent_input_json TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS mcp_approval_payload_envelopes (
+            invocation_id TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL UNIQUE,
+            envelope_version INTEGER NOT NULL,
+            envelope_json TEXT NOT NULL,
+            aad_digest TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            CHECK (envelope_version > 0),
+            CHECK (expires_at > created_at)
         );
 
         CREATE TABLE IF NOT EXISTS agent_file_drafts (
@@ -2442,6 +2518,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_status ON agent_pending_actions(status);
         CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_run_id ON agent_pending_actions(run_id);
         CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_conversation_id ON agent_pending_actions(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_mcp_approval_payload_envelopes_expires_at
+            ON mcp_approval_payload_envelopes(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_mcp_approval_payload_envelopes_action_id
+            ON mcp_approval_payload_envelopes(action_id);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_conversation_status ON agent_file_drafts(conversation_id, status);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
@@ -2544,6 +2624,26 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "messages", "ui_state_json", "TEXT")?;
     add_column_if_missing(
         connection,
+        "model_provider_settings",
+        "configuration_revision",
+        "TEXT",
+    )?;
+    connection.execute(
+        "
+        UPDATE model_provider_settings
+        SET configuration_revision =
+            'model-settings-v1:' || lower(hex(randomblob(4))) || '-' ||
+            lower(hex(randomblob(2))) || '-4' ||
+            substr(lower(hex(randomblob(2))), 2) || '-8' ||
+            substr(lower(hex(randomblob(2))), 2) || '-' ||
+            lower(hex(randomblob(6)))
+        WHERE configuration_revision IS NULL
+           OR configuration_revision = ''
+        ",
+        [],
+    )?;
+    add_column_if_missing(
+        connection,
         "conversation_forks",
         "target_message_id",
         "TEXT REFERENCES messages(id) ON DELETE CASCADE",
@@ -2609,6 +2709,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "agent_action_audit", "blocked_reason", "TEXT")?;
     add_column_if_missing(connection, "agent_action_audit", "decision_source", "TEXT")?;
     add_column_if_missing(connection, "agent_pending_actions", "target_status", "TEXT")?;
+    scrub_legacy_agent_action_payloads(connection)?;
     add_column_if_missing(
         connection,
         "context_compaction_summaries",
@@ -2627,6 +2728,248 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrubs_all_legacy_terminal_and_audit_only_payload_columns_once() {
+        const CANARY: &str = "LEGACY_ACTION_PLAINTEXT_CANARY";
+
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "DELETE FROM maintenance_tasks WHERE id = ?1",
+                [SCRUB_LEGACY_AGENT_ACTION_PAYLOADS_TASK],
+            )
+            .unwrap();
+
+        for status in ["rejected", "cancelled", "completed", "failed"] {
+            let action_id = format!("terminal-{status}");
+            connection
+                .execute(
+                    "
+                    INSERT INTO agent_pending_actions (
+                        action_id, run_id, action_type, tool_name, status, target_status,
+                        action_json, agent_input_json, created_at, updated_at
+                    )
+                    VALUES (?1, 'run-legacy', 'mcp_tool_call', 'legacy_tool', ?2, ?2, ?3, ?3, 1, 2)
+                    ",
+                    rusqlite::params![action_id, status, CANARY],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "
+                    INSERT INTO agent_action_audit (
+                        action_id, run_id, action_type, tool_name, status, action_json,
+                        patch_result_json, command_result_json, tool_result_json, error,
+                        created_at, effective_permissions_json, path_scope, command_cwd_scope,
+                        blocked_reason
+                    )
+                    VALUES (
+                        ?1, 'run-legacy', 'mcp_tool_call', 'legacy_tool', ?2, ?3,
+                        ?3, ?3, ?3, ?3, 1, ?3, ?3, ?3, ?3
+                    )
+                    ",
+                    rusqlite::params![action_id, status, CANARY],
+                )
+                .unwrap();
+        }
+
+        connection
+            .execute(
+                "
+                INSERT INTO agent_action_audit (
+                    action_id, run_id, action_type, tool_name, status, action_json,
+                    patch_result_json, command_result_json, tool_result_json, error,
+                    created_at, effective_permissions_json, path_scope, command_cwd_scope,
+                    blocked_reason
+                )
+                VALUES (
+                    'audit-only', 'run-legacy', 'mcp_tool_call', 'legacy_tool', 'completed',
+                    ?1, ?1, ?1, ?1, ?1, 1, ?1, ?1, ?1, ?1
+                )
+                ",
+                [CANARY],
+            )
+            .unwrap();
+
+        // A non-terminal row is intentionally left for Host startup reconciliation. Its matching
+        // audit must remain untouched so split-commit recovery retains its evidence.
+        connection
+            .execute(
+                "
+                INSERT INTO agent_pending_actions (
+                    action_id, run_id, action_type, tool_name, status,
+                    action_json, agent_input_json, created_at, updated_at
+                )
+                VALUES (
+                    'active', 'run-active', 'tool_call', 'write_file', 'approved',
+                    ?1, ?1, 1, 2
+                )
+                ",
+                [CANARY],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO agent_action_audit (
+                    action_id, run_id, action_type, tool_name, status, action_json,
+                    tool_result_json, error, created_at
+                )
+                VALUES (
+                    'active', 'run-active', 'tool_call', 'write_file', 'completed',
+                    ?1, ?1, ?1, 1
+                )
+                ",
+                [CANARY],
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let terminal_plaintext_count = connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM agent_pending_actions
+                WHERE status IN ('rejected', 'cancelled', 'completed', 'failed')
+                  AND (action_json <> '{}' OR agent_input_json <> '{}')
+                ",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        assert_eq!(terminal_plaintext_count, 0);
+
+        let scrubbed_audit_canary_count = connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM agent_action_audit
+                WHERE action_id <> 'active'
+                  AND (
+                    action_json LIKE '%' || ?1 || '%'
+                    OR COALESCE(patch_result_json, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(command_result_json, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(tool_result_json, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(error, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(effective_permissions_json, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(path_scope, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(command_cwd_scope, '') LIKE '%' || ?1 || '%'
+                    OR COALESCE(blocked_reason, '') LIKE '%' || ?1 || '%'
+                  )
+                ",
+                [CANARY],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        assert_eq!(scrubbed_audit_canary_count, 0);
+
+        let active_payloads = connection
+            .query_row(
+                "
+                SELECT pending.action_json, pending.agent_input_json, audit.action_json,
+                       audit.tool_result_json, audit.error
+                FROM agent_pending_actions AS pending
+                JOIN agent_action_audit AS audit ON audit.action_id = pending.action_id
+                WHERE pending.action_id = 'active'
+                ",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            active_payloads,
+            (
+                CANARY.to_string(),
+                CANARY.to_string(),
+                CANARY.to_string(),
+                Some(CANARY.to_string()),
+                Some(CANARY.to_string()),
+            )
+        );
+
+        let maintenance_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM maintenance_tasks WHERE id = ?1",
+                [SCRUB_LEGACY_AGENT_ACTION_PAYLOADS_TASK],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        assert_eq!(maintenance_count, 1);
+
+        connection
+            .execute(
+                "
+                INSERT INTO agent_pending_actions (
+                    action_id, run_id, action_type, tool_name, status, target_status,
+                    action_json, agent_input_json, created_at, updated_at
+                )
+                VALUES (
+                    'post-maintenance', 'run-current', 'tool_call', 'current_tool', 'completed',
+                    'completed', '{\"safeProjection\":true}', '{}', 3, 4
+                )
+                ",
+                [],
+            )
+            .unwrap();
+        run_migrations(&connection).unwrap();
+        let current_projection = connection
+            .query_row(
+                "SELECT action_json FROM agent_pending_actions WHERE action_id = 'post-maintenance'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(current_projection, r#"{"safeProjection":true}"#);
+    }
+
+    #[test]
+    fn backfills_a_canonical_random_revision_for_legacy_model_settings() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE model_provider_settings (
+                    id TEXT PRIMARY KEY CHECK (id = 'default'),
+                    api_url TEXT NOT NULL,
+                    api_token TEXT NOT NULL,
+                    search_mode TEXT NOT NULL,
+                    tavily_api_key TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO model_provider_settings (
+                    id, api_url, api_token, search_mode, tavily_api_key, updated_at
+                ) VALUES (
+                    'default', 'https://migration.invalid', 'fixed-test-token',
+                    'disabled', '', 1
+                );
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+        let revision = connection
+            .query_row(
+                "SELECT configuration_revision
+                 FROM model_provider_settings
+                 WHERE id = 'default'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+
+        assert!(crate::storage::config_repository::is_model_settings_revision(&revision));
+    }
 
     #[test]
     fn backfills_pre_journal_goals_as_unattributed_initial_snapshots() {

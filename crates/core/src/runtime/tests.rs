@@ -1285,6 +1285,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
     AgentChatInput {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: String::new(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -4568,6 +4569,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),
@@ -4901,6 +4903,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -5063,6 +5066,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -5413,6 +5417,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -5692,6 +5697,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     let base_input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -6102,6 +6108,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
+        provider_configuration_revision: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),

@@ -5,7 +5,10 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use crate::{config_digest, McpConfigDigest, McpError, McpServerConfig, McpServerId};
+use crate::{
+    config_digest, McpConfigDigest, McpConfigEpoch, McpError, McpServerConfig, McpServerId,
+    McpServerScope,
+};
 
 const REGISTRY_CHANGE_CAPACITY: usize = 128;
 
@@ -14,6 +17,9 @@ const REGISTRY_CHANGE_CAPACITY: usize = 128;
 pub struct McpRegistryEntry {
     pub config: McpServerConfig,
     pub config_digest: McpConfigDigest,
+    /// Opaque, non-reusable identity for this exact configuration incarnation.
+    pub config_epoch: McpConfigEpoch,
+    /// Monotonic Registry-wide event ordering revision.
     pub revision: u64,
 }
 
@@ -26,6 +32,7 @@ impl fmt::Debug for McpRegistryEntry {
             .field("scope", &self.config.scope)
             .field("trust", &self.config.trust)
             .field("config_digest", &self.config_digest)
+            .field("config_epoch", &self.config_epoch)
             .field("revision", &self.revision)
             .finish()
     }
@@ -46,8 +53,12 @@ pub struct McpRegistryChange {
     pub revision: u64,
     pub kind: McpRegistryChangeKind,
     pub server_id: McpServerId,
+    pub scope: McpServerScope,
     pub enabled: bool,
     pub config_digest: McpConfigDigest,
+    /// For removal this is the removed configuration's epoch. A later re-add
+    /// always receives a different epoch even if its digest is identical.
+    pub config_epoch: McpConfigEpoch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +174,7 @@ impl McpRegistry for InMemoryMcpRegistry {
         let entry = McpRegistryEntry {
             config,
             config_digest: digest,
+            config_epoch: McpConfigEpoch::new(),
             revision,
         };
         state.entries.insert(entry.config.id, entry.clone());
@@ -170,8 +182,10 @@ impl McpRegistry for InMemoryMcpRegistry {
             revision,
             kind: McpRegistryChangeKind::Added,
             server_id: entry.config.id,
+            scope: entry.config.scope.clone(),
             enabled: entry.config.enabled,
             config_digest: entry.config_digest.clone(),
+            config_epoch: entry.config_epoch,
         };
         self.publish(change);
         Ok(entry)
@@ -193,6 +207,7 @@ impl McpRegistry for InMemoryMcpRegistry {
         let entry = McpRegistryEntry {
             config,
             config_digest: digest,
+            config_epoch: McpConfigEpoch::new(),
             revision,
         };
         state.entries.insert(entry.config.id, entry.clone());
@@ -205,8 +220,10 @@ impl McpRegistry for InMemoryMcpRegistry {
             revision,
             kind,
             server_id: entry.config.id,
+            scope: entry.config.scope.clone(),
             enabled: entry.config.enabled,
             config_digest: entry.config_digest.clone(),
+            config_epoch: entry.config_epoch,
         };
         self.publish(change);
         Ok(if existed {
@@ -230,8 +247,10 @@ impl McpRegistry for InMemoryMcpRegistry {
             revision,
             kind: McpRegistryChangeKind::Removed,
             server_id,
+            scope: removed.config.scope.clone(),
             enabled: removed.config.enabled,
             config_digest: removed.config_digest.clone(),
+            config_epoch: removed.config_epoch,
         };
         self.publish(change);
         Ok(Some(removed))
@@ -265,7 +284,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::{McpEnvBinding, McpServerScope, McpStdioConfig, McpTransportConfig, McpTrustLevel};
+    use crate::{
+        McpApprovalMode, McpEnvBinding, McpServerScope, McpStdioConfig, McpTransportConfig,
+        McpTrustLevel,
+    };
 
     fn config(id: McpServerId, display_name: &str) -> McpServerConfig {
         McpServerConfig {
@@ -273,6 +295,7 @@ mod tests {
             display_name: display_name.to_string(),
             scope: McpServerScope::User,
             trust: McpTrustLevel::UserApproved,
+            approval_mode: McpApprovalMode::Prompt,
             enabled: true,
             transport: McpTransportConfig::Stdio(McpStdioConfig {
                 program: PathBuf::from("/owned/fixture"),
@@ -309,6 +332,46 @@ mod tests {
         let encoded = serde_json::to_string(&change).unwrap();
         assert!(!encoded.contains("opaque-secret-reference"));
         assert!(!encoded.contains("TOKEN"));
+        assert_eq!(change.scope, McpServerScope::User);
+    }
+
+    #[tokio::test]
+    async fn update_and_remove_changes_keep_only_safe_old_source_identity() {
+        let registry = InMemoryMcpRegistry::new();
+        let mut changes = registry.subscribe();
+        let id = McpServerId::new();
+        let original = config(id, "original");
+        registry.add(original.clone()).unwrap();
+        let added = changes.recv().await.unwrap();
+        assert_eq!(added.kind, McpRegistryChangeKind::Added);
+
+        let mut updated = original;
+        updated.display_name = "updated".to_string();
+        updated.scope = McpServerScope::Project {
+            project_id: "safe-project-id".to_string(),
+        };
+        let expected_digest = match registry.upsert(updated).unwrap() {
+            McpRegistryMutation::Updated(entry) => entry.config_digest,
+            other => panic!("expected update, got {other:?}"),
+        };
+        let update = changes.recv().await.unwrap();
+        assert_eq!(update.kind, McpRegistryChangeKind::Updated);
+        assert_eq!(
+            update.scope,
+            McpServerScope::Project {
+                project_id: "safe-project-id".to_string()
+            }
+        );
+        assert_eq!(update.config_digest, expected_digest);
+
+        registry.remove(id).unwrap().unwrap();
+        let removed = changes.recv().await.unwrap();
+        assert_eq!(removed.kind, McpRegistryChangeKind::Removed);
+        assert_eq!(removed.scope, update.scope);
+        assert_eq!(removed.config_digest, update.config_digest);
+        let encoded = serde_json::to_string(&removed).unwrap();
+        assert!(!encoded.contains("opaque-secret-reference"));
+        assert!(!encoded.contains("TOKEN"));
     }
 
     #[test]
@@ -316,11 +379,54 @@ mod tests {
         let registry = InMemoryMcpRegistry::new();
         let id = McpServerId::new();
         let original = config(id, "same");
-        registry.add(original.clone()).unwrap();
+        let added = registry.add(original.clone()).unwrap();
         assert!(registry.add(original.clone()).is_err());
-        assert!(matches!(
-            registry.upsert(original).unwrap(),
-            McpRegistryMutation::Unchanged(_)
-        ));
+        let unchanged = match registry.upsert(original).unwrap() {
+            McpRegistryMutation::Unchanged(entry) => entry,
+            other => panic!("expected unchanged entry, got {other:?}"),
+        };
+        assert_eq!(unchanged.config_epoch, added.config_epoch);
+        assert_eq!(unchanged.revision, added.revision);
+    }
+
+    #[tokio::test]
+    async fn effective_mutations_never_reuse_a_configuration_epoch() {
+        let registry = InMemoryMcpRegistry::new();
+        let mut changes = registry.subscribe();
+        let id = McpServerId::new();
+        let original = config(id, "config-a");
+        let added = registry.add(original.clone()).unwrap();
+        let added_change = changes.recv().await.unwrap();
+        assert_eq!(added_change.config_epoch, added.config_epoch);
+
+        let mut changed = original.clone();
+        changed.display_name = "config-b".to_string();
+        let changed = match registry.upsert(changed).unwrap() {
+            McpRegistryMutation::Updated(entry) => entry,
+            other => panic!("expected updated entry, got {other:?}"),
+        };
+        assert_ne!(changed.config_epoch, added.config_epoch);
+        assert!(changed.revision > added.revision);
+        let _ = changes.recv().await.unwrap();
+
+        let restored = match registry.upsert(original.clone()).unwrap() {
+            McpRegistryMutation::Updated(entry) => entry,
+            other => panic!("expected restored entry, got {other:?}"),
+        };
+        assert_eq!(restored.config_digest, added.config_digest);
+        assert_ne!(restored.config_epoch, added.config_epoch);
+        assert_ne!(restored.config_epoch, changed.config_epoch);
+        assert!(restored.revision > changed.revision);
+        let _ = changes.recv().await.unwrap();
+
+        let removed = registry.remove(id).unwrap().unwrap();
+        let removed_change = changes.recv().await.unwrap();
+        assert_eq!(removed_change.config_epoch, restored.config_epoch);
+        assert_eq!(removed_change.revision, removed.revision);
+
+        let readded = registry.add(original).unwrap();
+        assert_eq!(readded.config_digest, added.config_digest);
+        assert_ne!(readded.config_epoch, removed.config_epoch);
+        assert!(readded.revision > removed.revision);
     }
 }

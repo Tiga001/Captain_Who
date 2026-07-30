@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{McpError, McpServerId};
 
-pub(crate) const MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
+pub(crate) const MAX_TIMEOUT_MS: u64 = 300_000;
+const MAX_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const MAX_SHUTDOWN_TIMEOUT_MS: u64 = 2_000;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +29,20 @@ pub enum McpTrustLevel {
     UserApproved,
     Managed,
     Builtin,
+}
+
+/// Host-side policy for every tool invocation from this server.
+///
+/// `Prompt` means the Host must obtain a distinct per-call approval before it
+/// invokes the Manager. `Deny` is an emergency/configuration kill switch and is
+/// enforced again inside the Manager.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum McpApprovalMode {
+    #[default]
+    Prompt,
+    Deny,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +132,8 @@ pub struct McpServerConfig {
     pub display_name: String,
     pub scope: McpServerScope,
     pub trust: McpTrustLevel,
+    #[serde(default)]
+    pub approval_mode: McpApprovalMode,
     pub enabled: bool,
     pub transport: McpTransportConfig,
     #[serde(default = "McpServerConfig::default_connect_timeout_ms")]
@@ -132,7 +150,7 @@ impl McpServerConfig {
     }
 
     pub const fn default_request_timeout_ms() -> u64 {
-        30_000
+        60_000
     }
 
     pub const fn default_shutdown_timeout_ms() -> u64 {
@@ -152,16 +170,20 @@ impl McpServerConfig {
     }
 
     pub(crate) fn validate_timeouts(&self) -> Result<(), McpError> {
-        for (name, value) in [
-            ("connect", self.connect_timeout_ms),
-            ("request", self.request_timeout_ms),
-            ("shutdown", self.shutdown_timeout_ms),
-        ] {
-            if !(1..=MAX_TIMEOUT_MS).contains(&value) {
-                return Err(McpError::config(format!(
-                    "MCP {name} timeout must be between 1 ms and 24 hours"
-                )));
-            }
+        if !(1..=MAX_CONNECT_TIMEOUT_MS).contains(&self.connect_timeout_ms) {
+            return Err(McpError::config(
+                "MCP connect timeout must be between 1 ms and 10 seconds",
+            ));
+        }
+        if !(1..=MAX_TIMEOUT_MS).contains(&self.request_timeout_ms) {
+            return Err(McpError::config(
+                "MCP request timeout must be between 1 ms and 300 seconds",
+            ));
+        }
+        if !(1..=MAX_SHUTDOWN_TIMEOUT_MS).contains(&self.shutdown_timeout_ms) {
+            return Err(McpError::config(
+                "MCP shutdown timeout must be between 1 ms and 2 seconds",
+            ));
         }
         Ok(())
     }
@@ -175,11 +197,52 @@ impl fmt::Debug for McpServerConfig {
             .field("display_name", &self.display_name)
             .field("scope", &self.scope)
             .field("trust", &self.trust)
+            .field("approval_mode", &self.approval_mode)
             .field("enabled", &self.enabled)
             .field("transport", &self.transport)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("shutdown_timeout_ms", &self.shutdown_timeout_ms)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> McpServerConfig {
+        McpServerConfig {
+            id: McpServerId::new(),
+            display_name: "owned fixture".to_string(),
+            scope: McpServerScope::User,
+            trust: McpTrustLevel::UserApproved,
+            approval_mode: McpApprovalMode::Prompt,
+            enabled: true,
+            transport: McpTransportConfig::Stdio(McpStdioConfig {
+                program: PathBuf::from("/owned-fixture"),
+                arguments: Vec::new(),
+                cwd: PathBuf::from("/"),
+                environment: Vec::new(),
+            }),
+            connect_timeout_ms: McpServerConfig::default_connect_timeout_ms(),
+            request_timeout_ms: McpServerConfig::default_request_timeout_ms(),
+            shutdown_timeout_ms: McpServerConfig::default_shutdown_timeout_ms(),
+        }
+    }
+
+    #[test]
+    fn transport_timeouts_cannot_exceed_host_hard_limits() {
+        let mut value = config();
+        value.validate_timeouts().unwrap();
+
+        value.connect_timeout_ms = MAX_CONNECT_TIMEOUT_MS + 1;
+        assert!(value.validate_timeouts().is_err());
+        value = config();
+        value.request_timeout_ms = MAX_TIMEOUT_MS + 1;
+        assert!(value.validate_timeouts().is_err());
+        value = config();
+        value.shutdown_timeout_ms = MAX_SHUTDOWN_TIMEOUT_MS + 1;
+        assert!(value.validate_timeouts().is_err());
     }
 }

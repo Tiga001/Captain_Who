@@ -590,9 +590,11 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
     dynamically_activated_input.resume_checkpoint = Some(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-dynamic-installed-skill".to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: vec![mycopilot_core::AgentExtensionSnapshot {
             extension_id: "skills".to_string(),
@@ -1136,10 +1138,20 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
     assert_eq!(prepared.agent_input.api_url, "https://model.example/v1");
     assert_eq!(prepared.agent_input.api_token, "model-token");
 
-    let mut persisted_input = prepared.agent_input;
-    persisted_input.api_url = "https://stale.example/v1".to_string();
-    persisted_input.api_token.clear();
-    let restored = restore_agent_input_secrets(&storage, persisted_input);
+    let persisted = PersistedAgentResumeInput::from_agent_input(&prepared.agent_input).encode();
+    let restored = restore_agent_input_secrets(
+        &storage,
+        PersistedAgentResumeInput::decode(&persisted).unwrap(),
+    )
+    .unwrap();
     assert_eq!(restored.api_url, "https://model.example/v1");
     assert_eq!(restored.api_token, "model-token");
+
+    let mut stale = prepared.agent_input;
+    stale.api_url = "https://stale.example/v1".to_string();
+    let stale = PersistedAgentResumeInput::from_agent_input(&stale).encode();
+    let error =
+        restore_agent_input_secrets(&storage, PersistedAgentResumeInput::decode(&stale).unwrap())
+            .unwrap_err();
+    assert!(error.contains("endpoint no longer matches"));
 }

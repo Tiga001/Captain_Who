@@ -102,22 +102,39 @@ pub(super) fn conversation_trace_from_input_checkpoint(
     };
     let snapshot = match input.tool_continuation.as_ref() {
         Some(continuation) => {
+            // `pending_action_id` is the typed checkpoint marker for an MCP approval. The live
+            // continuation still carries the bounded authoritative result for the next model
+            // request, but the trace observer must see the exact same safe projection that was
+            // atomically committed with the pending-action settlement. Otherwise the first
+            // resumed trace publication attempts to rewrite the already committed ToolResult
+            // and correctly fails the append-only prefix check.
+            //
+            // Deliberately do not infer MCP identity from the provider-visible tool name.
+            let is_mcp = checkpoint.pending_action_id.is_some();
+            let durable_result = if is_mcp {
+                crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
+            } else {
+                continuation.result.clone()
+            };
             let projected =
-                crate::tools::model_projection_for_persisted_continuation(&continuation.result);
+                crate::tools::model_projection_for_persisted_continuation(&durable_result);
+            // The Host archive contains this same safe projection, not the raw MCP result. Keep
+            // its non-secret trace identity so resumed publications remain an exact prefix.
+            let durable_archive = archive_metadata.clone();
             let model_observation = finalize_model_tool_observation(
                 model_tool_result_gate,
                 &continuation.call.id,
                 !continuation.result.ok,
                 &projected,
-                archive_metadata,
+                &durable_archive,
             )?;
             conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
                 checkpoint,
                 &continuation.call,
-                &continuation.result,
+                &durable_result,
                 input.assistant_message_id.as_deref(),
                 &model_observation,
-                archive_metadata.clone(),
+                durable_archive,
             )
         }
         None => ConversationTraceSnapshot {

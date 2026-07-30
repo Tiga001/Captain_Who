@@ -1,4 +1,5 @@
 use super::*;
+use serde::Serializer;
 
 #[derive(Clone)]
 pub(crate) struct PendingActionRecord {
@@ -83,9 +84,22 @@ pub struct PendingAgentActionSnapshot {
     pub run_id: String,
     pub conversation_id: Option<String>,
     pub assistant_message_id: Option<String>,
+    #[serde(serialize_with = "serialize_renderer_safe_action")]
     pub action: AgentProposedAction,
     pub created_at: i64,
     pub status: PendingActionStatus,
+}
+
+fn serialize_renderer_safe_action<S>(
+    action: &AgentProposedAction,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut value = serde_json::to_value(action).map_err(serde::ser::Error::custom)?;
+    redact_renderer_mcp_binding_fields(&mut value);
+    value.serialize(serializer)
 }
 
 #[derive(Debug, Clone, Serialize)]

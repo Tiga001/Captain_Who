@@ -508,6 +508,7 @@ mod tests {
         AgentChatInput {
             api_url,
             api_token: "secret-token".to_string(),
+            provider_configuration_revision: None,
             model: "summary-model".to_string(),
             model_capabilities: crate::ModelCapabilities::default(),
             api_style: Some(api_style),

@@ -9,13 +9,17 @@ use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::catalog::discover_catalog;
+use crate::catalog::discover_catalog_with_limits;
+use crate::limits::{validate_structured_content, validate_tool_arguments};
 use crate::{
+    BoxMcpFuture, McpActiveCallId, McpActiveCallProvenance, McpActiveCallSnapshot, McpApprovalMode,
     McpCancellationToken, McpCatalogCompleteness, McpCatalogIssue, McpCatalogPolicy,
-    McpCatalogSnapshot, McpCatalogToolCall, McpConfigDigest, McpConnector, McpError, McpEvent,
-    McpEventSink, McpPeer, McpPeerNotificationState, McpProtocolSnapshot, McpRegistry,
-    McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry, McpRegistrySubscriptionError,
-    McpSafeError, McpServerId, McpServerScope, McpServerState, McpToolCall, McpToolId,
+    McpCatalogSnapshot, McpCatalogToolCall, McpConfigDigest, McpConfigEpoch, McpConnector,
+    McpDispatchCertainty, McpDispatchTracker, McpError, McpErrorKind, McpEvent, McpEventSink,
+    McpInvocationId, McpInvocationState, McpModelCallId, McpOutcomeUnknownReason, McpPeer,
+    McpPeerNotificationState, McpProtocolSnapshot, McpRegistry, McpRegistryChange,
+    McpRegistryChangeKind, McpRegistryEntry, McpRegistrySubscriptionError, McpSafeError,
+    McpSecurityLimits, McpServerId, McpServerScope, McpServerState, McpToolCall, McpToolId,
     McpToolResult, McpTrustLevel, NoopMcpEventSink,
 };
 
@@ -25,6 +29,8 @@ const FORCE_SHUTDOWN_GRACE_MAX: Duration = Duration::from_millis(250);
 pub struct McpManagerPolicy {
     pub catalog: McpCatalogPolicy,
     pub notification_debounce: Duration,
+    pub active_call_settle_timeout: Duration,
+    pub security_limits: McpSecurityLimits,
 }
 
 impl Default for McpManagerPolicy {
@@ -32,6 +38,8 @@ impl Default for McpManagerPolicy {
         Self {
             catalog: McpCatalogPolicy::default(),
             notification_debounce: Duration::from_millis(100),
+            active_call_settle_timeout: Duration::from_millis(250),
+            security_limits: McpSecurityLimits::default(),
         }
     }
 }
@@ -40,16 +48,22 @@ impl Default for McpManagerPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct McpServerStatus {
     pub server_id: McpServerId,
+    /// Bounded, control-character-normalized text for display only.
+    pub display_name: String,
     pub state: McpServerState,
     pub enabled: bool,
     pub scope: McpServerScope,
     pub trust: McpTrustLevel,
+    pub approval_mode: McpApprovalMode,
+    pub config_epoch: McpConfigEpoch,
+    pub registry_revision: u64,
     pub config_digest: McpConfigDigest,
     pub protocol: Option<McpProtocolSnapshot>,
     pub notification_state: McpPeerNotificationState,
     pub catalog_generation: u64,
     pub catalog_completeness: McpCatalogCompleteness,
     pub tool_count: usize,
+    pub active_call_count: usize,
     pub last_error: Option<McpSafeError>,
 }
 
@@ -57,16 +71,21 @@ impl McpServerStatus {
     fn from_registry(entry: &McpRegistryEntry) -> Self {
         Self {
             server_id: entry.config.id,
+            display_name: safe_display_name(&entry.config.display_name),
             state: McpServerState::Disabled,
             enabled: entry.config.enabled,
             scope: entry.config.scope.clone(),
             trust: entry.config.trust,
+            approval_mode: entry.config.approval_mode,
+            config_epoch: entry.config_epoch,
+            registry_revision: entry.revision,
             config_digest: entry.config_digest.clone(),
             protocol: None,
             notification_state: McpPeerNotificationState::Unknown,
             catalog_generation: 0,
             catalog_completeness: McpCatalogCompleteness::Failed(McpCatalogIssue::RequestFailed),
             tool_count: 0,
+            active_call_count: 0,
             last_error: None,
         }
     }
@@ -93,6 +112,7 @@ struct ManagedEntryState {
     refresh_inflight: bool,
     watcher_cancel: Option<CancellationToken>,
     watcher_task: Option<JoinHandle<()>>,
+    active_calls: BTreeMap<McpActiveCallId, Arc<ActiveCallControl>>,
     removed: bool,
 }
 
@@ -102,10 +122,165 @@ struct ManagedEntry {
     settled: Notify,
 }
 
+struct ActiveCallControl {
+    id: McpActiveCallId,
+    provenance: McpActiveCallProvenance,
+    cancellation: McpCancellationToken,
+    dispatch: McpDispatchTracker,
+    state: StdMutex<McpInvocationState>,
+    cancellation_reason: StdMutex<Option<McpOutcomeUnknownReason>>,
+    started_at: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+    timeout_ms: u64,
+    removed: AtomicBool,
+    settled: Notify,
+}
+
+impl ActiveCallControl {
+    fn new(id: McpActiveCallId, provenance: McpActiveCallProvenance, timeout_ms: u64) -> Self {
+        let started_at = tokio::time::Instant::now();
+        let deadline = started_at + Duration::from_millis(timeout_ms);
+        Self {
+            id,
+            provenance,
+            cancellation: McpCancellationToken::new(),
+            dispatch: McpDispatchTracker::new(),
+            state: StdMutex::new(McpInvocationState::Dispatching),
+            cancellation_reason: StdMutex::new(None),
+            started_at,
+            deadline,
+            timeout_ms,
+            removed: AtomicBool::new(false),
+            settled: Notify::new(),
+        }
+    }
+
+    fn snapshot(&self) -> McpActiveCallSnapshot {
+        McpActiveCallSnapshot {
+            id: self.id.clone(),
+            provenance: self.provenance.clone(),
+            state: self
+                .state
+                .lock()
+                .map(|state| *state)
+                .unwrap_or(McpInvocationState::OutcomeUnknown),
+            dispatch_phase: self.dispatch.phase(),
+            dispatch_certainty: self.dispatch.certainty(),
+            timeout_ms: self.timeout_ms,
+            elapsed_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            deadline_remaining_ms: u64::try_from(
+                self.deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
+        }
+    }
+
+    fn set_state(&self, next: McpInvocationState) {
+        if let Ok(mut state) = self.state.lock() {
+            *state = next;
+        }
+        if is_terminal_invocation_state(next) {
+            self.settled.notify_waiters();
+        }
+    }
+
+    fn cancel(&self, reason: McpOutcomeUnknownReason) {
+        if let Ok(mut stored) = self.cancellation_reason.lock() {
+            if stored.is_none() {
+                *stored = Some(reason);
+            }
+        }
+        self.cancellation.cancel();
+    }
+
+    fn cancellation_reason(&self) -> McpOutcomeUnknownReason {
+        self.cancellation_reason
+            .lock()
+            .ok()
+            .and_then(|reason| *reason)
+            .unwrap_or(McpOutcomeUnknownReason::Cancelled)
+    }
+
+    async fn wait_terminal(&self) {
+        loop {
+            let notified = self.settled.notified();
+            let terminal = self
+                .state
+                .lock()
+                .map(|state| is_terminal_invocation_state(*state))
+                .unwrap_or(true);
+            if terminal {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn wait_removed(&self) {
+        loop {
+            let notified = self.settled.notified();
+            if self.removed.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct ActiveCallGuard {
+    entry: Arc<ManagedEntry>,
+    control: Arc<ActiveCallControl>,
+}
+
+impl Drop for ActiveCallGuard {
+    fn drop(&mut self) {
+        let terminal = self
+            .control
+            .state
+            .lock()
+            .map(|state| is_terminal_invocation_state(*state))
+            .unwrap_or(true);
+        if !terminal {
+            let next = if self.control.dispatch.certainty()
+                == McpDispatchCertainty::DefinitelyNotDispatched
+            {
+                McpInvocationState::Cancelled
+            } else {
+                McpInvocationState::OutcomeUnknown
+            };
+            self.control.set_state(next);
+        }
+        let status = if let Ok(mut state) = self.entry.state.lock() {
+            if state
+                .active_calls
+                .get(&self.control.id)
+                .is_some_and(|active| Arc::ptr_eq(active, &self.control))
+            {
+                state.active_calls.remove(&self.control.id);
+            }
+            state.status.active_call_count = state.active_calls.len();
+            Some(state.status.clone())
+        } else {
+            None
+        };
+        if let Some(status) = status {
+            self.entry.publish_status(&status);
+        } else {
+            self.entry.settled.notify_waiters();
+        }
+        self.control.removed.store(true, Ordering::Release);
+        self.control.settled.notify_waiters();
+    }
+}
+
 impl ManagedEntry {
     fn new(registry: &McpRegistryEntry) -> Self {
         let status = McpServerStatus::from_registry(registry);
         let mut catalog = McpCatalogSnapshot::empty(registry.config.id);
+        catalog.source_config_epoch = Some(registry.config_epoch);
+        catalog.source_registry_revision = Some(registry.revision);
         catalog.source_config_digest = Some(registry.config_digest.clone());
         let (status_sender, _) = watch::channel(status.clone());
         Self {
@@ -120,6 +295,7 @@ impl ManagedEntry {
                 refresh_inflight: false,
                 watcher_cancel: None,
                 watcher_task: None,
+                active_calls: BTreeMap::new(),
                 removed: false,
             }),
             status: status_sender,
@@ -238,9 +414,34 @@ impl McpConnectionManager {
         policy: McpManagerPolicy,
     ) -> Result<Self, McpError> {
         policy.catalog.limits.validate()?;
+        policy.security_limits.validate()?;
+        let catalog_limits = &policy.catalog.limits;
+        let security_limits = &policy.security_limits;
+        if catalog_limits.max_pages > security_limits.max_catalog_pages
+            || catalog_limits.max_tools > security_limits.max_tools
+            || catalog_limits.max_schema_bytes_per_page > security_limits.max_schema_bytes_per_page
+            || catalog_limits.max_total_schema_bytes > security_limits.max_total_schema_bytes
+            || catalog_limits.max_descriptor_bytes_per_page
+                > security_limits.max_descriptor_bytes_per_page
+            || catalog_limits.max_total_descriptor_bytes
+                > security_limits.max_total_descriptor_bytes
+            || catalog_limits.max_cursor_bytes > security_limits.max_cursor_bytes
+            || catalog_limits.max_model_name_bytes > security_limits.max_model_name_bytes
+        {
+            return Err(McpError::config(
+                "MCP catalog limits exceed the centralized security policy",
+            ));
+        }
         if policy.notification_debounce > Duration::from_secs(60) {
             return Err(McpError::config(
                 "MCP notification debounce must not exceed 60 seconds",
+            ));
+        }
+        if policy.active_call_settle_timeout.is_zero()
+            || policy.active_call_settle_timeout > Duration::from_secs(30)
+        {
+            return Err(McpError::config(
+                "MCP active-call settlement timeout must be between 1 ms and 30 seconds",
             ));
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
@@ -336,7 +537,9 @@ impl McpConnectionManager {
                 if state.removed {
                     return Err(McpError::config("MCP server is being removed"));
                 }
-                let same_config = state.status.config_digest == registry.config_digest;
+                let same_config = state.status.config_epoch == registry.config_epoch
+                    && state.status.registry_revision == registry.revision
+                    && state.status.config_digest == registry.config_digest;
                 if matches!(
                     state.status.state,
                     McpServerState::Ready | McpServerState::Degraded
@@ -366,16 +569,17 @@ impl McpConnectionManager {
                     state.closing_peer = old_peer.clone();
                     let old_cancel = state.watcher_cancel.take();
                     let old_watcher = state.watcher_task.take();
+                    let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
                     transition_locked(
                         &self.inner.events,
                         &entry,
                         &mut state,
                         McpServerState::Starting,
                     );
-                    Some((epoch, old_peer, old_cancel, old_watcher))
+                    Some((epoch, old_peer, old_cancel, old_watcher, active_calls))
                 }
             };
-            let Some((epoch, old_peer, old_cancel, old_watcher)) = reservation else {
+            let Some((epoch, old_peer, old_cancel, old_watcher, active_calls)) = reservation else {
                 notified.await;
                 continue;
             };
@@ -386,6 +590,10 @@ impl McpConnectionManager {
             if let Some(cancel) = old_cancel {
                 cancel.cancel();
             }
+            cancel_active_calls(&active_calls, McpOutcomeUnknownReason::ServerRestarted);
+            let _ =
+                settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout)
+                    .await;
             if let Some(peer) = old_peer {
                 let _ = peer.close().await;
                 clear_closing_peer(&entry, &peer);
@@ -468,6 +676,23 @@ impl McpConnectionManager {
                 let error = McpError::protocol(
                     "MCP connector returned a peer for a different server identity",
                 );
+                let _ = peer.close().await;
+                let mut state = lock_entry(&entry)?;
+                state.connect_inflight = false;
+                if state.epoch == epoch && state.status.state == McpServerState::Starting {
+                    set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                } else {
+                    let status = state.status.clone();
+                    entry.publish_status(&status);
+                }
+                return Err(error);
+            }
+            if let Err(error) = self
+                .inner
+                .policy
+                .security_limits
+                .validate_protocol_snapshot(peer.protocol_snapshot())
+            {
                 let _ = peer.close().await;
                 let mut state = lock_entry(&entry)?;
                 state.connect_inflight = false;
@@ -782,10 +1007,11 @@ impl McpConnectionManager {
         let graceful_grace = timeout.saturating_sub(force_grace);
         if !graceful_grace.is_zero() {
             if let Ok(results) = tokio::time::timeout(graceful_grace, self.stop_all_owned()).await {
+                let cleanup_complete = self.graceful_shutdown_cleanup_complete(&results);
                 return McpShutdownReport {
                     results,
                     forced: false,
-                    cleanup_complete: true,
+                    cleanup_complete,
                 };
             }
         }
@@ -798,27 +1024,75 @@ impl McpConnectionManager {
         }
     }
 
+    fn graceful_shutdown_cleanup_complete(&self, results: &[McpBatchOperationResult]) -> bool {
+        if results.iter().any(|result| {
+            result.server_id.is_none()
+                || result.error.is_some()
+                || result.status.as_ref().is_none_or(|status| {
+                    status.state != McpServerState::Disabled || status.active_call_count != 0
+                })
+        }) {
+            return false;
+        }
+        let Ok(entries) = self.inner.entries.lock() else {
+            return false;
+        };
+        if entries.len() != results.len() {
+            return false;
+        }
+        if !entries.values().all(|entry| {
+            entry.state.lock().is_ok_and(|state| {
+                state.peer.is_none()
+                    && state.closing_peer.is_none()
+                    && state.watcher_cancel.is_none()
+                    && state.watcher_task.is_none()
+                    && !state.connect_inflight
+                    && !state.refresh_inflight
+                    && state.active_calls.is_empty()
+                    && state.status.state == McpServerState::Disabled
+                    && state.status.active_call_count == 0
+            })
+        }) {
+            return false;
+        }
+        self.inner
+            .lifecycle
+            .lock()
+            .is_ok_and(|lifecycle| !lifecycle.draining && lifecycle.active_starts == 0)
+    }
+
     async fn force_shutdown_entries(
         &self,
         force_grace: Duration,
     ) -> (Vec<McpBatchOperationResult>, bool) {
-        let entries = self
-            .inner
-            .entries
-            .lock()
-            .map(|entries| {
+        let (entries, mut cleanup_complete) = match self.inner.entries.lock() {
+            Ok(entries) => (
                 entries
                     .iter()
                     .map(|(server_id, entry)| (*server_id, Arc::clone(entry)))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+                    .collect::<Vec<_>>(),
+                true,
+            ),
+            Err(poisoned) => (
+                poisoned
+                    .into_inner()
+                    .iter()
+                    .map(|(server_id, entry)| (*server_id, Arc::clone(entry)))
+                    .collect::<Vec<_>>(),
+                false,
+            ),
+        };
         let mut tasks = JoinSet::new();
         let mut results = Vec::with_capacity(entries.len());
-        for (server_id, entry) in entries {
-            let (peers, cancel, watcher, status) = {
-                let Ok(mut state) = entry.state.lock() else {
-                    continue;
+        let mut active_calls_to_verify = Vec::new();
+        for (server_id, entry) in &entries {
+            let (peers, cancel, watcher, active_calls, status) = {
+                let mut state = match entry.state.lock() {
+                    Ok(state) => state,
+                    Err(poisoned) => {
+                        cleanup_complete = false;
+                        poisoned.into_inner()
+                    }
                 };
                 state.removed = true;
                 state.epoch = state.epoch.saturating_add(1);
@@ -835,8 +1109,9 @@ impl McpConnectionManager {
                 }
                 let cancel = state.watcher_cancel.take();
                 let watcher = state.watcher_task.take();
+                let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
                 let generation = state.catalog.generation;
-                state.catalog = McpCatalogSnapshot::empty(server_id);
+                state.catalog = McpCatalogSnapshot::empty(*server_id);
                 state.catalog.generation = generation;
                 sync_catalog_status_from_state(&mut state);
                 state.status.protocol = None;
@@ -844,11 +1119,11 @@ impl McpConnectionManager {
                 state.status.last_error = None;
                 transition_locked(
                     &self.inner.events,
-                    &entry,
+                    entry,
                     &mut state,
                     McpServerState::Disabled,
                 );
-                (peers, cancel, watcher, state.status.clone())
+                (peers, cancel, watcher, active_calls, state.status.clone())
             };
             if let Some(cancel) = cancel {
                 cancel.cancel();
@@ -856,33 +1131,80 @@ impl McpConnectionManager {
             if let Some(watcher) = watcher {
                 watcher.abort();
                 tasks.spawn(async move {
-                    let _ = watcher.await;
+                    match watcher.await {
+                        Ok(()) => true,
+                        Err(error) => error.is_cancelled(),
+                    }
+                });
+            }
+            cancel_active_calls(&active_calls, McpOutcomeUnknownReason::Shutdown);
+            if !active_calls.is_empty() {
+                active_calls_to_verify.extend(active_calls.iter().cloned());
+                tasks.spawn(async move {
+                    wait_for_active_call_removal(&active_calls).await;
+                    true
                 });
             }
             for peer in peers {
                 let _ = peer.force_close();
-                tasks.spawn(async move {
-                    let _ = peer.close().await;
-                });
+                tasks.spawn(async move { peer.close().await.is_ok() });
             }
             results.push(McpBatchOperationResult {
-                server_id: Some(server_id),
+                server_id: Some(*server_id),
                 status: Some(status),
                 error: None,
             });
         }
 
-        let settled = tokio::time::timeout(force_grace, async {
-            while tasks.join_next().await.is_some() {}
+        let tasks_complete: bool = tokio::time::timeout(force_grace, async {
+            let mut complete = true;
+            while let Some(result) = tasks.join_next().await {
+                complete &= result.unwrap_or(false);
+            }
+            complete
         })
         .await
-        .is_ok();
-        if !settled {
+        .unwrap_or_default();
+        cleanup_complete &= tasks_complete;
+
+        if !tasks_complete {
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
         }
+        cleanup_complete &= active_calls_to_verify.iter().all(|active| {
+            active.removed.load(Ordering::Acquire)
+                && active
+                    .state
+                    .lock()
+                    .map(|state| is_terminal_invocation_state(*state))
+                    .unwrap_or(false)
+        });
+        for (server_id, entry) in &entries {
+            let state = match entry.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    cleanup_complete = false;
+                    poisoned.into_inner()
+                }
+            };
+            let entry_complete = state.peer.is_none()
+                && state.closing_peer.is_none()
+                && state.watcher_cancel.is_none()
+                && state.watcher_task.is_none()
+                && !state.connect_inflight
+                && !state.refresh_inflight
+                && state.active_calls.is_empty()
+                && state.status.active_call_count == 0;
+            cleanup_complete &= entry_complete;
+            if let Some(result) = results
+                .iter_mut()
+                .find(|result| result.server_id == Some(*server_id))
+            {
+                result.status = Some(state.status.clone());
+            }
+        }
         results.sort_by_key(|result| result.server_id);
-        (results, settled)
+        (results, cleanup_complete)
     }
 
     async fn stop_all_owned(&self) -> Vec<McpBatchOperationResult> {
@@ -1038,6 +1360,49 @@ impl McpConnectionManager {
         Ok(Some(catalog))
     }
 
+    pub fn active_call(
+        &self,
+        id: &McpActiveCallId,
+    ) -> Result<Option<McpActiveCallSnapshot>, McpError> {
+        let Some(entry) = self.get_entry(id.server_id)? else {
+            return Ok(None);
+        };
+        let snapshot = lock_entry(&entry)?
+            .active_calls
+            .get(id)
+            .map(|call| call.snapshot());
+        Ok(snapshot)
+    }
+
+    pub fn list_active_calls(
+        &self,
+        server_id: Option<McpServerId>,
+    ) -> Result<Vec<McpActiveCallSnapshot>, McpError> {
+        let entries = self
+            .inner
+            .entries
+            .lock()
+            .map_err(|_| McpError::protocol("MCP manager entries lock is unavailable"))?;
+        let mut calls = Vec::new();
+        for (entry_server_id, entry) in entries.iter() {
+            if server_id.is_some_and(|expected| expected != *entry_server_id) {
+                continue;
+            }
+            calls.extend(
+                lock_entry(entry)?
+                    .active_calls
+                    .values()
+                    .map(|call| call.snapshot()),
+            );
+        }
+        calls.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(calls)
+    }
+
+    pub fn active_call_count(&self) -> Result<usize, McpError> {
+        Ok(self.list_active_calls(None)?.len())
+    }
+
     pub fn resolve_model_name(&self, model_name: &str) -> Result<Option<McpToolId>, McpError> {
         let entries = self
             .inner
@@ -1055,6 +1420,8 @@ impl McpConnectionManager {
                     McpServerState::Ready | McpServerState::Degraded
                 )
                 || state.peer.is_none()
+                || state.catalog.source_config_epoch != Some(state.status.config_epoch)
+                || state.catalog.source_registry_revision != Some(state.status.registry_revision)
                 || state.catalog.source_config_digest.as_ref() != Some(&state.status.config_digest)
                 || state.catalog.completeness != McpCatalogCompleteness::Complete
             {
@@ -1083,7 +1450,30 @@ impl McpConnectionManager {
         request: McpCatalogToolCall,
         cancellation: McpCancellationToken,
     ) -> Result<McpToolResult, McpError> {
+        let invocation_id = McpInvocationId::new();
+        let model_call_id = McpModelCallId::new(format!("legacy-{invocation_id}"))?;
+        let id = McpActiveCallId::new(request.tool_id.server_id, invocation_id, model_call_id);
+        self.call_catalog_tool_identified(id, request, cancellation)
+            .await
+    }
+
+    /// Invoke a catalog-bound tool using the Host/Runtime identity that will
+    /// also appear in approval records, traces and checkpoints.
+    pub async fn call_catalog_tool_identified(
+        &self,
+        id: McpActiveCallId,
+        request: McpCatalogToolCall,
+        cancellation: McpCancellationToken,
+    ) -> Result<McpToolResult, McpError> {
         let server_id = request.tool_id.server_id;
+        if id.server_id != server_id {
+            return Err(McpError::config(
+                "MCP active-call identity does not match the catalog route",
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(McpError::cancelled("MCP tools/call"));
+        }
         let registry =
             self.inner.registry.get(server_id)?.ok_or_else(|| {
                 McpError::config("MCP catalog invocation server is not registered")
@@ -1098,12 +1488,18 @@ impl McpConnectionManager {
                 "MCP catalog invocation server is not trusted",
             ));
         }
+        if registry.config.approval_mode == McpApprovalMode::Deny {
+            return Err(McpError::config(
+                "MCP tool invocation is denied by server approval policy",
+            ));
+        }
+        validate_tool_arguments(&request.arguments, &self.inner.policy.security_limits)?;
         let entry = self
             .get_entry(server_id)?
             .ok_or_else(|| McpError::config("MCP catalog invocation server is not ready"))?;
 
-        let (peer, call, timeout_ms) = {
-            let state = lock_entry(&entry)?;
+        let (peer, call, control, active_status) = {
+            let mut state = lock_entry(&entry)?;
             if state.removed {
                 return Err(McpError::config(
                     "MCP catalog invocation server is not registered",
@@ -1117,6 +1513,11 @@ impl McpConnectionManager {
             if state.status.trust == McpTrustLevel::Untrusted {
                 return Err(McpError::config(
                     "MCP catalog invocation server is not trusted",
+                ));
+            }
+            if state.status.approval_mode == McpApprovalMode::Deny {
+                return Err(McpError::config(
+                    "MCP tool invocation is denied by server approval policy",
                 ));
             }
             if state.status.state != McpServerState::Ready {
@@ -1137,7 +1538,13 @@ impl McpConnectionManager {
                     "MCP catalog invocation catalog is incomplete",
                 ));
             }
-            if state.status.config_digest != registry.config_digest
+            if state.status.config_epoch != registry.config_epoch
+                || state.status.registry_revision != registry.revision
+                || request.expected_config_epoch != state.status.config_epoch
+                || request.expected_registry_revision != state.status.registry_revision
+                || state.catalog.source_config_epoch != Some(state.status.config_epoch)
+                || state.catalog.source_registry_revision != Some(state.status.registry_revision)
+                || state.status.config_digest != registry.config_digest
                 || state.catalog.source_config_digest.as_ref() != Some(&state.status.config_digest)
                 || request.expected_config_digest != state.status.config_digest
             {
@@ -1168,6 +1575,7 @@ impl McpConnectionManager {
             }
             if tool.raw_name != request.tool_id.raw_name
                 || tool.model_name != request.expected_model_name
+                || tool.schema_digest != request.expected_schema_digest
             {
                 return Err(McpError::config(
                     "MCP catalog invocation tool route is stale",
@@ -1177,34 +1585,138 @@ impl McpConnectionManager {
                 .timeout_ms
                 .filter(|timeout_ms| *timeout_ms > 0)
                 .map(|timeout_ms| timeout_ms.min(registry.config.request_timeout_ms))
-                .unwrap_or(registry.config.request_timeout_ms);
+                .unwrap_or(registry.config.request_timeout_ms)
+                .min(self.inner.policy.security_limits.max_tool_timeout_ms);
+            let provenance = McpActiveCallProvenance {
+                tool_id: request.tool_id.clone(),
+                model_name: request.expected_model_name.clone(),
+                config_epoch: request.expected_config_epoch,
+                registry_revision: request.expected_registry_revision,
+                config_digest: request.expected_config_digest.clone(),
+                catalog_generation: request.expected_catalog_generation,
+                catalog_digest: request.expected_catalog_digest.clone(),
+                schema_digest: request.expected_schema_digest.clone(),
+            };
             let call = McpToolCall {
                 name: request.tool_id.raw_name.clone(),
                 arguments: request.arguments,
                 timeout_ms: Some(timeout_ms),
             };
-            (peer, call, timeout_ms)
+            if state.active_calls.contains_key(&id) {
+                return Err(McpError::config(
+                    "MCP active-call identity is already in use",
+                ));
+            }
+            let control = Arc::new(ActiveCallControl::new(id.clone(), provenance, timeout_ms));
+            state.active_calls.insert(id, Arc::clone(&control));
+            state.status.active_call_count = state.active_calls.len();
+            let active_status = state.status.clone();
+            (peer, call, control, active_status)
         };
 
-        let settle_cancellation = cancellation.clone();
-        let protocol_call = peer.call_tool(call, cancellation);
-        tokio::pin!(protocol_call);
-        let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+        entry.publish_status(&active_status);
+        let _active_guard = ActiveCallGuard {
+            entry: Arc::clone(&entry),
+            control: Arc::clone(&control),
+        };
+        // This is the logical dispatch linearization point. A configuration
+        // mutation committed before the following Registry read is definitely
+        // not dispatched. A mutation committed after this point races a
+        // possibly-dispatched call and is conservatively settled by the
+        // Registry watcher as outcome-unknown.
+        control.dispatch.mark_dispatching();
+        let final_registry =
+            self.inner.registry.get(server_id)?.ok_or_else(|| {
+                McpError::config("MCP catalog invocation server is not registered")
+            })?;
+        if final_registry.config_epoch != request.expected_config_epoch
+            || final_registry.revision != request.expected_registry_revision
+            || final_registry.config_digest != request.expected_config_digest
+            || !final_registry.config.enabled
+            || final_registry.config.trust == McpTrustLevel::Untrusted
+            || final_registry.config.approval_mode == McpApprovalMode::Deny
+        {
+            return Err(McpError::config(
+                "MCP catalog invocation configuration epoch is stale",
+            ));
+        }
+        {
+            let state = lock_entry(&entry)?;
+            if state.removed
+                || state.status.state != McpServerState::Ready
+                || state.status.config_epoch != request.expected_config_epoch
+                || state.status.registry_revision != request.expected_registry_revision
+                || state.catalog.source_config_epoch != Some(request.expected_config_epoch)
+                || state.catalog.source_registry_revision
+                    != Some(request.expected_registry_revision)
+                || state
+                    .active_calls
+                    .get(&control.id)
+                    .is_none_or(|active| !Arc::ptr_eq(active, &control))
+            {
+                return Err(McpError::config(
+                    "MCP catalog invocation configuration epoch is stale",
+                ));
+            }
+        }
+        if self.inner.shutdown_cancel.is_cancelled()
+            || cancellation.is_cancelled()
+            || control.cancellation.is_cancelled()
+        {
+            return Err(McpError::cancelled("MCP tools/call"));
+        }
+        // An SDK request handle only proves local queuing, not whether bytes
+        // reached the server, so cross the uncertainty boundary immediately
+        // before entering the peer.
+        control.dispatch.mark_request_queued();
+        control.set_state(McpInvocationState::Running);
+        let mut protocol_call =
+            peer.call_tool_tracked(call, control.cancellation.clone(), control.dispatch.clone());
+        let deadline = tokio::time::sleep_until(control.deadline);
         tokio::pin!(deadline);
-        tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = self.inner.shutdown_cancel.cancelled() => {
-                settle_cancellation.cancel();
-                let _ = tokio::time::timeout(Duration::from_millis(250), &mut protocol_call).await;
-                Err(McpError::shutdown("MCP connection manager is shutting down"))
+                settle_interrupted_call(
+                    &mut protocol_call,
+                    &control,
+                    self.inner.policy.active_call_settle_timeout,
+                    McpOutcomeUnknownReason::Shutdown,
+                ).await
+            }
+            _ = cancellation.cancelled() => {
+                settle_interrupted_call(
+                    &mut protocol_call,
+                    &control,
+                    self.inner.policy.active_call_settle_timeout,
+                    McpOutcomeUnknownReason::Cancelled,
+                ).await
+            }
+            _ = control.cancellation.cancelled() => {
+                let reason = control.cancellation_reason();
+                settle_interrupted_call(
+                    &mut protocol_call,
+                    &control,
+                    self.inner.policy.active_call_settle_timeout,
+                    reason,
+                ).await
             }
             _ = &mut deadline => {
-                settle_cancellation.cancel();
-                let _ = tokio::time::timeout(Duration::from_millis(250), &mut protocol_call).await;
-                Err(McpError::timeout("MCP tools/call", timeout_ms))
+                settle_interrupted_call(
+                    &mut protocol_call,
+                    &control,
+                    self.inner.policy.active_call_settle_timeout,
+                    McpOutcomeUnknownReason::TimedOut,
+                ).await
             }
-            result = &mut protocol_call => result,
-        }
+            result = &mut protocol_call => normalize_dispatched_result(&control, result),
+        };
+        let result = result.and_then(|result| {
+            validate_tool_result_limits(&result, &self.inner.policy.security_limits)?;
+            Ok(result)
+        });
+        control.set_state(invocation_state_for_result(&result));
+        result
     }
 
     async fn stop_entry(
@@ -1225,6 +1737,7 @@ impl McpConnectionManager {
                     && state.closing_peer.is_none()
                     && !state.connect_inflight
                     && !state.refresh_inflight
+                    && state.active_calls.is_empty()
                 {
                     return Ok(state.status.clone());
                 }
@@ -1237,21 +1750,31 @@ impl McpConnectionManager {
                     state.closing_peer = peer.clone();
                     let cancel = state.watcher_cancel.take();
                     let watcher = state.watcher_task.take();
+                    let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
                     transition_locked(
                         &self.inner.events,
                         &entry,
                         &mut state,
                         McpServerState::Stopping,
                     );
-                    Some((epoch, peer, cancel, watcher))
+                    Some((epoch, peer, cancel, watcher, active_calls))
                 }
             };
-            let Some((epoch, peer, cancel, watcher)) = reservation else {
+            let Some((epoch, peer, cancel, watcher, active_calls)) = reservation else {
                 notified.await;
                 continue;
             };
             if let Some(cancel) = cancel {
                 cancel.cancel();
+            }
+            cancel_active_calls(&active_calls, McpOutcomeUnknownReason::ServerStopped);
+            let settled_before_close =
+                settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout)
+                    .await;
+            if !settled_before_close {
+                if let Some(peer) = peer.as_ref() {
+                    let _ = peer.force_close();
+                }
             }
             let close_result = if let Some(peer) = peer.as_ref() {
                 let result = peer.close().await;
@@ -1260,6 +1783,9 @@ impl McpConnectionManager {
             } else {
                 Ok(())
             };
+            let settled_after_close =
+                settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout)
+                    .await;
             if let Some(watcher) = watcher {
                 let _ = watcher.await;
             }
@@ -1277,6 +1803,13 @@ impl McpConnectionManager {
             let mut state = lock_entry(&entry)?;
             if state.epoch != epoch {
                 return Ok(state.status.clone());
+            }
+            if !settled_after_close || !state.active_calls.is_empty() {
+                let error = McpError::shutdown(
+                    "MCP active-call cleanup did not complete while stopping the server",
+                );
+                set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                return Err(error);
             }
             match close_result {
                 Ok(()) => {
@@ -1308,7 +1841,10 @@ impl McpConnectionManager {
     ) -> Result<McpCatalogSnapshot, McpError> {
         let previous = {
             let state = lock_entry(&entry)?;
-            if state.catalog.source_config_digest.as_ref() == Some(&state.status.config_digest) {
+            if state.catalog.source_config_epoch == Some(state.status.config_epoch)
+                && state.catalog.source_registry_revision == Some(state.status.registry_revision)
+                && state.catalog.source_config_digest.as_ref() == Some(&state.status.config_digest)
+            {
                 state.catalog.clone()
             } else {
                 let mut empty = McpCatalogSnapshot::empty(server_id);
@@ -1316,11 +1852,12 @@ impl McpConnectionManager {
                 empty
             }
         };
-        let discovered = discover_catalog(
+        let discovered = discover_catalog_with_limits(
             peer.as_ref(),
             server_id,
             Some(&previous),
             &self.inner.policy.catalog,
+            &self.inner.policy.security_limits,
         )
         .await;
         let mut state = lock_entry(&entry)?;
@@ -1349,6 +1886,8 @@ impl McpConnectionManager {
                 fallback
             }
         };
+        candidate.source_config_epoch = Some(state.status.config_epoch);
+        candidate.source_registry_revision = Some(state.status.registry_revision);
         candidate.source_config_digest = Some(state.status.config_digest.clone());
         let catalog_changed = candidate != state.catalog;
         state.catalog = candidate.clone();
@@ -1490,7 +2029,7 @@ impl McpConnectionManager {
         epoch: u64,
         exit_code: Option<i32>,
     ) {
-        let peer = {
+        let (peer, active_calls) = {
             let Ok(mut state) = entry.state.lock() else {
                 return;
             };
@@ -1524,8 +2063,12 @@ impl McpConnectionManager {
             state.watcher_task.take();
             let peer = state.peer.take();
             state.closing_peer = peer.clone();
-            peer
+            let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
+            (peer, active_calls)
         };
+        cancel_active_calls(&active_calls, McpOutcomeUnknownReason::ServerExited);
+        let _ =
+            settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout).await;
         if let Some(peer) = peer {
             let _ = peer.close().await;
             clear_closing_peer(&entry, &peer);
@@ -1672,8 +2215,12 @@ impl McpConnectionManager {
         tokio::spawn(async move {
             loop {
                 match changes.recv().await {
-                    Ok(change) => reconcile_registry_change(&weak, change).await,
-                    Err(McpRegistrySubscriptionError::Lagged { .. }) => {
+                    Ok(change) => {
+                        emit_registry_change(&weak, &change);
+                        reconcile_registry_change(&weak, change).await;
+                    }
+                    Err(McpRegistrySubscriptionError::Lagged { skipped }) => {
+                        emit_registry_reconciliation_required(&weak, skipped);
                         reconcile_registry_snapshot(&weak).await
                     }
                     Err(McpRegistrySubscriptionError::Closed) => return,
@@ -1683,13 +2230,38 @@ impl McpConnectionManager {
     }
 }
 
+fn emit_registry_change(inner: &Weak<ManagerInner>, change: &McpRegistryChange) {
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    let _ = inner.events.send(McpEvent::RegistryChanged {
+        revision: change.revision,
+        kind: change.kind,
+        server_id: change.server_id,
+        scope: change.scope.clone(),
+        config_digest: change.config_digest.clone(),
+        config_epoch: change.config_epoch,
+    });
+}
+
+fn emit_registry_reconciliation_required(inner: &Weak<ManagerInner>, skipped_changes: u64) {
+    let Some(inner) = inner.upgrade() else {
+        return;
+    };
+    let _ = inner
+        .events
+        .send(McpEvent::RegistryReconciliationRequired { skipped_changes });
+}
+
 async fn reconcile_registry_change(inner: &Weak<ManagerInner>, change: McpRegistryChange) {
     let Some(inner) = inner.upgrade() else {
         return;
     };
     let manager = McpConnectionManager { inner };
     match manager.inner.registry.get(change.server_id) {
-        Ok(Some(record)) if record.revision == change.revision => {
+        Ok(Some(record))
+            if record.revision == change.revision && record.config_epoch == change.config_epoch =>
+        {
             reconcile_registry_record(&manager, record, change.kind).await;
         }
         Ok(Some(_)) => {
@@ -1760,7 +2332,9 @@ async fn reconcile_registry_record(
         return;
     }
 
-    let config_changed = previous.config_digest != record.config_digest;
+    let config_changed = previous.config_epoch != record.config_epoch
+        || previous.registry_revision != record.revision
+        || previous.config_digest != record.config_digest;
     let active_or_failed = matches!(
         previous.state,
         McpServerState::Starting
@@ -1819,9 +2393,22 @@ fn apply_registry_locked(
     state: &mut ManagedEntryState,
     registry: &McpRegistryEntry,
 ) {
-    if state.catalog.source_config_digest.as_ref() != Some(&registry.config_digest) {
+    let source_changed = state.catalog.source_config_epoch != Some(registry.config_epoch)
+        || state.catalog.source_registry_revision != Some(registry.revision)
+        || state.catalog.source_config_digest.as_ref() != Some(&registry.config_digest);
+    state.status.enabled = registry.config.enabled;
+    state.status.display_name = safe_display_name(&registry.config.display_name);
+    state.status.scope = registry.config.scope.clone();
+    state.status.trust = registry.config.trust;
+    state.status.approval_mode = registry.config.approval_mode;
+    state.status.config_epoch = registry.config_epoch;
+    state.status.registry_revision = registry.revision;
+    state.status.config_digest = registry.config_digest.clone();
+    if source_changed {
         let mut invalidated = McpCatalogSnapshot::empty(registry.config.id);
         invalidated.generation = state.catalog.generation;
+        invalidated.source_config_epoch = Some(registry.config_epoch);
+        invalidated.source_registry_revision = Some(registry.revision);
         invalidated.source_config_digest = Some(registry.config_digest.clone());
         let catalog_changed = invalidated != state.catalog;
         state.catalog = invalidated;
@@ -1830,10 +2417,182 @@ fn apply_registry_locked(
             emit_catalog_locked(events, state);
         }
     }
-    state.status.enabled = registry.config.enabled;
-    state.status.scope = registry.config.scope.clone();
-    state.status.trust = registry.config.trust;
-    state.status.config_digest = registry.config_digest.clone();
+}
+
+fn safe_display_name(value: &str) -> String {
+    const MAX_BYTES: usize = 256;
+    let mut output = String::new();
+    for character in value.chars() {
+        let character = if character.is_control() {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn is_terminal_invocation_state(state: McpInvocationState) -> bool {
+    matches!(
+        state,
+        McpInvocationState::Completed
+            | McpInvocationState::Failed
+            | McpInvocationState::Cancelled
+            | McpInvocationState::OutcomeUnknown
+    )
+}
+
+fn cancel_active_calls(calls: &[Arc<ActiveCallControl>], reason: McpOutcomeUnknownReason) {
+    for call in calls {
+        call.cancel(reason);
+    }
+}
+
+async fn settle_active_calls(calls: &[Arc<ActiveCallControl>], timeout: Duration) -> bool {
+    tokio::time::timeout(timeout, wait_for_active_call_removal(calls))
+        .await
+        .is_ok()
+}
+
+async fn wait_for_active_call_removal(calls: &[Arc<ActiveCallControl>]) {
+    for call in calls {
+        call.wait_terminal().await;
+        call.wait_removed().await;
+    }
+}
+
+fn invocation_state_for_result(result: &Result<McpToolResult, McpError>) -> McpInvocationState {
+    match result {
+        Ok(_) => McpInvocationState::Completed,
+        Err(error) if error.kind == McpErrorKind::OutcomeUnknown => {
+            McpInvocationState::OutcomeUnknown
+        }
+        Err(error) if error.kind == McpErrorKind::Cancelled => McpInvocationState::Cancelled,
+        Err(_) => McpInvocationState::Failed,
+    }
+}
+
+fn normalize_dispatched_result(
+    control: &ActiveCallControl,
+    result: Result<McpToolResult, McpError>,
+) -> Result<McpToolResult, McpError> {
+    match result {
+        Ok(result) => {
+            control.dispatch.mark_response_received();
+            Ok(result)
+        }
+        Err(error) if error.kind == McpErrorKind::OutcomeUnknown => Err(error),
+        Err(error) if error.dispatch_certainty == Some(McpDispatchCertainty::ResponseReceived) => {
+            if control.dispatch.certainty() == McpDispatchCertainty::ResponseReceived {
+                Err(error)
+            } else {
+                Err(McpError::outcome_unknown(
+                    "MCP tools/call",
+                    McpOutcomeUnknownReason::ProtocolFailure,
+                    control.dispatch.certainty(),
+                ))
+            }
+        }
+        Err(error)
+            if control.dispatch.certainty() != McpDispatchCertainty::DefinitelyNotDispatched =>
+        {
+            let reason = match error.kind {
+                McpErrorKind::Cancelled => control.cancellation_reason(),
+                McpErrorKind::Timeout => McpOutcomeUnknownReason::TimedOut,
+                McpErrorKind::ServerExited => McpOutcomeUnknownReason::ServerExited,
+                McpErrorKind::Shutdown => McpOutcomeUnknownReason::Shutdown,
+                McpErrorKind::Protocol => McpOutcomeUnknownReason::ProtocolFailure,
+                _ => McpOutcomeUnknownReason::TransportClosed,
+            };
+            Err(McpError::outcome_unknown(
+                "MCP tools/call",
+                reason,
+                control.dispatch.certainty(),
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn settle_interrupted_call(
+    call: &mut BoxMcpFuture<'_, McpToolResult>,
+    control: &ActiveCallControl,
+    grace: Duration,
+    reason: McpOutcomeUnknownReason,
+) -> Result<McpToolResult, McpError> {
+    control.cancel(reason);
+    match tokio::time::timeout(grace, call).await {
+        Ok(result) => normalize_dispatched_result(control, result),
+        Err(_) => Err(McpError::outcome_unknown(
+            "MCP tools/call",
+            reason,
+            control.dispatch.certainty(),
+        )),
+    }
+}
+
+fn validate_tool_result_limits(
+    result: &McpToolResult,
+    limits: &McpSecurityLimits,
+) -> Result<(), McpError> {
+    if result.content.len() > limits.max_content_blocks {
+        return Err(McpError::output_too_large(
+            "MCP tools/call",
+            "MCP tool result exceeded the configured content-block limit",
+        ));
+    }
+    if let Some(structured) = &result.structured_content {
+        if validate_structured_content(structured, limits).is_err() {
+            return Err(McpError::output_too_large(
+                "MCP tools/call",
+                "MCP structured result exceeded the configured safety budget",
+            ));
+        }
+    }
+    let encoded = serde_json::to_vec(result).map_err(|_| {
+        McpError::protocol("MCP tool result could not be measured safely")
+            .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
+    })?;
+    if encoded.len() > limits.max_raw_tool_result_bytes {
+        return Err(McpError::output_too_large(
+            "MCP tools/call",
+            "MCP tool result exceeded the configured byte limit",
+        ));
+    }
+    let mut total_media = 0_usize;
+    for block in &result.content {
+        let media_bytes = match block {
+            crate::McpContentBlock::Image { data, .. }
+            | crate::McpContentBlock::Audio { data, .. } => data.len(),
+            crate::McpContentBlock::EmbeddedResource {
+                resource: crate::McpEmbeddedResource::Blob { data, .. },
+            } => data.len(),
+            _ => 0,
+        };
+        if media_bytes > limits.max_encoded_media_bytes {
+            return Err(McpError::output_too_large(
+                "MCP tools/call",
+                "MCP tool result contained an oversized encoded media block",
+            ));
+        }
+        total_media = total_media.checked_add(media_bytes).ok_or_else(|| {
+            McpError::output_too_large(
+                "MCP tools/call",
+                "MCP tool result media byte count overflowed",
+            )
+        })?;
+    }
+    if total_media > limits.max_total_encoded_media_bytes {
+        return Err(McpError::output_too_large(
+            "MCP tools/call",
+            "MCP tool result exceeded the aggregate encoded media limit",
+        ));
+    }
+    Ok(())
 }
 
 fn next_epoch(epoch: u64) -> Result<u64, McpError> {
@@ -1872,6 +2631,8 @@ fn emit_catalog_locked(events: &mpsc::UnboundedSender<McpEvent>, state: &mut Man
         server_id: state.status.server_id,
         sequence: state.event_sequence,
         generation: state.catalog.generation,
+        config_epoch: state.status.config_epoch,
+        registry_revision: state.status.registry_revision,
         config_digest: state.status.config_digest.clone(),
         completeness: state.catalog.completeness.clone(),
         tool_count: state.catalog.tools.len(),
@@ -1959,5 +2720,239 @@ fn manager_task_batch_failure() -> McpBatchOperationResult {
         server_id: None,
         status: None,
         error: Some(McpSafeError::from(&error)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::InMemoryMcpRegistry;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::PathBuf;
+
+    struct RejectingConnector;
+
+    impl McpConnector for RejectingConnector {
+        fn connect<'a>(
+            &'a self,
+            _: &'a crate::McpServerConfig,
+        ) -> BoxMcpFuture<'a, Arc<dyn McpPeer>> {
+            Box::pin(async { Err(McpError::spawn("test connector does not start processes")) })
+        }
+    }
+
+    fn test_manager(registry: Arc<dyn McpRegistry>) -> McpConnectionManager {
+        McpConnectionManager::new(
+            registry,
+            Arc::new(RejectingConnector),
+            Arc::new(NoopMcpEventSink),
+            McpManagerPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    fn test_config(server_id: McpServerId) -> crate::McpServerConfig {
+        crate::McpServerConfig {
+            id: server_id,
+            display_name: "shutdown-test".to_string(),
+            scope: McpServerScope::User,
+            trust: McpTrustLevel::UserApproved,
+            approval_mode: McpApprovalMode::Prompt,
+            enabled: true,
+            transport: crate::McpTransportConfig::Stdio(crate::McpStdioConfig {
+                program: PathBuf::from("/not-executed"),
+                arguments: Vec::new(),
+                cwd: PathBuf::from("/"),
+                environment: Vec::new(),
+            }),
+            connect_timeout_ms: 10_000,
+            request_timeout_ms: 60_000,
+            shutdown_timeout_ms: 2_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn active_call_settlement_reports_timeout_until_terminal_removal() {
+        let server_id = McpServerId::new();
+        let control = Arc::new(ActiveCallControl::new(
+            McpActiveCallId::new(
+                server_id,
+                McpInvocationId::new(),
+                McpModelCallId::new("settlement-boundary").unwrap(),
+            ),
+            McpActiveCallProvenance {
+                tool_id: McpToolId {
+                    server_id,
+                    raw_name: "slow".to_string(),
+                },
+                model_name: "mcp__fixture__slow".to_string(),
+                config_epoch: McpConfigEpoch::new(),
+                registry_revision: 1,
+                config_digest: "a".repeat(64).parse().unwrap(),
+                catalog_generation: 1,
+                catalog_digest: "b".repeat(64).parse().unwrap(),
+                schema_digest: "c".repeat(64).parse().unwrap(),
+            },
+            60_000,
+        ));
+        assert!(
+            !settle_active_calls(std::slice::from_ref(&control), Duration::from_millis(1),).await
+        );
+
+        control.set_state(McpInvocationState::OutcomeUnknown);
+        assert!(
+            !settle_active_calls(std::slice::from_ref(&control), Duration::from_millis(1),).await,
+            "a terminal state alone is not cleanup until the active registry guard is removed"
+        );
+        control.removed.store(true, Ordering::Release);
+        control.settled.notify_waiters();
+        assert!(
+            settle_active_calls(std::slice::from_ref(&control), Duration::from_millis(50),).await
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_shutdown_recovers_poisoned_entry_map_but_reports_incomplete_cleanup() {
+        let registry = InMemoryMcpRegistry::shared();
+        let server_id = McpServerId::new();
+        let registered = registry.add(test_config(server_id)).unwrap();
+        let manager = test_manager(registry);
+        let entry = Arc::new(ManagedEntry::new(&registered));
+        manager
+            .inner
+            .entries
+            .lock()
+            .unwrap()
+            .insert(server_id, Arc::clone(&entry));
+
+        let inner = Arc::clone(&manager.inner);
+        assert!(catch_unwind(AssertUnwindSafe(move || {
+            let _entries = inner.entries.lock().unwrap();
+            panic!("poison manager entry map for deterministic cleanup test");
+        }))
+        .is_err());
+
+        let (results, cleanup_complete) = manager
+            .force_shutdown_entries(Duration::from_millis(50))
+            .await;
+        assert!(!cleanup_complete);
+        assert_eq!(results.len(), 1);
+        let state = entry.state.lock().unwrap();
+        assert!(state.removed);
+        assert_eq!(state.status.state, McpServerState::Disabled);
+        assert!(state.active_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forced_shutdown_recovers_poisoned_entry_state_but_never_claims_completion() {
+        let registry = InMemoryMcpRegistry::shared();
+        let server_id = McpServerId::new();
+        let registered = registry.add(test_config(server_id)).unwrap();
+        let manager = test_manager(registry);
+        let entry = Arc::new(ManagedEntry::new(&registered));
+        manager
+            .inner
+            .entries
+            .lock()
+            .unwrap()
+            .insert(server_id, Arc::clone(&entry));
+
+        let poisoned_entry = Arc::clone(&entry);
+        assert!(catch_unwind(AssertUnwindSafe(move || {
+            let _state = poisoned_entry.state.lock().unwrap();
+            panic!("poison managed entry state for deterministic cleanup test");
+        }))
+        .is_err());
+
+        let (results, cleanup_complete) = manager
+            .force_shutdown_entries(Duration::from_millis(50))
+            .await;
+        assert!(!cleanup_complete);
+        assert_eq!(results.len(), 1);
+        let state = match entry.state.lock() {
+            Ok(_) => panic!("managed entry state should remain poisoned"),
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        assert!(state.removed);
+        assert_eq!(state.status.state, McpServerState::Disabled);
+        assert!(state.active_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_completion_requires_successful_results_and_clean_entry_state() {
+        let registry = InMemoryMcpRegistry::shared();
+        let server_id = McpServerId::new();
+        let registered = registry.add(test_config(server_id)).unwrap();
+        let manager = test_manager(registry);
+        let entry = Arc::new(ManagedEntry::new(&registered));
+        manager
+            .inner
+            .entries
+            .lock()
+            .unwrap()
+            .insert(server_id, Arc::clone(&entry));
+        let disabled = entry.state.lock().unwrap().status.clone();
+        let success = McpBatchOperationResult {
+            server_id: Some(server_id),
+            status: Some(disabled.clone()),
+            error: None,
+        };
+        assert!(manager.graceful_shutdown_cleanup_complete(std::slice::from_ref(&success)));
+
+        let close_error = McpError::shutdown("fixture peer close failed");
+        let failed = McpBatchOperationResult {
+            server_id: Some(server_id),
+            status: None,
+            error: Some(McpSafeError::from(&close_error)),
+        };
+        assert!(!manager.graceful_shutdown_cleanup_complete(&[failed]));
+
+        entry.state.lock().unwrap().status.state = McpServerState::Error;
+        assert!(!manager.graceful_shutdown_cleanup_complete(&[success]));
+    }
+
+    #[test]
+    fn every_error_after_request_queue_is_outcome_unknown_without_response_evidence() {
+        let server_id = McpServerId::new();
+        let control = ActiveCallControl::new(
+            McpActiveCallId::new(
+                server_id,
+                McpInvocationId::new(),
+                McpModelCallId::new("post-dispatch-errors").unwrap(),
+            ),
+            McpActiveCallProvenance {
+                tool_id: McpToolId {
+                    server_id,
+                    raw_name: "mutating_tool".to_string(),
+                },
+                model_name: "mcp__fixture__mutating_tool".to_string(),
+                config_epoch: McpConfigEpoch::new(),
+                registry_revision: 1,
+                config_digest: "a".repeat(64).parse().unwrap(),
+                catalog_generation: 1,
+                catalog_digest: "b".repeat(64).parse().unwrap(),
+                schema_digest: "c".repeat(64).parse().unwrap(),
+            },
+            60_000,
+        );
+        control.dispatch.mark_request_queued();
+
+        for error in [
+            McpError::config("post-dispatch config failure"),
+            McpError::spawn("post-dispatch spawn failure"),
+            McpError::negotiation("post-dispatch negotiation failure"),
+            McpError::protocol("post-dispatch protocol failure"),
+            McpError::cancelled("MCP tools/call"),
+            McpError::timeout("MCP tools/call", 1),
+            McpError::server_exited(None),
+            McpError::shutdown("post-dispatch shutdown"),
+        ] {
+            let normalized = normalize_dispatched_result(&control, Err(error)).unwrap_err();
+            assert_eq!(normalized.kind, McpErrorKind::OutcomeUnknown);
+            assert_eq!(
+                normalized.dispatch_certainty,
+                Some(McpDispatchCertainty::PossiblyDispatched)
+            );
+        }
     }
 }

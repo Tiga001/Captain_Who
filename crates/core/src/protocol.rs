@@ -21,11 +21,17 @@ pub struct ModelCapabilities {
     pub image_input: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentChatInput {
     pub api_url: String,
     pub api_token: String,
+    /// Opaque Host-only identity of the exact provider settings save used to prepare this run.
+    ///
+    /// This field never crosses Serde boundaries. Core-server freezes it into its explicit,
+    /// secret-free pending-resume DTO instead of exposing it to Renderer or provider payloads.
+    #[serde(skip)]
+    pub provider_configuration_revision: Option<String>,
     pub model: String,
     /// Resolved by the backend from the selected model configuration and kept
     /// immutable across approval pause/resume for this logical run.
@@ -76,6 +82,12 @@ pub struct AgentChatInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
     pub messages: Vec<AgentChatMessage>,
+}
+
+impl std::fmt::Debug for AgentChatInput {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentChatInput([REDACTED])")
+    }
 }
 
 #[derive(Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -198,6 +210,13 @@ pub struct AgentRunCheckpoint {
     pub context_items: Vec<AgentContextCheckpointItem>,
     pub next_model_request_index: usize,
     pub queued_tool_calls: Vec<AgentQueuedToolCallCheckpoint>,
+    /// Number of additional MCP calls discarded behind the pending MCP approval.
+    ///
+    /// These calls had no prepared one-time invocation identity and therefore cannot be resumed
+    /// safely. Raw calls and arguments are deliberately absent; restore emits only a fixed Host
+    /// diagnostic instructing the model to prepare new calls after the approved continuation.
+    #[serde(default)]
+    pub deferred_external_tool_call_count: u32,
     pub suppressed_narration: bool,
     pub extension_snapshots: Vec<AgentExtensionSnapshot>,
     /// Exact model-facing and execution-authorizing Tool contract for the response being paused.
@@ -209,6 +228,11 @@ pub struct AgentRunCheckpoint {
     /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
     /// epoch; it never reconstructs authority from rendered model context.
     pub run_world_state: WorldStateSnapshot,
+    /// Approval-record identity. MCP uses an application UUID independent of the provider Tool
+    /// Call identity; legacy and built-in checkpoints omit this field and use
+    /// `pending_tool_call_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_action_id: Option<String>,
     pub pending_tool_call_id: String,
     #[serde(default)]
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
@@ -625,12 +649,18 @@ pub struct AgentPromptPreferences {
     pub updated_at: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSearchConfig {
     pub mode: AgentSearchMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tavily_api_key: Option<String>,
+}
+
+impl std::fmt::Debug for AgentSearchConfig {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentSearchConfig([REDACTED])")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -1004,8 +1034,8 @@ pub enum AgentMcpServerScope {
 /// Immutable MCP catalog identity frozen into one run's ToolRegistry.
 ///
 /// `model_tool_name` is never parsed to recover the server or raw tool. Invocation uses the
-/// remaining typed fields and revalidates the config digest and catalog generation at the Host
-/// boundary.
+/// remaining typed fields and revalidates the config epoch/revision, digest and Catalog identity
+/// at the Host boundary.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMcpToolProvenance {
@@ -1013,9 +1043,215 @@ pub struct AgentMcpToolProvenance {
     pub scope: AgentMcpServerScope,
     pub raw_tool_name: String,
     pub model_tool_name: String,
+    /// High-entropy identity of this concrete Server configuration instance.
+    ///
+    /// Unlike `config_digest`, this UUID changes whenever a configuration is replaced, including
+    /// an ABA transition back to byte-for-byte identical configuration. Approval and checkpoint
+    /// revalidation must require an exact match.
+    pub config_epoch: String,
+    /// Monotonic Registry revision that published this configuration instance.
+    ///
+    /// Delayed change events may invalidate only approvals whose frozen revision is older than the
+    /// event revision; the epoch remains the cross-restart/ABA authority boundary.
+    pub registry_revision: u64,
     pub config_digest: String,
     pub catalog_generation: u64,
     pub catalog_digest: String,
+    /// Digest supplied by the MCP Catalog for the raw Server descriptor schemas.
+    ///
+    /// This identity is used only to revalidate the live Catalog route. It is deliberately
+    /// distinct from `schema_digest`, which binds the normalized input schema actually exposed to
+    /// the model provider.
+    pub catalog_schema_digest: String,
+    /// Digest of the normalized, Provider-facing input schema.
+    pub schema_digest: String,
+    /// Version of the Host normalizer that produced `schema_digest`.
+    pub schema_normalizer_version: u32,
+}
+
+/// Host-facing risk label for an MCP Tool approval.
+///
+/// Every value remains approval-gated. Server-authored annotations may select a more specific
+/// *claimed* label, but never grant execution authority or suppress the prompt.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpToolRisk {
+    Unknown,
+    ReadOnlyClaimed,
+    SideEffectsPossible,
+    DestructiveClaimed,
+    OpenWorldClaimed,
+}
+
+/// MCP approval policy frozen into a proposed external Tool invocation.
+///
+/// The MVP deliberately has no allow-without-prompt state. Managed policy can grow as a distinct
+/// variant later without reinterpreting `Prompt`.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpApprovalMode {
+    Prompt,
+    Deny,
+}
+
+/// Bounded structural description of model-authored MCP arguments.
+///
+/// Scalar values and property names are intentionally absent: either can contain a credential or
+/// user-private value. The full argument object only crosses the non-serializable Host preparation
+/// boundary and is never reconstructed from this summary.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpArgumentSummary {
+    pub encoded_bytes: u64,
+    pub top_level_property_count: u64,
+    pub string_value_count: u64,
+    pub number_value_count: u64,
+    pub boolean_value_count: u64,
+    pub null_value_count: u64,
+    pub object_value_count: u64,
+    pub array_value_count: u64,
+    pub max_depth: u32,
+    pub truncated: bool,
+}
+
+/// Stable identity of one concrete MCP Tool invocation.
+///
+/// `invocation_id` is application-generated, high entropy, and independent of provider Tool Call
+/// IDs. Routing continues to use typed provenance; `arguments_digest` binds a separately sealed
+/// payload without placing the payload itself in Protocol, events, traces, or checkpoints.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpToolInvocationIdentity {
+    /// Approval-record identity used for user decisions and pending-action CAS.
+    ///
+    /// This is application-generated and independent of both the invocation id and provider Tool
+    /// Call id.
+    pub action_id: String,
+    /// One-time execution-grant identity used to seal and consume raw arguments.
+    pub invocation_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub provenance: AgentMcpToolProvenance,
+    pub arguments_digest: String,
+}
+
+/// Renderer-safe summary of a pending external MCP Tool approval.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpToolApprovalSummary {
+    pub server_id: String,
+    pub server_display_name: String,
+    pub scope: AgentMcpServerScope,
+    pub raw_tool_name: String,
+    pub model_tool_name: String,
+    pub arguments: AgentMcpArgumentSummary,
+    pub risk: AgentMcpToolRisk,
+    pub external: bool,
+}
+
+/// Safe, non-secret persistence capability frozen for one MCP approval payload.
+///
+/// This marker is part of the approval's authenticated identity. It never contains an opaque
+/// payload reference, ciphertext, credential reference, or key material. A missing marker from a
+/// legacy record defaults fail-closed to `ProcessOnly`, which cannot be recovered after restart.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpApprovalPayloadPersistence {
+    #[default]
+    ProcessOnly,
+    DurableAuthenticatedEnvelope,
+}
+
+/// Public, persistable approval DTO for one MCP invocation.
+///
+/// `call.args` is always the Tool-owned safe projection (currently an empty object). The raw
+/// arguments are delivered separately to `McpToolInvoker::prepare_approval` and must be sealed by
+/// the Host before this action is published.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpToolApproval {
+    pub identity: AgentMcpToolInvocationIdentity,
+    pub call: AgentToolCall,
+    pub summary: AgentMcpToolApprovalSummary,
+    pub approval_mode: AgentMcpApprovalMode,
+    /// Frozen Host payload capability. This is safe to persist and present, but does not expose
+    /// the payload's location or encrypted representation.
+    #[serde(default)]
+    pub payload_persistence: AgentMcpApprovalPayloadPersistence,
+    pub created_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpToolInvocationState {
+    PendingApproval,
+    Approved,
+    Dispatching,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Rejected,
+    Expired,
+    PayloadUnavailable,
+    PolicyDenied,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpToolInvocationOutcome {
+    Succeeded,
+    ToolError,
+    OutputTooLarge,
+    TransportError,
+    TimedOut,
+    Cancelled,
+    Rejected,
+    Expired,
+    PayloadUnavailable,
+    PolicyDenied,
+    OutcomeUnknown,
+}
+
+/// Host-classified certainty about whether one MCP invocation crossed the external dispatch
+/// boundary.
+///
+/// This is deliberately independent of retryability. In particular, `PossiblyDispatched` must
+/// never be interpreted as permission to replay the Tool Call.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpDispatchCertainty {
+    DefinitelyNotDispatched,
+    PossiblyDispatched,
+    ResponseReceived,
+}
+
+/// Secret-free lifecycle record suitable for AgentEvent and Renderer projection.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMcpToolInvocationEvent {
+    pub action_id: String,
+    pub invocation_id: String,
+    pub call_id: String,
+    pub server_id: String,
+    pub server_display_name: String,
+    pub raw_tool_name: String,
+    pub model_tool_name: String,
+    pub external: bool,
+    pub state: AgentMcpToolInvocationState,
+    pub dispatch_certainty: AgentMcpDispatchCertainty,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AgentMcpToolInvocationOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+    /// Bounded Host-classified code only; never a Server message or transport diagnostic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub output_truncated: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -1226,7 +1462,7 @@ pub enum AgentCommandRiskLevel {
     Unknown,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolCall {
     /// Application-owned opaque identity shared by the call's entire lifecycle.
@@ -1242,6 +1478,12 @@ pub struct AgentToolCall {
     pub reason: Option<String>,
 }
 
+impl std::fmt::Debug for AgentToolCall {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentToolCall([REDACTED])")
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolDefinition {
@@ -1254,7 +1496,7 @@ pub struct AgentToolDefinition {
     pub approval_mode: AgentToolApprovalMode,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolResult {
     pub call_id: String,
@@ -1271,6 +1513,12 @@ pub struct AgentToolResult {
     /// in-memory result.
     #[serde(skip, default)]
     pub exact_archive_file: Option<crate::exact_capture::ExactToolResultArchiveFile>,
+}
+
+impl std::fmt::Debug for AgentToolResult {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentToolResult([REDACTED])")
+    }
 }
 
 /// Version of the presentation-safe image-generation result returned by the Agent Tool.
@@ -2006,6 +2254,9 @@ pub enum AgentProposedAction {
     ToolCall {
         call: AgentToolCall,
     },
+    McpToolCall {
+        approval: Box<AgentMcpToolApproval>,
+    },
     Diff {
         diff: AgentDiffProposal,
     },
@@ -2136,6 +2387,10 @@ pub enum AgentEvent {
     ToolResult {
         run_id: String,
         result: AgentToolResult,
+    },
+    McpToolInvocationStateChanged {
+        run_id: String,
+        invocation: AgentMcpToolInvocationEvent,
     },
     TodoUpdated {
         run_id: String,
@@ -2561,6 +2816,41 @@ mod tests {
 
         let round_trip = serde_json::from_value::<AgentChatInput>(serialized).unwrap();
         assert!(round_trip.model_capabilities.image_input);
+    }
+
+    #[test]
+    fn agent_input_calls_and_results_never_expose_values_through_debug() {
+        const CANARY: &str = "AGENT_RUNTIME_DEBUG_SECRET_CANARY";
+        let input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": CANARY,
+            "model": "test-model",
+            "searchConfig": {
+                "mode": "tavily",
+                "tavilyApiKey": CANARY
+            },
+            "messages": []
+        }))
+        .unwrap();
+        let call = AgentToolCall {
+            id: "call-safe-id".to_string(),
+            tool: "mcp__fixture__echo".to_string(),
+            args: json!({"neutral": CANARY}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let result = AgentToolResult {
+            call_id: "call-safe-id".to_string(),
+            tool: "mcp__fixture__echo".to_string(),
+            ok: true,
+            result: Some(json!({"neutral": CANARY})),
+            error: None,
+            exact_archive_file: None,
+        };
+
+        let rendered = format!("{input:?}{:?}{call:?}{result:?}", input.search_config);
+        assert!(!rendered.contains(CANARY));
+        assert!(!rendered.contains("neutral"));
     }
 
     #[test]

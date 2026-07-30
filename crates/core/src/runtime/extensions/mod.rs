@@ -747,6 +747,7 @@ mod tests {
                 context_items: Vec::new(),
                 next_model_request_index: 1,
                 queued_tool_calls: Vec::new(),
+                deferred_external_tool_call_count: 0,
                 suppressed_narration: false,
                 extension_snapshots: vec![AgentExtensionSnapshot {
                     extension_id: "private".to_string(),
@@ -772,6 +773,7 @@ mod tests {
                     .unwrap()],
                 )
                 .unwrap(),
+                pending_action_id: None,
                 pending_tool_call_id: "call-1".to_string(),
                 conversation_trace_items: Vec::new(),
                 conversation_model_context_items: Vec::new(),

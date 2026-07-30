@@ -1,11 +1,47 @@
 use super::*;
 
 pub fn agent_event_notification(event: AgentEvent) -> Value {
+    let mut params = json!(event);
+    redact_renderer_mcp_binding_fields(&mut params);
     json!({
         "jsonrpc": "2.0",
         "method": AGENT_EVENT_NOTIFICATION_METHOD,
-        "params": event
+        "params": params
     })
+}
+
+/// Removes Host-only MCP approval binding material before a value crosses the
+/// core-server → Main/Renderer notification boundary.
+///
+/// The arguments digest is required for durable Host revalidation, but exposing
+/// it would let an untrusted UI consumer brute-force low-entropy scalar
+/// arguments. MCP actions already contain only the empty-object call
+/// projection; this final guard strips the remaining execution-only
+/// fingerprint from every nested action (including `done.proposedActions`).
+pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                redact_renderer_mcp_binding_fields(value);
+            }
+        }
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("mcp_tool_call") {
+                if let Some(identity) = object
+                    .get_mut("approval")
+                    .and_then(Value::as_object_mut)
+                    .and_then(|approval| approval.get_mut("identity"))
+                    .and_then(Value::as_object_mut)
+                {
+                    identity.remove("argumentsDigest");
+                }
+            }
+            for value in object.values_mut() {
+                redact_renderer_mcp_binding_fields(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 pub(crate) fn resolve_project(

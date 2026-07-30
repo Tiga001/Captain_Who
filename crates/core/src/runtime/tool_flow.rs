@@ -293,6 +293,9 @@ pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentP
         AgentProposedAction::ToolCall { call } => {
             call.approval_status = AgentApprovalStatus::Approved;
         }
+        AgentProposedAction::McpToolCall { approval } => {
+            approval.call.approval_status = AgentApprovalStatus::Approved;
+        }
         AgentProposedAction::SkillMaterialization { materialization } => {
             materialization.approval_status = AgentApprovalStatus::Approved;
         }

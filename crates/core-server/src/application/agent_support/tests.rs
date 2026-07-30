@@ -144,6 +144,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-backend-bound".to_string(),
+        pending_action_id: None,
         context_items: vec![AgentContextCheckpointItem {
             role: "assistant".to_string(),
             content: String::new(),
@@ -163,6 +164,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         }],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),

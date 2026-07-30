@@ -125,8 +125,13 @@ impl StorageService {
     }
 
     pub fn load_model_settings(&self) -> Result<Option<ModelSettingsRecord>, String> {
-        let connection = self.state.connection()?;
-        config_repository::load_model_settings(&connection).map_err(storage_error)
+        let mut connection = self.state.connection()?;
+        config_repository::load_model_settings(&mut connection).map_err(storage_error)
+    }
+
+    pub fn load_model_settings_snapshot(&self) -> Result<Option<ModelSettingsSnapshot>, String> {
+        let mut connection = self.state.connection()?;
+        config_repository::load_model_settings_snapshot(&mut connection).map_err(storage_error)
     }
 
     pub fn save_model_settings(&self, settings: ModelSettingsRecord) -> Result<(), String> {

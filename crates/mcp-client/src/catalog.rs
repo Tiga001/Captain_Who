@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::digest::{canonical_json_bytes, catalog_digest, schema_digest, tool_name_hash};
+use crate::limits::validate_schema_value;
 use crate::{
-    McpCatalogDigest, McpConfigDigest, McpError, McpPeer, McpSchemaDigest, McpServerId,
-    McpToolDescriptor,
+    McpCatalogDigest, McpConfigDigest, McpConfigEpoch, McpError, McpPeer, McpSchemaDigest,
+    McpSecurityLimits, McpServerId, McpToolDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,11 +23,50 @@ pub struct McpToolId {
 /// fail closed. Routing still uses `tool_id` and never parses `model_name`.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct McpCatalogToolCall {
+pub struct McpCatalogToolCallIdentity {
     pub tool_id: McpToolId,
+    pub expected_config_epoch: McpConfigEpoch,
+    pub expected_registry_revision: u64,
     pub expected_config_digest: McpConfigDigest,
     pub expected_catalog_generation: u64,
     pub expected_catalog_digest: McpCatalogDigest,
+    pub expected_schema_digest: McpSchemaDigest,
+    pub expected_model_name: String,
+}
+
+impl fmt::Debug for McpCatalogToolCallIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpCatalogToolCallIdentity")
+            .field("server_id", &self.tool_id.server_id)
+            .field("raw_name", &"<redacted>")
+            .field("expected_config_epoch", &self.expected_config_epoch)
+            .field(
+                "expected_registry_revision",
+                &self.expected_registry_revision,
+            )
+            .field("expected_config_digest", &self.expected_config_digest)
+            .field(
+                "expected_catalog_generation",
+                &self.expected_catalog_generation,
+            )
+            .field("expected_catalog_digest", &self.expected_catalog_digest)
+            .field("expected_schema_digest", &self.expected_schema_digest)
+            .field("expected_model_name", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCatalogToolCall {
+    pub tool_id: McpToolId,
+    pub expected_config_epoch: McpConfigEpoch,
+    pub expected_registry_revision: u64,
+    pub expected_config_digest: McpConfigDigest,
+    pub expected_catalog_generation: u64,
+    pub expected_catalog_digest: McpCatalogDigest,
+    pub expected_schema_digest: McpSchemaDigest,
     pub expected_model_name: String,
     #[serde(default)]
     pub arguments: Value,
@@ -39,12 +79,18 @@ impl fmt::Debug for McpCatalogToolCall {
             .debug_struct("McpCatalogToolCall")
             .field("server_id", &self.tool_id.server_id)
             .field("raw_name", &"<redacted>")
+            .field("expected_config_epoch", &self.expected_config_epoch)
+            .field(
+                "expected_registry_revision",
+                &self.expected_registry_revision,
+            )
             .field("expected_config_digest", &self.expected_config_digest)
             .field(
                 "expected_catalog_generation",
                 &self.expected_catalog_generation,
             )
             .field("expected_catalog_digest", &self.expected_catalog_digest)
+            .field("expected_schema_digest", &self.expected_schema_digest)
             .field("expected_model_name", &"<redacted>")
             .field("arguments", &"<redacted>")
             .field("timeout_ms", &self.timeout_ms)
@@ -53,20 +99,16 @@ impl fmt::Debug for McpCatalogToolCall {
 }
 
 impl McpCatalogToolCall {
-    pub fn new(
-        tool_id: McpToolId,
-        expected_config_digest: McpConfigDigest,
-        expected_catalog_generation: u64,
-        expected_catalog_digest: McpCatalogDigest,
-        expected_model_name: impl Into<String>,
-        arguments: Value,
-    ) -> Self {
+    pub fn new(identity: McpCatalogToolCallIdentity, arguments: Value) -> Self {
         Self {
-            tool_id,
-            expected_config_digest,
-            expected_catalog_generation,
-            expected_catalog_digest,
-            expected_model_name: expected_model_name.into(),
+            tool_id: identity.tool_id,
+            expected_config_epoch: identity.expected_config_epoch,
+            expected_registry_revision: identity.expected_registry_revision,
+            expected_config_digest: identity.expected_config_digest,
+            expected_catalog_generation: identity.expected_catalog_generation,
+            expected_catalog_digest: identity.expected_catalog_digest,
+            expected_schema_digest: identity.expected_schema_digest,
+            expected_model_name: identity.expected_model_name,
             arguments,
             timeout_ms: None,
         }
@@ -103,6 +145,9 @@ pub enum McpCatalogCompleteness {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum McpCatalogDiagnosticKind {
+    InvalidRawName,
+    DescriptionLimitExceeded,
+    InvalidSchema,
     DuplicateRawName,
     NormalizationCollision,
     ModelNameCollision,
@@ -159,6 +204,10 @@ impl fmt::Debug for McpCatalogTool {
 #[serde(rename_all = "camelCase")]
 pub struct McpCatalogSnapshot {
     pub server_id: McpServerId,
+    /// Opaque configuration incarnation that produced this catalog.
+    pub source_config_epoch: Option<McpConfigEpoch>,
+    /// Registry-wide ordering revision that produced this catalog.
+    pub source_registry_revision: Option<u64>,
     /// Digest of the Registry configuration that produced this catalog.
     /// Protocol-only discovery leaves it unset; Connection Manager snapshots
     /// always bind it before publication or routing.
@@ -177,6 +226,8 @@ impl McpCatalogSnapshot {
     pub fn empty(server_id: McpServerId) -> Self {
         Self {
             server_id,
+            source_config_epoch: None,
+            source_registry_revision: None,
             source_config_digest: None,
             generation: 0,
             completeness: McpCatalogCompleteness::Failed(McpCatalogIssue::RequestFailed),
@@ -205,6 +256,8 @@ impl fmt::Debug for McpCatalogSnapshot {
         formatter
             .debug_struct("McpCatalogSnapshot")
             .field("server_id", &self.server_id)
+            .field("source_config_epoch", &self.source_config_epoch)
+            .field("source_registry_revision", &self.source_registry_revision)
             .field("source_config_digest", &self.source_config_digest)
             .field("generation", &self.generation)
             .field("completeness", &self.completeness)
@@ -232,15 +285,16 @@ pub struct McpCatalogLimits {
 
 impl Default for McpCatalogLimits {
     fn default() -> Self {
+        let security = crate::McpSecurityLimits::default();
         Self {
-            max_pages: 32,
-            max_tools: 1_024,
-            max_schema_bytes_per_page: 1024 * 1024,
-            max_total_schema_bytes: 8 * 1024 * 1024,
-            max_descriptor_bytes_per_page: 2 * 1024 * 1024,
-            max_total_descriptor_bytes: 16 * 1024 * 1024,
-            max_cursor_bytes: 4 * 1024,
-            max_model_name_bytes: 64,
+            max_pages: security.max_catalog_pages,
+            max_tools: security.max_tools,
+            max_schema_bytes_per_page: security.max_schema_bytes_per_page,
+            max_total_schema_bytes: security.max_total_schema_bytes,
+            max_descriptor_bytes_per_page: security.max_descriptor_bytes_per_page,
+            max_total_descriptor_bytes: security.max_total_descriptor_bytes,
+            max_cursor_bytes: security.max_cursor_bytes,
+            max_model_name_bytes: security.max_model_name_bytes,
         }
     }
 }
@@ -285,13 +339,37 @@ impl CatalogMeasurements {
     }
 }
 
+struct CatalogDescriptorCandidate {
+    descriptor: McpToolDescriptor,
+    issues: Vec<McpCatalogDiagnosticKind>,
+}
+
+#[cfg(test)]
 pub(crate) async fn discover_catalog(
     peer: &dyn McpPeer,
     server_id: McpServerId,
     previous: Option<&McpCatalogSnapshot>,
     policy: &McpCatalogPolicy,
 ) -> Result<McpCatalogSnapshot, McpError> {
+    discover_catalog_with_limits(
+        peer,
+        server_id,
+        previous,
+        policy,
+        &McpSecurityLimits::default(),
+    )
+    .await
+}
+
+pub(crate) async fn discover_catalog_with_limits(
+    peer: &dyn McpPeer,
+    server_id: McpServerId,
+    previous: Option<&McpCatalogSnapshot>,
+    policy: &McpCatalogPolicy,
+    security_limits: &McpSecurityLimits,
+) -> Result<McpCatalogSnapshot, McpError> {
     policy.limits.validate()?;
+    security_limits.validate()?;
     if !peer.protocol_snapshot().capabilities.tools {
         return complete_snapshot(server_id, previous, Vec::new(), 0, 0, 0, policy);
     }
@@ -335,17 +413,22 @@ pub(crate) async fn discover_catalog(
             .checked_add(1)
             .ok_or_else(|| McpError::protocol("MCP catalog page count overflowed"))?;
 
+        let page_candidates = page
+            .tools
+            .into_iter()
+            .map(|descriptor| prepare_descriptor(descriptor, security_limits))
+            .collect::<Vec<_>>();
         let mut page_schema_bytes = 0_usize;
         let mut page_descriptor_bytes = 0_usize;
-        for descriptor in &page.tools {
-            let bytes = schema_bytes(descriptor).map_err(|_| {
+        for candidate in &page_candidates {
+            let bytes = schema_bytes(&candidate.descriptor).map_err(|_| {
                 McpError::protocol("MCP tool schema could not be normalized safely")
             })?;
             page_schema_bytes = page_schema_bytes
                 .checked_add(bytes)
                 .ok_or_else(|| McpError::protocol("MCP schema byte count overflowed"))?;
             page_descriptor_bytes = page_descriptor_bytes
-                .checked_add(descriptor_sort_key(descriptor)?.len())
+                .checked_add(descriptor_sort_key(&candidate.descriptor)?.len())
                 .ok_or_else(|| McpError::protocol("MCP descriptor byte count overflowed"))?;
         }
         if page_schema_bytes > policy.limits.max_schema_bytes_per_page {
@@ -371,7 +454,7 @@ pub(crate) async fn discover_catalog(
 
         let proposed_tools = descriptors
             .len()
-            .checked_add(page.tools.len())
+            .checked_add(page_candidates.len())
             .ok_or_else(|| McpError::protocol("MCP tool count overflowed"))?;
         if proposed_tools > policy.limits.max_tools {
             return incomplete_snapshot(
@@ -410,7 +493,7 @@ pub(crate) async fn discover_catalog(
                 policy,
             );
         }
-        descriptors.extend(page.tools);
+        descriptors.extend(page_candidates);
         total_schema_bytes = proposed_schema_bytes;
         total_descriptor_bytes = proposed_descriptor_bytes;
 
@@ -454,7 +537,7 @@ pub(crate) async fn discover_catalog(
 fn complete_snapshot(
     server_id: McpServerId,
     previous: Option<&McpCatalogSnapshot>,
-    descriptors: Vec<McpToolDescriptor>,
+    descriptors: Vec<CatalogDescriptorCandidate>,
     page_count: usize,
     total_schema_bytes: usize,
     total_descriptor_bytes: usize,
@@ -472,6 +555,8 @@ fn complete_snapshot(
     };
     Ok(McpCatalogSnapshot {
         server_id,
+        source_config_epoch: None,
+        source_registry_revision: None,
         source_config_digest: None,
         generation,
         completeness: McpCatalogCompleteness::Complete,
@@ -487,7 +572,7 @@ fn complete_snapshot(
 fn incomplete_snapshot(
     server_id: McpServerId,
     previous: Option<&McpCatalogSnapshot>,
-    descriptors: Vec<McpToolDescriptor>,
+    descriptors: Vec<CatalogDescriptorCandidate>,
     issue: McpCatalogIssue,
     measurements: CatalogMeasurements,
     policy: &McpCatalogPolicy,
@@ -504,6 +589,8 @@ fn incomplete_snapshot(
     if descriptors.is_empty() {
         return Ok(McpCatalogSnapshot {
             server_id,
+            source_config_epoch: None,
+            source_registry_revision: None,
             source_config_digest: None,
             generation: previous_generation,
             completeness: McpCatalogCompleteness::Failed(issue),
@@ -518,6 +605,8 @@ fn incomplete_snapshot(
     let (tools, diagnostics) = build_tools(server_id, descriptors, policy)?;
     Ok(McpCatalogSnapshot {
         server_id,
+        source_config_epoch: None,
+        source_registry_revision: None,
         source_config_digest: None,
         generation: previous_generation,
         completeness: McpCatalogCompleteness::Partial(issue),
@@ -532,26 +621,37 @@ fn incomplete_snapshot(
 
 fn build_tools(
     server_id: McpServerId,
-    mut descriptors: Vec<McpToolDescriptor>,
+    mut descriptors: Vec<CatalogDescriptorCandidate>,
     policy: &McpCatalogPolicy,
 ) -> Result<(Vec<McpCatalogTool>, Vec<McpCatalogDiagnostic>), McpError> {
     descriptors.sort_by(|left, right| {
-        left.name.cmp(&right.name).then_with(|| {
-            descriptor_sort_key(left)
-                .unwrap_or_default()
-                .cmp(&descriptor_sort_key(right).unwrap_or_default())
-        })
+        left.descriptor
+            .name
+            .cmp(&right.descriptor.name)
+            .then_with(|| {
+                descriptor_sort_key(&left.descriptor)
+                    .unwrap_or_default()
+                    .cmp(&descriptor_sort_key(&right.descriptor).unwrap_or_default())
+            })
     });
 
-    let mut grouped = BTreeMap::<String, Vec<McpToolDescriptor>>::new();
-    for descriptor in descriptors {
+    let mut diagnostics = Vec::new();
+    let mut grouped = BTreeMap::<String, Vec<CatalogDescriptorCandidate>>::new();
+    for candidate in descriptors {
+        for kind in &candidate.issues {
+            diagnostics.push(McpCatalogDiagnostic {
+                kind: *kind,
+                raw_names: vec![safe_diagnostic_name(&candidate.descriptor.name)],
+                model_name: None,
+                occurrence_count: 1,
+            });
+        }
         grouped
-            .entry(descriptor.name.clone())
+            .entry(candidate.descriptor.name.clone())
             .or_default()
-            .push(descriptor);
+            .push(candidate);
     }
 
-    let mut diagnostics = Vec::new();
     let mut tools = Vec::with_capacity(grouped.len());
     for (raw_name, duplicates) in grouped {
         let duplicate_count = duplicates.len();
@@ -563,10 +663,12 @@ fn build_tools(
                 occurrence_count: duplicate_count,
             });
         }
-        let descriptor = duplicates
+        let candidate = duplicates
             .into_iter()
             .next()
             .expect("grouped descriptor must not be empty");
+        let descriptor_valid = candidate.issues.is_empty();
+        let descriptor = candidate.descriptor;
         let model_name = build_model_name(server_id, &raw_name, policy.limits.max_model_name_bytes);
         let reserved = policy.reserved_model_names.contains(&model_name);
         if reserved {
@@ -589,7 +691,7 @@ fn build_tools(
                 descriptor.output_schema.as_ref(),
             )?,
             descriptor,
-            routable: duplicate_count == 1 && !reserved,
+            routable: descriptor_valid && duplicate_count == 1 && !reserved,
         });
     }
 
@@ -641,6 +743,86 @@ fn build_tools(
             .then_with(|| left.raw_names.cmp(&right.raw_names))
     });
     Ok((tools, diagnostics))
+}
+
+fn prepare_descriptor(
+    mut descriptor: McpToolDescriptor,
+    limits: &McpSecurityLimits,
+) -> CatalogDescriptorCandidate {
+    let mut issues = Vec::new();
+    if descriptor.name.is_empty()
+        || descriptor.name.len() > limits.max_raw_tool_name_bytes
+        || descriptor.name.chars().any(char::is_control)
+    {
+        descriptor.name = format!("invalid_{}", tool_name_hash(&descriptor.name));
+        issues.push(McpCatalogDiagnosticKind::InvalidRawName);
+    }
+
+    let title_invalid = descriptor
+        .title
+        .as_ref()
+        .is_some_and(|title| title.len() > limits.max_tool_description_bytes);
+    let description_invalid = descriptor
+        .description
+        .as_ref()
+        .is_some_and(|description| description.len() > limits.max_tool_description_bytes);
+    let annotation_title_invalid = descriptor
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.title.as_ref())
+        .is_some_and(|title| title.len() > limits.max_tool_description_bytes);
+    if title_invalid || description_invalid || annotation_title_invalid {
+        if title_invalid {
+            descriptor.title = None;
+        }
+        if description_invalid {
+            descriptor.description = None;
+        }
+        if annotation_title_invalid {
+            if let Some(annotations) = &mut descriptor.annotations {
+                annotations.title = None;
+            }
+        }
+        issues.push(McpCatalogDiagnosticKind::DescriptionLimitExceeded);
+    }
+
+    let input_valid = validate_schema_value(&descriptor.input_schema, limits).is_ok();
+    let output_valid = descriptor
+        .output_schema
+        .as_ref()
+        .is_none_or(|schema| validate_schema_value(schema, limits).is_ok());
+    if !input_valid || !output_valid {
+        if !input_valid {
+            descriptor.input_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            });
+        }
+        if !output_valid {
+            descriptor.output_schema = None;
+        }
+        issues.push(McpCatalogDiagnosticKind::InvalidSchema);
+    }
+
+    CatalogDescriptorCandidate { descriptor, issues }
+}
+
+fn safe_diagnostic_name(value: &str) -> String {
+    const MAX_BYTES: usize = 256;
+    let mut output = String::new();
+    for character in value.chars() {
+        let character = if character.is_control() {
+            '\u{fffd}'
+        } else {
+            character
+        };
+        if output.len() + character.len_utf8() > MAX_BYTES {
+            break;
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn effective_catalog_digest(tools: &[McpCatalogTool]) -> Result<McpCatalogDigest, McpError> {
@@ -707,10 +889,13 @@ fn normalize_stem(raw_name: &str) -> String {
 
 fn diagnostic_rank(kind: McpCatalogDiagnosticKind) -> u8 {
     match kind {
-        McpCatalogDiagnosticKind::DuplicateRawName => 0,
-        McpCatalogDiagnosticKind::NormalizationCollision => 1,
-        McpCatalogDiagnosticKind::ModelNameCollision => 2,
-        McpCatalogDiagnosticKind::ReservedModelName => 3,
+        McpCatalogDiagnosticKind::InvalidRawName => 0,
+        McpCatalogDiagnosticKind::DescriptionLimitExceeded => 1,
+        McpCatalogDiagnosticKind::InvalidSchema => 2,
+        McpCatalogDiagnosticKind::DuplicateRawName => 3,
+        McpCatalogDiagnosticKind::NormalizationCollision => 4,
+        McpCatalogDiagnosticKind::ModelNameCollision => 5,
+        McpCatalogDiagnosticKind::ReservedModelName => 6,
     }
 }
 
@@ -719,7 +904,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use serde_json::json;
+    use serde_json::{json, Map, Value};
 
     use super::*;
     use crate::{
@@ -821,6 +1006,14 @@ mod tests {
         }
     }
 
+    fn candidates(descriptors: Vec<McpToolDescriptor>) -> Vec<CatalogDescriptorCandidate> {
+        let limits = McpSecurityLimits::default();
+        descriptors
+            .into_iter()
+            .map(|descriptor| prepare_descriptor(descriptor, &limits))
+            .collect()
+    }
+
     #[test]
     fn namespace_is_stable_bounded_and_independent_of_display_name() {
         let id = McpServerId::from_uuid(
@@ -841,7 +1034,7 @@ mod tests {
         let policy = McpCatalogPolicy::default();
         let (tools, diagnostics) = build_tools(
             id,
-            vec![descriptor("alpha.beta"), descriptor("alpha/beta")],
+            candidates(vec![descriptor("alpha.beta"), descriptor("alpha/beta")]),
             &policy,
         )
         .unwrap();
@@ -856,7 +1049,7 @@ mod tests {
         let id = McpServerId::new();
         let (tools, diagnostics) = build_tools(
             id,
-            vec![descriptor("same"), descriptor("same")],
+            candidates(vec![descriptor("same"), descriptor("same")]),
             &McpCatalogPolicy::default(),
         )
         .unwrap();
@@ -1111,6 +1304,83 @@ mod tests {
             descriptor_snapshot.completeness,
             McpCatalogCompleteness::Failed(McpCatalogIssue::PageDescriptorLimitExceeded)
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_untrusted_descriptors_are_unroutable_without_hiding_healthy_tools() {
+        let limits = McpSecurityLimits::default();
+        let mut too_deep = json!({"type": "string"});
+        for _ in 0..limits.max_schema_depth {
+            too_deep = json!({"not": too_deep});
+        }
+        let too_many_nodes = json!({
+            "anyOf": vec![Value::Bool(true); limits.max_schema_nodes]
+        });
+        let properties = (0..=limits.max_schema_properties)
+            .map(|index| (format!("property_{index}"), json!({"type": "string"})))
+            .collect::<Map<_, _>>();
+
+        let mut descriptors = vec![descriptor("healthy")];
+        for (name, schema) in [
+            ("too_deep", too_deep),
+            ("too_many_nodes", too_many_nodes),
+            (
+                "too_many_properties",
+                json!({"type": "object", "properties": properties}),
+            ),
+            (
+                "too_many_enum_values",
+                json!({"type": "string", "enum": vec!["x"; limits.max_schema_enum_values + 1]}),
+            ),
+            (
+                "remote_ref",
+                json!({"type": "object", "$ref": "https://example.invalid/schema.json"}),
+            ),
+            (
+                "oversized_literal",
+                json!({"type": "string", "const": "x".repeat(limits.max_schema_string_literal_bytes + 1)}),
+            ),
+        ] {
+            let mut invalid = descriptor(name);
+            invalid.input_schema = schema;
+            descriptors.push(invalid);
+        }
+        let mut oversized_description = descriptor("oversized_description");
+        oversized_description.description = Some("x".repeat(limits.max_tool_description_bytes + 1));
+        descriptors.push(oversized_description);
+        descriptors.push(descriptor(&"x".repeat(limits.max_raw_tool_name_bytes + 1)));
+
+        let id = McpServerId::new();
+        let peer = ScriptedPeer::new(id, vec![(None, Ok(page(descriptors, None)))]);
+        let snapshot = discover_catalog(peer.as_ref(), id, None, &McpCatalogPolicy::default())
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.completeness, McpCatalogCompleteness::Complete);
+        assert!(snapshot
+            .tools
+            .iter()
+            .find(|tool| tool.raw_name == "healthy")
+            .is_some_and(|tool| tool.routable));
+        assert_eq!(
+            snapshot.tools.iter().filter(|tool| !tool.routable).count(),
+            8
+        );
+        assert_eq!(
+            snapshot
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| { diagnostic.kind == McpCatalogDiagnosticKind::InvalidSchema })
+                .count(),
+            6
+        );
+        assert!(snapshot.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == McpCatalogDiagnosticKind::DescriptionLimitExceeded
+        }));
+        assert!(snapshot
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.kind == McpCatalogDiagnosticKind::InvalidRawName }));
     }
 
     #[test]

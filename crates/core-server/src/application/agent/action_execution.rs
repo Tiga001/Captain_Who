@@ -726,6 +726,21 @@ impl AgentService {
                     "自动批准执行器只支持结构化 apply_patch diff 和 run_command。".to_string(),
                 ),
             }),
+            AgentProposedAction::McpToolCall { approval } => Ok(AgentToolResult {
+                exact_archive_file: None,
+                call_id: approval.identity.call_id,
+                tool: approval.identity.provenance.model_tool_name,
+                ok: false,
+                result: Some(serde_json::json!({
+                    "type": "mcp_approval",
+                    "code": "approvedInvocationRequired",
+                    "retryable": false,
+                })),
+                error: Some(
+                    "MCP tools can only execute through the one-time approved invocation path."
+                        .to_string(),
+                ),
+            }),
             AgentProposedAction::SkillMaterialization { materialization } => {
                 let effect_storage_id = pending_action_storage_id(&run_id, &materialization.id);
                 let mut file_effect_guard =

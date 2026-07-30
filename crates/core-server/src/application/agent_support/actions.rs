@@ -123,6 +123,7 @@ fn workspace_relative_turn_change(
 pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
     match action {
         AgentProposedAction::ToolCall { call } => call.id.clone(),
+        AgentProposedAction::McpToolCall { approval } => approval.identity.action_id.clone(),
         AgentProposedAction::Diff { diff } => diff.id.clone(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.clone(),
         AgentProposedAction::Command { command } => command.id.clone(),
@@ -132,14 +133,12 @@ pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
     }
 }
 
-/// Stable backend identity for a provider-scoped action id.
-pub(crate) fn pending_action_storage_id(run_id: &str, action_id: &str) -> String {
-    format!("v2:{}:{run_id}:{action_id}", run_id.len())
-}
+pub(crate) use crate::pending_action_identity::pending_action_storage_id;
 
 pub(crate) fn action_type_for_action(action: &AgentProposedAction) -> &'static str {
     match action {
         AgentProposedAction::ToolCall { .. } => "tool_call",
+        AgentProposedAction::McpToolCall { .. } => "mcp_tool_call",
         AgentProposedAction::Diff { .. } => "diff",
         AgentProposedAction::FileWrite { .. } => "file_write",
         AgentProposedAction::Command { .. } => "command",
@@ -152,6 +151,9 @@ pub(crate) fn action_type_for_action(action: &AgentProposedAction) -> &'static s
 pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
     match action {
         AgentProposedAction::ToolCall { call } => call.tool.clone(),
+        AgentProposedAction::McpToolCall { approval } => {
+            approval.identity.provenance.model_tool_name.clone()
+        }
         AgentProposedAction::Diff { .. } => "apply_patch".to_string(),
         AgentProposedAction::FileWrite { .. } => "write_file".to_string(),
         AgentProposedAction::Command { .. } => "run_command".to_string(),
@@ -168,6 +170,7 @@ pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
 pub(crate) fn tool_call_for_action(action: &AgentProposedAction) -> AgentToolCall {
     match action {
         AgentProposedAction::ToolCall { call } => call.clone(),
+        AgentProposedAction::McpToolCall { approval } => approval.call.clone(),
         AgentProposedAction::Diff { diff } => diff_tool_call(diff),
         AgentProposedAction::FileWrite { file_write } => file_write_tool_call(file_write),
         AgentProposedAction::Command { command } => command_tool_call(command),

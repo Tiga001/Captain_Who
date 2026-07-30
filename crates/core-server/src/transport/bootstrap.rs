@@ -2,6 +2,84 @@ use super::*;
 use std::fs::File;
 use std::path::Path;
 
+#[cfg(not(test))]
+use crate::application::mcp::approval_payload_store::MCP_APPROVAL_CREDENTIAL_SERVICE;
+use crate::application::mcp::approval_payload_store::{
+    durable_mcp_payload_store_or_process_only, McpApprovalPayloadStore,
+};
+use crate::application::mcp::registry_event_sink::McpAgentRegistryEventSink;
+use crate::application::mcp::sqlite_envelope_repository::SqliteMcpApprovalEnvelopeRepository;
+
+const MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60);
+
+struct McpApprovalExpiryReconciler {
+    cancellation: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl McpApprovalExpiryReconciler {
+    fn spawn(agent_service: AgentService, payload_store: Arc<dyn McpApprovalPayloadStore>) -> Self {
+        let (cancellation, mut cancelled) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let first_tick =
+                tokio::time::Instant::now() + MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL;
+            let mut interval =
+                tokio::time::interval_at(first_tick, MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut cancelled => break,
+                    _ = interval.tick() => {
+                        if reconcile_expired_mcp_approvals_tick(
+                            &agent_service,
+                            payload_store.as_ref(),
+                        )
+                        .is_err()
+                        {
+                            eprintln!("MCP approval expiry reconciliation failed safely");
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            cancellation: Some(cancellation),
+            task: Some(task),
+        }
+    }
+
+    async fn shutdown(mut self) -> Result<(), String> {
+        if let Some(cancellation) = self.cancellation.take() {
+            let _ = cancellation.send(());
+        }
+        self.task
+            .take()
+            .expect("MCP expiry reconciler task is owned until shutdown")
+            .await
+            .map_err(|_| "MCP approval expiry reconciler task failed during shutdown".to_string())
+    }
+}
+
+impl Drop for McpApprovalExpiryReconciler {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self.cancellation.take() {
+            let _ = cancellation.send(());
+        }
+    }
+}
+
+fn reconcile_expired_mcp_approvals_tick(
+    agent_service: &AgentService,
+    payload_store: &dyn McpApprovalPayloadStore,
+) -> Result<crate::application::agent::McpApprovalExpiryReconciliation, String> {
+    let summary = agent_service.reconcile_expired_mcp_approvals()?;
+    payload_store
+        .reconcile_expired(summary.cutoff_ms)
+        .map_err(|_| "failed to reconcile expired MCP approval payloads".to_string())?;
+    Ok(summary)
+}
+
 pub(crate) struct CoreServerBootstrap {
     pub(crate) storage: Arc<StorageService>,
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
@@ -179,11 +257,6 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
                 "failed to reconcile interrupted image-generation Agent audits: {error}"
             ))
         })?;
-    bootstrap
-        .agent_service
-        .reconcile_startup_orphaned_conversation_traces()
-        .map_err(io::Error::other)?;
-
     // Round 3 deliberately starts with an empty in-memory Registry. The stdio policy authorizes
     // no executable, so constructing the optional MCP subsystem cannot launch an unknown Server.
     // Future persisted settings will populate this Registry through an explicit authorization
@@ -191,14 +264,33 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let mcp_registry = InMemoryMcpRegistry::shared();
     let mcp_connector: Arc<dyn McpConnector> =
         Arc::new(McpStdioConnector::new(McpStdioPolicy::default()));
+    let mcp_event_sink = Arc::new(McpAgentRegistryEventSink::new());
     let mcp_manager = Arc::new(
-        McpConnectionManager::without_events(
+        McpConnectionManager::new(
             mcp_registry,
             mcp_connector,
+            mcp_event_sink.clone(),
             McpManagerPolicy::default(),
         )
         .map_err(|_| io::Error::other("failed to initialize the MCP connection manager"))?,
     );
+    let mcp_payload_store = mcp_approval_payload_store(Arc::clone(&bootstrap.storage));
+    let _ = mcp_payload_store.reconcile_expired(mycopilot_core::storage::now_ms());
+    let mcp_bridge = Arc::new(
+        McpRuntimeBridge::with_payload_store_and_registry_security_gate(
+            Arc::clone(&mcp_manager),
+            Arc::clone(&mcp_payload_store),
+            mcp_event_sink.clone(),
+        ),
+    );
+    let agent_service = bootstrap
+        .agent_service
+        .clone()
+        .with_mcp_tool_invoker(mcp_bridge.clone())
+        .with_mcp_startup_inspector(mcp_bridge);
+    mcp_event_sink
+        .bind(agent_service.clone())
+        .map_err(io::Error::other)?;
     let mcp_startup_manager = Arc::clone(&mcp_manager);
     let mcp_startup = tokio::spawn(async move {
         let failures = mcp_startup_manager
@@ -213,11 +305,14 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
             );
         }
     });
-    let mcp_bridge = Arc::new(McpRuntimeBridge::new(Arc::clone(&mcp_manager)));
-    let agent_service = bootstrap
-        .agent_service
-        .clone()
-        .with_mcp_tool_invoker(mcp_bridge);
+    agent_service
+        .reconcile_startup_mcp_actions()
+        .map_err(io::Error::other)?;
+    agent_service
+        .reconcile_startup_orphaned_conversation_traces()
+        .map_err(io::Error::other)?;
+    let mcp_approval_expiry_reconciler =
+        McpApprovalExpiryReconciler::spawn(agent_service.clone(), mcp_payload_store);
 
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (image_artifact_outbound_tx, image_artifact_outbound_rx) =
@@ -267,6 +362,9 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     // process-owned close authority for every connection that reached the Manager.
     mcp_startup.abort();
     let _ = mcp_startup.await;
+    let mcp_approval_expiry_shutdown = mcp_approval_expiry_reconciler.shutdown().await;
+    let mcp_action_invalidation =
+        agent_service.invalidate_process_bound_mcp_actions_before_shutdown();
 
     // Admission has stopped. Settle accepted filesystem jobs while active agents are cancelled in
     // parallel; queued jobs receive cancellation errors and running jobs get a bounded grace
@@ -317,6 +415,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .await
         .map_err(|error| io::Error::other(format!("outbound writer stopped: {error}")))?;
     input_result?;
+    mcp_approval_expiry_shutdown.map_err(io::Error::other)?;
     git_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     skill_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     skill_acquisition_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
@@ -344,9 +443,18 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     if mcp_shutdown_failures > 0 {
         eprintln!("{mcp_shutdown_failures} MCP server(s) did not shut down cleanly");
     }
+    match &mcp_action_invalidation {
+        Ok(summary) if summary.payload_invalidation_failures > 0 => eprintln!(
+            "{} process-bound MCP approval payload(s) could not be invalidated cleanly",
+            summary.payload_invalidation_failures
+        ),
+        Ok(_) => {}
+        Err(_) => eprintln!("process-bound MCP approvals could not be settled safely at shutdown"),
+    }
     if let Some(error) = outbound_error {
         return Err(error);
     }
+    mcp_action_invalidation.map_err(io::Error::other)?;
     writer_result
 }
 
@@ -413,6 +521,43 @@ fn image_generation_credential_store(
     }
 }
 
+/// Selects the native credential backend dedicated to the MCP approval master key.
+///
+/// Unlike image generation, MCP payload encryption never falls back to the development file
+/// credential store. On macOS an unsigned or ad-hoc-signed helper receives no Keychain adapter;
+/// the caller then uses a process-only payload store.
+#[cfg(test)]
+fn mcp_approval_credential_store() -> Option<Arc<dyn CredentialStore>> {
+    // Unit-test binaries must never probe or mutate the developer's real Keychain/Credential
+    // Manager. Durable recovery tests inject InMemoryCredentialStore directly into the factory.
+    None
+}
+
+#[cfg(not(test))]
+fn mcp_approval_credential_store() -> Option<Arc<dyn CredentialStore>> {
+    #[cfg(target_os = "macos")]
+    {
+        if !macos_core_server_has_stable_signing_identity() {
+            return None;
+        }
+        NonInteractiveMacCredentialStore::new(MCP_APPROVAL_CREDENTIAL_SERVICE)
+            .ok()
+            .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        SystemCredentialStore::new(MCP_APPROVAL_CREDENTIAL_SERVICE)
+            .ok()
+            .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+    }
+}
+
+fn mcp_approval_payload_store(storage: Arc<StorageService>) -> Arc<dyn McpApprovalPayloadStore> {
+    let repository = Arc::new(SqliteMcpApprovalEnvelopeRepository::new(storage));
+    durable_mcp_payload_store_or_process_only(repository, mcp_approval_credential_store())
+}
+
 fn uses_development_image_generation_credentials() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -450,5 +595,53 @@ pub(crate) fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {
         Ok(path)
     } else {
         std::env::current_dir().map(|current_directory| current_directory.join(path))
+    }
+}
+
+#[cfg(test)]
+mod mcp_payload_bootstrap_tests {
+    use super::*;
+    use crate::application::mcp::approval_payload_store::{
+        InMemoryMcpApprovalPayloadStore, McpApprovalPayloadPersistence,
+        UnavailableMcpApprovalPayloadStore,
+    };
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_bootstrap_never_probes_native_credentials_and_uses_process_only_payloads() {
+        assert!(mcp_approval_credential_store().is_none());
+        let directory = tempdir().unwrap();
+        let database_path = directory.path().join("test.sqlite");
+        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        assert_eq!(
+            mcp_approval_payload_store(storage).persistence(),
+            McpApprovalPayloadPersistence::ProcessOnly
+        );
+    }
+
+    #[test]
+    fn expiry_tick_reconciles_the_host_payload_store_after_agent_state() {
+        let directory = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&directory.path().join("test.sqlite")).unwrap());
+        let service = AgentService::new(storage);
+        let unavailable = UnavailableMcpApprovalPayloadStore;
+        assert!(
+            reconcile_expired_mcp_approvals_tick(&service, &unavailable).is_err(),
+            "an unavailable payload store must be observed by the synchronized tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn expiry_reconciler_cancellation_is_explicit_and_awaited_without_a_timer_sleep() {
+        let directory = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&directory.path().join("test.sqlite")).unwrap());
+        let service = AgentService::new(storage);
+        let reconciler = McpApprovalExpiryReconciler::spawn(
+            service,
+            Arc::new(InMemoryMcpApprovalPayloadStore::default()),
+        );
+        reconciler.shutdown().await.unwrap();
     }
 }

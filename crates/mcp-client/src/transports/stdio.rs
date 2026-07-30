@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
+use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -24,27 +25,42 @@ use crate::connection::{McpClientEventHandler, STATE_FAILED, STATE_READY};
 use crate::{
     BoxMcpFuture, McpCancellationToken, McpCapabilitySnapshot, McpClientHandle, McpConnector,
     McpEnvBinding, McpError, McpImplementationInfo, McpLifecycleKind, McpPeer,
-    McpPeerNotificationState, McpPeerSignalPublisher, McpProtocolSnapshot, McpServerConfig,
-    McpStderrSnapshot, McpStdioConfig, McpTransportConfig, McpTrustLevel,
+    McpPeerNotificationState, McpPeerSignalPublisher, McpProtocolSnapshot, McpSecurityLimits,
+    McpServerConfig, McpStderrSnapshot, McpStdioConfig, McpTransportConfig, McpTrustLevel,
 };
 
-const DEFAULT_STDOUT_MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_STDERR_MAX_RETAINED_BYTES: usize = 64 * 1024;
-const DEFAULT_STDERR_RATE_LIMIT_BYTES_PER_SECOND: usize = 16 * 1024;
+const MIN_FORCE_REAP_WINDOW: Duration = Duration::from_millis(250);
+const EXITED_LEADER_TERM_GRACE: Duration = Duration::from_millis(25);
 
 struct SpawnedChildGuard {
     child: Option<Child>,
+    containment: Option<ProcessContainment>,
 }
 
 impl SpawnedChildGuard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
+    fn new(child: Child, containment: ProcessContainment) -> Self {
+        Self {
+            child: Some(child),
+            containment: Some(containment),
+        }
     }
 
-    fn into_inner(mut self) -> Child {
-        self.child
-            .take()
-            .expect("owned MCP child must be present until supervision starts")
+    fn into_parts(mut self) -> (Child, ProcessContainment) {
+        (
+            self.child
+                .take()
+                .expect("owned MCP child must be present until supervision starts"),
+            self.containment
+                .take()
+                .expect("MCP process containment must accompany its child"),
+        )
+    }
+
+    fn containment(&self) -> ProcessContainment {
+        *self
+            .containment
+            .as_ref()
+            .expect("MCP process containment must accompany its child")
     }
 }
 
@@ -68,11 +84,94 @@ impl DerefMut for SpawnedChildGuard {
 
 impl Drop for SpawnedChildGuard {
     fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
+        if let (Some(mut child), Some(containment)) = (self.child.take(), self.containment.take()) {
             // Async connector cancellation can drop this future at any await. Kill the isolated
-            // process group synchronously before Child's kill_on_drop fallback handles the direct
-            // child, so descendants are not left behind.
-            terminate_child(child);
+            // process group synchronously, then transfer the Child to a detached reaper instead
+            // of relying only on kill_on_drop (which does not itself wait for exit).
+            request_terminate_child(&containment, &mut child);
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    tokio::time::sleep(EXITED_LEADER_TERM_GRACE).await;
+                    force_kill_child(&containment, &mut child);
+                    let _ = child.wait().await;
+                });
+            } else {
+                // Runtime teardown must not turn an owned child into an
+                // unreaped zombie. A small OS thread owns a private
+                // current-thread runtime solely long enough to finish the
+                // bounded kill-and-wait sequence. No protocol data crosses
+                // this fallback boundary.
+                let _ = std::thread::Builder::new()
+                    .name("mcp-child-reaper".to_string())
+                    .spawn(move || {
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_time()
+                            .build();
+                        if let Ok(runtime) = runtime {
+                            runtime.block_on(async move {
+                                tokio::time::sleep(EXITED_LEADER_TERM_GRACE).await;
+                                force_kill_child(&containment, &mut child);
+                                let _ = child.wait().await;
+                            });
+                        } else {
+                            force_kill_child(&containment, &mut child);
+                            for _ in 0..25 {
+                                match child.try_wait() {
+                                    Ok(Some(_)) | Err(_) => break,
+                                    Ok(None) => {
+                                        std::thread::sleep(Duration::from_millis(10));
+                                    }
+                                }
+                            }
+                        }
+                    });
+            }
+        }
+    }
+}
+
+/// Spawn-time identity of the OS containment boundary.
+///
+/// On Unix the group leader is deliberately kept unreaped until the group has
+/// received its final signal. The zombie leader pins both its PID and PGID, so
+/// a delayed cleanup cannot target an unrelated process group that reused the
+/// numeric identifier.
+#[derive(Clone, Copy)]
+pub(crate) struct ProcessContainment {
+    #[cfg(unix)]
+    leader_pid: libc::pid_t,
+    #[cfg(unix)]
+    process_group_id: libc::pid_t,
+}
+
+impl ProcessContainment {
+    fn capture(child: &Child) -> Result<Self, McpError> {
+        #[cfg(unix)]
+        {
+            let leader_pid = child
+                .id()
+                .and_then(|id| libc::pid_t::try_from(id).ok())
+                .filter(|id| *id > 0)
+                .ok_or_else(|| {
+                    McpError::spawn("failed to retain MCP process containment identity")
+                })?;
+            // SAFETY: getpgid only inspects kernel process metadata for the
+            // freshly spawned repository-authorized child.
+            let process_group_id = unsafe { libc::getpgid(leader_pid) };
+            if process_group_id != leader_pid {
+                return Err(McpError::spawn(
+                    "MCP child did not enter its dedicated process group",
+                ));
+            }
+            Ok(Self {
+                leader_pid,
+                process_group_id,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child;
+            Ok(Self {})
         }
     }
 }
@@ -87,18 +186,23 @@ pub struct McpStdioPolicy {
     pub allowed_programs: BTreeSet<PathBuf>,
     pub allowed_host_variables: BTreeSet<String>,
     pub stdout_max_line_bytes: usize,
+    pub stderr_max_line_bytes: usize,
     pub stderr_max_retained_bytes: usize,
     pub stderr_rate_limit_bytes_per_second: usize,
+    pub security_limits: McpSecurityLimits,
 }
 
 impl Default for McpStdioPolicy {
     fn default() -> Self {
+        let security_limits = McpSecurityLimits::default();
         Self {
             allowed_programs: BTreeSet::new(),
             allowed_host_variables: BTreeSet::new(),
-            stdout_max_line_bytes: DEFAULT_STDOUT_MAX_LINE_BYTES,
-            stderr_max_retained_bytes: DEFAULT_STDERR_MAX_RETAINED_BYTES,
-            stderr_rate_limit_bytes_per_second: DEFAULT_STDERR_RATE_LIMIT_BYTES_PER_SECOND,
+            stdout_max_line_bytes: security_limits.max_protocol_message_bytes,
+            stderr_max_line_bytes: security_limits.max_stderr_line_bytes,
+            stderr_max_retained_bytes: security_limits.max_stderr_retained_bytes,
+            stderr_rate_limit_bytes_per_second: security_limits.stderr_rate_limit_bytes_per_second,
+            security_limits,
         }
     }
 }
@@ -128,33 +232,44 @@ impl McpStdioConnector {
         }
         let McpTransportConfig::Stdio(stdio) = &config.transport;
         let mut command = build_command(stdio, &self.policy)?;
-        let mut child = SpawnedChildGuard::new(
-            command
-                .spawn()
-                .map_err(|_| McpError::spawn("failed to start MCP stdio server"))?,
-        );
+        let mut spawned = command
+            .spawn()
+            .map_err(|_| McpError::spawn("failed to start MCP stdio server"))?;
+        let containment = match ProcessContainment::capture(&spawned) {
+            Ok(containment) => containment,
+            Err(error) => {
+                let _ = spawned.start_kill();
+                let _ = spawned.wait().await;
+                return Err(error);
+            }
+        };
+        let mut child = SpawnedChildGuard::new(spawned, containment);
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
-                terminate_and_reap(&mut child, config.shutdown_timeout()).await;
+                terminate_and_reap(child.containment(), &mut child, config.shutdown_timeout())
+                    .await;
                 return Err(McpError::spawn("MCP server stdin pipe was unavailable"));
             }
         };
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate_and_reap(&mut child, config.shutdown_timeout()).await;
+                terminate_and_reap(child.containment(), &mut child, config.shutdown_timeout())
+                    .await;
                 return Err(McpError::spawn("MCP server stdout pipe was unavailable"));
             }
         };
         let stderr = match child.stderr.take() {
             Some(stderr) => stderr,
             None => {
-                terminate_and_reap(&mut child, config.shutdown_timeout()).await;
+                terminate_and_reap(child.containment(), &mut child, config.shutdown_timeout())
+                    .await;
                 return Err(McpError::spawn("MCP server stderr pipe was unavailable"));
             }
         };
         let stderr_capture = Arc::new(Mutex::new(StderrAccumulator::new(
+            self.policy.stderr_max_line_bytes,
             self.policy.stderr_max_retained_bytes,
             self.policy.stderr_rate_limit_bytes_per_second,
         )));
@@ -184,13 +299,16 @@ impl McpStdioConnector {
         let service = match negotiation {
             Ok(Ok(service)) => service,
             Ok(Err(_)) => {
-                let error = negotiation_failure(&mut child, config.shutdown_timeout()).await;
+                let error =
+                    negotiation_failure(child.containment(), &mut child, config.shutdown_timeout())
+                        .await;
                 stderr_task.abort();
                 let _ = stderr_task.await;
                 return Err(error);
             }
             Err(_) => {
-                terminate_and_reap(&mut child, config.shutdown_timeout()).await;
+                terminate_and_reap(child.containment(), &mut child, config.shutdown_timeout())
+                    .await;
                 stderr_task.abort();
                 let _ = stderr_task.await;
                 return Err(McpError::timeout(
@@ -204,24 +322,39 @@ impl McpStdioConnector {
             let _ = failed_service
                 .close_with_timeout(config.shutdown_timeout())
                 .await;
-            terminate_and_reap(&mut child, config.shutdown_timeout()).await;
+            terminate_and_reap(child.containment(), &mut child, config.shutdown_timeout()).await;
             stderr_task.abort();
             let _ = stderr_task.await;
             return Err(McpError::negotiation(
                 "MCP server omitted negotiated peer info",
             ));
         };
-        let protocol = map_protocol_snapshot(&peer_info);
+        let protocol = match map_protocol_snapshot(&peer_info, &self.policy.security_limits) {
+            Ok(protocol) => protocol,
+            Err(error) => {
+                let mut failed_service = service;
+                let _ = failed_service
+                    .close_with_timeout(config.shutdown_timeout())
+                    .await;
+                terminate_and_reap(child.containment(), &mut child, config.shutdown_timeout())
+                    .await;
+                stderr_task.abort();
+                let _ = stderr_task.await;
+                return Err(error);
+            }
+        };
         let peer = service.peer().clone();
         let notification_task =
             establish_tool_notifications(&peer, &protocol, &signals, config.connect_timeout())
                 .await;
+        let (child, containment) = child.into_parts();
         Ok(Arc::new(McpClientHandle::new(
             config.id,
             protocol,
             peer,
             service,
-            child.into_inner(),
+            child,
+            containment,
             stderr_capture,
             stderr_task,
             notification_task,
@@ -320,8 +453,14 @@ pub(crate) struct StdioProcessSupervisor {
     shutdown_timeout: Duration,
 }
 
+struct ContainedChild {
+    child: Child,
+    containment: ProcessContainment,
+}
+
 pub(crate) fn spawn_process_supervisor(
     child: Child,
+    containment: ProcessContainment,
     state: Arc<AtomicU8>,
     shutdown_timeout: Duration,
     signals: McpPeerSignalPublisher,
@@ -332,7 +471,7 @@ pub(crate) fn spawn_process_supervisor(
     let (shutdown, shutdown_requested) = oneshot::channel();
     let task_force = force.clone();
     let task = tokio::spawn(supervise_process(
-        child,
+        ContainedChild { child, containment },
         shutdown_requested,
         task_force,
         state,
@@ -356,19 +495,34 @@ impl StdioProcessSupervisor {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        let join_timeout = self.shutdown_timeout.saturating_mul(3);
-        match tokio::time::timeout(join_timeout, &mut self.task).await {
+        // Two cooperative phases are allowed here: an stdin/transport-close grace period and,
+        // on Unix, a process-group TERM grace period. KILL + reap receives its own independent
+        // window below instead of borrowing time from either cooperative phase.
+        let join_timeout = self.shutdown_timeout.saturating_mul(2);
+        let initial_join = tokio::time::timeout(join_timeout, &mut self.task).await;
+        match initial_join {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(McpError::shutdown(
                 "MCP process supervisor task failed while closing",
             )),
             Err(_) => {
+                // The supervisor owns the Child and is the only task allowed to reap it. Do not
+                // abort that task when the cooperative TERM path exceeds its outer deadline:
+                // switch it to the process-group KILL path, then grant that path a separate
+                // bounded window. If even that window expires, dropping the JoinHandle detaches
+                // (rather than aborts) the supervisor so it can still reap a delayed exit.
                 self.force.cancel();
-                self.task.abort();
-                let _ = (&mut self.task).await;
-                Err(McpError::shutdown(
-                    "MCP process supervisor did not finish while closing",
-                ))
+                match tokio::time::timeout(force_reap_window(self.shutdown_timeout), &mut self.task)
+                    .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err(McpError::shutdown(
+                        "MCP process supervisor task failed during forced cleanup",
+                    )),
+                    Err(_) => Err(McpError::shutdown(
+                        "MCP process supervisor is still reaping after forced termination",
+                    )),
+                }
             }
         }
     }
@@ -376,6 +530,9 @@ impl StdioProcessSupervisor {
 
 impl Drop for StdioProcessSupervisor {
     fn drop(&mut self) {
+        // `supervise_process` owns the Child. Waking its biased force branch performs the
+        // best-effort process-group KILL while letting the detached task retain responsibility
+        // for wait/reap. Never abort that task: doing so could strand a zombie.
         self.force.cancel();
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -384,7 +541,7 @@ impl Drop for StdioProcessSupervisor {
 }
 
 async fn supervise_process(
-    mut child: Child,
+    process: ContainedChild,
     mut shutdown_requested: oneshot::Receiver<()>,
     force: McpCancellationToken,
     state: Arc<AtomicU8>,
@@ -392,15 +549,23 @@ async fn supervise_process(
     shutdown_timeout: Duration,
     signals: McpPeerSignalPublisher,
 ) -> Result<(), McpError> {
+    let ContainedChild {
+        mut child,
+        containment,
+    } = process;
     let outcome = tokio::select! {
         biased;
-        _ = force.cancelled() => force_then_reap(&mut child)
+        _ = force.cancelled() => force_then_reap(&mut child, &containment, shutdown_timeout)
             .await
             .map(|status| (status, true)),
-        status = child.wait() => status
-            .map(|status| (status, false))
-            .map_err(|_| McpError::shutdown("failed to reap MCP server process")),
-        _ = &mut shutdown_requested => wait_then_force(&mut child, shutdown_timeout, &force)
+        status = wait_for_natural_exit(&mut child, &containment, shutdown_timeout) => status
+            .map(|status| (status, false)),
+        _ = &mut shutdown_requested => wait_then_force(
+            &mut child,
+            &containment,
+            shutdown_timeout,
+            &force,
+        )
             .await
             .map(|status| (status, true)),
     };
@@ -426,17 +591,105 @@ async fn supervise_process(
     Ok(())
 }
 
-async fn force_then_reap(child: &mut Child) -> Result<std::process::ExitStatus, McpError> {
-    terminate_child(child);
-    match tokio::time::timeout(Duration::from_millis(250), child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(_)) => Err(McpError::shutdown(
-            "failed to reap MCP server process after forced termination",
-        )),
-        Err(_) => Err(McpError::shutdown(
-            "MCP server process did not exit after forced termination",
-        )),
+async fn force_then_reap(
+    child: &mut Child,
+    containment: &ProcessContainment,
+    shutdown_timeout: Duration,
+) -> Result<std::process::ExitStatus, McpError> {
+    request_terminate_child(containment, child);
+    tokio::time::sleep(exited_leader_term_grace(shutdown_timeout)).await;
+    force_kill_child(containment, child);
+    // Keep the sole Child owner alive until the OS reports the process as reaped. Callers apply
+    // their own bounded wait and may detach this task, but they must not cancel this final wait.
+    child.wait().await.map_err(|_| {
+        McpError::shutdown("failed to reap MCP server process after forced termination")
+    })
+}
+
+fn force_reap_window(shutdown_timeout: Duration) -> Duration {
+    shutdown_timeout.max(MIN_FORCE_REAP_WINDOW)
+}
+
+fn exited_leader_term_grace(shutdown_timeout: Duration) -> Duration {
+    EXITED_LEADER_TERM_GRACE.min(shutdown_timeout)
+}
+
+async fn wait_for_natural_exit(
+    child: &mut Child,
+    containment: &ProcessContainment,
+    shutdown_timeout: Duration,
+) -> Result<std::process::ExitStatus, McpError> {
+    wait_for_leader_exit_without_reaping(child, containment)
+        .await
+        .map_err(|_| McpError::shutdown("failed to observe MCP server process exit"))?;
+    cleanup_after_observed_exit(child, containment, shutdown_timeout).await
+}
+
+async fn cleanup_after_observed_exit(
+    child: &mut Child,
+    containment: &ProcessContainment,
+    shutdown_timeout: Duration,
+) -> Result<std::process::ExitStatus, McpError> {
+    // The exited Unix leader remains a waitable zombie here. That pins the PGID while descendants
+    // receive TERM and then KILL, eliminating the PID-reuse window created by Child::try_wait.
+    request_terminate_child(containment, child);
+    tokio::time::sleep(exited_leader_term_grace(shutdown_timeout)).await;
+    force_kill_child(containment, child);
+    reap_child(child).await
+}
+
+async fn reap_child(child: &mut Child) -> Result<std::process::ExitStatus, McpError> {
+    child
+        .wait()
+        .await
+        .map_err(|_| McpError::shutdown("failed to reap MCP server process"))
+}
+
+#[cfg(unix)]
+async fn wait_for_leader_exit_without_reaping(
+    _child: &mut Child,
+    containment: &ProcessContainment,
+) -> std::io::Result<()> {
+    loop {
+        match leader_exit_observed(containment) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[cfg(unix)]
+fn leader_exit_observed(containment: &ProcessContainment) -> std::io::Result<bool> {
+    let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: the siginfo storage is valid, and leader_pid is the immutable spawn-time PID of our
+    // own child. WNOWAIT intentionally leaves the leader waitable so it anchors its PGID.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            containment.leader_pid as libc::id_t,
+            information.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful waitid initializes siginfo_t; POSIX specifies si_pid == 0 when WNOHANG
+    // found no waitable status, and si_pid is defined for SIGCHLD information from WEXITED.
+    Ok(unsafe { information.assume_init().si_pid() } != 0)
+}
+
+#[cfg(not(unix))]
+async fn wait_for_leader_exit_without_reaping(
+    child: &mut Child,
+    _containment: &ProcessContainment,
+) -> std::io::Result<()> {
+    // Degraded direct-child platforms cannot observe without reaping. A second Child::wait call
+    // returns Tokio's cached exit status during the shared cleanup path.
+    child.wait().await.map(|_| ())
 }
 
 async fn establish_tool_notifications(
@@ -455,7 +708,12 @@ async fn establish_tool_notifications(
     }
 
     let filter = SubscriptionFilter::builder().tools_list_changed().build();
-    let mut subscription = match tokio::time::timeout(timeout, peer.listen(filter)).await {
+    let mut subscription = match tokio::time::timeout(
+        timeout,
+        peer.listen_with_capacity(filter, NonZeroUsize::MIN),
+    )
+    .await
+    {
         Ok(Ok(subscription)) if subscription.acknowledged().tools_list_changed == Some(true) => {
             subscription
         }
@@ -489,36 +747,52 @@ async fn establish_tool_notifications(
 
 async fn wait_then_force(
     child: &mut Child,
+    containment: &ProcessContainment,
     shutdown_timeout: Duration,
     force: &McpCancellationToken,
 ) -> Result<std::process::ExitStatus, McpError> {
     enum WaitOutcome {
         Forced,
-        Child(
-            Result<Result<std::process::ExitStatus, std::io::Error>, tokio::time::error::Elapsed>,
-        ),
+        Child(Result<Result<(), std::io::Error>, tokio::time::error::Elapsed>),
     }
 
     let outcome = tokio::select! {
         biased;
         _ = force.cancelled() => WaitOutcome::Forced,
-        result = tokio::time::timeout(shutdown_timeout, child.wait()) => {
+        result = tokio::time::timeout(
+            shutdown_timeout,
+            wait_for_leader_exit_without_reaping(child, containment),
+        ) => {
             WaitOutcome::Child(result)
         }
     };
     match outcome {
-        WaitOutcome::Forced => force_then_reap(child).await,
-        WaitOutcome::Child(Ok(Ok(status))) => Ok(status),
+        WaitOutcome::Forced => force_then_reap(child, containment, shutdown_timeout).await,
+        WaitOutcome::Child(Ok(Ok(()))) => {
+            cleanup_after_observed_exit(child, containment, shutdown_timeout).await
+        }
         WaitOutcome::Child(Ok(Err(_))) => {
             Err(McpError::shutdown("failed to reap MCP server process"))
         }
         WaitOutcome::Child(Err(_)) => {
-            terminate_child(child);
-            match tokio::time::timeout(shutdown_timeout, child.wait()).await {
-                Ok(Ok(status)) => Ok(status),
-                _ => Err(McpError::shutdown(
-                    "MCP server process did not exit after forced termination",
-                )),
+            request_terminate_child(containment, child);
+            let term_outcome = tokio::select! {
+                biased;
+                _ = force.cancelled() => None,
+                result = tokio::time::timeout(
+                    shutdown_timeout,
+                    wait_for_leader_exit_without_reaping(child, containment),
+                ) => Some(result),
+            };
+            match term_outcome {
+                Some(Ok(Ok(()))) => {
+                    // TERM got its full bounded grace period. KILL the still-pinned group before
+                    // reaping the leader so TERM-ignoring descendants cannot survive.
+                    force_kill_child(containment, child);
+                    reap_child(child).await
+                }
+                Some(Ok(Err(_))) => Err(McpError::shutdown("failed to reap MCP server process")),
+                Some(Err(_)) | None => force_then_reap(child, containment, shutdown_timeout).await,
             }
         }
     }
@@ -526,6 +800,9 @@ async fn wait_then_force(
 
 pub(crate) struct StderrAccumulator {
     retained: Vec<u8>,
+    pending_line: Vec<u8>,
+    pending_line_truncated: bool,
+    max_line_bytes: usize,
     max_retained_bytes: usize,
     rate_limit_bytes_per_second: usize,
     window_started: Instant,
@@ -534,9 +811,16 @@ pub(crate) struct StderrAccumulator {
 }
 
 impl StderrAccumulator {
-    fn new(max_retained_bytes: usize, rate_limit_bytes_per_second: usize) -> Self {
+    fn new(
+        max_line_bytes: usize,
+        max_retained_bytes: usize,
+        rate_limit_bytes_per_second: usize,
+    ) -> Self {
         Self {
             retained: Vec::with_capacity(max_retained_bytes.min(8 * 1024)),
+            pending_line: Vec::with_capacity(max_line_bytes.min(1024)),
+            pending_line_truncated: false,
+            max_line_bytes,
             max_retained_bytes,
             rate_limit_bytes_per_second,
             window_started: Instant::now(),
@@ -546,6 +830,37 @@ impl StderrAccumulator {
     }
 
     fn ingest(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            if *byte == b'\n' {
+                self.flush_pending_line(true);
+            } else if self.pending_line.len() < self.max_line_bytes {
+                self.pending_line.push(*byte);
+            } else {
+                self.pending_line_truncated = true;
+                self.dropped_bytes = self.dropped_bytes.saturating_add(1);
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        if !self.pending_line.is_empty() || self.pending_line_truncated {
+            self.flush_pending_line(false);
+        }
+    }
+
+    fn flush_pending_line(&mut self, newline: bool) {
+        let original_len = self.pending_line.len() + usize::from(newline);
+        // Server stderr is never trusted display text. Retain only a
+        // host-generated marker so neutral-looking credentials and terminal
+        // control/log-injection sequences cannot escape heuristic redaction.
+        self.dropped_bytes = self.dropped_bytes.saturating_add(original_len as u64);
+        let mut safe_line = b"[mcp stderr omitted]".to_vec();
+        if newline {
+            safe_line.push(b'\n');
+        }
+        self.pending_line.clear();
+        self.pending_line_truncated = false;
+
         if self.window_started.elapsed() >= Duration::from_secs(1) {
             self.window_started = Instant::now();
             self.retained_in_window = 0;
@@ -554,10 +869,12 @@ impl StderrAccumulator {
             .rate_limit_bytes_per_second
             .saturating_sub(self.retained_in_window);
         let capacity_remaining = self.max_retained_bytes.saturating_sub(self.retained.len());
-        let accepted = bytes.len().min(rate_remaining).min(capacity_remaining);
-        self.retained.extend_from_slice(&bytes[..accepted]);
+        let accepted = safe_line.len().min(rate_remaining).min(capacity_remaining);
+        self.retained.extend_from_slice(&safe_line[..accepted]);
         self.retained_in_window += accepted;
-        self.dropped_bytes += (bytes.len() - accepted) as u64;
+        self.dropped_bytes = self
+            .dropped_bytes
+            .saturating_add((safe_line.len() - accepted) as u64);
     }
 
     pub(crate) fn snapshot(&self) -> McpStderrSnapshot {
@@ -575,7 +892,10 @@ async fn drain_stderr(stderr: ChildStderr, capture: Arc<Mutex<StderrAccumulator>
     let mut buffer = [0_u8; 8 * 1024];
     loop {
         match reader.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                capture.lock().await.finish();
+                break;
+            }
             Ok(read) => capture.lock().await.ingest(&buffer[..read]),
         }
     }
@@ -599,6 +919,7 @@ fn build_command(config: &McpStdioConfig, policy: &McpStdioPolicy) -> Result<Com
 }
 
 fn validate_stdio_config(config: &McpStdioConfig, policy: &McpStdioPolicy) -> Result<(), McpError> {
+    policy.security_limits.validate()?;
     if !config.program.is_absolute() {
         return Err(McpError::config(
             "MCP stdio executable path must be absolute",
@@ -620,6 +941,17 @@ fn validate_stdio_config(config: &McpStdioConfig, policy: &McpStdioPolicy) -> Re
     if policy.stderr_max_retained_bytes == 0 {
         return Err(McpError::config(
             "MCP stderr retained-byte limit must be greater than zero",
+        ));
+    }
+    if policy.stderr_max_line_bytes == 0
+        || policy.stderr_max_line_bytes > policy.security_limits.max_stderr_line_bytes
+        || policy.stderr_max_retained_bytes > policy.security_limits.max_stderr_retained_bytes
+        || policy.stderr_rate_limit_bytes_per_second
+            > policy.security_limits.stderr_rate_limit_bytes_per_second
+        || policy.stdout_max_line_bytes > policy.security_limits.max_protocol_message_bytes
+    {
+        return Err(McpError::config(
+            "MCP stdio limits exceed the centralized security policy",
         ));
     }
     if policy.stdout_max_line_bytes == 0 {
@@ -713,14 +1045,37 @@ fn resolve_environment(
     Ok(environment)
 }
 
-fn map_protocol_snapshot(peer: &rmcp::model::ServerPeerInfo) -> McpProtocolSnapshot {
+fn map_protocol_snapshot(
+    peer: &rmcp::model::ServerPeerInfo,
+    limits: &McpSecurityLimits,
+) -> Result<McpProtocolSnapshot, McpError> {
+    if peer
+        .instructions
+        .as_ref()
+        .is_some_and(|instructions| instructions.len() > limits.max_server_instructions_bytes)
+    {
+        return Err(McpError::negotiation(
+            "MCP server instructions exceeded the configured size limit",
+        ));
+    }
+    let encoded_capabilities = serde_json::to_vec(&peer.capabilities)
+        .map_err(|_| McpError::negotiation("MCP server capabilities could not be measured"))?;
+    if encoded_capabilities.len() > limits.max_capability_metadata_bytes {
+        return Err(McpError::negotiation(
+            "MCP server capabilities exceeded the configured metadata limit",
+        ));
+    }
     let negotiated_version = peer.protocol_version.to_string();
     let lifecycle = if peer.protocol_version == ProtocolVersion::V_2026_07_28 {
         McpLifecycleKind::Discover
-    } else {
+    } else if peer.protocol_version == ProtocolVersion::V_2025_11_25 {
         McpLifecycleKind::InitializeFallback
+    } else {
+        return Err(McpError::negotiation(
+            "MCP server selected an unsupported protocol version",
+        ));
     };
-    McpProtocolSnapshot {
+    let snapshot = McpProtocolSnapshot {
         negotiated_version,
         lifecycle,
         server: peer
@@ -731,7 +1086,9 @@ fn map_protocol_snapshot(peer: &rmcp::model::ServerPeerInfo) -> McpProtocolSnaps
                 version: server.version.clone(),
             }),
         capabilities: map_capabilities(&peer.capabilities),
-    }
+    };
+    limits.validate_protocol_snapshot(&snapshot)?;
+    Ok(snapshot)
 }
 
 fn map_capabilities(capabilities: &ServerCapabilities) -> McpCapabilitySnapshot {
@@ -763,27 +1120,47 @@ fn map_capabilities(capabilities: &ServerCapabilities) -> McpCapabilitySnapshot 
     }
 }
 
-async fn negotiation_failure(child: &mut Child, shutdown_timeout: Duration) -> McpError {
-    match child.try_wait() {
-        Ok(Some(status)) => McpError::server_exited(status.code()),
-        Ok(None) => match tokio::time::timeout(Duration::from_millis(100), child.wait()).await {
-            Ok(Ok(status)) => McpError::server_exited(status.code()),
-            Ok(Err(_)) => McpError::negotiation("MCP protocol negotiation failed"),
-            Err(_) => {
-                terminate_and_reap(child, shutdown_timeout).await;
-                McpError::negotiation("MCP protocol negotiation failed")
+async fn negotiation_failure(
+    containment: ProcessContainment,
+    child: &mut Child,
+    shutdown_timeout: Duration,
+) -> McpError {
+    match tokio::time::timeout(
+        Duration::from_millis(100),
+        wait_for_leader_exit_without_reaping(child, &containment),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            match cleanup_after_observed_exit(child, &containment, shutdown_timeout).await {
+                Ok(status) => McpError::server_exited(status.code()),
+                Err(_) => McpError::negotiation("MCP protocol negotiation failed"),
             }
-        },
-        Err(_) => {
-            terminate_and_reap(child, shutdown_timeout).await;
+        }
+        Ok(Err(_)) | Err(_) => {
+            terminate_and_reap(containment, child, shutdown_timeout).await;
             McpError::negotiation("MCP protocol negotiation failed")
         }
     }
 }
 
-async fn terminate_and_reap(child: &mut Child, timeout: Duration) {
-    terminate_child(child);
-    let _ = tokio::time::timeout(timeout, child.wait()).await;
+async fn terminate_and_reap(containment: ProcessContainment, child: &mut Child, timeout: Duration) {
+    request_terminate_child(&containment, child);
+    match tokio::time::timeout(
+        timeout,
+        wait_for_leader_exit_without_reaping(child, &containment),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            force_kill_child(&containment, child);
+            let _ = child.wait().await;
+        }
+        Ok(Err(_)) | Err(_) => {
+            force_kill_child(&containment, child);
+            let _ = tokio::time::timeout(force_reap_window(timeout), child.wait()).await;
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -791,31 +1168,69 @@ fn configure_process_isolation(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn configure_process_isolation(_command: &mut Command) {
-    // Windows Job Object containment is intentionally deferred to the process
-    // hardening round. The retained Child and kill_on_drop still provide a
-    // bounded single-process fallback.
+    // Degraded Windows backend: this release supervises only the direct child. It deliberately
+    // does not claim Job Object containment or descendant-tree termination.
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn configure_process_isolation(_command: &mut Command) {
+    // Unknown non-Unix targets use the same direct-child degraded backend.
 }
 
 #[cfg(unix)]
-pub(crate) fn terminate_child(child: &mut Child) {
-    let Some(id) = child.id() else {
+fn signal_process_group(containment: &ProcessContainment, child: &mut Child, signal: libc::c_int) {
+    // Every call occurs before the sole Child owner reaps the leader. A live or zombie leader pins
+    // this spawn-time PGID, so the negative kill cannot target a newly reused group.
+    // A completed cleanup may leave the connector guard to run after Child::wait cleared id().
+    // Disarm in that case: the group was already signalled while pinned, and using only the saved
+    // numeric PGID after reap would create exactly the reuse hazard this containment prevents.
+    if child.id().and_then(|id| libc::pid_t::try_from(id).ok()) != Some(containment.leader_pid) {
         return;
-    };
-    let Ok(process_group) = i32::try_from(id) else {
-        let _ = child.start_kill();
-        return;
-    };
-    // SAFETY: the child was created as leader of a fresh process group. A
-    // negative PID targets only that group and does not dereference memory.
-    if unsafe { libc::kill(-process_group, libc::SIGKILL) } != 0 {
-        let _ = child.start_kill();
+    }
+    // Do not issue a separate kill(..., 0) preflight: the real signal syscall is the atomic
+    // existence check and action. A probe-then-signal sequence would add a needless TOCTOU gap.
+    // SAFETY: kill does not dereference memory. The negative immutable PGID addresses only the
+    // dedicated process group captured immediately after spawn.
+    if unsafe { libc::kill(-containment.process_group_id, signal) } != 0 && signal == libc::SIGKILL
+    {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            let _ = child.start_kill();
+        }
     }
 }
 
-#[cfg(not(unix))]
-pub(crate) fn terminate_child(child: &mut Child) {
+#[cfg(unix)]
+pub(crate) fn request_terminate_child(containment: &ProcessContainment, child: &mut Child) {
+    signal_process_group(containment, child, libc::SIGTERM);
+}
+
+#[cfg(unix)]
+pub(crate) fn force_kill_child(containment: &ProcessContainment, child: &mut Child) {
+    signal_process_group(containment, child, libc::SIGKILL);
+}
+
+#[cfg(windows)]
+pub(crate) fn request_terminate_child(_containment: &ProcessContainment, child: &mut Child) {
+    // There is no portable graceful console signal for an arbitrary child. This is explicitly a
+    // direct-child degraded backend; Job Object containment remains future work.
+    let _ = child.start_kill();
+}
+
+#[cfg(windows)]
+pub(crate) fn force_kill_child(_containment: &ProcessContainment, child: &mut Child) {
+    let _ = child.start_kill();
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) fn request_terminate_child(_containment: &ProcessContainment, child: &mut Child) {
+    let _ = child.start_kill();
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) fn force_kill_child(_containment: &ProcessContainment, child: &mut Child) {
     let _ = child.start_kill();
 }
 
@@ -823,6 +1238,10 @@ pub(crate) fn terminate_child(child: &mut Child) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn peer_info(value: serde_json::Value) -> rmcp::model::ServerPeerInfo {
+        serde_json::from_value(value).expect("test peer info should deserialize")
+    }
 
     fn stdio_config() -> McpStdioConfig {
         McpStdioConfig {
@@ -901,5 +1320,90 @@ mod tests {
         let config = stdio_config();
         let error = build_command(&config, &McpStdioPolicy::default()).unwrap_err();
         assert_eq!(error.kind, crate::McpErrorKind::Config);
+    }
+
+    #[test]
+    fn protocol_snapshot_rejects_unknown_versions_and_oversized_capability_metadata() {
+        let limits = McpSecurityLimits::default();
+        let valid = peer_info(serde_json::json!({
+            "protocolVersion": "2026-07-28",
+            "capabilities": {
+                "tools": {},
+                "extensions": {"io.example.safe": {}}
+            },
+            "serverInfo": {"name": "owned-fixture", "version": "1.0.0"}
+        }));
+        map_protocol_snapshot(&valid, &limits).unwrap();
+
+        let unknown = peer_info(serde_json::json!({
+            "protocolVersion": "2099-01-01",
+            "capabilities": {}
+        }));
+        assert!(map_protocol_snapshot(&unknown, &limits).is_err());
+
+        let oversized = peer_info(serde_json::json!({
+            "protocolVersion": "2026-07-28",
+            "capabilities": {
+                "experimental": {
+                    "io.example.large": {
+                        "data": "x".repeat(limits.max_capability_metadata_bytes)
+                    }
+                }
+            }
+        }));
+        assert!(map_protocol_snapshot(&oversized, &limits).is_err());
+    }
+
+    #[test]
+    fn protocol_snapshot_rejects_peer_identity_and_extension_budgets() {
+        let limits = McpSecurityLimits::default();
+        let oversized_name = peer_info(serde_json::json!({
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "serverInfo": {
+                "name": "n".repeat(limits.max_server_implementation_name_bytes + 1),
+                "version": "1.0.0"
+            }
+        }));
+        assert!(map_protocol_snapshot(&oversized_name, &limits).is_err());
+
+        let extensions = (0..=limits.max_capability_extensions)
+            .map(|index| {
+                (
+                    format!("io.example.extension.{index}"),
+                    serde_json::json!({}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let too_many_extensions = peer_info(serde_json::json!({
+            "protocolVersion": "2026-07-28",
+            "capabilities": {"extensions": extensions}
+        }));
+        assert!(map_protocol_snapshot(&too_many_extensions, &limits).is_err());
+    }
+
+    #[test]
+    fn stderr_capture_never_retains_server_controlled_text() {
+        let mut capture = StderrAccumulator::new(128, 1024, 1024);
+        capture.ingest(
+            b"neutral-canary-without-secret-keywords\nAuthorization: Bearer fixed-test-secret\n",
+        );
+        let snapshot = capture.snapshot();
+        assert!(!snapshot
+            .retained
+            .contains("neutral-canary-without-secret-keywords"));
+        assert!(snapshot.retained.contains("[mcp stderr omitted]"));
+        assert!(!snapshot.retained.contains("fixed-test-secret"));
+        assert!(snapshot.truncated);
+    }
+
+    #[test]
+    fn stderr_capture_bounds_each_line_and_total_retention() {
+        let mut capture = StderrAccumulator::new(8, 32, 32);
+        capture.ingest(b"0123456789abcdef\nsecond-safe-line\n");
+        let snapshot = capture.snapshot();
+        assert!(snapshot.retained_bytes <= 32);
+        assert!(snapshot.dropped_bytes > 0);
+        assert!(snapshot.truncated);
     }
 }

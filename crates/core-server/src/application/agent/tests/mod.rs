@@ -26,6 +26,8 @@ mod context_history;
 mod context_runtime;
 mod file_write_permissions;
 mod image_generation;
+mod mcp_approval_expiry;
+mod mcp_approval_lifecycle;
 mod office;
 mod pending_actions;
 mod skills;
@@ -50,9 +52,10 @@ fn completed_output_for_terminal_gate() -> AgentChatOutput {
 
 fn command_test_input(workspace: &Path) -> AgentChatInput {
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
-        "apiUrl": "https://should-not-be-called.test/v1/chat/completions",
-        "apiToken": "secret",
-        "model": "test-model",
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "token",
+        "model": "model-1",
+        "contextWindowTokens": 128000,
         "messages": []
     }))
     .unwrap();
@@ -180,6 +183,69 @@ fn test_model_settings() -> ModelSettingsRecord {
             enabled: true,
         }],
     }
+}
+
+fn save_test_pending_provider(
+    storage: &StorageService,
+    model_id: &str,
+    api_url: &str,
+    api_token: &str,
+    search_mode: &str,
+    tavily_api_key: &str,
+) {
+    storage
+        .save_model_settings(ModelSettingsRecord {
+            api_url: api_url.to_string(),
+            api_token: api_token.to_string(),
+            search_mode: search_mode.to_string(),
+            tavily_api_key: tavily_api_key.to_string(),
+            models: vec![ModelConfigRecord {
+                id: model_id.to_string(),
+                display_name: "Pending provider fixture".to_string(),
+                api_url_override: None,
+                api_token_override: None,
+                supports_image: false,
+                context_window_tokens: Some(128_000),
+                input_price: "0".to_string(),
+                output_price: "0".to_string(),
+                enabled: true,
+            }],
+        })
+        .unwrap();
+}
+
+fn save_test_pending_provider_for_input(storage: &StorageService, input: &AgentChatInput) {
+    let (search_mode, tavily_api_key) = input
+        .search_config
+        .as_ref()
+        .map(|search| {
+            let mode = match search.mode {
+                mycopilot_core::AgentSearchMode::Auto => "auto",
+                mycopilot_core::AgentSearchMode::Disabled => "disabled",
+                mycopilot_core::AgentSearchMode::Tavily => "tavily",
+            };
+            (mode, search.tavily_api_key.as_deref().unwrap_or_default())
+        })
+        .unwrap_or(("disabled", ""));
+    storage
+        .save_model_settings(ModelSettingsRecord {
+            api_url: input.api_url.clone(),
+            api_token: input.api_token.clone(),
+            search_mode: search_mode.to_string(),
+            tavily_api_key: tavily_api_key.to_string(),
+            models: vec![ModelConfigRecord {
+                id: input.model.clone(),
+                display_name: "Pending input fixture".to_string(),
+                api_url_override: None,
+                api_token_override: None,
+                supports_image: input.model_capabilities.image_input,
+                context_window_tokens: input.context_window_tokens.or(Some(128_000)),
+                input_price: "0".to_string(),
+                output_price: "0".to_string(),
+                enabled: true,
+            }],
+        })
+        .unwrap();
 }
 
 fn write_test_skill(workspace: &Path, body: &str) {

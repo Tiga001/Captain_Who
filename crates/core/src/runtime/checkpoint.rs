@@ -10,7 +10,9 @@ use super::tool_failure_guard::semantic_tool_call_fingerprint;
 use super::tool_flow::build_tool_observation_message;
 #[cfg(test)]
 use crate::context::ContextCapacityDetector;
-use crate::context::{ContextFrame, ContextGroup, ContextOrigin, ModelToolResultGate};
+use crate::context::{
+    ContextFrame, ContextGroup, ContextOrigin, ContextSource, ModelToolResultGate,
+};
 use crate::conversation_trace::{
     canonical_tool_result_for_context, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder, ConversationTurnTraceItem,
@@ -53,6 +55,7 @@ impl QueuedToolCall {
 #[derive(Debug, Clone, Default)]
 pub(super) struct ToolCallBatch {
     queue: VecDeque<QueuedToolCall>,
+    deferred_external_tool_call_count: u32,
     suppressed_narration: bool,
     /// Semantic calls already accepted from this one model response.
     ///
@@ -104,6 +107,7 @@ impl ToolCallBatch {
             .collect();
         Self {
             queue,
+            deferred_external_tool_call_count: 0,
             suppressed_narration,
             seen_semantic_fingerprints: BTreeSet::new(),
         }
@@ -129,6 +133,32 @@ impl ToolCallBatch {
 
     pub(super) fn is_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+
+    /// Drops queued external calls that do not yet have a one-time Host preparation.
+    ///
+    /// Only a count survives the approval checkpoint. In particular, model-authored arguments,
+    /// Server names and Server-authored Tool names never enter this diagnostic channel.
+    pub(super) fn defer_external_calls(
+        &mut self,
+        mut is_external: impl FnMut(&QueuedToolCall) -> bool,
+    ) -> u32 {
+        let before = self.queue.len();
+        self.queue.retain(|call| !is_external(call));
+        let dropped = before.saturating_sub(self.queue.len());
+        let dropped = u32::try_from(dropped).unwrap_or(u32::MAX);
+        self.deferred_external_tool_call_count = self
+            .deferred_external_tool_call_count
+            .saturating_add(dropped);
+        dropped
+    }
+
+    pub(super) fn take_deferred_external_tool_call_count(&mut self) -> Option<u32> {
+        if self.queue.is_empty() && self.deferred_external_tool_call_count > 0 {
+            Some(std::mem::take(&mut self.deferred_external_tool_call_count))
+        } else {
+            None
+        }
     }
 
     pub(super) fn take_suppressed_narration(&mut self) -> bool {
@@ -194,7 +224,8 @@ pub(super) fn create_run_checkpoint(
         conversation_trace_truncated,
     ) = conversation_trace.checkpoint();
     validate_conversation_trace_tool_call_ids(&conversation_trace_items)?;
-    let context_items = context.checkpoint_items()?;
+    let mut context_items = context.checkpoint_items()?;
+    project_mcp_result_context_for_checkpoint(&mut context_items);
     validate_context_checkpoint_tool_call_ids(&context_items)?;
     validate_checkpoint_world_state(run_world_state, model_capabilities)?;
     Ok(AgentRunCheckpoint {
@@ -207,12 +238,14 @@ pub(super) fn create_run_checkpoint(
             .iter()
             .map(queued_tool_call_checkpoint)
             .collect::<AgentResult<Vec<_>>>()?,
+        deferred_external_tool_call_count: tool_batch.deferred_external_tool_call_count,
         suppressed_narration: tool_batch.suppressed_narration,
         extension_snapshots,
         tool_set: tool_set.checkpoint(),
         run_context: run_context.cloned(),
         model_capabilities,
         run_world_state: run_world_state.clone(),
+        pending_action_id: None,
         pending_tool_call_id: pending_tool_call_id.to_string(),
         conversation_trace_items,
         conversation_model_context_items,
@@ -221,7 +254,6 @@ pub(super) fn create_run_checkpoint(
     })
 }
 
-#[cfg(test)]
 #[cfg(test)]
 pub(super) fn restore_run_checkpoint(
     checkpoint: AgentRunCheckpoint,
@@ -275,6 +307,18 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         )));
     }
     validate_model_tool_call_id(&checkpoint.pending_tool_call_id)?;
+    if checkpoint
+        .pending_action_id
+        .as_ref()
+        .is_some_and(|action_id| {
+            action_id.trim().is_empty()
+                || action_id.trim() != action_id
+                || action_id.len() > 2_048
+                || action_id.chars().any(char::is_control)
+        })
+    {
+        return Err(AgentError::new("无法恢复运行检查点：待审批动作标识无效。"));
+    }
     validate_tool_set_checkpoint_shape(&checkpoint.tool_set)?;
     validate_checkpoint_world_state(&checkpoint.run_world_state, checkpoint.model_capabilities)?;
     validate_model_tool_call_id(&continuation.call.id)?;
@@ -331,7 +375,12 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         name: continuation.call.tool.clone(),
         args: continuation.call.args.clone(),
     };
-    let durable_result = canonical_tool_result_for_context(&continuation.result);
+    let is_mcp = checkpoint.pending_action_id.is_some();
+    let durable_result = if is_mcp {
+        crate::tools::mcp_tool_result_persistence_projection(&continuation.result)
+    } else {
+        canonical_tool_result_for_context(&continuation.result)
+    };
     let llm_result =
         crate::tools::model_projection_for_persisted_continuation(&continuation.result);
     let model_observation = super::finalize_model_tool_observation(
@@ -341,10 +390,22 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         &llm_result,
         archive_metadata,
     )?;
+    let persisted_model_observation = if is_mcp {
+        super::finalize_model_tool_observation(
+            model_tool_result_gate,
+            &continuation.call.id,
+            !continuation.result.ok,
+            &durable_result,
+            archive_metadata,
+        )?
+    } else {
+        model_observation.clone()
+    };
     context.append_tool_continuation(
         &continuation_call,
         model_observation.clone(),
         !continuation.result.ok,
+        is_mcp,
         assistant_message_id.map(|assistant_message_id| {
             ContextOrigin::conversation_trace_item(
                 assistant_message_id,
@@ -370,7 +431,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
             0,
             &crate::llm::LlmMessage::tool_result(
                 continuation.call.id.clone(),
-                model_observation,
+                persisted_model_observation,
                 !continuation.result.ok,
             ),
         );
@@ -386,6 +447,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         next_model_request_index: checkpoint.next_model_request_index,
         tool_batch: ToolCallBatch {
             queue,
+            deferred_external_tool_call_count: checkpoint.deferred_external_tool_call_count,
             suppressed_narration: checkpoint.suppressed_narration,
             seen_semantic_fingerprints: restored_batch_fingerprints,
         },
@@ -396,6 +458,22 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         model_capabilities: checkpoint.model_capabilities,
         run_world_state: checkpoint.run_world_state,
     })
+}
+
+pub(super) const MCP_DURABLE_RESULT_PLACEHOLDER: &str =
+    "MCP result content omitted from durable state; consult the live invocation lifecycle.";
+
+fn project_mcp_result_context_for_checkpoint(items: &mut [AgentContextCheckpointItem]) {
+    for item in items {
+        if item
+            .sources
+            .iter()
+            .any(|source| source == ContextSource::McpToolResult.as_str())
+        {
+            item.content = MCP_DURABLE_RESULT_PLACEHOLDER.to_string();
+            item.images.clear();
+        }
+    }
 }
 
 fn validate_checkpoint_world_state(
@@ -743,6 +821,104 @@ mod tests {
             .is_some_and(|details| details.to_string().contains(secret)));
     }
 
+    #[test]
+    fn mcp_approval_barrier_drops_only_external_calls_and_persists_a_safe_reprepare_count() {
+        let secret = "queued-mcp-secret-must-not-persist";
+        let mut batch = ToolCallBatch::from_model_response(
+            "checkpoint-validation-run",
+            0,
+            String::new(),
+            vec![
+                LlmToolCall {
+                    id: canonical_test_call_id(1, "provider-mcp-one"),
+                    name: "mcp__fixture__first".to_string(),
+                    args: json!({"value": secret}),
+                },
+                LlmToolCall {
+                    id: canonical_test_call_id(2, "provider-builtin"),
+                    name: "read_file".to_string(),
+                    args: json!({"path": "report.txt"}),
+                },
+                LlmToolCall {
+                    id: canonical_test_call_id(3, "provider-mcp-two"),
+                    name: "mcp__fixture__second".to_string(),
+                    args: json!({"other": secret}),
+                },
+            ],
+            false,
+            |call| {
+                (
+                    LlmToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        args: if call.name.starts_with("mcp__") {
+                            json!({})
+                        } else {
+                            call.args.clone()
+                        },
+                    },
+                    if call.name.starts_with("mcp__") {
+                        AgentToolCallCheckpointPersistence::DeniedMcp
+                    } else {
+                        AgentToolCallCheckpointPersistence::Allowed
+                    },
+                )
+            },
+        );
+
+        assert_eq!(
+            batch.defer_external_calls(|queued| queued.call.name.starts_with("mcp__")),
+            2
+        );
+        assert_eq!(batch.queue.len(), 1);
+        assert_eq!(batch.queue[0].call.name, "read_file");
+        assert_eq!(batch.take_deferred_external_tool_call_count(), None);
+
+        let pending = LlmToolCall {
+            id: canonical_test_call_id(0, "provider-pending"),
+            name: "write_file".to_string(),
+            args: json!({"path": "report.txt"}),
+        };
+        let context = ContextFrame::new(vec![ContextItem::assistant(
+            "",
+            vec![pending.clone()],
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(ContextGroup::tool_exchange("mcp-barrier-pending")),
+        )]);
+        let trace = ConversationTraceRecorder::default();
+        let checkpoint = create_run_checkpoint(
+            "checkpoint-validation-run",
+            RunCheckpointState {
+                context: &context,
+                next_model_request_index: 1,
+                tool_batch: &batch,
+                extension_snapshots: Vec::new(),
+                pending_tool_call_id: &pending.id,
+                conversation_trace: &trace,
+                tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(checkpoint.queued_tool_calls.len(), 1);
+        assert_eq!(checkpoint.deferred_external_tool_call_count, 2);
+        let rendered = serde_json::to_string(&checkpoint).unwrap();
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("mcp__fixture__first"));
+        assert!(!rendered.contains("mcp__fixture__second"));
+
+        batch.pop_front();
+        assert_eq!(batch.take_deferred_external_tool_call_count(), Some(2));
+        assert_eq!(batch.take_deferred_external_tool_call_count(), None);
+    }
+
     fn restorable_checkpoint_fixture() -> (AgentRunCheckpoint, AgentToolContinuation) {
         let pending = LlmToolCall {
             id: canonical_test_call_id(0, "provider-pending"),
@@ -806,6 +982,58 @@ mod tests {
             },
         };
         (checkpoint, continuation)
+    }
+
+    #[test]
+    fn mcp_continuation_keeps_live_model_result_but_redacts_durable_trace_and_checkpoint() {
+        const RESULT_CANARY: &str = "MCP_RESULT_CANARY_MUST_NOT_PERSIST";
+        let (mut checkpoint, mut continuation) = restorable_checkpoint_fixture();
+        let model_tool_name = "mcp__fixture__secret_result".to_string();
+        checkpoint.pending_action_id = Some(uuid::Uuid::new_v4().to_string());
+        let pending_call_id = checkpoint.pending_tool_call_id.clone();
+        checkpoint
+            .context_items
+            .iter_mut()
+            .flat_map(|item| item.tool_calls.iter_mut())
+            .find(|call| call.id == pending_call_id)
+            .expect("pending checkpoint ToolCall")
+            .name
+            .clone_from(&model_tool_name);
+        checkpoint
+            .tool_set
+            .exposed_tool_names
+            .push(model_tool_name.clone());
+        checkpoint.tool_set.exposed_tool_names.sort();
+        checkpoint.tool_set.exposed_tool_names.dedup();
+        continuation.call.tool.clone_from(&model_tool_name);
+        continuation.result.tool = model_tool_name;
+        continuation.result.result = Some(json!({
+            "value": RESULT_CANARY,
+            "neutral": {"data": RESULT_CANARY},
+        }));
+
+        let restored =
+            restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+        let mut live_context_items = restored.context.checkpoint_items().unwrap();
+        assert!(
+            serde_json::to_string(&live_context_items)
+                .unwrap()
+                .contains(RESULT_CANARY),
+            "the current process must still supply the bounded authoritative result to the model"
+        );
+
+        let (trace_items, model_items, _, _) = restored.conversation_trace.checkpoint();
+        assert!(!serde_json::to_string(&trace_items)
+            .unwrap()
+            .contains(RESULT_CANARY));
+        assert!(!serde_json::to_string(&model_items)
+            .unwrap()
+            .contains(RESULT_CANARY));
+
+        project_mcp_result_context_for_checkpoint(&mut live_context_items);
+        let durable_context = serde_json::to_string(&live_context_items).unwrap();
+        assert!(!durable_context.contains(RESULT_CANARY));
+        assert!(durable_context.contains(MCP_DURABLE_RESULT_PLACEHOLDER));
     }
 
     fn assert_invalid_tool_call_id(error: AgentError) {

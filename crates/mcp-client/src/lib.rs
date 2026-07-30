@@ -4,10 +4,10 @@
 //! types. `rmcp` is an implementation detail confined to the connector and
 //! mapping modules.
 //!
-//! Hosts must disable the `rmcp` tracing target before handling sensitive tool
-//! arguments or results. The SDK can emit peer-controlled protocol content
-//! even above debug level, outside this crate's redacted domain-type `Debug`
-//! implementations.
+//! Hosts must install a non-overridable target filter for `rmcp` before
+//! handling sensitive tool arguments or results. The SDK can emit
+//! peer-controlled protocol content at multiple tracing levels, outside this
+//! crate's redacted domain-type `Debug` implementations.
 //!
 //! ```compile_fail
 //! use mycopilot_mcp_client::rmcp;
@@ -20,6 +20,8 @@ mod connector;
 mod digest;
 mod error;
 mod event;
+mod invocation;
+mod limits;
 mod manager;
 mod registry;
 mod transports;
@@ -28,11 +30,11 @@ mod types;
 pub use catalog::{
     McpCatalogCompleteness, McpCatalogDiagnostic, McpCatalogDiagnosticKind, McpCatalogIssue,
     McpCatalogLimits, McpCatalogPolicy, McpCatalogSnapshot, McpCatalogTool, McpCatalogToolCall,
-    McpToolId,
+    McpCatalogToolCallIdentity, McpToolId,
 };
 pub use config::{
-    McpEnvBinding, McpServerConfig, McpServerScope, McpStdioConfig, McpTransportConfig,
-    McpTrustLevel,
+    McpApprovalMode, McpEnvBinding, McpServerConfig, McpServerScope, McpStdioConfig,
+    McpTransportConfig, McpTrustLevel,
 };
 pub use connection::{McpClientHandle, McpPeer};
 pub use connector::{BoxMcpFuture, McpConnector};
@@ -43,6 +45,12 @@ pub use event::{
     McpConnectionEvent, McpEvent, McpEventSink, McpPeerNotificationState, McpPeerSignalReceiver,
     McpPeerSignalSnapshot, McpSafeError, McpServerState, McpStderrSnapshot, NoopMcpEventSink,
 };
+pub use invocation::{
+    McpActiveCallId, McpActiveCallProvenance, McpActiveCallSnapshot, McpDispatchCertainty,
+    McpDispatchPhase, McpDispatchTracker, McpInvocationId, McpInvocationState, McpModelCallId,
+    McpOutcomeUnknownReason,
+};
+pub use limits::McpSecurityLimits;
 pub use manager::{
     McpBatchOperationResult, McpConnectionManager, McpManagerPolicy, McpServerStatus,
     McpShutdownReport,
@@ -53,9 +61,10 @@ pub use registry::{
 };
 pub use transports::stdio::{McpStdioConnector, McpStdioPolicy};
 pub use types::{
-    McpCacheScope, McpCapabilitySnapshot, McpConnectionState, McpContentBlock, McpEmbeddedResource,
-    McpImplementationInfo, McpLifecycleKind, McpProtocolSnapshot, McpResourceLink, McpServerId,
-    McpToolAnnotations, McpToolCall, McpToolDescriptor, McpToolPage, McpToolResult,
+    McpCacheScope, McpCapabilitySnapshot, McpConfigEpoch, McpConnectionState, McpContentBlock,
+    McpEmbeddedResource, McpImplementationInfo, McpLifecycleKind, McpProtocolSnapshot,
+    McpResourceLink, McpServerId, McpToolAnnotations, McpToolCall, McpToolDescriptor, McpToolPage,
+    McpToolResult,
 };
 
 /// Re-export the cancellation primitive as part of our stable API boundary.

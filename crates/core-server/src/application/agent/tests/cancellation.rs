@@ -145,9 +145,11 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel".to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
@@ -168,6 +170,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
     });
+    save_test_pending_provider_for_input(&storage, &agent_input);
     service
         .store_pending_action(
             "run-cancel",
@@ -261,9 +264,11 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-forced".to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
@@ -417,7 +422,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage);
+    let service = AgentService::new(Arc::clone(&storage));
     let command = AgentCommandRequest {
         id: "command-cancel-before-spawn".to_string(),
         command: "mkdir cancelled-before-spawn".to_string(),
@@ -435,9 +440,11 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-before-spawn".to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
@@ -477,6 +484,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         permissions: AgentPermissions::default(),
     });
     agent_input.resume_checkpoint = Some(checkpoint);
+    save_test_pending_provider_for_input(&storage, &agent_input);
     service
         .store_pending_action(
             "run-cancel-before-spawn",
@@ -569,9 +577,11 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
@@ -612,6 +622,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
     });
     agent_input.resume_checkpoint = Some(checkpoint);
 
+    save_test_pending_provider_for_input(&storage, &agent_input);
     let service = AgentService::new(Arc::clone(&storage));
     service
         .store_pending_action(
@@ -758,9 +769,11 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-command-cancel".to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),

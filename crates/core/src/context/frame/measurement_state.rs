@@ -464,6 +464,7 @@ impl ContextFrame {
         call: &LlmToolCall,
         observation: String,
         is_error: bool,
+        is_mcp: bool,
         origin: Option<ContextOrigin>,
     ) -> AgentResult<()> {
         let checkpoint_call = self.validate_pending_tool_call(&call.id)?;
@@ -492,6 +493,9 @@ impl ContextFrame {
         )
         .with_source(ContextSource::ToolResult)
         .with_group(group);
+        if is_mcp {
+            metadata = metadata.with_source(ContextSource::McpToolResult);
+        }
         if let Some(origin) = origin {
             metadata = metadata.with_origin(origin);
         }

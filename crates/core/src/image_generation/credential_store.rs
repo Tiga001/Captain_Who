@@ -122,6 +122,31 @@ impl CredentialReference {
         }
     }
 
+    /// Creates a deterministic backend-owned reference from a fixed opaque identifier.
+    ///
+    /// This is intended for singleton Host keys whose lookup identity must survive process
+    /// restarts without persisting a reference beside encrypted records. Callers must use a
+    /// product-owned, non-user-derived lowercase hexadecimal identifier. Existing image-provider
+    /// reference generation remains random and continues to use [`Self::new_for_backend`].
+    pub fn from_stable_opaque_id(
+        backend: CredentialStoreBackend,
+        opaque_id: &str,
+    ) -> Result<Self, CredentialStoreError> {
+        if backend == CredentialStoreBackend::LegacySystemV1
+            || opaque_id.len() != OPAQUE_REFERENCE_UUID_BYTES
+            || !opaque_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(CredentialStoreError::InvalidReference);
+        }
+        Ok(Self {
+            value: format!("{OPAQUE_REFERENCE_PREFIX}{}/{opaque_id}", backend.as_str()),
+            backend,
+            opaque_id: opaque_id.to_string(),
+        })
+    }
+
     /// Returns the non-secret reference value for persistence or keyring lookup.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -584,6 +609,37 @@ mod tests {
                 .unwrap();
         assert_eq!(legacy.backend(), CredentialStoreBackend::LegacySystemV1);
         assert!(!InMemoryCredentialStore::default().supports_reference(&legacy));
+    }
+
+    #[test]
+    fn stable_backend_owned_reference_is_deterministic_without_changing_random_references() {
+        const STABLE_ID: &str = "9e5289f6297448d1b7e8895e5eb0d033";
+        let first = CredentialReference::from_stable_opaque_id(
+            CredentialStoreBackend::InMemoryV1,
+            STABLE_ID,
+        )
+        .unwrap();
+        let second = CredentialReference::from_stable_opaque_id(
+            CredentialStoreBackend::InMemoryV1,
+            STABLE_ID,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(CredentialReference::parse(first.as_str()).unwrap(), first);
+        assert_ne!(
+            CredentialReference::new_for_backend(CredentialStoreBackend::InMemoryV1),
+            second
+        );
+        assert!(CredentialReference::from_stable_opaque_id(
+            CredentialStoreBackend::LegacySystemV1,
+            STABLE_ID
+        )
+        .is_err());
+        assert!(CredentialReference::from_stable_opaque_id(
+            CredentialStoreBackend::InMemoryV1,
+            "NOT-A-CANONICAL-STABLE-ID"
+        )
+        .is_err());
     }
 
     #[test]

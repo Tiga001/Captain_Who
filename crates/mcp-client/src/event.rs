@@ -5,7 +5,7 @@ use tokio::sync::watch;
 
 use crate::{
     McpCatalogCompleteness, McpConfigDigest, McpConnectionState, McpError, McpErrorKind,
-    McpServerId,
+    McpRegistryChangeKind, McpServerId, McpServerScope,
 };
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,8 +194,16 @@ impl From<&McpError> for McpSafeError {
                 "mcp_protocol_error",
                 "The MCP server returned an invalid protocol response.",
             ),
+            McpErrorKind::OutputTooLarge => (
+                "mcp_output_too_large",
+                "The MCP server returned a tool result that exceeded safety limits.",
+            ),
             McpErrorKind::Timeout => ("mcp_timeout", "The MCP operation timed out."),
             McpErrorKind::Cancelled => ("mcp_cancelled", "The MCP operation was cancelled."),
+            McpErrorKind::OutcomeUnknown => (
+                "mcp_outcome_unknown",
+                "The MCP request may have reached the server, but its outcome is unknown.",
+            ),
             McpErrorKind::ServerExited => ("mcp_server_exited", "The MCP server process exited."),
             McpErrorKind::Shutdown => (
                 "mcp_shutdown_error",
@@ -215,6 +223,23 @@ impl From<&McpError> for McpSafeError {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum McpEvent {
+    /// A committed Registry mutation containing only routing-safe identity metadata.
+    ///
+    /// In particular, this event never carries the Server configuration, command, environment,
+    /// headers, or secret references.
+    RegistryChanged {
+        revision: u64,
+        kind: McpRegistryChangeKind,
+        server_id: McpServerId,
+        scope: McpServerScope,
+        config_digest: McpConfigDigest,
+        config_epoch: crate::McpConfigEpoch,
+    },
+    /// The Registry broadcast receiver skipped one or more mutations.
+    ///
+    /// A Host must treat this as a fail-closed signal for approval state because a removed
+    /// configuration source may no longer be present in the current Registry snapshot.
+    RegistryReconciliationRequired { skipped_changes: u64 },
     ServerStateChanged {
         server_id: McpServerId,
         sequence: u64,
@@ -225,6 +250,8 @@ pub enum McpEvent {
         server_id: McpServerId,
         sequence: u64,
         generation: u64,
+        config_epoch: crate::McpConfigEpoch,
+        registry_revision: u64,
         config_digest: McpConfigDigest,
         completeness: McpCatalogCompleteness,
         tool_count: usize,

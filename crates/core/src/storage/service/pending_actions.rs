@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingActionResumeCheckpointProjection {
+    model: String,
+    api_style: Option<AgentApiStyle>,
+    resume_checkpoint: Option<AgentRunCheckpoint>,
+    tool_continuation: Option<AgentToolContinuation>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentPendingActionResultCommitOutcome {
     Committed { trace_changed: bool },
@@ -22,6 +31,112 @@ pub enum AgentPendingActionSettlementInspection {
     },
 }
 
+/// Safe terminal classification for an MCP approval found during Host startup.
+///
+/// The storage boundary accepts this closed enum rather than arbitrary messages, ensuring neither
+/// model-authored arguments nor Server diagnostics can enter the durable audit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpStartupActionTerminalOutcome {
+    PayloadUnavailable,
+    Expired,
+    PolicyDenied,
+    Rejected,
+    Cancelled,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpActionTerminalizationRequest {
+    pub action_id: String,
+    pub expected_status: String,
+    pub outcome: McpStartupActionTerminalOutcome,
+}
+
+impl McpStartupActionTerminalOutcome {
+    fn error_code(self) -> &'static str {
+        match self {
+            Self::PayloadUnavailable => "mcp.approval_payload_unavailable",
+            Self::Expired => "mcp.approval_payload_expired",
+            Self::PolicyDenied => "mcp.approval_policy_denied",
+            Self::Rejected => "mcp.approval_rejected",
+            Self::Cancelled => "mcp.approval_cancelled",
+            Self::OutcomeUnknown => "mcp.tool_outcome_unknown",
+        }
+    }
+
+    fn safe_reason(self) -> &'static str {
+        match self {
+            Self::PayloadUnavailable => {
+                "The sealed MCP approval payload was unavailable after process restart; the tool was definitely not dispatched."
+            }
+            Self::Expired => {
+                "The MCP approval expired before dispatch; the tool was definitely not dispatched."
+            }
+            Self::PolicyDenied => {
+                "Host policy invalidated the MCP approval before dispatch; the tool was definitely not dispatched."
+            }
+            Self::Rejected => {
+                "The recovered MCP approval was rejected by the user before dispatch; the tool was definitely not dispatched."
+            }
+            Self::Cancelled => {
+                "The recovered MCP approval was cancelled by the user before dispatch; the tool was definitely not dispatched."
+            }
+            Self::OutcomeUnknown => {
+                "The MCP invocation crossed the durable dispatch boundary before process restart; its outcome is unknown and it was not replayed."
+            }
+        }
+    }
+
+    fn pending_status(self) -> &'static str {
+        match self {
+            Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
+            Self::PayloadUnavailable
+            | Self::Expired
+            | Self::PolicyDenied
+            | Self::OutcomeUnknown => "failed",
+        }
+    }
+
+    fn run_status(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::PayloadUnavailable
+            | Self::Expired
+            | Self::PolicyDenied
+            | Self::Rejected
+            | Self::OutcomeUnknown => "failed",
+        }
+    }
+
+    fn message_status(self) -> &'static str {
+        match self {
+            Self::Cancelled => "cancelled",
+            Self::PayloadUnavailable
+            | Self::Expired
+            | Self::PolicyDenied
+            | Self::Rejected
+            | Self::OutcomeUnknown => "error",
+        }
+    }
+}
+
+fn valid_mcp_terminal_transition(
+    expected_status: &str,
+    outcome: McpStartupActionTerminalOutcome,
+) -> bool {
+    match outcome {
+        McpStartupActionTerminalOutcome::PayloadUnavailable
+        | McpStartupActionTerminalOutcome::Expired
+        | McpStartupActionTerminalOutcome::PolicyDenied
+        | McpStartupActionTerminalOutcome::Rejected
+        | McpStartupActionTerminalOutcome::Cancelled => {
+            matches!(expected_status, "pending" | "approved")
+        }
+        McpStartupActionTerminalOutcome::OutcomeUnknown => expected_status == "executing",
+    }
+}
+
 pub(super) fn is_valid_pending_successor(
     interrupted: &AgentPendingActionRecord,
     candidate: &AgentPendingActionRecord,
@@ -34,6 +149,7 @@ pub(super) fn is_valid_pending_successor(
     };
     let action_id = match &action {
         AgentProposedAction::ToolCall { call } => call.id.as_str(),
+        AgentProposedAction::McpToolCall { approval } => approval.identity.call_id.as_str(),
         AgentProposedAction::Diff { diff } => diff.id.as_str(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
         AgentProposedAction::Command { command } => command.id.as_str(),
@@ -46,7 +162,9 @@ pub(super) fn is_valid_pending_successor(
     if candidate.tool_call_id.as_deref() != Some(action_id) {
         return false;
     }
-    let Ok(input) = serde_json::from_str::<AgentChatInput>(&candidate.agent_input_json) else {
+    let Ok(input) = serde_json::from_str::<PendingActionResumeCheckpointProjection>(
+        &candidate.agent_input_json,
+    ) else {
         return false;
     };
     let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
@@ -65,7 +183,7 @@ pub(super) fn is_valid_pending_successor(
             .find_map(|item| match item {
                 ConversationTurnTraceItem::ToolResult {
                     sequence, call_id, ..
-                } if call_id == parent_call_id => Some(*sequence),
+                } if call_id == parent_call_id => Some(sequence.to_owned()),
                 _ => None,
             });
     let child_call_sequence =
@@ -75,7 +193,7 @@ pub(super) fn is_valid_pending_successor(
             .find_map(|item| match item {
                 ConversationTurnTraceItem::ToolCall {
                     sequence, call_id, ..
-                } if call_id == action_id => Some(*sequence),
+                } if call_id == action_id => Some(sequence.to_owned()),
                 _ => None,
             });
     matches!(
@@ -273,12 +391,13 @@ fn recovered_manual_file_effect_trace(
     tool_result: &AgentToolResult,
 ) -> Result<ConversationTurnTrace, String> {
     let input =
-        serde_json::from_str::<AgentChatInput>(&pending.agent_input_json).map_err(|error| {
-            format!(
-                "启动对账无法解析人工命令 {} 的冻结续跑输入：{error}",
-                pending.action_id
-            )
-        })?;
+        serde_json::from_str::<PendingActionResumeCheckpointProjection>(&pending.agent_input_json)
+            .map_err(|error| {
+                format!(
+                    "启动对账无法解析人工命令 {} 的冻结续跑输入：{error}",
+                    pending.action_id
+                )
+            })?;
     if input.tool_continuation.is_some() {
         return Err(format!(
             "启动对账发现人工命令 {} 的冻结输入已包含 ToolResult continuation。",
@@ -374,7 +493,7 @@ fn recovered_manual_file_effect_trace(
     let archive = crate::ConversationHistoryArchiveTraceMetadata::default();
     let model_observation = crate::project_persisted_continuation_observation(
         &input.model,
-        &input.api_url,
+        "",
         input.api_style,
         tool_result,
         &archive,
@@ -605,7 +724,206 @@ fn manual_file_effect_has_authoritative_settlement(
     Ok(proof.is_ok())
 }
 
+fn terminalize_mcp_action_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    request: &McpActionTerminalizationRequest,
+    updated_at: i64,
+) -> Result<Option<AgentPendingActionRecord>, String> {
+    if !valid_mcp_terminal_transition(&request.expected_status, request.outcome) {
+        return Err("invalid MCP terminal transition".to_string());
+    }
+    let Some(record) =
+        pending_action_repository::load_pending_action(transaction, &request.action_id)
+            .map_err(storage_error)?
+    else {
+        return Ok(None);
+    };
+    if record.status != request.expected_status {
+        return Ok(None);
+    }
+    if record.action_type != "mcp_tool_call" {
+        return Err("MCP terminalization rejected a non-MCP action".to_string());
+    }
+
+    let terminal_status = request.outcome.pending_status();
+    let run_status = request.outcome.run_status();
+    let affected = transaction
+        .execute(
+            "
+            UPDATE agent_pending_actions
+            SET status = ?3,
+                target_status = ?3,
+                action_json = '{}',
+                agent_input_json = '{}',
+                updated_at = ?4
+            WHERE action_id = ?1
+              AND status = ?2
+              AND action_type = 'mcp_tool_call'
+            ",
+            rusqlite::params![
+                request.action_id,
+                request.expected_status,
+                terminal_status,
+                updated_at
+            ],
+        )
+        .map_err(storage_error)?;
+    if affected != 1 {
+        return Err("MCP terminalization lost its status CAS".to_string());
+    }
+
+    transaction
+        .execute(
+            "
+            UPDATE agent_action_audit
+            SET status = ?2,
+                action_json = '{}',
+                patch_result_json = NULL,
+                command_result_json = NULL,
+                tool_result_json = NULL,
+                error = ?3,
+                blocked_reason = ?4,
+                completed_at = COALESCE(completed_at, ?5)
+            WHERE action_id = ?1
+            ",
+            rusqlite::params![
+                request.action_id,
+                terminal_status,
+                request.outcome.error_code(),
+                request.outcome.safe_reason(),
+                updated_at
+            ],
+        )
+        .map_err(storage_error)?;
+    transaction
+        .execute(
+            "DELETE FROM mcp_approval_payload_envelopes WHERE action_id = ?1",
+            [&request.action_id],
+        )
+        .map_err(storage_error)?;
+
+    if let (Some(conversation_id), Some(message_id)) = (
+        record.conversation_id.as_deref(),
+        record.assistant_message_id.as_deref(),
+    ) {
+        chat_repository::update_message_run_terminal_state(
+            transaction,
+            conversation_id,
+            message_id,
+            Some(request.outcome.message_status()),
+            run_status,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+    }
+    transaction
+        .execute(
+            "
+            UPDATE agent_usage_records
+            SET status = ?2, error = ?3, completed_at = ?4
+            WHERE run_id = ?1
+              AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')
+            ",
+            rusqlite::params![
+                record.run_id,
+                run_status,
+                request.outcome.error_code(),
+                updated_at
+            ],
+        )
+        .map_err(storage_error)?;
+    Ok(Some(record))
+}
+
 impl StorageService {
+    /// Atomically terminalizes one startup MCP action without retaining action arguments.
+    ///
+    /// `pending` and `approved` are pre-dispatch states and therefore accept only definitely-not-
+    /// dispatched outcomes. `executing` is the durable dispatch boundary and can only become
+    /// outcome-unknown. The pending row, matching audit, owner run state, usage, and any durable
+    /// ciphertext envelope are settled in one SQLite transaction.
+    pub fn terminalize_mcp_agent_action_on_startup(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        outcome: McpStartupActionTerminalOutcome,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        if !valid_mcp_terminal_transition(expected_status, outcome) {
+            return Err("invalid MCP startup terminal transition".to_string());
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let request = McpActionTerminalizationRequest {
+            action_id: action_id.to_string(),
+            expected_status: expected_status.to_string(),
+            outcome,
+        };
+        let changed =
+            terminalize_mcp_action_in_transaction(&transaction, &request, updated_at)?.is_some();
+        transaction.commit().map_err(storage_error)?;
+        Ok(changed)
+    }
+
+    /// Atomically terminalizes a Host-selected set of MCP approvals.
+    ///
+    /// The entire batch commits or rolls back together. Pre-dispatch rows may become unavailable,
+    /// expired, policy-denied, rejected, or cancelled; an `executing` row can only become outcome-
+    /// unknown. Every durable payload envelope and argument-bearing pending/audit projection is
+    /// scrubbed in the same SQLite transaction.
+    pub fn terminalize_mcp_agent_actions(
+        &self,
+        requests: &[McpActionTerminalizationRequest],
+        updated_at: i64,
+    ) -> Result<usize, String> {
+        if requests.is_empty() {
+            return Ok(0);
+        }
+        let mut unique_ids = HashSet::with_capacity(requests.len());
+        if requests.iter().any(|request| {
+            !unique_ids.insert(request.action_id.as_str())
+                || !valid_mcp_terminal_transition(&request.expected_status, request.outcome)
+        }) {
+            return Err("invalid or duplicate MCP terminalization request".to_string());
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        for request in requests {
+            if terminalize_mcp_action_in_transaction(&transaction, request, updated_at)?.is_none() {
+                return Err("MCP terminalization batch lost an expected status CAS".to_string());
+            }
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(requests.len())
+    }
+
+    pub fn retire_unsafe_pending_agent_action(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        let mut connection = self.state.connection()?;
+        let affected = pending_action_repository::retire_unsafe_pending_action(
+            &mut connection,
+            action_id,
+            expected_status,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        match affected {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(format!(
+                "unsafe pending action retirement touched {affected} rows for actionId={action_id}"
+            )),
+        }
+    }
+
     pub fn list_unsettled_file_effects(&self) -> Result<Vec<AgentUnsettledFileEffect>, String> {
         let connection = self.state.connection()?;
         let candidates = agent_action_audit_repository::list_unsettled_file_effects(&connection)
@@ -702,6 +1020,17 @@ impl StorageService {
     pub fn list_pending_agent_actions(&self) -> Result<Vec<AgentPendingActionRecord>, String> {
         let connection = self.state.connection()?;
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
+    }
+
+    /// Returns pending and interrupted approval rows for Host-owned startup format validation.
+    ///
+    /// Callers must treat the JSON columns as untrusted and avoid logging or deserializing them
+    /// outside an explicit versioned allowlist.
+    pub fn list_active_agent_actions_for_startup(
+        &self,
+    ) -> Result<Vec<AgentPendingActionRecord>, String> {
+        let connection = self.state.connection()?;
+        pending_action_repository::list_active_actions(&connection).map_err(storage_error)
     }
 
     pub fn reconcile_interrupted_pending_agent_actions(
@@ -1467,7 +1796,8 @@ fn validate_manual_file_effect_settlement_request(
         manual_file_effect_identity(&action)?;
     let pending_status_is_valid = expected_pending_status == "approved"
         || (expected_action_type == "skill_materialization"
-            && expected_pending_status == "executing");
+            && expected_pending_status == "executing")
+        || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing");
     if !pending_status_is_valid {
         return Err(format!(
             "manual file-effect settlement has invalid pending status `{expected_pending_status}` for `{expected_action_type}`"
@@ -1712,9 +2042,12 @@ fn manual_file_effect_identity(
                 false,
             ))
         }
-        _ => Err(
-            "manual audited settlement only supports command, Office and Skill file effects"
-                .to_string(),
-        ),
+        AgentProposedAction::McpToolCall { approval } => Ok((
+            "mcp_tool_call",
+            approval.identity.provenance.model_tool_name.clone(),
+            approval.identity.call_id.clone(),
+            false,
+        )),
+        _ => Err("manual audited settlement does not support this action type".to_string()),
     }
 }

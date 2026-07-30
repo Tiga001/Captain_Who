@@ -144,6 +144,7 @@ impl AgentService {
         action: AgentProposedAction,
         agent_input: AgentChatInput,
     ) -> Result<bool, String> {
+        let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
         let deletion_lifecycle = self
             .deletion_lifecycle
             .lock()
@@ -151,7 +152,15 @@ impl AgentService {
         if deletion_lifecycle.contains_input(&agent_input) {
             return Err("项目或会话正在移除，无法发布待审批操作。".to_string());
         }
+        if !mcp_pending_action_binding_matches(run_id, None, &action, &agent_input) {
+            self.invalidate_mcp_pending_payload(&action);
+            return Err("MCP pending approval frozen identity is inconsistent.".to_string());
+        }
         let action_id = action_id_for_action(&action);
+        let tool_call_id = match &action {
+            AgentProposedAction::McpToolCall { approval } => approval.identity.call_id.clone(),
+            _ => action_id.clone(),
+        };
         let storage_id = pending_action_storage_id(run_id, &action_id);
         let pending_record = PendingActionRecord {
             storage_id: storage_id.clone(),
@@ -162,7 +171,7 @@ impl AgentService {
                 assistant_message_id: normalized_optional(Some(assistant_message_id)),
                 action_type: action_type_for_action(&action).to_string(),
                 tool_name: tool_name_for_action(&action),
-                tool_call_id: Some(action_id_for_action(&action)),
+                tool_call_id: Some(tool_call_id),
                 action,
                 created_at: now_ms(),
                 status: PendingActionStatus::Pending,
@@ -184,7 +193,13 @@ impl AgentService {
                 }
             }
         }
-        let storage_outcome = self.persist_pending_action(&pending_record)?;
+        let storage_outcome = match self.persist_pending_action(&pending_record) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
+                return Err(error);
+            }
+        };
         let should_publish = {
             let mut pending_actions = self
                 .pending_actions
@@ -193,6 +208,7 @@ impl AgentService {
             match pending_actions.get(&storage_id) {
                 Some(existing) if same_pending_action_identity(existing, &pending_record) => false,
                 Some(existing) => {
+                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
                     return Err(format!(
                         "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
                         existing.snapshot.run_id, pending_record.snapshot.run_id
@@ -219,6 +235,15 @@ impl AgentService {
         }
         drop(deletion_lifecycle);
         Ok(should_publish)
+    }
+
+    pub(super) fn invalidate_mcp_pending_payload(&self, action: &AgentProposedAction) {
+        let AgentProposedAction::McpToolCall { approval } = action else {
+            return;
+        };
+        if let Some(invoker) = self.mcp_tool_invoker.as_ref() {
+            let _ = invoker.invalidate_prepared_approval(&approval.identity);
+        }
     }
 
     pub(super) fn transition_pending_status(
@@ -774,62 +799,189 @@ fn auto_action_audit_record(
     }
 }
 
+pub(super) fn mcp_pending_action_binding_matches(
+    run_id: &str,
+    record: Option<&AgentPendingActionRecord>,
+    action: &AgentProposedAction,
+    agent_input: &AgentChatInput,
+) -> bool {
+    let AgentProposedAction::McpToolCall { approval } = action else {
+        return record.is_none_or(|record| record.action_type != "mcp_tool_call");
+    };
+    if mcp_tool_invocation_event(
+        approval,
+        McpToolInvocationEventUpdate {
+            state: AgentMcpToolInvocationState::PendingApproval,
+            dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+            outcome: None,
+            is_error: None,
+            error_code: None,
+            duration_ms: None,
+            output_truncated: false,
+        },
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let identity = &approval.identity;
+    let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
+        return false;
+    };
+    if identity.run_id != run_id
+        || checkpoint.run_id != identity.run_id
+        || checkpoint.pending_action_id.as_deref() != Some(identity.action_id.as_str())
+        || checkpoint.pending_tool_call_id != identity.call_id
+        || approval.call.id != identity.call_id
+        || approval.call.tool != identity.provenance.model_tool_name
+    {
+        return false;
+    }
+    record.is_none_or(|record| {
+        record.action_type == "mcp_tool_call"
+            && record.run_id == identity.run_id
+            && record.action_id == pending_action_storage_id(run_id, &identity.action_id)
+            && record.tool_call_id.as_deref() == Some(identity.call_id.as_str())
+            && record.tool_name == identity.provenance.model_tool_name
+    })
+}
+
+fn retire_unsafe_active_pending_record(
+    storage: &Arc<StorageService>,
+    record: &AgentPendingActionRecord,
+) -> Result<(), String> {
+    let did_retire = storage
+        .retire_unsafe_pending_agent_action(&record.action_id, &record.status, now_ms())
+        .map_err(|_| {
+            format!(
+                "failed to retire unsupported pending action input {}",
+                record.action_id
+            )
+        })?;
+    if !did_retire {
+        return Err(format!(
+            "unsupported pending action input {} changed before it could be retired",
+            record.action_id
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn load_persisted_pending_actions(
     storage: &Arc<StorageService>,
 ) -> Result<HashMap<String, PendingActionRecord>, String> {
     let records = storage
-        .list_pending_agent_actions()
+        .list_active_agent_actions_for_startup()
         .map_err(|error| format!("failed to load persisted pending actions: {error}"))?;
 
-    records
-        .into_iter()
-        .map(|record| {
-            let action = serde_json::from_str::<AgentProposedAction>(&record.action_json).map_err(
-                |error| {
-                    format!(
-                        "failed to parse persisted pending action {}: {error}",
-                        record.action_id
-                    )
-                },
-            )?;
-            let agent_input = serde_json::from_str::<AgentChatInput>(&record.agent_input_json)
-                .map_err(|error| {
-                    format!(
-                        "failed to parse persisted pending action input {}: {error}",
-                        record.action_id
-                    )
-                })?;
-            let agent_input = restore_agent_input_secrets(storage, agent_input);
-            let status = pending_status_from_label(&record.status).ok_or_else(|| {
-                format!(
-                    "persisted pending action {} has unknown status {}",
-                    record.action_id, record.status
-                )
-            })?;
-            let action_id = action_id_for_action(&action);
-            let storage_id = record.action_id.clone();
-            let snapshot = PendingAgentActionSnapshot {
-                action_id,
-                action_type: record.action_type,
-                tool_name: record.tool_name,
-                tool_call_id: record.tool_call_id,
-                run_id: record.run_id,
-                conversation_id: record.conversation_id,
-                assistant_message_id: record.assistant_message_id,
+    let mut pending_actions = HashMap::with_capacity(records.len());
+    for record in records {
+        if record.status != "pending" && record.action_type != "mcp_tool_call" {
+            return Err(format!(
+                "non-MCP interrupted action {} survived generic startup reconciliation",
+                record.action_id
+            ));
+        }
+        let decoded_input = match PersistedAgentResumeInput::decode(&record.agent_input_json) {
+            Ok(input) => input,
+            Err(_) => {
+                retire_unsafe_active_pending_record(storage, &record)?;
+                continue;
+            }
+        };
+        let action = match serde_json::from_str::<AgentProposedAction>(&record.action_json) {
+            Ok(action) => action,
+            Err(error) if record.action_type != "mcp_tool_call" => {
+                return Err(format!(
+                    "failed to parse persisted pending action {}: {error}",
+                    record.action_id
+                ));
+            }
+            Err(_) => {
+                retire_unsafe_active_pending_record(storage, &record)?;
+                continue;
+            }
+        };
+        if !mcp_pending_action_binding_matches(
+            &record.run_id,
+            Some(&record),
+            &action,
+            &decoded_input.agent_input,
+        ) {
+            retire_unsafe_active_pending_record(storage, &record)?;
+            continue;
+        }
+        let agent_input = restore_agent_input_secrets(storage, decoded_input)?;
+        let status = pending_status_from_label(&record.status).ok_or_else(|| {
+            format!(
+                "persisted pending action {} has unknown status {}",
+                record.action_id, record.status
+            )
+        })?;
+        let action_id = action_id_for_action(&action);
+        let storage_id = record.action_id.clone();
+        let snapshot = PendingAgentActionSnapshot {
+            action_id,
+            action_type: record.action_type,
+            tool_name: record.tool_name,
+            tool_call_id: record.tool_call_id,
+            run_id: record.run_id,
+            conversation_id: record.conversation_id,
+            assistant_message_id: record.assistant_message_id,
+            action,
+            created_at: record.created_at,
+            status,
+        };
+        pending_actions.insert(
+            storage_id.clone(),
+            PendingActionRecord {
+                storage_id,
+                snapshot,
+                agent_input,
+            },
+        );
+    }
+    Ok(pending_actions)
+}
+
+/// Scrubs unsupported active resume formats before generic startup reconciliation can parse them.
+///
+/// This preflight deliberately reads only the version marker/allowlisted DTO and never logs the
+/// raw JSON. Retirement is a status-bound SQLite transaction that clears both the pending action
+/// and matching audit payload, so legacy pending, approved, and executing rows cannot retain
+/// provider credentials or raw external-tool arguments after startup.
+pub(super) fn retire_unsafe_active_pending_agent_inputs(
+    storage: &Arc<StorageService>,
+) -> Result<usize, String> {
+    let records = storage
+        .list_active_agent_actions_for_startup()
+        .map_err(|_| "failed to inspect active pending-action persistence formats".to_string())?;
+    let mut retired = 0_usize;
+    for record in records {
+        let decoded_input = match PersistedAgentResumeInput::decode(&record.agent_input_json) {
+            Ok(input) => input,
+            Err(_) => {
+                retire_unsafe_active_pending_record(storage, &record)?;
+                retired = retired.saturating_add(1);
+                continue;
+            }
+        };
+        let parsed_action = serde_json::from_str::<AgentProposedAction>(&record.action_json);
+        let invalid_mcp_binding = match parsed_action.as_ref() {
+            Ok(action) => !mcp_pending_action_binding_matches(
+                &record.run_id,
+                Some(&record),
                 action,
-                created_at: record.created_at,
-                status,
-            };
-            Ok((
-                storage_id.clone(),
-                PendingActionRecord {
-                    storage_id,
-                    snapshot,
-                    agent_input,
-                },
-            ))
-        })
-        .collect()
+                &decoded_input.agent_input,
+            ),
+            Err(_) => record.action_type == "mcp_tool_call",
+        };
+        if invalid_mcp_binding {
+            retire_unsafe_active_pending_record(storage, &record)?;
+            retired = retired.saturating_add(1);
+        }
+    }
+    Ok(retired)
 }
 
 pub(super) fn resolve_pending_action_storage_id(
@@ -894,7 +1046,10 @@ pub(super) fn persisted_pending_agent_input_json(
     status: PendingActionStatus,
 ) -> String {
     let mut persisted_agent_input = agent_input.clone();
-    persisted_agent_input.api_token.clear();
+    // The explicit allowlist DTO below, rather than mutation of a full AgentChatInput
+    // serialization, is the security boundary. Secret-bearing fields may remain in this
+    // short-lived clone because `PersistedAgentResumeInput::from_agent_input` records only
+    // non-secret identities and credential-required booleans.
     // Pending actions must survive restart, while an approved action may still be executing and
     // need its continuation input. Once the action is terminal, the live continuation owns any
     // remaining in-memory copy; the durable row only retains Skill identity and revision metadata.
@@ -920,7 +1075,7 @@ pub(super) fn persisted_pending_agent_input_json(
             mycopilot_core::redact_terminal_skill_discovery(checkpoint);
         }
     }
-    serialize_json(&persisted_agent_input)
+    PersistedAgentResumeInput::from_agent_input(&persisted_agent_input).encode()
 }
 
 pub(super) fn pending_status_redacts_run_scoped_input(status: PendingActionStatus) -> bool {
@@ -937,42 +1092,141 @@ pub(super) fn pending_status_redacts_run_scoped_input(status: PendingActionStatu
 
 pub(super) fn restore_agent_input_secrets(
     storage: &Arc<StorageService>,
-    mut agent_input: AgentChatInput,
-) -> AgentChatInput {
-    if !agent_input.api_token.trim().is_empty() {
-        return agent_input;
+    persisted: DecodedPersistedAgentResumeInput,
+) -> Result<AgentChatInput, String> {
+    let mut agent_input = persisted.agent_input;
+    let settings_snapshot = storage
+        .load_model_settings_snapshot()
+        .map_err(|_| "failed to resolve frozen pending-action provider settings".to_string())?
+        .ok_or_else(|| "frozen pending-action provider settings are unavailable".to_string())?;
+    if settings_snapshot.configuration_revision != persisted.provider_configuration_revision {
+        return Err("frozen pending-action provider configuration no longer matches".to_string());
     }
+    let settings = settings_snapshot.settings;
 
-    let Ok(Some(settings)) = storage.load_model_settings() else {
-        return agent_input;
-    };
-
-    let conversation_model_id = agent_input
+    let conversation_model_id = match agent_input
         .context
         .as_ref()
         .and_then(|context| context.conversation_id.as_deref())
-        .and_then(|conversation_id| storage.load_conversation(conversation_id).ok().flatten())
-        .and_then(|conversation| conversation.model_id);
-    let model = conversation_model_id
+    {
+        Some(conversation_id) => storage
+            .load_conversation(conversation_id)
+            .map_err(|_| "failed to verify frozen pending-action conversation".to_string())?
+            .and_then(|conversation| conversation.model_id),
+        None => None,
+    };
+    if conversation_model_id
         .as_deref()
-        .and_then(|model_id| settings.models.iter().find(|model| model.id == model_id))
-        .or_else(|| {
-            settings
-                .models
-                .iter()
-                .find(|model| model.id == agent_input.model)
-        });
+        .is_some_and(|model_id| model_id != agent_input.model)
+    {
+        return Err(
+            "frozen pending-action model identity no longer matches its conversation".to_string(),
+        );
+    }
+    let model = settings
+        .models
+        .iter()
+        .find(|model| model.id == agent_input.model && model.enabled)
+        .ok_or_else(|| "frozen pending-action model configuration is unavailable".to_string())?;
 
     // Pending actions deliberately persist without API tokens. On restoration, resolve the
-    // same model-specific-or-global pair used by a fresh run so approval continuation cannot
-    // silently switch providers after an app restart.
-    if let Some(model) = model {
-        if let Ok(connection) = settings.effective_connection_for(model) {
-            agent_input.api_url = connection.api_url;
-            agent_input.api_token = connection.api_token;
+    // exact model-specific-or-global pair used by the frozen run. Endpoint changes fail closed;
+    // credentials are rehydrated only after the endpoint digest has matched.
+    let connection = settings.effective_connection_for(model).map_err(|_| {
+        let credential_missing = match (
+            model.api_url_override.as_deref(),
+            model.api_token_override.as_deref(),
+        ) {
+            (Some(url), Some(token)) => !url.trim().is_empty() && token.trim().is_empty(),
+            (None, None) => {
+                !settings.api_url.trim().is_empty() && settings.api_token.trim().is_empty()
+            }
+            _ => false,
+        };
+        if persisted.provider_credential_required && credential_missing {
+            "frozen pending-action provider credential is unavailable".to_string()
+        } else {
+            "frozen pending-action provider connection is unavailable".to_string()
+        }
+    })?;
+    if persisted_endpoint_digest(&connection.api_url) != persisted.provider_endpoint_digest {
+        return Err("frozen pending-action provider endpoint no longer matches".to_string());
+    }
+    let provider_credential_present = !connection.api_token.trim().is_empty();
+    if provider_credential_present != persisted.provider_credential_required {
+        return Err(
+            "frozen pending-action provider credential presence no longer matches".to_string(),
+        );
+    }
+    agent_input.api_url = connection.api_url;
+    agent_input.api_token = connection.api_token;
+
+    if let Some(search) = agent_input.search_config.as_mut() {
+        if search.mode != search_mode_from_storage(&settings.search_mode) {
+            return Err("frozen pending-action search mode no longer matches".to_string());
+        }
+        let search_credential_present = !settings.tavily_api_key.trim().is_empty();
+        if search_credential_present != persisted.search_credential_required {
+            return Err(
+                "frozen pending-action search credential presence no longer matches".to_string(),
+            );
+        }
+        if persisted.search_credential_required {
+            search.tavily_api_key = Some(settings.tavily_api_key);
         }
     }
-    agent_input
+    Ok(agent_input)
+}
+
+fn bind_pending_provider_configuration(
+    storage: &Arc<StorageService>,
+    mut agent_input: AgentChatInput,
+) -> Result<AgentChatInput, String> {
+    let snapshot = storage
+        .load_model_settings_snapshot()
+        .map_err(|_| "failed to freeze pending-action provider configuration".to_string())?
+        .ok_or_else(|| "pending-action provider configuration is unavailable".to_string())?;
+    if agent_input
+        .provider_configuration_revision
+        .as_deref()
+        .is_some_and(|revision| revision != snapshot.configuration_revision)
+    {
+        return Err("pending-action provider configuration changed before persistence".to_string());
+    }
+    let model = snapshot
+        .settings
+        .models
+        .iter()
+        .find(|model| model.id == agent_input.model && model.enabled)
+        .ok_or_else(|| "pending-action model configuration is unavailable".to_string())?;
+    let connection = snapshot
+        .settings
+        .effective_connection_for(model)
+        .map_err(|_| "pending-action provider connection is unavailable".to_string())?;
+    if connection.api_url != agent_input.api_url
+        || connection.api_token != agent_input.api_token
+        || model.supports_image != agent_input.model_capabilities.image_input
+        || agent_input
+            .context_window_tokens
+            .is_some_and(|tokens| tokens != model.effective_context_window_tokens())
+    {
+        return Err(
+            "pending-action provider configuration does not match the active run".to_string(),
+        );
+    }
+    if let Some(search) = agent_input.search_config.as_ref() {
+        let configured_key = (!snapshot.settings.tavily_api_key.trim().is_empty())
+            .then_some(snapshot.settings.tavily_api_key.trim());
+        if search.mode != search_mode_from_storage(&snapshot.settings.search_mode)
+            || search.tavily_api_key.as_deref() != configured_key
+        {
+            return Err(
+                "pending-action search configuration does not match the active run".to_string(),
+            );
+        }
+    }
+    agent_input.provider_configuration_revision = Some(snapshot.configuration_revision);
+    Ok(agent_input)
 }
 
 pub(super) fn agent_input_with_run_checkpoint(
@@ -1010,6 +1264,7 @@ pub(super) fn ensure_pending_status_transition(
         (PendingActionStatus::Pending, PendingActionStatus::Approved)
             | (PendingActionStatus::Pending, PendingActionStatus::Executing)
             | (PendingActionStatus::Pending, PendingActionStatus::Cancelled)
+            | (PendingActionStatus::Approved, PendingActionStatus::Executing)
             | (PendingActionStatus::Approved, PendingActionStatus::Completed)
             | (PendingActionStatus::Approved, PendingActionStatus::Failed)
             | (PendingActionStatus::Approved, PendingActionStatus::Cancelled)

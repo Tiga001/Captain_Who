@@ -156,7 +156,58 @@ pub fn list_interrupted_actions(
             updated_at
         FROM agent_pending_actions
         WHERE status IN ('approved', 'executing')
+          AND action_type <> 'mcp_tool_call'
         ORDER BY created_at ASC
+        ",
+    )?;
+    let records = statement
+        .query_map([], |row| {
+            Ok(AgentPendingActionRecord {
+                action_id: row.get(0)?,
+                run_id: row.get(1)?,
+                conversation_id: row.get(2)?,
+                assistant_message_id: row.get(3)?,
+                action_type: row.get(4)?,
+                tool_name: row.get(5)?,
+                tool_call_id: row.get(6)?,
+                status: row.get(7)?,
+                target_status: row.get(8)?,
+                action_json: row.get(9)?,
+                agent_input_json: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?
+        .collect();
+    records
+}
+
+/// Lists every non-terminal approval row before startup reconciliation mutates it.
+///
+/// Host layers use this narrow preflight view to reject and atomically scrub legacy persistence
+/// formats before the generic reconciler attempts to decode their action or resume payload.
+pub fn list_active_actions(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            action_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action_type,
+            tool_name,
+            tool_call_id,
+            status,
+            target_status,
+            action_json,
+            agent_input_json,
+            created_at,
+            updated_at
+        FROM agent_pending_actions
+        WHERE status IN ('pending', 'approved', 'executing')
+        ORDER BY created_at ASC, action_id ASC
         ",
     )?;
     let records = statement
@@ -356,6 +407,52 @@ pub fn delete_pending_actions_for_project(
     Ok(())
 }
 
+/// Atomically retires one pre-allowlist pending row without ever decoding or logging its JSON.
+///
+/// Legacy MCP actions may have placed raw arguments in `action_json`, while older resume
+/// persistence could retain provider or search credentials in `agent_input_json`. Both columns
+/// and the matching audit payload are scrubbed in the same transaction before the row becomes
+/// terminal.
+pub fn retire_unsafe_pending_action(
+    connection: &mut Connection,
+    action_id: &str,
+    expected_status: &str,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    let transaction = connection.transaction()?;
+    let affected = transaction.execute(
+        "
+        UPDATE agent_pending_actions
+        SET status = 'failed',
+            target_status = 'failed',
+            action_json = '{}',
+            agent_input_json = '{}',
+            updated_at = ?3
+        WHERE action_id = ?1
+          AND status = ?2
+        ",
+        params![action_id, expected_status, updated_at],
+    )?;
+    if affected == 1 {
+        transaction.execute(
+            "
+            UPDATE agent_action_audit
+            SET status = 'failed',
+                action_json = '{}',
+                patch_result_json = NULL,
+                command_result_json = NULL,
+                tool_result_json = NULL,
+                error = 'Unsafe legacy pending payload was retired.',
+                completed_at = COALESCE(completed_at, ?2)
+            WHERE action_id = ?1
+            ",
+            params![action_id, updated_at],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(affected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +535,62 @@ mod tests {
         assert_eq!(agent_input_json, redacted_input);
         assert!(!agent_input_json.contains(INSTRUCTION_MARKER));
         assert_eq!(updated_at, 2);
+    }
+
+    #[test]
+    fn startup_preflight_lists_and_scrubs_every_active_legacy_status() {
+        const ACTION_CANARY: &str = "LEGACY_ACTIVE_ACTION_CANARY";
+        const INPUT_CANARY: &str = "LEGACY_ACTIVE_INPUT_CANARY";
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+
+        for (index, status) in ["pending", "approved", "executing"].into_iter().enumerate() {
+            let action_id = format!("legacy-active-{status}");
+            store_pending_action(
+                &connection,
+                &AgentPendingActionRecord {
+                    action_id,
+                    run_id: format!("legacy-run-{status}"),
+                    conversation_id: None,
+                    assistant_message_id: None,
+                    action_type: "mcp_tool_call".to_string(),
+                    tool_name: "legacy_external_tool".to_string(),
+                    tool_call_id: Some(format!("legacy-call-{status}")),
+                    status: status.to_string(),
+                    target_status: None,
+                    action_json: format!(r#"{{"secret":"{ACTION_CANARY}-{status}"}}"#),
+                    agent_input_json: format!(r#"{{"apiToken":"{INPUT_CANARY}-{status}"}}"#),
+                    created_at: i64::try_from(index + 1).unwrap(),
+                    updated_at: i64::try_from(index + 1).unwrap(),
+                },
+            )
+            .unwrap();
+        }
+
+        let active = list_active_actions(&connection).unwrap();
+        assert_eq!(active.len(), 3);
+        for record in active {
+            assert_eq!(
+                retire_unsafe_pending_action(
+                    &mut connection,
+                    &record.action_id,
+                    &record.status,
+                    10,
+                )
+                .unwrap(),
+                1
+            );
+            let retired = load_pending_action(&connection, &record.action_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(retired.status, "failed");
+            assert_eq!(retired.target_status.as_deref(), Some("failed"));
+            assert_eq!(retired.action_json, "{}");
+            assert_eq!(retired.agent_input_json, "{}");
+            assert!(!retired.action_json.contains(ACTION_CANARY));
+            assert!(!retired.agent_input_json.contains(INPUT_CANARY));
+        }
+        assert!(list_active_actions(&connection).unwrap().is_empty());
     }
 
     #[test]

@@ -1,5 +1,51 @@
 use super::*;
 
+fn revision_test_settings() -> ModelSettingsRecord {
+    ModelSettingsRecord {
+        api_url: "https://revision.example/v1".to_string(),
+        api_token: "fixed-revision-test-token".to_string(),
+        search_mode: "disabled".to_string(),
+        tavily_api_key: String::new(),
+        models: vec![ModelConfigRecord {
+            id: "revision-model".to_string(),
+            display_name: "Revision Model".to_string(),
+            api_url_override: None,
+            api_token_override: None,
+            supports_image: false,
+            context_window_tokens: Some(128_000),
+            input_price: "0".to_string(),
+            output_price: "0".to_string(),
+            enabled: true,
+        }],
+    }
+}
+
+#[test]
+fn every_model_settings_save_rotates_an_opaque_host_revision() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+
+    service.save_model_settings(settings.clone()).unwrap();
+    let first = service.load_model_settings_snapshot().unwrap().unwrap();
+    service.save_model_settings(settings).unwrap();
+    let second = service.load_model_settings_snapshot().unwrap().unwrap();
+
+    assert!(
+        crate::storage::config_repository::is_model_settings_revision(
+            &first.configuration_revision
+        )
+    );
+    assert!(
+        crate::storage::config_repository::is_model_settings_revision(
+            &second.configuration_revision
+        )
+    );
+    assert_ne!(first.configuration_revision, second.configuration_revision);
+    assert_eq!(first.settings.models[0].id, second.settings.models[0].id);
+    assert_eq!(format!("{first:?}"), "ModelSettingsSnapshot([REDACTED])");
+}
+
 #[test]
 fn rejects_invalid_model_prices_without_overwriting_saved_settings() {
     let fixture = StorageFixture::new();

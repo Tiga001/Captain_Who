@@ -19,11 +19,13 @@ use tokio::task::JoinHandle;
 use crate::config::MAX_TIMEOUT_MS;
 use crate::connector::BoxMcpFuture;
 use crate::transports::stdio::{
-    spawn_process_supervisor, ProcessExitCode, StderrAccumulator, StdioProcessSupervisor,
+    spawn_process_supervisor, ProcessContainment, ProcessExitCode, StderrAccumulator,
+    StdioProcessSupervisor,
 };
 use crate::{
-    McpCacheScope, McpCancellationToken, McpConnectionState, McpContentBlock, McpEmbeddedResource,
-    McpError, McpPeerSignalPublisher, McpPeerSignalReceiver, McpProtocolSnapshot, McpResourceLink,
+    McpCacheScope, McpCancellationToken, McpConnectionState, McpContentBlock, McpDispatchCertainty,
+    McpDispatchTracker, McpEmbeddedResource, McpError, McpOutcomeUnknownReason,
+    McpPeerSignalPublisher, McpPeerSignalReceiver, McpProtocolSnapshot, McpResourceLink,
     McpServerId, McpStderrSnapshot, McpToolAnnotations, McpToolCall, McpToolDescriptor,
     McpToolPage, McpToolResult,
 };
@@ -84,6 +86,23 @@ pub trait McpPeer: Send + Sync {
         call: McpToolCall,
         cancellation: McpCancellationToken,
     ) -> BoxMcpFuture<'a, McpToolResult>;
+    fn call_tool_tracked<'a>(
+        &'a self,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
+        dispatch: McpDispatchTracker,
+    ) -> BoxMcpFuture<'a, McpToolResult> {
+        dispatch.mark_dispatching();
+        dispatch.mark_request_queued();
+        let call = self.call_tool(call, cancellation);
+        Box::pin(async move {
+            let result = call.await;
+            if result.is_ok() {
+                dispatch.mark_response_received();
+            }
+            result
+        })
+    }
     fn subscribe_signals(&self) -> Option<McpPeerSignalReceiver> {
         None
     }
@@ -135,6 +154,7 @@ impl McpClientHandle {
         peer: rmcp::Peer<RoleClient>,
         service: RmcpClientService,
         child: tokio::process::Child,
+        containment: ProcessContainment,
         stderr: Arc<Mutex<StderrAccumulator>>,
         stderr_task: JoinHandle<()>,
         notification_task: Option<JoinHandle<()>>,
@@ -146,6 +166,7 @@ impl McpClientHandle {
         let force_close = McpCancellationToken::new();
         let (process, process_exit_code) = spawn_process_supervisor(
             child,
+            containment,
             Arc::clone(&state),
             shutdown_timeout,
             signals.clone(),
@@ -272,6 +293,26 @@ impl McpClientHandle {
         call: McpToolCall,
         cancellation: McpCancellationToken,
     ) -> Result<McpToolResult, McpError> {
+        self.call_tool_inner(call, cancellation, Some(McpDispatchTracker::new()))
+            .await
+    }
+
+    pub async fn call_tool_tracked(
+        &self,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
+        dispatch: McpDispatchTracker,
+    ) -> Result<McpToolResult, McpError> {
+        self.call_tool_inner(call, cancellation, Some(dispatch))
+            .await
+    }
+
+    async fn call_tool_inner(
+        &self,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
+        dispatch: Option<McpDispatchTracker>,
+    ) -> Result<McpToolResult, McpError> {
         self.require_ready("tools/call")?;
         if cancellation.is_cancelled() {
             return Err(McpError::cancelled("tools/call"));
@@ -290,7 +331,7 @@ impl McpClientHandle {
             .unwrap_or(self.request_timeout.as_millis() as u64);
         if !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
             return Err(McpError::config(
-                "MCP tool timeout must be between 1 ms and 24 hours",
+                "MCP tool timeout must be between 1 ms and 300 seconds",
             ));
         }
         let timeout = Duration::from_millis(timeout_ms);
@@ -300,6 +341,9 @@ impl McpClientHandle {
         }
         let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
         let deadline = tokio::time::Instant::now() + timeout;
+        if let Some(dispatch) = &dispatch {
+            dispatch.mark_dispatching();
+        }
         let send_request = self
             .peer
             .send_cancellable_request(request, PeerRequestOptions::no_options());
@@ -316,6 +360,9 @@ impl McpClientHandle {
                 result.map_err(|error| self.map_service_error_sync("tools/call", error))?
             }
         };
+        if let Some(dispatch) = &dispatch {
+            dispatch.mark_request_queued();
+        }
 
         enum CallWait {
             Response(Box<Result<ServerResult, ServiceError>>),
@@ -333,28 +380,53 @@ impl McpClientHandle {
             },
         };
         let result = match wait {
-            CallWait::Response(result) => {
-                (*result).map_err(|error| self.map_service_error_sync("tools/call", error))?
-            }
+            CallWait::Response(result) => match *result {
+                Ok(result) => {
+                    if let Some(dispatch) = &dispatch {
+                        dispatch.mark_response_received();
+                    }
+                    result
+                }
+                Err(error) => {
+                    let error = self.map_service_error_sync("tools/call", error);
+                    return Err(tracked_interruption(
+                        &dispatch,
+                        outcome_unknown_reason_for_error(&error),
+                        || error,
+                    ));
+                }
+            },
             CallWait::Cancelled => {
                 schedule_request_cancellation(handle, "cancelled by host");
-                return Err(McpError::cancelled("tools/call"));
+                return Err(tracked_interruption(
+                    &dispatch,
+                    McpOutcomeUnknownReason::Cancelled,
+                    || McpError::cancelled("tools/call"),
+                ));
             }
             CallWait::TimedOut => {
                 schedule_request_cancellation(handle, "request timeout");
-                return Err(McpError::timeout("tools/call", timeout.as_millis() as u64));
+                return Err(tracked_interruption(
+                    &dispatch,
+                    McpOutcomeUnknownReason::TimedOut,
+                    || McpError::timeout("tools/call", timeout.as_millis() as u64),
+                ));
             }
             CallWait::TransportClosed => {
-                return Err(
-                    self.map_service_error_sync("tools/call", ServiceError::TransportClosed)
-                );
+                self.state.store(STATE_FAILED, Ordering::Release);
+                return Err(tracked_interruption(
+                    &dispatch,
+                    McpOutcomeUnknownReason::TransportClosed,
+                    || self.map_service_error_sync("tools/call", ServiceError::TransportClosed),
+                ));
             }
         };
 
         let ServerResult::CallToolResult(result) = result else {
-            return Err(McpError::protocol(
-                "tools/call returned an unsupported response type",
-            ));
+            return Err(
+                McpError::protocol("tools/call returned an unsupported response type")
+                    .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived),
+            );
         };
         if result
             .result_type
@@ -363,13 +435,17 @@ impl McpClientHandle {
         {
             return Err(McpError::protocol(
                 "tools/call returned a non-complete result unsupported in MCP client round 1",
-            ));
+            )
+            .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived));
         }
         let content = result
             .content
             .into_iter()
             .map(map_content)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                error.with_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
+            })?;
         Ok(McpToolResult {
             content,
             structured_content: result.structured_content,
@@ -490,6 +566,33 @@ impl Drop for McpClientHandle {
     }
 }
 
+fn tracked_interruption(
+    dispatch: &Option<McpDispatchTracker>,
+    reason: McpOutcomeUnknownReason,
+    fallback: impl FnOnce() -> McpError,
+) -> McpError {
+    let Some(dispatch) = dispatch else {
+        return fallback();
+    };
+    let certainty = dispatch.certainty();
+    if certainty == McpDispatchCertainty::DefinitelyNotDispatched {
+        fallback().with_dispatch_certainty(certainty)
+    } else {
+        McpError::outcome_unknown("tools/call", reason, certainty)
+    }
+}
+
+fn outcome_unknown_reason_for_error(error: &McpError) -> McpOutcomeUnknownReason {
+    match error.kind {
+        crate::McpErrorKind::Cancelled => McpOutcomeUnknownReason::Cancelled,
+        crate::McpErrorKind::Timeout => McpOutcomeUnknownReason::TimedOut,
+        crate::McpErrorKind::ServerExited => McpOutcomeUnknownReason::ServerExited,
+        crate::McpErrorKind::Shutdown => McpOutcomeUnknownReason::Shutdown,
+        crate::McpErrorKind::Protocol => McpOutcomeUnknownReason::ProtocolFailure,
+        _ => McpOutcomeUnknownReason::TransportClosed,
+    }
+}
+
 fn schedule_request_cancellation(handle: RequestHandle<RoleClient>, reason: &'static str) {
     tokio::spawn(async move {
         let _ = tokio::time::timeout(
@@ -605,6 +708,15 @@ impl McpPeer for McpClientHandle {
         cancellation: McpCancellationToken,
     ) -> BoxMcpFuture<'a, McpToolResult> {
         Box::pin(async move { self.call_tool(call, cancellation).await })
+    }
+
+    fn call_tool_tracked<'a>(
+        &'a self,
+        call: McpToolCall,
+        cancellation: McpCancellationToken,
+        dispatch: McpDispatchTracker,
+    ) -> BoxMcpFuture<'a, McpToolResult> {
+        Box::pin(async move { self.call_tool_tracked(call, cancellation, dispatch).await })
     }
 
     fn subscribe_signals(&self) -> Option<McpPeerSignalReceiver> {

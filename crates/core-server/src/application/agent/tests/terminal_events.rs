@@ -1325,9 +1325,11 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
+        pending_action_id: None,
         context_items: Vec::new(),
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),

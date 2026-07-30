@@ -102,6 +102,7 @@ impl AgentService {
         let agent_input = AgentChatInput {
             api_url: connection.api_url,
             api_token: String::new(),
+            provider_configuration_revision: None,
             model: model.id.clone(),
             model_capabilities: ModelCapabilities {
                 image_input: model.supports_image,

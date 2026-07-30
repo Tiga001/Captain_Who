@@ -19,6 +19,7 @@ pub mod file_draft_repository;
 pub mod guidance_repository;
 pub mod image_generation_execution_repository;
 pub mod image_generation_repository;
+pub mod mcp_approval_envelope_repository;
 pub mod migrations;
 pub mod model_request_observation_repository;
 pub mod models;

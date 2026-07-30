@@ -596,6 +596,12 @@ fn validate_tool_identity(
             }
         }
         AgentToolIdentity::Mcp { provenance } => {
+            let config_epoch_is_valid =
+                uuid::Uuid::parse_str(&provenance.config_epoch).is_ok_and(|epoch| {
+                    !epoch.is_nil()
+                        && epoch.get_version() == Some(uuid::Version::Random)
+                        && provenance.config_epoch == epoch.to_string()
+                });
             let scoped_id_is_valid = match &provenance.scope {
                 AgentMcpServerScope::Project { project_id } => {
                     !project_id.trim().is_empty()
@@ -615,6 +621,8 @@ fn validate_tool_identity(
             };
             if provenance.model_tool_name != trace_tool
                 || uuid::Uuid::parse_str(&provenance.server_id).is_err()
+                || !config_epoch_is_valid
+                || provenance.registry_revision == 0
                 || provenance.raw_tool_name.trim().is_empty()
                 || provenance.raw_tool_name.trim() != provenance.raw_tool_name
                 || provenance.raw_tool_name.len() > 1_024
@@ -630,6 +638,18 @@ fn validate_tool_identity(
                     .catalog_digest
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || provenance.catalog_schema_digest.len() != 64
+                || !provenance
+                    .catalog_schema_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || provenance.schema_digest.len() != 64
+                || !provenance
+                    .schema_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || provenance.schema_normalizer_version
+                    != crate::MCP_INPUT_SCHEMA_NORMALIZER_VERSION
                 || !scoped_id_is_valid
             {
                 return Err("conversation trace MCP provenance is invalid".to_string());
@@ -1256,6 +1276,9 @@ impl ConversationTraceRecorder {
                 (&office_operation.id, office_operation.approval_status)
             }
             AgentProposedAction::ToolCall { call } => (&call.id, call.approval_status),
+            AgentProposedAction::McpToolCall { approval } => {
+                (&approval.identity.call_id, approval.call.approval_status)
+            }
         };
         if let Some(ConversationTurnTraceItem::ToolCall {
             approval_status: current,
@@ -1897,9 +1920,14 @@ mod tests {
                 },
                 raw_tool_name: "echo/raw".to_string(),
                 model_tool_name: tool_name.to_string(),
+                config_epoch: "66dcbb6b-92a3-4d4e-9591-f0707e4ca3e3".to_string(),
+                registry_revision: 3,
                 config_digest: "a".repeat(64),
                 catalog_generation: 4,
                 catalog_digest: "b".repeat(64),
+                catalog_schema_digest: "d".repeat(64),
+                schema_digest: "c".repeat(64),
+                schema_normalizer_version: crate::MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
             },
         };
         let mut recorder = ConversationTraceRecorder::default();
