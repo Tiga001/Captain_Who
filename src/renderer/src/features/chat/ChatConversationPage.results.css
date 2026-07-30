@@ -736,13 +736,12 @@ button.read-activity__image:focus-visible {
 
 .read-activity__text-item {
   min-width: 0;
-  overflow: hidden;
   color: var(--mc-color-text-muted);
   font-size: var(--mc-font-size-chat-activity);
   font-weight: var(--mc-font-weight-medium);
   line-height: var(--mc-line-height-relaxed);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .read-activity__text-item[data-status='failed'] {

@@ -1377,6 +1377,32 @@ mod tests {
     }
 
     #[test]
+    fn read_directory_failure_keeps_its_classification_and_path_in_durable_trace() {
+        let result = json!({
+            "code": "path_is_directory",
+            "errorCode": "read_file.path_is_directory",
+            "path": "crates/mcp-client/src",
+            "message": "read_file 只能读取普通文本文件。",
+            "continueWith": {
+                "tool": "workspace_map",
+                "args": {
+                    "focusPath": "crates/mcp-client/src",
+                    "maxDepth": 3
+                }
+            }
+        });
+
+        let (projected, truncated) = project_read_result(&result);
+
+        assert!(!truncated);
+        assert_eq!(projected["code"], "path_is_directory");
+        assert_eq!(projected["errorCode"], "read_file.path_is_directory");
+        assert_eq!(projected["path"], "crates/mcp-client/src");
+        assert_eq!(projected["message"], "read_file 只能读取普通文本文件。");
+        assert!(projected.get("continueWith").is_none());
+    }
+
+    #[test]
     fn skill_resource_body_is_checkpoint_only_and_never_enters_durable_projection() {
         let result = json!({
             "uri": "skill://package/example/revision/references/guide.md",

@@ -2,7 +2,10 @@ import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { ChatReadActivity } from '../../features/chat/chatTypes'
-import { ReadToolActivity } from '../../features/chat/components/toolActivities/ReadToolActivity'
+import {
+  ReadToolActivity,
+  ReadToolActivityGroup
+} from '../../features/chat/components/toolActivities/ReadToolActivity'
 import type { ImageArtifactResolver } from '../../features/imageGeneration/artifacts/ImageArtifactResolver'
 
 const mocks = vi.hoisted(() => ({
@@ -12,7 +15,17 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => ({
+    t: (key: string) =>
+      ({
+        'agent.read.completedWithPathFailures': '读取了 {label}，{count} 个路径失败',
+        'agent.read.count.file': '{count} 个文件',
+        'agent.read.file.pathIsDirectory': '目录被误用为文件',
+        'agent.read.item': '读取 {fileName}',
+        'agent.read.pathIsDirectoryItem': '目录被误用为文件：{path}',
+        'agent.read.pathFailedCount': '{count} 个路径失败'
+      })[key] ?? key
+  })
 }))
 
 vi.mock('../../features/storage/storageClient', () => ({
@@ -170,5 +183,126 @@ describe('ReadToolActivity image presentation', () => {
         release: retainedRelease
       })
     })
+  })
+})
+
+describe('ReadToolActivity structured path failures', () => {
+  function readFileCall(id: string, path: string): AgentToolCall {
+    return {
+      id,
+      tool: 'read_file',
+      args: { path },
+      approvalStatus: 'not_required'
+    }
+  }
+
+  function readFileActivity(
+    call: AgentToolCall,
+    path: string,
+    status: ChatReadActivity['status']
+  ): ChatReadActivity {
+    return {
+      callId: call.id,
+      tool: call.tool,
+      kind: 'file',
+      status,
+      path,
+      fileName: path.split('/').pop() ?? path,
+      updatedAt: 1
+    }
+  }
+
+  function successfulReadResult(call: AgentToolCall, path: string): AgentToolResult {
+    return {
+      callId: call.id,
+      tool: call.tool,
+      ok: true,
+      result: { path, content: 'ok' }
+    }
+  }
+
+  function directoryReadResult(call: AgentToolCall, path: string): AgentToolResult {
+    return {
+      callId: call.id,
+      tool: call.tool,
+      ok: false,
+      result: {
+        code: 'path_is_directory',
+        errorCode: 'read_file.path_is_directory',
+        path,
+        message: 'read_file 只能读取普通文本文件。',
+        continueWith: {
+          tool: 'workspace_map',
+          args: { focusPath: path, maxDepth: 3 }
+        }
+      },
+      error: 'read_file 只能读取普通文本文件。'
+    }
+  }
+
+  it('shows the directory misuse and its complete relative path', async () => {
+    const path = 'crates/mcp-client/src'
+    const readCall = readFileCall('read-directory', path)
+    const screen = await render(
+      <ReadToolActivity
+        activity={readFileActivity(readCall, path, 'failed')}
+        call={readCall}
+        result={directoryReadResult(readCall, path)}
+      />
+    )
+
+    expect(screen.container.textContent).toContain('目录被误用为文件')
+    expect(screen.container.textContent).toContain('目录被误用为文件：crates/mcp-client/src')
+  })
+
+  it('separates successful files from path failures in a group', async () => {
+    const successful = ['crates/mcp-client/src/lib.rs', 'crates/core/src/lib.rs', 'README.md'].map(
+      (path, index) => {
+        const readCall = readFileCall(`read-success-${index}`, path)
+        return {
+          activity: readFileActivity(readCall, path, 'completed'),
+          call: readCall,
+          result: successfulReadResult(readCall, path)
+        }
+      }
+    )
+    const failedPath = 'crates/mcp-client/src'
+    const failedCall = readFileCall('read-directory', failedPath)
+    const screen = await render(
+      <ReadToolActivityGroup
+        items={[
+          ...successful,
+          {
+            activity: readFileActivity(failedCall, failedPath, 'failed'),
+            call: failedCall,
+            result: directoryReadResult(failedCall, failedPath)
+          }
+        ]}
+      />
+    )
+
+    expect(screen.container.textContent).toContain('读取了 3 个文件，1 个路径失败')
+    expect(screen.container.textContent).toContain(failedPath)
+  })
+
+  it('keeps ordinary read failures on the generic failure label', async () => {
+    const path = 'crates/core/src/missing.rs'
+    const readCall = readFileCall('read-missing', path)
+    const result: AgentToolResult = {
+      callId: readCall.id,
+      tool: readCall.tool,
+      ok: false,
+      error: '文件不存在'
+    }
+    const screen = await render(
+      <ReadToolActivity
+        activity={readFileActivity(readCall, path, 'failed')}
+        call={readCall}
+        result={result}
+      />
+    )
+
+    expect(screen.container.textContent).toContain('agent.read.file.failed')
+    expect(screen.container.textContent).not.toContain('目录被误用为文件')
   })
 })

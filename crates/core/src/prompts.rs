@@ -165,7 +165,11 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- run_command.inputs 中每个文件只填写 path；需要脚本内固定名称时再填写可选 mountPath。不要构造 source 类型对象，Host 会自动识别 workspace、绝对路径、附件、生成物和 Skill 资源并冻结内容身份。".to_string());
     }
     if has_tool(tool_definitions, "workspace_map") {
-        rules.push("- 用户询问项目结构、技术栈、入口或整体架构时，先用 workspace_map 建立有边界的概览，再通过 search_files、search_code 或 read_* 深入。".to_string());
+        let mut rule = "- 用户询问项目结构、技术栈、入口或整体架构时，先用 workspace_map 建立有边界的概览，再通过 search_files、search_code 或 read_* 深入。".to_string();
+        if has_tool(tool_definitions, "search_files") && has_tool(tool_definitions, "read_file") {
+            rule.push_str(" search_files 结果必须按 kind 路由：kind=file 且为 UTF-8 文本时使用 read_file，kind=directory 时使用 workspace_map.focusPath。");
+        }
+        rules.push(rule);
     }
     if has_tool(tool_definitions, "attachments_list") {
         rules.push("- 需要当前聊天的历史附件时先用 attachments_list；需要同项目其他聊天的附件时用 attachments_list_project。取得 readPath 后再调用对应 read_* 工具。".to_string());
@@ -402,6 +406,23 @@ mod tests {
         assert!(!prompt.contains("create 直接提供完整 content"));
         assert!(!prompt.contains("web_fetch 用于深读"));
         assert!(!prompt.contains("run_command.command 必须是单行字符串"));
+    }
+
+    #[test]
+    fn search_file_kind_routing_is_merged_into_workspace_map_guidance() {
+        let prompt = build_system_prompt(
+            None,
+            &[
+                tool_definition("workspace_map"),
+                tool_definition("search_files"),
+                tool_definition("read_file"),
+            ],
+        );
+
+        assert!(prompt.contains("search_files 结果必须按 kind 路由"));
+        assert!(prompt.contains("kind=file 且为 UTF-8 文本时使用 read_file"));
+        assert!(prompt.contains("kind=directory 时使用 workspace_map.focusPath"));
+        assert_eq!(prompt.matches("用户询问项目结构、技术栈").count(), 1);
     }
 
     #[test]

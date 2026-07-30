@@ -6,12 +6,15 @@ use crate::protocol::{
 use crate::revision::{compose_content_revision, ContentRevisionHasher};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs::{File, Metadata};
+use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::SystemTime;
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MODEL_RESULT_METADATA_RESERVE_TOKENS: u64 = 2_000;
+const PATH_IS_DIRECTORY_ERROR_CODE: &str = "read_file.path_is_directory";
+const PATH_IS_DIRECTORY_CODE: &str = "path_is_directory";
+const PATH_IS_DIRECTORY_MESSAGE: &str = "read_file 只能读取普通文本文件。";
 
 pub(super) struct ReadFileTool;
 
@@ -27,12 +30,12 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read an authorized UTF-8 text file. Paths may be workspace-relative, absolute, use a supported system alias, or reference @attachments; the current read permission is enforced at execution time. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
+            description: "Read an authorized regular UTF-8 text file. read_file.path must identify a regular file, never a directory; inspect directories with workspace_map.focusPath. Paths may be workspace-relative, absolute, use a supported system alias, or reference @attachments; the current read permission is enforced at execution time. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative path, absolute local path, @home/@desktop/@documents/@downloads, or an exact @attachments/... readPath. Availability depends on the current read permission." },
+                    "path": { "type": "string", "description": "A regular UTF-8 text file only: workspace-relative path, absolute local path, @home/@desktop/@documents/@downloads, or an exact @attachments/... readPath. For a directory, call workspace_map with this path as focusPath instead. Availability depends on the current read permission." },
                     "startLine": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line. Omit to start at the beginning." },
                     "startByte": { "type": "integer", "minimum": 0, "description": "Continuation cursor. Pass nextStartByte from a previous truncated result; do not combine with startLine." },
                     "expectedRevision": { "type": "string", "description": "Optional continuation guard. Pass the exact revision from the previous page so a changed file cannot be silently spliced into the same read." },
@@ -54,13 +57,30 @@ impl AgentTool for ReadFileTool {
         args.validate()?;
         let path = args.path()?;
         let file_path = context.resolve_existing_path(path)?;
+        let display_path = context.display_path(path, &file_path)?;
+        let display_path = if display_path.is_empty() {
+            ".".to_string()
+        } else {
+            display_path
+        };
+        let path_metadata = fs::metadata(&file_path)
+            .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
+        if path_metadata.is_dir() {
+            return Err(path_is_directory_error(&display_path));
+        }
+        if !path_metadata.is_file() {
+            return Err(AgentError::new("read_file 只能读取普通文本文件。"));
+        }
         let mut file = File::open(&file_path)
             .map_err(|error| AgentError::new(format!("打开文件失败：{error}")))?;
         let initial_metadata = file
             .metadata()
             .map_err(|error| AgentError::new(format!("读取文件元数据失败：{error}")))?;
+        if initial_metadata.is_dir() {
+            return Err(path_is_directory_error(&display_path));
+        }
         if !initial_metadata.is_file() {
-            return Err(AgentError::new("read_file 只能读取文件。"));
+            return Err(AgentError::new("read_file 只能读取普通文本文件。"));
         }
 
         let requested_start_line = u64::try_from(args.start_line.unwrap_or(1)).unwrap_or(u64::MAX);
@@ -89,7 +109,7 @@ impl AgentTool for ReadFileTool {
 
         fit_read_file_page_to_model_budget(
             context,
-            context.display_path(path, &file_path)?,
+            display_path,
             &inspection,
             &fragment.content,
             fragment.stop_reason,
@@ -157,6 +177,7 @@ fn read_file_model_projection(source: Option<&Value>) -> Option<Value> {
             "truncatedReason",
             "nextStartByte",
             "nextStartLine",
+            "continueWith",
         ],
     );
     if let (Some(Value::Object(output)), Some(source)) = (projected.as_mut(), source) {
@@ -182,6 +203,25 @@ fn read_file_model_projection(source: Option<&Value>) -> Option<Value> {
         }
     }
     projected
+}
+
+fn path_is_directory_error(path: &str) -> AgentError {
+    AgentError::structured(
+        PATH_IS_DIRECTORY_ERROR_CODE,
+        PATH_IS_DIRECTORY_MESSAGE,
+        json!({
+            "code": PATH_IS_DIRECTORY_CODE,
+            "path": path,
+            "message": PATH_IS_DIRECTORY_MESSAGE,
+            "continueWith": {
+                "tool": "workspace_map",
+                "args": {
+                    "focusPath": path,
+                    "maxDepth": 3
+                }
+            }
+        }),
+    )
 }
 
 fn fit_read_file_page_to_model_budget(
@@ -753,7 +793,10 @@ fn file_changed_error() -> AgentError {
 #[cfg(test)]
 mod tests {
     use super::super::{ToolExecutionContext, ToolRegistry};
-    use super::STREAM_BUFFER_BYTES;
+    use super::{
+        PATH_IS_DIRECTORY_CODE, PATH_IS_DIRECTORY_ERROR_CODE, PATH_IS_DIRECTORY_MESSAGE,
+        STREAM_BUFFER_BYTES,
+    };
     use crate::context::{ContextCapacityDetector, ContextTextBudget};
     use crate::protocol::{
         AgentApiStyle, AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
@@ -777,6 +820,54 @@ mod tests {
         assert!(definition.input_schema["properties"]
             .get("filePath")
             .is_none());
+        assert!(definition.description.contains("regular UTF-8 text file"));
+        let path_description = definition.input_schema["properties"]["path"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(path_description.contains("regular UTF-8 text file"));
+        assert!(path_description.contains("workspace_map"));
+        assert!(path_description.contains("focusPath"));
+    }
+
+    #[test]
+    fn directory_error_returns_an_executable_workspace_map_recovery() {
+        let fixture = TestWorkspace::new();
+        fs::create_dir_all(fixture.root.join("crates/mcp-client/src")).unwrap();
+        let context = fixture.context();
+        let registry = ToolRegistry::defaults_with_search(None);
+        let call = AgentToolCall {
+            id: "call-read-directory".to_string(),
+            tool: "read_file".to_string(),
+            args: json!({ "path": "crates/mcp-client/src" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let raw = registry.execute(&context, &call);
+
+        assert!(!raw.ok);
+        assert_eq!(raw.error.as_deref(), Some(PATH_IS_DIRECTORY_MESSAGE));
+        let payload = raw.result.as_ref().unwrap();
+        assert_eq!(payload["code"], PATH_IS_DIRECTORY_CODE);
+        assert_eq!(payload["errorCode"], PATH_IS_DIRECTORY_ERROR_CODE);
+        assert_eq!(payload["path"], "crates/mcp-client/src");
+        assert_eq!(payload["message"], PATH_IS_DIRECTORY_MESSAGE);
+        assert_eq!(
+            payload["continueWith"],
+            json!({
+                "tool": "workspace_map",
+                "args": {
+                    "focusPath": "crates/mcp-client/src",
+                    "maxDepth": 3
+                }
+            })
+        );
+
+        let model = registry.model_projection(&raw);
+        let projected = model.result.unwrap();
+        assert_eq!(projected["code"], PATH_IS_DIRECTORY_CODE);
+        assert_eq!(projected["path"], "crates/mcp-client/src");
+        assert_eq!(projected["continueWith"], payload["continueWith"]);
     }
 
     #[test]

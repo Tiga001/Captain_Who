@@ -31,7 +31,7 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
 }
 
 #[test]
-fn exact_history_archive_precedes_bounded_trace_projection() {
+fn exact_history_archive_precedes_model_and_checkpoint_projection() {
     use crate::conversation_trace::ConversationTraceRecorder;
     use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};
     use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
@@ -85,6 +85,13 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
         })),
         error: None,
     };
+    let model_result = AgentToolResult {
+        result: Some(json!({
+            "summary": "bounded model projection ".repeat(4_000),
+            "truncated": true
+        })),
+        ..raw.clone()
+    };
     let mut recorder = ConversationTraceRecorder::default();
     recorder.record_tool_call(&call);
     let sequence = recorder.pending_tool_result_sequence(&call.id).unwrap();
@@ -101,26 +108,37 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
         sequence: Some(sequence),
         raw_result: &raw,
         archive_result: &raw,
-        model_result: &raw,
+        model_result: &model_result,
         model_tool_result_gate: &gate,
     });
     assert_eq!(metadata.archived_completely, Some(true));
     assert!(metadata.truncated_at_source);
     assert!(metadata.model_projection_truncated);
-    let observation =
-        finalize_model_tool_observation(&gate, &call.id, false, &raw, &metadata).unwrap();
+    let (observation, checkpoint_observation) =
+        finalize_tool_observations(&gate, &call.id, false, &model_result, &raw, &metadata).unwrap();
     let projected: Value = serde_json::from_str(&observation).unwrap();
-    assert_eq!(projected["truncated"], true);
-    assert_eq!(projected["truncatedAtSource"], true);
-    assert!(projected["originalBytes"].as_u64().unwrap() > 0);
-    assert_eq!(projected["continueWith"]["tool"], "conversation_history");
-    assert!(projected["historyOpen"]
-        .as_str()
-        .unwrap()
-        .starts_with("hist_v1_"));
+    let checkpoint_projected: Value = serde_json::from_str(&checkpoint_observation).unwrap();
+    for projection in [&projected, &checkpoint_projected] {
+        assert_eq!(projection["truncated"], true);
+        assert_eq!(projection["truncatedAtSource"], true);
+        assert!(projection["originalBytes"].as_u64().unwrap() > 0);
+        assert_eq!(projection["continueWith"]["tool"], "conversation_history");
+        assert!(projection["historyOpen"]
+            .as_str()
+            .unwrap()
+            .starts_with("hist_v1_"));
+    }
+    assert_eq!(
+        projected["historyOpen"],
+        checkpoint_projected["historyOpen"]
+    );
+    assert!(
+        gate.would_truncate(&call.id, false, &model_result),
+        "the model fixture must exercise the central length gate"
+    );
     assert!(
         gate.would_truncate(&call.id, false, &raw),
-        "the fixture must exercise the central length gate"
+        "the checkpoint fixture must exercise the central length gate"
     );
     recorder.record_tool_result_with_archive(&call, &raw, metadata.clone());
     let trace = recorder.finish(

@@ -52,6 +52,8 @@ const TOOL_KINDS: Partial<Record<string, ChatReadActivityKind>> = {
   read_word: 'word'
 }
 
+const PATH_IS_DIRECTORY_CODE = 'path_is_directory'
+
 const STATUS_LABELS: Record<
   ChatReadActivityKind,
   {
@@ -121,6 +123,34 @@ function getPathFromCall(call: AgentToolCall) {
   const path = typeof args.path === 'string' ? args.path : ''
   const filePath = typeof args.filePath === 'string' ? args.filePath : ''
   return path.trim() || filePath.trim()
+}
+
+function getResultRecord(result: AgentToolResult | undefined): Record<string, unknown> | undefined {
+  if (!result?.result || typeof result.result !== 'object' || Array.isArray(result.result)) {
+    return undefined
+  }
+  return result.result as Record<string, unknown>
+}
+
+function getPathFromResult(result: AgentToolResult | undefined) {
+  const path = getResultRecord(result)?.path
+  return typeof path === 'string' ? path.trim() : ''
+}
+
+function isPathIsDirectoryFailure(call: AgentToolCall, result: AgentToolResult | undefined) {
+  return (
+    call.tool === 'read_file' &&
+    result?.ok === false &&
+    getResultRecord(result)?.code === PATH_IS_DIRECTORY_CODE
+  )
+}
+
+function getDisplayPath(
+  activity: ChatReadActivity | undefined,
+  call: AgentToolCall,
+  result: AgentToolResult | undefined
+) {
+  return getPathFromResult(result) || activity?.path?.trim() || getPathFromCall(call)
 }
 
 function getFileName(path: string) {
@@ -203,10 +233,14 @@ function getReadGroupLabel(
     (currentCounts, item) => {
       const status = getStatus(item.activity, item.result, item.settledStatus)
       currentCounts[status] += 1
+      if (status === 'failed' && isPathIsDirectoryFailure(item.call, item.result)) {
+        currentCounts.pathFailed += 1
+      }
       return currentCounts
     },
-    { cancelled: 0, completed: 0, failed: 0, running: 0 }
+    { cancelled: 0, completed: 0, failed: 0, pathFailed: 0, running: 0 }
   )
+  const otherFailed = counts.failed - counts.pathFailed
 
   if (counts.running > 0) {
     const progress = [
@@ -215,9 +249,10 @@ function getReadGroupLabel(
             label: getReadCountLabel(t, kind, counts.completed)
           })
         : '',
-      counts.failed > 0
-        ? formatTranslation(t, 'agent.read.failedCount', { count: counts.failed })
-        : ''
+      counts.pathFailed > 0
+        ? formatTranslation(t, 'agent.read.pathFailedCount', { count: counts.pathFailed })
+        : '',
+      otherFailed > 0 ? formatTranslation(t, 'agent.read.failedCount', { count: otherFailed }) : ''
     ].filter(Boolean)
     return progress.length > 0
       ? `${t(STATUS_LABELS[kind].running)}${t('agent.separator')}${progress.join(t('agent.separator'))}`
@@ -225,12 +260,36 @@ function getReadGroupLabel(
   }
 
   if (counts.failed > 0) {
+    if (counts.completed > 0 && counts.pathFailed > 0 && otherFailed === 0) {
+      return formatTranslation(t, 'agent.read.completedWithPathFailures', {
+        label: getReadCountLabel(t, kind, counts.completed),
+        count: counts.pathFailed
+      })
+    }
     if (counts.completed > 0) {
       return [
         formatTranslation(t, 'agent.read.completedCount', {
           label: getReadCountLabel(t, kind, counts.completed)
         }),
-        formatTranslation(t, 'agent.read.failedCount', { count: counts.failed })
+        counts.pathFailed > 0
+          ? formatTranslation(t, 'agent.read.pathFailedCount', { count: counts.pathFailed })
+          : '',
+        otherFailed > 0
+          ? formatTranslation(t, 'agent.read.failedCount', { count: otherFailed })
+          : ''
+      ]
+        .filter(Boolean)
+        .join(t('agent.separator'))
+    }
+    if (counts.pathFailed === counts.failed) {
+      return counts.pathFailed === 1
+        ? t('agent.read.file.pathIsDirectory')
+        : formatTranslation(t, 'agent.read.pathFailedCount', { count: counts.pathFailed })
+    }
+    if (counts.pathFailed > 0) {
+      return [
+        formatTranslation(t, 'agent.read.pathFailedCount', { count: counts.pathFailed }),
+        formatTranslation(t, 'agent.read.failedCount', { count: otherFailed })
       ].join(t('agent.separator'))
     }
     if (items.length > 1) {
@@ -271,19 +330,19 @@ function getReadGroupLabel(
 function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const fileName = getDisplayName(activity, call, t)
+  const displayPath = getDisplayPath(activity, call, result) || fileName
+  const pathIsDirectory = isPathIsDirectoryFailure(call, result)
   const error = activity?.error ?? result?.error
 
   return (
     <div
       className="read-activity__text-item"
       data-status={error ? 'failed' : undefined}
-      title={
-        error
-          ? `${activity?.path || getPathFromCall(call) || fileName}\n${error}`
-          : activity?.path || getPathFromCall(call) || fileName
-      }
+      title={error ? `${displayPath}\n${error}` : displayPath}
     >
-      {formatTranslation(t, 'agent.read.item', { fileName })}
+      {pathIsDirectory
+        ? formatTranslation(t, 'agent.read.pathIsDirectoryItem', { path: displayPath })
+        : formatTranslation(t, 'agent.read.item', { fileName: displayPath })}
     </div>
   )
 }
@@ -389,7 +448,9 @@ export function ReadToolActivity({
   const { t } = useFrontendConfig()
   const kind = getKind(call, activity)
   const status = getStatus(activity, result, settledStatus)
-  const label = t(STATUS_LABELS[kind][status])
+  const label = isPathIsDirectoryFailure(call, result)
+    ? t('agent.read.file.pathIsDirectory')
+    : t(STATUS_LABELS[kind][status])
   const StatusIcon = getStatusIcon(kind)
   const hasDetails = Boolean(activity || getPathFromCall(call) || result?.error)
   const isPending = status === 'running'

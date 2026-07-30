@@ -1722,19 +1722,13 @@ impl AgentRuntime {
                     };
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
-                    let model_observation = finalize_model_tool_observation(
+                    let (model_observation, checkpoint_observation) = finalize_tool_observations(
                         &model_tool_result_gate,
                         &call.id,
                         !result.ok,
                         &llm_result,
-                        &archive_metadata,
-                    )?;
-                    let checkpoint_observation = finalize_model_tool_observation(
-                        &model_tool_result_gate,
-                        &call.id,
-                        !result.ok,
                         &checkpoint_result,
-                        &ConversationHistoryArchiveTraceMetadata::default(),
+                        &archive_metadata,
                     )?;
                     let recorded_result_sequence = {
                         let mut recorder = conversation_trace
@@ -2305,6 +2299,25 @@ pub(crate) fn finalize_model_tool_observation(
         )));
     }
     Ok(output.content)
+}
+
+/// Applies the same completed Archive settlement to both consumers.
+///
+/// Checkpoint projections may retain more detail than live model projections, so dropping the
+/// Archive metadata from either branch can turn a recoverable 10K compaction into a run failure.
+fn finalize_tool_observations(
+    gate: &ModelToolResultGate,
+    call_id: &str,
+    is_error: bool,
+    model_result: &AgentToolResult,
+    checkpoint_result: &AgentToolResult,
+    archive: &ConversationHistoryArchiveTraceMetadata,
+) -> AgentResult<(String, String)> {
+    let model_observation =
+        finalize_model_tool_observation(gate, call_id, is_error, model_result, archive)?;
+    let checkpoint_observation =
+        finalize_model_tool_observation(gate, call_id, is_error, checkpoint_result, archive)?;
+    Ok((model_observation, checkpoint_observation))
 }
 
 fn load_continuation_archive_metadata(

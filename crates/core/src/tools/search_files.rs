@@ -25,7 +25,7 @@ impl AgentTool for SearchFilesTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "search_files".to_string(),
-            description: "Find files or directories by path or file name. With no workspace, provide an absolute path or a system alias such as @desktop."
+            description: "Find files or directories by path or file name. Route every match by its kind: kind=file may be passed to read_file when it is UTF-8 text; kind=directory must be inspected with workspace_map.focusPath, never read_file. With no workspace, provide an absolute path or a system alias such as @desktop."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -253,6 +253,11 @@ mod tests {
         fixture.write_file("README.md", "hello\n");
         let context = fixture.context();
         let registry = ToolRegistry::defaults_with_search(None);
+        let definition = registry.definition_for("search_files").unwrap();
+        assert!(definition.description.contains("kind=file"));
+        assert!(definition.description.contains("read_file"));
+        assert!(definition.description.contains("kind=directory"));
+        assert!(definition.description.contains("workspace_map.focusPath"));
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "search_files".to_string(),
@@ -264,7 +269,9 @@ mod tests {
         let result = registry.execute(&context, &call);
 
         assert!(result.ok, "{:?}", result.error);
-        assert_eq!(result.result.unwrap()["matches"][0]["path"], "src/main.rs");
+        let result = result.result.unwrap();
+        assert_eq!(result["matches"][0]["path"], "src/main.rs");
+        assert_eq!(result["matches"][0]["kind"], "file");
     }
 
     #[test]
