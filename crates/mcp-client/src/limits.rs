@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{McpError, McpProtocolSnapshot};
+use crate::{
+    McpContentBlock, McpDispatchCertainty, McpEmbeddedResource, McpError, McpProtocolSnapshot,
+    McpToolResult,
+};
 
 const MAX_CONFIGURED_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_CONFIGURED_COUNT_LIMIT: usize = 1_000_000;
@@ -386,6 +389,65 @@ pub(crate) fn validate_structured_content(
     if encoded.len() > limits.max_structured_content_bytes {
         return Err(McpError::protocol(
             "MCP structured result exceeded the configured byte limit",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_tool_result(
+    result: &McpToolResult,
+    limits: &McpSecurityLimits,
+) -> Result<(), McpError> {
+    if result.content.len() > limits.max_content_blocks {
+        return Err(McpError::output_too_large(
+            "MCP tools/call",
+            "MCP tool result exceeded the configured content-block limit",
+        ));
+    }
+    if let Some(structured) = &result.structured_content {
+        if validate_structured_content(structured, limits).is_err() {
+            return Err(McpError::output_too_large(
+                "MCP tools/call",
+                "MCP structured result exceeded the configured safety budget",
+            ));
+        }
+    }
+    let encoded = serde_json::to_vec(result).map_err(|_| {
+        McpError::protocol("MCP tool result could not be measured safely")
+            .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
+    })?;
+    if encoded.len() > limits.max_raw_tool_result_bytes {
+        return Err(McpError::output_too_large(
+            "MCP tools/call",
+            "MCP tool result exceeded the configured byte limit",
+        ));
+    }
+    let mut total_media = 0_usize;
+    for block in &result.content {
+        let media_bytes = match block {
+            McpContentBlock::Image { data, .. } | McpContentBlock::Audio { data, .. } => data.len(),
+            McpContentBlock::EmbeddedResource {
+                resource: McpEmbeddedResource::Blob { data, .. },
+            } => data.len(),
+            _ => 0,
+        };
+        if media_bytes > limits.max_encoded_media_bytes {
+            return Err(McpError::output_too_large(
+                "MCP tools/call",
+                "MCP tool result contained an oversized encoded media block",
+            ));
+        }
+        total_media = total_media.checked_add(media_bytes).ok_or_else(|| {
+            McpError::output_too_large(
+                "MCP tools/call",
+                "MCP tool result media byte count overflowed",
+            )
+        })?;
+    }
+    if total_media > limits.max_total_encoded_media_bytes {
+        return Err(McpError::output_too_large(
+            "MCP tools/call",
+            "MCP tool result exceeded the aggregate encoded media limit",
         ));
     }
     Ok(())

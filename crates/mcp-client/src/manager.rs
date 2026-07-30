@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog::discover_catalog_with_limits;
-use crate::limits::{validate_structured_content, validate_tool_arguments};
+use crate::limits::{validate_tool_arguments, validate_tool_result};
 use crate::{
     BoxMcpFuture, McpActiveCallId, McpActiveCallProvenance, McpActiveCallSnapshot, McpApprovalMode,
     McpCancellationToken, McpCatalogCompleteness, McpCatalogIssue, McpCatalogPolicy,
@@ -30,6 +30,8 @@ pub struct McpManagerPolicy {
     pub catalog: McpCatalogPolicy,
     pub notification_debounce: Duration,
     pub active_call_settle_timeout: Duration,
+    pub max_active_calls_per_server: usize,
+    pub max_active_calls_total: usize,
     pub security_limits: McpSecurityLimits,
 }
 
@@ -39,6 +41,8 @@ impl Default for McpManagerPolicy {
             catalog: McpCatalogPolicy::default(),
             notification_debounce: Duration::from_millis(100),
             active_call_settle_timeout: Duration::from_millis(250),
+            max_active_calls_per_server: 32,
+            max_active_calls_total: 256,
             security_limits: McpSecurityLimits::default(),
         }
     }
@@ -232,6 +236,11 @@ impl ActiveCallControl {
 struct ActiveCallGuard {
     entry: Arc<ManagedEntry>,
     control: Arc<ActiveCallControl>,
+    global_permit: Option<GlobalActiveCallPermit>,
+}
+
+struct GlobalActiveCallPermit {
+    inner: Arc<ManagerInner>,
 }
 
 impl Drop for ActiveCallGuard {
@@ -252,7 +261,8 @@ impl Drop for ActiveCallGuard {
             };
             self.control.set_state(next);
         }
-        let status = if let Ok(mut state) = self.entry.state.lock() {
+        let global_permit = self.global_permit.take();
+        if let Ok(mut state) = self.entry.state.lock() {
             if state
                 .active_calls
                 .get(&self.control.id)
@@ -261,17 +271,25 @@ impl Drop for ActiveCallGuard {
                 state.active_calls.remove(&self.control.id);
             }
             state.status.active_call_count = state.active_calls.len();
-            Some(state.status.clone())
+            // Release global admission before making the new per-Server count
+            // observable. Publish while the same state lock is held so a new
+            // call cannot publish count=1 and then be overwritten by this
+            // older guard's count=0 snapshot.
+            drop(global_permit);
+            self.entry.publish_status(&state.status);
         } else {
-            None
-        };
-        if let Some(status) = status {
-            self.entry.publish_status(&status);
-        } else {
+            drop(global_permit);
             self.entry.settled.notify_waiters();
         }
         self.control.removed.store(true, Ordering::Release);
         self.control.settled.notify_waiters();
+    }
+}
+
+impl Drop for GlobalActiveCallPermit {
+    fn drop(&mut self) {
+        let previous = self.inner.active_call_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "global MCP active-call count underflow");
     }
 }
 
@@ -319,6 +337,7 @@ struct ManagerInner {
     shutdown_started: AtomicBool,
     shutdown_cancel: CancellationToken,
     registry_watcher_started: AtomicBool,
+    active_call_count: AtomicUsize,
     events: mpsc::UnboundedSender<McpEvent>,
 }
 
@@ -444,6 +463,15 @@ impl McpConnectionManager {
                 "MCP active-call settlement timeout must be between 1 ms and 30 seconds",
             ));
         }
+        if policy.max_active_calls_per_server == 0
+            || policy.max_active_calls_total == 0
+            || policy.max_active_calls_per_server > policy.max_active_calls_total
+            || policy.max_active_calls_total > 4096
+        {
+            return Err(McpError::config(
+                "MCP active-call limits must be non-zero, ordered, and at most 4096",
+            ));
+        }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             McpError::config("MCP connection manager requires an active Tokio runtime")
         })?;
@@ -464,6 +492,7 @@ impl McpConnectionManager {
                 shutdown_started: AtomicBool::new(false),
                 shutdown_cancel: CancellationToken::new(),
                 registry_watcher_started: AtomicBool::new(false),
+                active_call_count: AtomicUsize::new(0),
                 events,
             }),
         };
@@ -613,11 +642,10 @@ impl McpConnectionManager {
                     epoch,
                     current_registry.as_ref(),
                 )?;
-                if current_registry.is_none() {
+                let Some(current) = current_registry else {
                     self.remove_managed_entry_if_same(server_id, &entry);
                     return Err(McpError::config("MCP server is no longer registered"));
-                }
-                let current = current_registry.expect("registry entry checked as present");
+                };
                 if !owns_reservation {
                     return Err(McpError::cancelled("MCP server start"));
                 }
@@ -645,11 +673,10 @@ impl McpConnectionManager {
                             epoch,
                             current_registry.as_ref(),
                         )?;
-                        if current_registry.is_none() {
+                        let Some(current) = current_registry else {
                             self.remove_managed_entry_if_same(server_id, &entry);
                             return Err(McpError::config("MCP server is no longer registered"));
-                        }
-                        let current = current_registry.expect("registry entry checked as present");
+                        };
                         if !owns_reservation {
                             return Err(McpError::cancelled("MCP server start"));
                         }
@@ -732,11 +759,10 @@ impl McpConnectionManager {
                     epoch,
                     current_registry.as_ref(),
                 )?;
-                if current_registry.is_none() {
+                let Some(current) = current_registry else {
                     self.remove_managed_entry_if_same(server_id, &entry);
                     return Err(McpError::config("MCP server is no longer registered"));
-                }
-                let current = current_registry.expect("registry entry checked as present");
+                };
                 if !owns_reservation {
                     return Err(McpError::cancelled("MCP server start"));
                 }
@@ -749,12 +775,13 @@ impl McpConnectionManager {
                 continue;
             }
 
-            let signal_receiver = peer.subscribe_signals();
-            let initial_signal_snapshot = signal_receiver
+            let signal_subscription = peer.subscribe_signals().map(|signals| {
+                let snapshot = signals.snapshot();
+                (signals, snapshot)
+            });
+            let notification_state = signal_subscription
                 .as_ref()
-                .map(crate::McpPeerSignalReceiver::snapshot);
-            let notification_state = initial_signal_snapshot
-                .map(|snapshot| snapshot.notification_state)
+                .map(|(_, snapshot)| snapshot.notification_state)
                 .unwrap_or(McpPeerNotificationState::Unsupported);
             let watcher_cancel = CancellationToken::new();
             let commit_stale = {
@@ -786,7 +813,7 @@ impl McpConnectionManager {
                 return Err(McpError::cancelled("MCP server start"));
             }
 
-            if let Some(signals) = signal_receiver {
+            if let Some((signals, initial_signal_snapshot)) = signal_subscription {
                 let watcher_manager = self.clone();
                 let watcher_entry = Arc::clone(&entry);
                 let watcher = tokio::spawn(async move {
@@ -796,8 +823,7 @@ impl McpConnectionManager {
                             watcher_entry,
                             epoch,
                             signals,
-                            initial_signal_snapshot
-                                .expect("signal snapshot exists when receiver exists"),
+                            initial_signal_snapshot,
                             watcher_cancel,
                         )
                         .await;
@@ -1498,7 +1524,7 @@ impl McpConnectionManager {
             .get_entry(server_id)?
             .ok_or_else(|| McpError::config("MCP catalog invocation server is not ready"))?;
 
-        let (peer, call, control, active_status) = {
+        let (peer, call, control, active_status, global_permit) = {
             let mut state = lock_entry(&entry)?;
             if state.removed {
                 return Err(McpError::config(
@@ -1607,24 +1633,25 @@ impl McpConnectionManager {
                     "MCP active-call identity is already in use",
                 ));
             }
+            if state.active_calls.len() >= self.inner.policy.max_active_calls_per_server {
+                return Err(McpError::capacity(
+                    "MCP per-server active-call limit was reached",
+                ));
+            }
+            let global_permit = reserve_global_active_call(&self.inner)?;
             let control = Arc::new(ActiveCallControl::new(id.clone(), provenance, timeout_ms));
             state.active_calls.insert(id, Arc::clone(&control));
             state.status.active_call_count = state.active_calls.len();
             let active_status = state.status.clone();
-            (peer, call, control, active_status)
+            (peer, call, control, active_status, global_permit)
         };
 
         entry.publish_status(&active_status);
         let _active_guard = ActiveCallGuard {
             entry: Arc::clone(&entry),
             control: Arc::clone(&control),
+            global_permit: Some(global_permit),
         };
-        // This is the logical dispatch linearization point. A configuration
-        // mutation committed before the following Registry read is definitely
-        // not dispatched. A mutation committed after this point races a
-        // possibly-dispatched call and is conservatively settled by the
-        // Registry watcher as outcome-unknown.
-        control.dispatch.mark_dispatching();
         let final_registry =
             self.inner.registry.get(server_id)?.ok_or_else(|| {
                 McpError::config("MCP catalog invocation server is not registered")
@@ -1665,6 +1692,11 @@ impl McpConnectionManager {
         {
             return Err(McpError::cancelled("MCP tools/call"));
         }
+        // Cross the dispatch uncertainty boundary only after every Host-owned
+        // Registry/Catalog identity and cancellation check has passed. A
+        // mutation committed after this point races a possibly-dispatched call
+        // and is conservatively settled by the Registry watcher.
+        control.dispatch.mark_dispatching();
         // An SDK request handle only proves local queuing, not whether bytes
         // reached the server, so cross the uncertainty boundary immediately
         // before entering the peer.
@@ -1712,7 +1744,7 @@ impl McpConnectionManager {
             result = &mut protocol_call => normalize_dispatched_result(&control, result),
         };
         let result = result.and_then(|result| {
-            validate_tool_result_limits(&result, &self.inner.policy.security_limits)?;
+            validate_tool_result(&result, &self.inner.policy.security_limits)?;
             Ok(result)
         });
         control.set_state(invocation_state_for_result(&result));
@@ -2414,6 +2446,33 @@ async fn stop_and_forget_unregistered(manager: &McpConnectionManager, server_id:
     }
 }
 
+fn reserve_global_active_call(
+    inner: &Arc<ManagerInner>,
+) -> Result<GlobalActiveCallPermit, McpError> {
+    let maximum = inner.policy.max_active_calls_total;
+    let mut current = inner.active_call_count.load(Ordering::Acquire);
+    loop {
+        if current >= maximum {
+            return Err(McpError::capacity(
+                "MCP global active-call limit was reached",
+            ));
+        }
+        match inner.active_call_count.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                return Ok(GlobalActiveCallPermit {
+                    inner: Arc::clone(inner),
+                });
+            }
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 fn lock_entry(
     entry: &ManagedEntry,
 ) -> Result<std::sync::MutexGuard<'_, ManagedEntryState>, McpError> {
@@ -2589,66 +2648,6 @@ async fn settle_interrupted_call(
     }
 }
 
-fn validate_tool_result_limits(
-    result: &McpToolResult,
-    limits: &McpSecurityLimits,
-) -> Result<(), McpError> {
-    if result.content.len() > limits.max_content_blocks {
-        return Err(McpError::output_too_large(
-            "MCP tools/call",
-            "MCP tool result exceeded the configured content-block limit",
-        ));
-    }
-    if let Some(structured) = &result.structured_content {
-        if validate_structured_content(structured, limits).is_err() {
-            return Err(McpError::output_too_large(
-                "MCP tools/call",
-                "MCP structured result exceeded the configured safety budget",
-            ));
-        }
-    }
-    let encoded = serde_json::to_vec(result).map_err(|_| {
-        McpError::protocol("MCP tool result could not be measured safely")
-            .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
-    })?;
-    if encoded.len() > limits.max_raw_tool_result_bytes {
-        return Err(McpError::output_too_large(
-            "MCP tools/call",
-            "MCP tool result exceeded the configured byte limit",
-        ));
-    }
-    let mut total_media = 0_usize;
-    for block in &result.content {
-        let media_bytes = match block {
-            crate::McpContentBlock::Image { data, .. }
-            | crate::McpContentBlock::Audio { data, .. } => data.len(),
-            crate::McpContentBlock::EmbeddedResource {
-                resource: crate::McpEmbeddedResource::Blob { data, .. },
-            } => data.len(),
-            _ => 0,
-        };
-        if media_bytes > limits.max_encoded_media_bytes {
-            return Err(McpError::output_too_large(
-                "MCP tools/call",
-                "MCP tool result contained an oversized encoded media block",
-            ));
-        }
-        total_media = total_media.checked_add(media_bytes).ok_or_else(|| {
-            McpError::output_too_large(
-                "MCP tools/call",
-                "MCP tool result media byte count overflowed",
-            )
-        })?;
-    }
-    if total_media > limits.max_total_encoded_media_bytes {
-        return Err(McpError::output_too_large(
-            "MCP tools/call",
-            "MCP tool result exceeded the aggregate encoded media limit",
-        ));
-    }
-    Ok(())
-}
-
 fn next_epoch(epoch: u64) -> Result<u64, McpError> {
     epoch
         .checked_add(1)
@@ -2780,7 +2779,7 @@ fn manager_task_batch_failure() -> McpBatchOperationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemoryMcpRegistry;
+    use crate::{InMemoryMcpRegistry, McpContentBlock};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::PathBuf;
 
@@ -3042,6 +3041,90 @@ mod tests {
 
         entry.state.lock().unwrap().status.state = McpServerState::Error;
         assert!(!manager.graceful_shutdown_cleanup_complete(&[success]));
+    }
+
+    #[test]
+    fn tool_result_limits_reject_raw_bytes_blocks_structured_content_and_media() {
+        let limits = McpSecurityLimits::default();
+
+        let raw = McpToolResult {
+            content: vec![McpContentBlock::Text {
+                text: "x".repeat(limits.max_raw_tool_result_bytes),
+            }],
+            structured_content: None,
+            is_error: false,
+        };
+        assert_eq!(
+            validate_tool_result(&raw, &limits).unwrap_err().kind,
+            McpErrorKind::OutputTooLarge
+        );
+
+        let blocks = McpToolResult {
+            content: (0..=limits.max_content_blocks)
+                .map(|_| McpContentBlock::Text {
+                    text: String::new(),
+                })
+                .collect(),
+            structured_content: None,
+            is_error: false,
+        };
+        assert_eq!(
+            validate_tool_result(&blocks, &limits).unwrap_err().kind,
+            McpErrorKind::OutputTooLarge
+        );
+
+        let structured = McpToolResult {
+            content: Vec::new(),
+            structured_content: Some(serde_json::json!({
+                "value": "x".repeat(limits.max_structured_content_bytes)
+            })),
+            is_error: false,
+        };
+        assert_eq!(
+            validate_tool_result(&structured, &limits).unwrap_err().kind,
+            McpErrorKind::OutputTooLarge
+        );
+
+        let oversized_block = McpToolResult {
+            content: vec![McpContentBlock::Image {
+                data: "a".repeat(limits.max_encoded_media_bytes + 1),
+                mime_type: "image/png".to_string(),
+            }],
+            structured_content: None,
+            is_error: false,
+        };
+        assert_eq!(
+            validate_tool_result(&oversized_block, &limits)
+                .unwrap_err()
+                .kind,
+            McpErrorKind::OutputTooLarge
+        );
+
+        let aggregate = McpToolResult {
+            content: vec![
+                McpContentBlock::Audio {
+                    data: "a".repeat(limits.max_encoded_media_bytes),
+                    mime_type: "audio/wav".to_string(),
+                },
+                McpContentBlock::Image {
+                    data: "b".repeat(limits.max_encoded_media_bytes),
+                    mime_type: "image/png".to_string(),
+                },
+                McpContentBlock::EmbeddedResource {
+                    resource: crate::McpEmbeddedResource::Blob {
+                        uri: "mcp-owned://fixture/blob".to_string(),
+                        mime_type: Some("application/octet-stream".to_string()),
+                        data: "c".to_string(),
+                    },
+                },
+            ],
+            structured_content: None,
+            is_error: false,
+        };
+        assert_eq!(
+            validate_tool_result(&aggregate, &limits).unwrap_err().kind,
+            McpErrorKind::OutputTooLarge
+        );
     }
 
     #[test]

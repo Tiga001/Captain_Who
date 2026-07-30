@@ -999,6 +999,14 @@ fn map_invocation_error(error: McpError) -> AgentError {
                 "dispatchCertainty": dispatch_certainty,
             }),
         ),
+        McpErrorKind::Capacity => AgentError::structured(
+            "mcp.tool_capacity_exceeded",
+            "The MCP tool invocation did not start because Host capacity is full.",
+            serde_json::json!({
+                "retryable": false,
+                "dispatchCertainty": dispatch_certainty,
+            }),
+        ),
         McpErrorKind::Spawn
         | McpErrorKind::Negotiation
         | McpErrorKind::Protocol
@@ -1750,6 +1758,28 @@ mod tests {
                 .and_then(|details| details.get("retryable"))
                 .and_then(serde_json::Value::as_bool),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn host_capacity_is_not_misreported_as_a_stale_tool_snapshot() {
+        let error = map_invocation_error(McpError::capacity(
+            "untrusted internal active-call capacity detail",
+        ));
+        assert_eq!(error.code(), Some("mcp.tool_capacity_exceeded"));
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("retryable"))
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details.get("dispatchCertainty"))
+                .and_then(serde_json::Value::as_str),
+            Some("definitely_not_dispatched")
         );
     }
 

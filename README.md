@@ -29,7 +29,8 @@ crates/core-server/       Rust 应用边界（application / transport / adapters
 开发模式下，Electron 通过 Cargo 启动 `core-server`；生产包会把 release 二进制复制到 `process.resourcesPath`。Electron 与 Rust 之间使用逐行 JSON-RPC 通信。
 
 Agent 上下文的组装、长期轨迹、会话状态、分类计量、容量保护、压缩规划、审批恢复和前端用量投影见[上下文管理架构](docs/context-management.md)。
-各层依赖方向、core-server 分层、Agent 协议所有权和 IPC 约束见[架构边界](docs/architecture.md)。
+各层依赖方向、core-server 分层、Agent 协议所有权和 IPC 约束见[架构边界](docs/architecture.md)；
+MCP 模块、fixture、扩展和安全约束见 [MCP v1 开发文档](docs/mcp.md)。
 
 ## 环境要求
 

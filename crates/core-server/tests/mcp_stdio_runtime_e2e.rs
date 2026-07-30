@@ -83,6 +83,8 @@ async fn main() {
             .next()
             .map(PathBuf::from)
             .expect("owned fixture marker path");
+        std::fs::write(fixture_pid_marker(&marker), std::process::id().to_string())
+            .expect("write repository-owned fixture PID marker");
         let service = OwnedFixtureServer::new(marker)
             .serve(rmcp::transport::stdio())
             .await
@@ -141,6 +143,8 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
         .start(server_id)
         .await
         .expect("start repository-owned MCP fixture");
+    #[cfg(unix)]
+    let fixture_pid = read_fixture_pid(&call_marker);
 
     let bridge = Arc::new(McpRuntimeBridge::new(Arc::clone(&manager)));
     let catalog_context = McpToolCatalogContext {
@@ -291,6 +295,8 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
 
     let shutdown = manager.stop_all().await;
     assert!(shutdown.iter().all(|result| result.error.is_none()));
+    #[cfg(unix)]
+    assert_process_reaped(fixture_pid);
     assert_eq!(
         manager
             .get_status(server_id)
@@ -387,6 +393,8 @@ async fn persistent_registry_core_rpc_stdio_fixture_chain() {
     );
     let started_server = &started["result"]["server"];
     assert_eq!(started_server["state"], "ready");
+    #[cfg(unix)]
+    let first_fixture_pid = read_fixture_pid(&call_marker);
 
     let tools = first_host
         .request(
@@ -431,6 +439,8 @@ async fn persistent_registry_core_rpc_stdio_fixture_chain() {
             .expect("persisted Registry revision"),
     );
     first_host.shutdown().await;
+    #[cfg(unix)]
+    assert_process_reaped(first_fixture_pid);
 
     let mut restarted_host = CoreRpcHarness::spawn(&database, fixture_dir.path()).await;
     let restored = restarted_host
@@ -478,6 +488,8 @@ async fn persistent_registry_core_rpc_stdio_fixture_chain() {
     );
     let restored_started_server = &restored_started["result"]["server"];
     assert_eq!(restored_started_server["state"], "ready");
+    #[cfg(unix)]
+    let restored_fixture_pid = read_fixture_pid(&call_marker);
 
     let restarted = restarted_host
         .request(
@@ -491,6 +503,16 @@ async fn persistent_registry_core_rpc_stdio_fixture_chain() {
     );
     let restarted_server = &restarted["result"]["server"];
     assert_eq!(restarted_server["state"], "ready");
+    #[cfg(unix)]
+    let restarted_fixture_pid = read_fixture_pid(&call_marker);
+    #[cfg(unix)]
+    {
+        assert_ne!(
+            restored_fixture_pid, restarted_fixture_pid,
+            "restart must replace the repository-owned fixture process"
+        );
+        assert_process_reaped(restored_fixture_pid);
+    }
 
     let deleted = restarted_host
         .request("mcp.server.delete", mutation_params(restarted_server))
@@ -501,6 +523,8 @@ async fn persistent_registry_core_rpc_stdio_fixture_chain() {
     );
     assert_eq!(deleted["result"]["server"]["enabled"], false);
     assert_eq!(deleted["result"]["server"]["state"], "disabled");
+    #[cfg(unix)]
+    assert_process_reaped(restarted_fixture_pid);
 
     let list = restarted_host
         .request("mcp.server.list", json!({ "schemaVersion": 1 }))
@@ -660,6 +684,34 @@ fn fixture_call_count(marker: &Path) -> usize {
         .expect("read repository-owned fixture call marker")
         .lines()
         .count()
+}
+
+fn fixture_pid_marker(marker: &Path) -> PathBuf {
+    marker.with_extension("pid")
+}
+
+#[cfg(unix)]
+fn read_fixture_pid(marker: &Path) -> libc::pid_t {
+    std::fs::read_to_string(fixture_pid_marker(marker))
+        .expect("read repository-owned fixture PID marker")
+        .parse()
+        .expect("parse repository-owned fixture PID")
+}
+
+#[cfg(unix)]
+fn assert_process_reaped(pid: libc::pid_t) {
+    // SAFETY: signal 0 performs only an existence/permission probe. The PID
+    // came from this repository-owned fixture process.
+    let result = unsafe { libc::kill(pid, 0) };
+    assert_eq!(
+        result, -1,
+        "repository-owned fixture PID {pid} still exists"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "repository-owned fixture PID {pid} was not fully reaped"
+    );
 }
 
 async fn read_json_request(stream: &mut TcpStream) -> serde_json::Value {

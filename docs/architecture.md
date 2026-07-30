@@ -52,3 +52,17 @@ consume that same fixture.
 Renderer-facing channel names are owned by `packages/host-api`. Main-process registrars and preload
 bridges import those constants. Main IPC registration is split by domain; preload exposes the same
 domains as narrow bridge modules.
+
+## MCP
+
+`mycopilot-mcp-client` is a transport-neutral protocol boundary below core-server. It owns rmcp,
+stdio process supervision, lifecycle negotiation, Registry/Manager/Catalog state and bounded Tool
+results, but does not depend on Agent Runtime or Electron.
+
+Core owns the rmcp-free Tool identity, approval and model projection contract. Core-server composes
+the persistent Registry, exact launch authorization, sealed approval payload store and
+`McpRuntimeBridge`. Renderer management and approval surfaces can use only the versioned Host API
+through Main/Preload allowlists.
+
+The complete implementation and extension contract is documented in
+[MCP v1 development and security boundaries](mcp.md).

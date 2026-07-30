@@ -1923,6 +1923,173 @@ async fn catalog_call_propagates_cancellation_to_the_peer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_call_admission_is_bounded_and_releases_capacity() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "bounded-calls", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("slow", "waits for cancellation")]);
+    server
+        .wait_for_call_cancellation
+        .store(true, Ordering::SeqCst);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(
+        registry,
+        connector,
+        sink,
+        McpManagerPolicy {
+            max_active_calls_per_server: 1,
+            max_active_calls_total: 1,
+            ..McpManagerPolicy::default()
+        },
+    );
+    manager.start(server_id).await.unwrap();
+
+    let first_request = catalog_call(&manager, server_id, "slow", json!({}));
+    let first_cancellation = McpCancellationToken::new();
+    let task_manager = manager.clone();
+    let task_cancellation = first_cancellation.clone();
+    let first = tokio::spawn(async move {
+        task_manager
+            .call_catalog_tool(first_request, task_cancellation)
+            .await
+    });
+    wait_until(Duration::from_secs(1), || server.calls().len() == 1).await;
+
+    let error = manager
+        .call_catalog_tool(
+            catalog_call(&manager, server_id, "slow", json!({})),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect_err("second concurrent call must be rejected before peer dispatch");
+    assert_eq!(error.kind, McpErrorKind::Capacity);
+    assert!(error.message.contains("active-call limit"));
+    assert_eq!(server.calls().len(), 1);
+
+    first_cancellation.cancel();
+    first
+        .await
+        .expect("join first bounded call")
+        .expect_err("first bounded call is conservatively outcome-unknown");
+    assert_eq!(manager.active_call_count().unwrap(), 0);
+
+    server
+        .wait_for_call_cancellation
+        .store(false, Ordering::SeqCst);
+    manager
+        .call_catalog_tool(
+            catalog_call(&manager, server_id, "slow", json!({})),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect("capacity must be released when the active-call guard settles");
+    assert_eq!(manager.active_call_count().unwrap(), 0);
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_active_call_admission_spans_servers_and_duplicate_id_spends_no_permit() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let first_server_id = McpServerId::new();
+    let second_server_id = McpServerId::new();
+    registry
+        .add(config(first_server_id, "global-capacity-a", true))
+        .unwrap();
+    registry
+        .add(config(second_server_id, "global-capacity-b", true))
+        .unwrap();
+    let first_server = MockServer::with_tools(vec![descriptor("slow", "waits")]);
+    first_server
+        .wait_for_call_cancellation
+        .store(true, Ordering::SeqCst);
+    let second_server = MockServer::with_tools(vec![descriptor("echo", "returns")]);
+    connector.add(first_server_id, Arc::clone(&first_server));
+    connector.add(second_server_id, Arc::clone(&second_server));
+    let manager = manager(
+        registry,
+        connector,
+        sink,
+        McpManagerPolicy {
+            max_active_calls_per_server: 1,
+            max_active_calls_total: 1,
+            ..McpManagerPolicy::default()
+        },
+    );
+    manager.start(first_server_id).await.unwrap();
+    manager.start(second_server_id).await.unwrap();
+
+    let fixed_id = McpActiveCallId::new(
+        first_server_id,
+        McpInvocationId::new(),
+        McpModelCallId::new("owned-global-capacity-call").unwrap(),
+    );
+    let first_cancellation = McpCancellationToken::new();
+    let first_manager = manager.clone();
+    let first_task_id = fixed_id.clone();
+    let first_task_cancellation = first_cancellation.clone();
+    let first = tokio::spawn(async move {
+        first_manager
+            .call_catalog_tool_identified(
+                first_task_id,
+                catalog_call(&first_manager, first_server_id, "slow", json!({})),
+                first_task_cancellation,
+            )
+            .await
+    });
+    wait_until(Duration::from_secs(1), || first_server.calls().len() == 1).await;
+
+    let duplicate = manager
+        .call_catalog_tool_identified(
+            fixed_id,
+            catalog_call(&manager, first_server_id, "slow", json!({})),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect_err("duplicate active identity must fail before reserving capacity");
+    assert_eq!(duplicate.kind, McpErrorKind::Config);
+    assert_eq!(
+        duplicate.dispatch_certainty,
+        Some(McpDispatchCertainty::DefinitelyNotDispatched)
+    );
+
+    let global = manager
+        .call_catalog_tool(
+            catalog_call(&manager, second_server_id, "echo", json!({})),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect_err("one Server must consume the global admission slot");
+    assert_eq!(global.kind, McpErrorKind::Capacity);
+    assert_eq!(
+        global.dispatch_certainty,
+        Some(McpDispatchCertainty::DefinitelyNotDispatched)
+    );
+    assert!(second_server.calls().is_empty());
+
+    first_cancellation.cancel();
+    first
+        .await
+        .expect("join first global-capacity call")
+        .expect_err("cancelled dispatched call must be outcome-unknown");
+    assert_eq!(manager.active_call_count().unwrap(), 0);
+    manager
+        .call_catalog_tool(
+            catalog_call(&manager, second_server_id, "echo", json!({})),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect("global permit must be immediately reusable after settlement");
+    assert_eq!(second_server.calls().len(), 1);
+    manager.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_cancels_and_settles_active_calls_before_closing_peer() {
     let registry = InMemoryMcpRegistry::shared();
     let connector = Arc::new(MockConnector::default());

@@ -5,17 +5,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mycopilot_mcp_client::{
-    InMemoryMcpRegistry, McpCancellationToken, McpCatalogCompleteness, McpConnectionManager,
-    McpConnectionState, McpConnector, McpContentBlock, McpDispatchCertainty, McpEnvBinding,
-    McpErrorKind, McpEvent, McpLifecycleKind, McpManagerPolicy, McpOutcomeUnknownReason, McpPeer,
+    InMemoryMcpRegistry, McpCancellationToken, McpCatalogCompleteness, McpCatalogIssue,
+    McpCatalogToolCall, McpConnectionManager, McpConnectionState, McpConnector, McpContentBlock,
+    McpDispatchCertainty, McpDispatchPhase, McpDispatchTracker, McpEnvBinding, McpErrorKind,
+    McpEvent, McpLifecycleKind, McpManagerPolicy, McpOutcomeUnknownReason, McpPeer,
     McpPeerNotificationState, McpRegistry, McpServerConfig, McpServerId, McpServerScope,
-    McpStdioConfig, McpStdioConnector, McpStdioPolicy, McpToolCall, McpTransportConfig,
-    McpTrustLevel,
+    McpServerState, McpStdioConfig, McpStdioConnector, McpStdioPolicy, McpToolCall,
+    McpTransportConfig, McpTrustLevel,
 };
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{
     CallToolResult, ContentBlock, Implementation, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, SubscriptionFilter, Tool,
+    ProgressNotificationParam, RequestMetaObject, ServerCapabilities, ServerInfo,
+    SubscriptionFilter, Tool,
 };
 use rmcp::service::{RequestContext, SubscriptionContext, SubscriptionSink};
 use rmcp::{tool, tool_handler, tool_router, Json, RoleServer, ServerHandler, ServiceExt};
@@ -27,10 +29,16 @@ const MODERN_FIXTURE: &str = "--fixture-modern";
 const LEGACY_FIXTURE: &str = "--fixture-legacy";
 const DYNAMIC_MODERN_FIXTURE: &str = "--fixture-dynamic-modern";
 const DYNAMIC_LEGACY_FIXTURE: &str = "--fixture-dynamic-legacy";
+const PAGED_FIXTURE: &str = "--fixture-paged";
+const REPEATED_CURSOR_FIXTURE: &str = "--fixture-repeated-cursor";
+const LARGE_CATALOG_FIXTURE: &str = "--fixture-large-catalog";
+const OVER_LIMIT_CATALOG_FIXTURE: &str = "--fixture-over-limit-catalog";
 const EARLY_EXIT_FIXTURE: &str = "--fixture-early-exit";
 const EXIT_AFTER_NEGOTIATION_FIXTURE: &str = "--fixture-exit-after-negotiation";
 const STDERR_FIXTURE: &str = "--fixture-stderr-flood";
 const STDOUT_FIXTURE: &str = "--fixture-stdout-flood";
+const MALFORMED_JSON_FIXTURE: &str = "--fixture-malformed-json";
+const INVALID_UTF8_FIXTURE: &str = "--fixture-invalid-utf8";
 const UNCOOPERATIVE_FIXTURE: &str = "--fixture-uncooperative-close";
 #[cfg(unix)]
 const UNCOOPERATIVE_DYNAMIC_FIXTURE: &str = "--fixture-uncooperative-dynamic-close";
@@ -43,6 +51,8 @@ const FORKED_DESCENDANT_FIXTURE: &str = "--fixture-forked-descendant";
 const ENV_PARENT: &str = "--fixture-env-parent";
 const ENV_PROBE: &str = "--fixture-env-probe";
 const FORBIDDEN_TEST_ENV: &str = "MYCOPILOT_MCP_FORBIDDEN_TEST_VALUE";
+const STRESS_SUITE: &str = "--stress-suite";
+const NOTIFICATION_STORM_COUNT: usize = 512;
 
 #[cfg(unix)]
 static TERM_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -211,6 +221,93 @@ impl FixtureServer {
     }
 
     #[tool(
+        name = "return_protocol_error",
+        description = "Return a deterministic JSON-RPC tool error",
+        annotations(read_only_hint = true)
+    )]
+    async fn return_protocol_error(&self) -> Result<String, rmcp::ErrorData> {
+        Err(rmcp::ErrorData::internal_error(
+            "SERVER_PRIVATE_ERROR_CANARY",
+            None,
+        ))
+    }
+
+    #[tool(
+        name = "oversized_text_result",
+        description = "Return repository-owned text beyond the Host raw-result budget",
+        annotations(read_only_hint = true)
+    )]
+    async fn oversized_text_result(&self) -> String {
+        "x".repeat(4 * 1024 * 1024)
+    }
+
+    #[tool(
+        name = "oversized_structured_result",
+        description = "Return repository-owned structured content beyond the Host budget",
+        annotations(read_only_hint = true)
+    )]
+    async fn oversized_structured_result(&self) -> CallToolResult {
+        CallToolResult::structured(json!({"payload": "x".repeat(9 * 1024)}))
+    }
+
+    #[tool(
+        name = "oversized_image_result",
+        description = "Return repository-owned encoded image data beyond the per-block budget",
+        annotations(read_only_hint = true)
+    )]
+    async fn oversized_image_result(&self) -> CallToolResult {
+        CallToolResult::success(vec![ContentBlock::image(
+            "A".repeat(1024 * 1024 + 4),
+            "image/png",
+        )])
+    }
+
+    #[tool(
+        name = "too_many_content_blocks",
+        description = "Return more repository-owned content blocks than the Host accepts",
+        annotations(read_only_hint = true)
+    )]
+    async fn too_many_content_blocks(&self) -> CallToolResult {
+        CallToolResult::success(
+            (0..129)
+                .map(|_| ContentBlock::text("owned"))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[tool(
+        name = "progress_until_timeout",
+        description = "Emit controlled progress without completing before the Host deadline",
+        annotations(read_only_hint = true)
+    )]
+    async fn progress_until_timeout(
+        &self,
+        Parameters(input): Parameters<SlowInput>,
+        meta: RequestMetaObject,
+        peer: rmcp::Peer<RoleServer>,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<String, rmcp::ErrorData> {
+        let progress_token = meta
+            .get_progress_token()
+            .ok_or_else(|| rmcp::ErrorData::invalid_params("progress token required", None))?;
+        let steps = input.delay_ms.min(5_000).div_ceil(10);
+        for step in 0..steps {
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok("cancelled".to_string()),
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
+            let _ = peer
+                .notify_progress(
+                    ProgressNotificationParam::new(progress_token.clone(), step as f64)
+                        .with_total(steps as f64)
+                        .with_message("owned fixture progress"),
+                )
+                .await;
+        }
+        Ok("completed".to_string())
+    }
+
+    #[tool(
         name = "slow_tool",
         description = "Wait for a controlled fixture duration",
         annotations(read_only_hint = true)
@@ -293,12 +390,12 @@ impl DynamicFixtureServer {
                     selected
                 };
                 if let Some(sink) = sink {
-                    for _ in 0..8 {
+                    for _ in 0..NOTIFICATION_STORM_COUNT {
                         let _ = sink.notify_tool_list_changed().await;
                     }
                 }
             } else {
-                for _ in 0..8 {
+                for _ in 0..NOTIFICATION_STORM_COUNT {
                     let _ = peer.notify_tool_list_changed().await;
                 }
             }
@@ -366,6 +463,86 @@ impl ServerHandler for DynamicFixtureServer {
     }
 }
 
+#[derive(Clone)]
+struct PagedFixtureServer {
+    repeat_cursor: bool,
+}
+
+impl ServerHandler for PagedFixtureServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            Implementation::new("mycopilot-owned-paged-fixture", "1.0.0"),
+        )
+    }
+
+    async fn list_tools(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let cursor = request.and_then(|request| request.cursor);
+        let schema = Arc::new(Default::default());
+        match cursor.as_deref() {
+            None => Ok(ListToolsResult {
+                tools: vec![Tool::new(
+                    "page_one_tool",
+                    "Deterministic first wire page",
+                    Arc::clone(&schema),
+                )],
+                next_cursor: Some("owned-page-two".to_string()),
+                ..Default::default()
+            }),
+            Some("owned-page-two") => Ok(ListToolsResult {
+                tools: vec![Tool::new(
+                    "page_two_tool",
+                    "Deterministic second wire page",
+                    schema,
+                )],
+                next_cursor: self.repeat_cursor.then(|| "owned-page-two".to_string()),
+                ..Default::default()
+            }),
+            Some(_) => Err(rmcp::ErrorData::invalid_params(
+                "unknown repository fixture cursor",
+                None,
+            )),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LargeCatalogFixtureServer {
+    tool_count: usize,
+}
+
+impl ServerHandler for LargeCatalogFixtureServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            Implementation::new("mycopilot-owned-large-catalog-fixture", "1.0.0"),
+        )
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let schema = Arc::new(Default::default());
+        let tools = (0..self.tool_count)
+            .map(|index| {
+                Tool::new(
+                    format!("owned_tool_{index:04}"),
+                    "Deterministic large-catalog fixture tool",
+                    Arc::clone(&schema),
+                )
+            })
+            .collect();
+        Ok(ListToolsResult {
+            tools,
+            ..Default::default()
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -373,6 +550,10 @@ async fn main() {
         Some(LEGACY_FIXTURE) => serve_fixture(true).await,
         Some(DYNAMIC_MODERN_FIXTURE) => serve_dynamic_fixture(false).await,
         Some(DYNAMIC_LEGACY_FIXTURE) => serve_dynamic_fixture(true).await,
+        Some(PAGED_FIXTURE) => serve_paged_fixture(false).await,
+        Some(REPEATED_CURSOR_FIXTURE) => serve_paged_fixture(true).await,
+        Some(LARGE_CATALOG_FIXTURE) => serve_large_catalog_fixture(1024).await,
+        Some(OVER_LIMIT_CATALOG_FIXTURE) => serve_large_catalog_fixture(1025).await,
         Some(EARLY_EXIT_FIXTURE) => {}
         Some(EXIT_AFTER_NEGOTIATION_FIXTURE) => {
             let _service = FixtureServer::new()
@@ -398,6 +579,24 @@ async fn main() {
                 .await
                 .expect("write fixed fixture stdout");
             stdout.flush().await.expect("flush fixed fixture stdout");
+            std::future::pending::<()>().await;
+        }
+        Some(MALFORMED_JSON_FIXTURE) => {
+            let mut stdout = tokio::io::stdout();
+            stdout
+                .write_all(b"not-json\n")
+                .await
+                .expect("write malformed owned fixture JSON");
+            stdout.flush().await.expect("flush malformed fixture JSON");
+            std::future::pending::<()>().await;
+        }
+        Some(INVALID_UTF8_FIXTURE) => {
+            let mut stdout = tokio::io::stdout();
+            stdout
+                .write_all(&[0xff, b'\n'])
+                .await
+                .expect("write invalid UTF-8 owned fixture frame");
+            stdout.flush().await.expect("flush invalid UTF-8 frame");
             std::future::pending::<()>().await;
         }
         Some(UNCOOPERATIVE_FIXTURE) => {
@@ -501,6 +700,7 @@ async fn main() {
             let present = std::env::var_os(FORBIDDEN_TEST_ENV).is_some();
             std::process::exit(if present { 73 } else { 0 });
         }
+        Some(STRESS_SUITE) => run_stress_suite().await,
         Some(other) if other.starts_with("--fixture-") => {
             panic!("unknown fixture mode: {other}")
         }
@@ -549,6 +749,25 @@ async fn serve_dynamic_fixture(legacy: bool) {
         .expect("wait for owned dynamic fixture");
 }
 
+async fn serve_paged_fixture(repeat_cursor: bool) {
+    let service = PagedFixtureServer { repeat_cursor }
+        .serve(rmcp::transport::stdio())
+        .await
+        .expect("start owned paged fixture");
+    service.waiting().await.expect("wait for paged fixture");
+}
+
+async fn serve_large_catalog_fixture(tool_count: usize) {
+    let service = LargeCatalogFixtureServer { tool_count }
+        .serve(rmcp::transport::stdio())
+        .await
+        .expect("start owned large-catalog fixture");
+    service
+        .waiting()
+        .await
+        .expect("wait for large-catalog fixture");
+}
+
 async fn legacy_transport() -> (tokio::io::Stdin, tokio::io::Stdout) {
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut request_line = String::new();
@@ -581,11 +800,19 @@ async fn legacy_transport() -> (tokio::io::Stdin, tokio::io::Stdout) {
 
 async fn run_integration_suite() {
     modern_discovery_and_tool_round_trip().await;
+    json_rpc_tool_error_is_an_authoritative_response().await;
+    direct_stdio_result_limit_is_enforced().await;
+    direct_stdio_structured_media_and_block_limits_are_enforced().await;
+    manager_preserves_authoritative_json_rpc_error_certainty().await;
+    manager_rejects_a_real_stdio_result_beyond_the_raw_byte_limit().await;
+    progress_never_extends_the_host_deadline().await;
     legacy_initialize_fallback_and_tool_call().await;
+    real_stdio_tool_pagination_and_repeated_cursor_protection().await;
     modern_and_legacy_dynamic_notifications_share_one_signal_api().await;
     manager_debounces_dynamic_tool_refresh().await;
     manager_emits_safe_owned_server_exit_event().await;
     timeout_sends_protocol_cancellation().await;
+    cancellation_before_dispatch_is_definitely_not_dispatched().await;
     explicit_cancellation_reaches_server().await;
     cancellation_stays_bounded_under_transport_backpressure().await;
     early_server_exit_is_structured().await;
@@ -593,6 +820,7 @@ async fn run_integration_suite() {
     #[cfg(unix)]
     protocol_eof_is_reported_while_the_child_remains_alive().await;
     close_reaps_server_process().await;
+    concurrent_close_callers_share_one_cleanup_result().await;
     forced_close_terminates_uncooperative_owned_fixture().await;
     #[cfg(unix)]
     dropped_handle_force_kills_and_reaps_uncooperative_owned_fixture().await;
@@ -607,10 +835,273 @@ async fn run_integration_suite() {
     manager_shutdown_force_reaps_uncooperative_owned_fixture().await;
     stderr_is_continuously_drained_and_bounded().await;
     oversized_protocol_line_is_rejected().await;
+    malformed_and_non_utf8_protocol_frames_are_rejected().await;
     unallowlisted_parent_environment_is_not_inherited().await;
+    shell_looking_arguments_remain_literal_argv().await;
     launch_is_denied_without_explicit_authorization().await;
     invalid_timeout_configuration_is_rejected().await;
     transport_neutral_connector_api_and_stable_types().await;
+}
+
+async fn run_stress_suite() {
+    let started = tokio::time::Instant::now();
+    stdio_start_stop_100_cycles().await;
+    manager_restarts_and_concurrent_refresh_remain_bounded().await;
+    stop_and_remove_during_real_calls_settle_without_replay().await;
+    crashed_server_can_be_reconfigured_and_restarted().await;
+    large_real_catalog_honors_the_1024_tool_boundary().await;
+    eprintln!(
+        "owned MCP stress suite completed in {} ms",
+        started.elapsed().as_millis()
+    );
+}
+
+async fn stdio_start_stop_100_cycles() {
+    for cycle in 0..100 {
+        let client = connect_fixture(MODERN_FIXTURE).await;
+        #[cfg(unix)]
+        let pid = fixture_process_id(&client).await;
+        client
+            .close()
+            .await
+            .unwrap_or_else(|error| panic!("close owned cycle {cycle}: {error}"));
+        assert_eq!(client.connection_state(), McpConnectionState::Closed);
+        #[cfg(unix)]
+        assert_child_was_reaped(pid);
+    }
+}
+
+async fn manager_restarts_and_concurrent_refresh_remain_bounded() {
+    let registry = InMemoryMcpRegistry::shared();
+    let primary = fixture_config(MODERN_FIXTURE);
+    let primary_id = primary.id;
+    registry.add(primary).expect("register restart fixture");
+    let manager = McpConnectionManager::without_events(
+        Arc::clone(&registry) as Arc<dyn McpRegistry>,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct restart fixture manager");
+    manager
+        .start(primary_id)
+        .await
+        .expect("start restart fixture");
+    for iteration in 0..25 {
+        let status = manager
+            .restart(primary_id)
+            .await
+            .unwrap_or_else(|error| panic!("restart iteration {iteration}: {error}"));
+        assert_eq!(status.state, McpServerState::Ready);
+        assert_eq!(status.active_call_count, 0);
+    }
+    manager.stop_all().await;
+
+    let registry = InMemoryMcpRegistry::shared();
+    let mut ids = Vec::new();
+    for index in 0..8 {
+        let mut config = fixture_config(MODERN_FIXTURE);
+        config.display_name = format!("owned concurrent fixture {index}");
+        ids.push(config.id);
+        registry.add(config).expect("register concurrent fixture");
+    }
+    let manager = McpConnectionManager::without_events(
+        registry,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct concurrent fixture manager");
+    let results = manager.start_enabled().await;
+    assert_eq!(results.len(), ids.len());
+    assert!(results.iter().all(|result| {
+        result.error.is_none()
+            && result
+                .status
+                .as_ref()
+                .is_some_and(|status| status.state == McpServerState::Ready)
+    }));
+    let mut refreshes = tokio::task::JoinSet::new();
+    for server_id in ids.iter().copied() {
+        let manager = manager.clone();
+        refreshes.spawn(async move { manager.refresh(server_id).await });
+    }
+    while let Some(result) = refreshes.join_next().await {
+        result
+            .expect("join concurrent real refresh")
+            .expect("refresh concurrent real fixture");
+    }
+    let stopped = manager.stop_all().await;
+    assert_eq!(stopped.len(), ids.len());
+    assert_eq!(manager.active_call_count().unwrap(), 0);
+    for server_id in ids {
+        assert_eq!(
+            manager.get_status(server_id).unwrap().unwrap().state,
+            McpServerState::Disabled
+        );
+    }
+}
+
+async fn stop_and_remove_during_real_calls_settle_without_replay() {
+    for remove in [false, true] {
+        let registry = InMemoryMcpRegistry::shared();
+        let server = fixture_config(MODERN_FIXTURE);
+        let server_id = server.id;
+        registry.add(server).expect("register active-call fixture");
+        let manager = McpConnectionManager::without_events(
+            registry,
+            Arc::new(fixture_connector()),
+            McpManagerPolicy::default(),
+        )
+        .expect("construct active-call fixture manager");
+        manager
+            .start(server_id)
+            .await
+            .expect("start active-call fixture");
+        #[cfg(unix)]
+        let fixture_pid = manager
+            .call_catalog_tool(
+                catalog_call_for_manager(
+                    &manager,
+                    server_id,
+                    "fixture_process_id",
+                    json!({}),
+                    None,
+                ),
+                McpCancellationToken::new(),
+            )
+            .await
+            .expect("read owned active-call fixture pid")
+            .structured_content
+            .and_then(|value| value.get("pid").and_then(Value::as_u64))
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+            .expect("owned fixture returns a valid pid");
+        let call = catalog_call_for_manager(
+            &manager,
+            server_id,
+            "slow_tool",
+            json!({"delay_ms": 5_000}),
+            Some(5_000),
+        );
+        let call_manager = manager.clone();
+        let task = tokio::spawn(async move {
+            call_manager
+                .call_catalog_tool(call, McpCancellationToken::new())
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if manager.active_call_count().unwrap() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("real stdio call must enter active registry");
+
+        if remove {
+            assert!(manager
+                .remove_server(server_id)
+                .await
+                .expect("remove active real fixture")
+                .is_some());
+        } else {
+            manager
+                .stop(server_id)
+                .await
+                .expect("stop active real fixture");
+        }
+        let error = task
+            .await
+            .expect("join interrupted real call")
+            .expect_err("interrupted dispatched call must not be replayed");
+        assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::PossiblyDispatched)
+        );
+        assert_eq!(manager.active_call_count().unwrap(), 0);
+        #[cfg(unix)]
+        assert_child_was_reaped(fixture_pid);
+        if !remove {
+            manager.stop_all().await;
+        }
+    }
+}
+
+async fn crashed_server_can_be_reconfigured_and_restarted() {
+    let registry = InMemoryMcpRegistry::shared();
+    let crashing = fixture_config(EXIT_AFTER_NEGOTIATION_FIXTURE);
+    let server_id = crashing.id;
+    registry
+        .add(crashing.clone())
+        .expect("register crashing fixture");
+    let manager = McpConnectionManager::without_events(
+        Arc::clone(&registry) as Arc<dyn McpRegistry>,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct crashing fixture manager");
+    manager
+        .start(server_id)
+        .await
+        .expect("start crashing fixture");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if manager
+                .get_status(server_id)
+                .unwrap()
+                .is_some_and(|status| status.state == McpServerState::Error)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("manager must observe fixture crash");
+
+    let mut recovered = crashing;
+    let McpTransportConfig::Stdio(stdio) = &mut recovered.transport else {
+        panic!("owned fixture must use stdio");
+    };
+    stdio.arguments = vec![MODERN_FIXTURE.to_string()];
+    registry
+        .upsert(recovered)
+        .expect("replace crashed fixture launch spec");
+    let status = manager
+        .restart(server_id)
+        .await
+        .expect("restart reconfigured owned fixture");
+    assert_eq!(status.state, McpServerState::Ready);
+    manager.stop_all().await;
+}
+
+async fn large_real_catalog_honors_the_1024_tool_boundary() {
+    let registry = InMemoryMcpRegistry::shared();
+    let accepted = fixture_config(LARGE_CATALOG_FIXTURE);
+    let accepted_id = accepted.id;
+    registry.add(accepted).expect("register 1024-tool fixture");
+    let rejected = fixture_config(OVER_LIMIT_CATALOG_FIXTURE);
+    let rejected_id = rejected.id;
+    registry.add(rejected).expect("register 1025-tool fixture");
+    let manager = McpConnectionManager::without_events(
+        registry,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct large-catalog fixture manager");
+    manager.start_enabled().await;
+
+    let accepted = manager.catalog(accepted_id).unwrap().unwrap();
+    assert_eq!(accepted.completeness, McpCatalogCompleteness::Complete);
+    assert_eq!(accepted.tools.len(), 1024);
+    let rejected = manager.catalog(rejected_id).unwrap().unwrap();
+    assert_eq!(
+        rejected.completeness,
+        McpCatalogCompleteness::Failed(McpCatalogIssue::ToolLimitExceeded)
+    );
+    assert!(rejected.resolve_model_name("mcp__anything").is_none());
+    manager.stop_all().await;
 }
 
 async fn modern_and_legacy_dynamic_notifications_share_one_signal_api() {
@@ -816,6 +1307,9 @@ async fn modern_discovery_and_tool_round_trip() {
         "add_numbers",
         "structured_result",
         "return_tool_error",
+        "return_protocol_error",
+        "oversized_text_result",
+        "progress_until_timeout",
         "slow_tool",
     ] {
         assert!(names.contains(required), "missing fixture tool {required}");
@@ -858,6 +1352,177 @@ async fn modern_discovery_and_tool_round_trip() {
     client.close().await.expect("close modern fixture");
 }
 
+async fn json_rpc_tool_error_is_an_authoritative_response() {
+    let client = connect_fixture(MODERN_FIXTURE).await;
+    let dispatch = McpDispatchTracker::new();
+    let error = client
+        .call_tool_tracked(
+            McpToolCall::new("return_protocol_error", json!({})),
+            McpCancellationToken::new(),
+            dispatch.clone(),
+        )
+        .await
+        .expect_err("fixture must return a JSON-RPC error response");
+    assert_eq!(error.kind, McpErrorKind::Protocol);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::ResponseReceived)
+    );
+    assert_eq!(error.outcome_unknown_reason, None);
+    assert_eq!(dispatch.phase(), McpDispatchPhase::ResponseReceived);
+    assert!(
+        !error.message.contains("SERVER_PRIVATE_ERROR_CANARY"),
+        "untrusted JSON-RPC error text must not cross the safe error boundary"
+    );
+    client.close().await.expect("close protocol-error fixture");
+}
+
+async fn manager_preserves_authoritative_json_rpc_error_certainty() {
+    let registry = InMemoryMcpRegistry::shared();
+    let server = fixture_config(MODERN_FIXTURE);
+    let server_id = server.id;
+    registry
+        .add(server)
+        .expect("register protocol-error fixture");
+    let manager = McpConnectionManager::without_events(
+        registry,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct protocol-error fixture manager");
+    manager
+        .start(server_id)
+        .await
+        .expect("start protocol-error fixture");
+    let error = manager
+        .call_catalog_tool(
+            catalog_call_for_manager(
+                &manager,
+                server_id,
+                "return_protocol_error",
+                json!({}),
+                None,
+            ),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect_err("manager must surface the authoritative JSON-RPC error");
+    assert_eq!(error.kind, McpErrorKind::Protocol);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::ResponseReceived)
+    );
+    assert_eq!(error.outcome_unknown_reason, None);
+    assert_eq!(manager.active_call_count().unwrap(), 0);
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Ready
+    );
+    manager.stop_all().await;
+}
+
+async fn direct_stdio_result_limit_is_enforced() {
+    let client = connect_fixture(MODERN_FIXTURE).await;
+    let error = call(&client, "oversized_text_result", json!({}))
+        .await
+        .expect_err("low-level stdio client must enforce the Host result budget");
+    assert_eq!(error.kind, McpErrorKind::OutputTooLarge);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::ResponseReceived)
+    );
+    client
+        .close()
+        .await
+        .expect("close oversized direct fixture");
+}
+
+async fn direct_stdio_structured_media_and_block_limits_are_enforced() {
+    let client = connect_fixture(MODERN_FIXTURE).await;
+    for tool_name in [
+        "oversized_structured_result",
+        "oversized_image_result",
+        "too_many_content_blocks",
+    ] {
+        let error = match call(&client, tool_name, json!({})).await {
+            Ok(_) => panic!("owned {tool_name} must exceed its Host result budget"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, McpErrorKind::OutputTooLarge);
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::ResponseReceived)
+        );
+    }
+    client
+        .close()
+        .await
+        .expect("close structured/media/block-limit fixture");
+}
+
+async fn manager_rejects_a_real_stdio_result_beyond_the_raw_byte_limit() {
+    let registry = InMemoryMcpRegistry::shared();
+    let server = fixture_config(MODERN_FIXTURE);
+    let server_id = server.id;
+    registry.add(server).expect("register oversized fixture");
+    let manager = McpConnectionManager::without_events(
+        registry,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct oversized-result manager");
+    manager
+        .start(server_id)
+        .await
+        .expect("start oversized-result fixture");
+    let error = manager
+        .call_catalog_tool(
+            catalog_call_for_manager(
+                &manager,
+                server_id,
+                "oversized_text_result",
+                json!({}),
+                None,
+            ),
+            McpCancellationToken::new(),
+        )
+        .await
+        .expect_err("Host must reject a real result beyond the raw-result budget");
+    assert_eq!(error.kind, McpErrorKind::OutputTooLarge);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::ResponseReceived)
+    );
+    assert_eq!(manager.active_call_count().unwrap(), 0);
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Ready
+    );
+    manager.stop_all().await;
+}
+
+async fn progress_never_extends_the_host_deadline() {
+    let client = connect_fixture(MODERN_FIXTURE).await;
+    let mut progress = McpToolCall::new("progress_until_timeout", json!({"delay_ms": 1_000}));
+    progress.timeout_ms = Some(75);
+    let started = tokio::time::Instant::now();
+    let error = client
+        .call_tool(progress, McpCancellationToken::new())
+        .await
+        .expect_err("progress must not keep a tool call alive past its Host deadline");
+    let elapsed = started.elapsed();
+    assert_eq!(error.kind, McpErrorKind::OutcomeUnknown);
+    assert_eq!(
+        error.outcome_unknown_reason,
+        Some(McpOutcomeUnknownReason::TimedOut)
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "progress unexpectedly extended the hard deadline: {elapsed:?}"
+    );
+    client.close().await.expect("close progress fixture");
+}
+
 async fn legacy_initialize_fallback_and_tool_call() {
     let client = connect_fixture(LEGACY_FIXTURE).await;
     let snapshot = client.protocol_snapshot();
@@ -878,6 +1543,58 @@ async fn legacy_initialize_fallback_and_tool_call() {
         }]
     );
     client.close().await.expect("close legacy fixture");
+}
+
+async fn real_stdio_tool_pagination_and_repeated_cursor_protection() {
+    let client = connect_fixture(PAGED_FIXTURE).await;
+    let first = client
+        .list_tools(None)
+        .await
+        .expect("read first real stdio tool page");
+    assert_eq!(first.tools[0].name, "page_one_tool");
+    assert_eq!(first.next_cursor.as_deref(), Some("owned-page-two"));
+    let second = client
+        .list_tools(first.next_cursor)
+        .await
+        .expect("read second real stdio tool page");
+    assert_eq!(second.tools[0].name, "page_two_tool");
+    assert_eq!(second.next_cursor, None);
+    client.close().await.expect("close paged fixture client");
+
+    let registry = InMemoryMcpRegistry::shared();
+    let paged = fixture_config(PAGED_FIXTURE);
+    let paged_id = paged.id;
+    registry.add(paged).expect("register paged fixture");
+    let repeated = fixture_config(REPEATED_CURSOR_FIXTURE);
+    let repeated_id = repeated.id;
+    registry
+        .add(repeated)
+        .expect("register repeated-cursor fixture");
+    let manager = McpConnectionManager::without_events(
+        registry,
+        Arc::new(fixture_connector()),
+        McpManagerPolicy::default(),
+    )
+    .expect("construct real stdio pagination manager");
+    let results = manager.start_enabled().await;
+    assert_eq!(results.len(), 2);
+    let complete = manager.catalog(paged_id).unwrap().unwrap();
+    assert_eq!(complete.completeness, McpCatalogCompleteness::Complete);
+    assert_eq!(complete.page_count, 2);
+    assert_eq!(complete.tools.len(), 2);
+    let repeated = manager.catalog(repeated_id).unwrap().unwrap();
+    assert_eq!(
+        repeated.completeness,
+        McpCatalogCompleteness::Partial(McpCatalogIssue::RepeatedCursor)
+    );
+    assert!(
+        repeated
+            .tools
+            .iter()
+            .all(|tool| repeated.resolve_model_name(&tool.model_name).is_none()),
+        "partial wire catalogs must fail closed at the routing boundary"
+    );
+    manager.stop_all().await;
 }
 
 async fn timeout_sends_protocol_cancellation() {
@@ -940,6 +1657,36 @@ async fn explicit_cancellation_reaches_server() {
     );
     wait_for_slow_status(&client, true).await;
     client.close().await.expect("close cancellation fixture");
+}
+
+async fn cancellation_before_dispatch_is_definitely_not_dispatched() {
+    let client = connect_fixture(MODERN_FIXTURE).await;
+    let cancellation = McpCancellationToken::new();
+    cancellation.cancel();
+    let dispatch = McpDispatchTracker::new();
+    let error = client
+        .call_tool_tracked(
+            McpToolCall::new("slow_tool", json!({"delay_ms": 2_000})),
+            cancellation,
+            dispatch.clone(),
+        )
+        .await
+        .expect_err("a pre-cancelled call must never be dispatched");
+    assert_eq!(error.kind, McpErrorKind::Cancelled);
+    assert_eq!(
+        error.dispatch_certainty,
+        Some(McpDispatchCertainty::DefinitelyNotDispatched)
+    );
+    assert_eq!(dispatch.phase(), McpDispatchPhase::NotStarted);
+    let status = call(&client, "slow_status", json!({}))
+        .await
+        .expect("read fixture status after pre-dispatch cancellation");
+    let status = status
+        .structured_content
+        .expect("fixture status is structured");
+    assert_eq!(status["started"], false);
+    assert_eq!(status["cancelled"], false);
+    client.close().await.expect("close pre-cancelled fixture");
 }
 
 async fn cancellation_stays_bounded_under_transport_backpressure() {
@@ -1036,10 +1783,28 @@ async fn protocol_eof_is_reported_while_the_child_remains_alive() {
 
 async fn close_reaps_server_process() {
     let client = connect_fixture(MODERN_FIXTURE).await;
+    #[cfg(unix)]
+    let fixture_pid = fixture_process_id(&client).await;
     assert_eq!(client.connection_state(), McpConnectionState::Ready);
     client.close().await.expect("close and reap fixture");
     assert_eq!(client.connection_state(), McpConnectionState::Closed);
     client.close().await.expect("close is idempotent");
+    #[cfg(unix)]
+    assert_child_was_reaped(fixture_pid);
+}
+
+async fn concurrent_close_callers_share_one_cleanup_result() {
+    let client = connect_fixture(MODERN_FIXTURE).await;
+    #[cfg(unix)]
+    let fixture_pid = fixture_process_id(&client).await;
+    let first = Arc::clone(&client);
+    let second = Arc::clone(&client);
+    let (first_result, second_result) = tokio::join!(first.close(), second.close());
+    assert_eq!(first_result, second_result);
+    first_result.expect("concurrent close callers share successful cleanup");
+    assert_eq!(client.connection_state(), McpConnectionState::Closed);
+    #[cfg(unix)]
+    assert_child_was_reaped(fixture_pid);
 }
 
 async fn forced_close_terminates_uncooperative_owned_fixture() {
@@ -1267,6 +2032,27 @@ async fn oversized_protocol_line_is_rejected() {
     ));
 }
 
+async fn malformed_and_non_utf8_protocol_frames_are_rejected() {
+    for mode in [MALFORMED_JSON_FIXTURE, INVALID_UTF8_FIXTURE] {
+        let mut config = fixture_config(mode);
+        config.connect_timeout_ms = 500;
+        config.shutdown_timeout_ms = 150;
+        let error =
+            tokio::time::timeout(Duration::from_secs(2), fixture_connector().connect(&config))
+                .await
+                .expect("malformed owned fixture rejection must remain bounded")
+                .expect_err("malformed protocol frame must fail negotiation");
+        assert!(
+            matches!(
+                error.kind,
+                McpErrorKind::Negotiation | McpErrorKind::ServerExited | McpErrorKind::Timeout
+            ),
+            "unexpected error for {mode}: {:?}",
+            error.kind
+        );
+    }
+}
+
 async fn unallowlisted_parent_environment_is_not_inherited() {
     let status =
         tokio::process::Command::new(std::env::current_exe().expect("integration test executable"))
@@ -1280,6 +2066,37 @@ async fn unallowlisted_parent_environment_is_not_inherited() {
             .await
             .expect("run owned environment parent");
     assert!(status.success(), "environment isolation helper failed");
+}
+
+async fn shell_looking_arguments_remain_literal_argv() {
+    let sentinel = std::env::temp_dir().join(format!(
+        "mycopilot-mcp-owned-shell-sentinel-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut config = fixture_config(EARLY_EXIT_FIXTURE);
+    config.transport = McpTransportConfig::Stdio(McpStdioConfig {
+        program: std::env::current_exe().expect("resolve repository-owned test executable"),
+        arguments: vec![
+            EARLY_EXIT_FIXTURE.to_string(),
+            String::new(),
+            format!("; touch {}", sentinel.display()),
+            format!("$(touch {})", sentinel.display()),
+        ],
+        cwd: std::env::current_dir().expect("resolve repository-owned test cwd"),
+        environment: Vec::new(),
+    });
+    fixture_connector()
+        .connect(&config)
+        .await
+        .expect_err("owned early-exit fixture does not negotiate");
+    let created = sentinel.exists();
+    if created {
+        let _ = std::fs::remove_file(&sentinel);
+    }
+    assert!(
+        !created,
+        "stdio argv must never be interpreted by a command shell"
+    );
 }
 
 async fn run_environment_parent() {
@@ -1399,6 +2216,42 @@ async fn call(
             McpCancellationToken::new(),
         )
         .await
+}
+
+fn catalog_call_for_manager(
+    manager: &McpConnectionManager,
+    server_id: McpServerId,
+    raw_name: &str,
+    arguments: Value,
+    timeout_ms: Option<u64>,
+) -> McpCatalogToolCall {
+    let status = manager
+        .get_status(server_id)
+        .expect("read real fixture status")
+        .expect("real fixture status");
+    let catalog = manager
+        .catalog(server_id)
+        .expect("read real fixture catalog")
+        .expect("real fixture catalog");
+    let tool = catalog
+        .tools
+        .iter()
+        .find(|tool| tool.raw_name == raw_name)
+        .unwrap_or_else(|| panic!("real fixture catalog is missing {raw_name}"));
+    McpCatalogToolCall {
+        tool_id: tool.id.clone(),
+        expected_config_epoch: status.config_epoch,
+        expected_registry_revision: status.registry_revision,
+        expected_config_digest: status.config_digest,
+        expected_catalog_generation: catalog.generation,
+        expected_catalog_digest: catalog
+            .content_digest
+            .expect("complete real fixture catalog digest"),
+        expected_schema_digest: tool.schema_digest.clone(),
+        expected_model_name: tool.model_name.clone(),
+        arguments,
+        timeout_ms,
+    }
 }
 
 #[cfg(unix)]

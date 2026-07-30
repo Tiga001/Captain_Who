@@ -361,6 +361,7 @@ impl McpStdioConnector {
             signals,
             config.request_timeout(),
             config.shutdown_timeout(),
+            self.policy.security_limits.clone(),
         )))
     }
 }

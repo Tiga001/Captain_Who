@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -22,14 +23,16 @@ const REGISTRY_METADATA_SINGLETON: i64 = 1;
 const REGISTRY_CHANGE_CAPACITY: usize = 128;
 pub(crate) const MCP_REGISTRY_MAX_SERVERS: usize = 1024;
 const MAX_WIRE_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
-pub(crate) const MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION: u32 = 1;
-pub(crate) const MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION: u32 = 1;
+pub(crate) const MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION: u32 = 2;
+pub(crate) const MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION: u32 = 2;
 const SOURCE_USER_MANUAL: &str = "user_manual";
 const RECORD_STATE_ACTIVE: &str = "active";
 const RECORD_STATE_INVALID: &str = "invalid";
 const SAFE_ERROR_RECONCILED: &str = "startup_record_reconciled";
 const SAFE_ERROR_INVALID: &str = "invalid_persisted_record";
 const LAUNCH_DIGEST_DOMAIN: &[u8] = b"mycopilot-mcp-launch-spec-v1\0";
+const LAUNCH_FILE_IDENTITY_DOMAIN: &[u8] = b"mycopilot-mcp-launch-file-identity-v1\0";
+const MAX_LAUNCH_CODE_INPUTS: usize = 16;
 
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
@@ -172,6 +175,14 @@ pub(crate) struct McpLaunchAuthorizationRecord {
     pub(crate) authorization_format_version: u32,
     pub(crate) server_id: McpServerId,
     pub(crate) launch_spec_digest: McpLaunchSpecDigest,
+    /// Digest of the canonical executable, cwd, and every argv entry that
+    /// resolves to an existing filesystem object at authorization time.
+    ///
+    /// The legacy SQLite column is named `authorized_launch_spec_digest`.
+    /// Format v2 deliberately stores this stronger identity there; the
+    /// logical launch-spec digest remains in the adjacent non-authority
+    /// `launch_spec_digest` column.
+    pub(crate) file_identity_digest: McpLaunchSpecDigest,
     /// The current configuration identity bound to this exact launch
     /// authorization. Host-owned non-launch mutations may rebind these fields
     /// only while the physical launch digest remains unchanged.
@@ -383,6 +394,15 @@ impl SqliteMcpRegistry {
         precondition: &McpRegistryMutationPrecondition,
         enabled: bool,
     ) -> Result<McpRegistryEntry, McpRegistryPersistenceError> {
+        let live_authorization_valid = if enabled {
+            let existing = self
+                .get_persisted(precondition.server_id)?
+                .ok_or(McpRegistryPersistenceError::NotFound)?;
+            ensure_precondition(&existing.entry, precondition)?;
+            launch_authorization_is_valid(&existing)
+        } else {
+            false
+        };
         let (entry, change) = {
             let mut connection = self.lock_connection()?;
             let transaction = connection
@@ -391,15 +411,17 @@ impl SqliteMcpRegistry {
             let existing = load_record(&transaction, precondition.server_id)?
                 .ok_or(McpRegistryPersistenceError::NotFound)?;
             ensure_precondition(&existing.entry, precondition)?;
+            if enabled
+                && (!live_authorization_valid || !launch_authorization_identity_is_valid(&existing))
+            {
+                return Err(McpRegistryPersistenceError::AuthorizationRequired);
+            }
             if existing.entry.config.enabled == enabled {
                 transaction
                     .commit()
                     .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
                 (existing.entry, None)
             } else {
-                if enabled && !authorization_is_valid(&existing) {
-                    return Err(McpRegistryPersistenceError::AuthorizationRequired);
-                }
                 let mut config = existing.entry.config.clone();
                 config.enabled = enabled;
                 let record = commit_updated_record(
@@ -426,6 +448,7 @@ impl SqliteMcpRegistry {
         &self,
         precondition: &McpRegistryMutationPrecondition,
         expected_launch_spec_digest: &McpLaunchSpecDigest,
+        expected_file_identity_digest: &McpLaunchSpecDigest,
         authorization_policy_version: u32,
         authorized_at_ms: i64,
     ) -> Result<McpLaunchAuthorizationRecord, McpRegistryPersistenceError> {
@@ -434,6 +457,26 @@ impl SqliteMcpRegistry {
         {
             return Err(McpRegistryPersistenceError::InvalidConfig);
         }
+        // Filesystem validation must not run while SQLite holds an IMMEDIATE
+        // transaction. The transaction below rechecks the Registry CAS; the
+        // final connector boundary rechecks this identity again before spawn.
+        let verified_file_identity_digest = {
+            let existing = self
+                .get_persisted(precondition.server_id)?
+                .ok_or(McpRegistryPersistenceError::NotFound)?;
+            ensure_precondition(&existing.entry, precondition)?;
+            if &existing.launch_spec_digest != expected_launch_spec_digest {
+                return Err(McpRegistryPersistenceError::Conflict);
+            }
+            let live = compute_launch_file_identity_digest(
+                &existing.entry.config,
+                expected_launch_spec_digest,
+            )?;
+            if &live != expected_file_identity_digest {
+                return Err(McpRegistryPersistenceError::Conflict);
+            }
+            live
+        };
         let (authorization, change) = {
             let mut connection = self.lock_connection()?;
             let transaction = connection
@@ -447,6 +490,8 @@ impl SqliteMcpRegistry {
             }
             if let Some(current) = &existing.launch_authorization {
                 if current.launch_spec_digest == *expected_launch_spec_digest
+                    && current.file_identity_digest == verified_file_identity_digest
+                    && launch_authorization_identity_is_valid(&existing)
                     && current.server_id == existing.entry.config.id
                     && current.authored_config_epoch == existing.entry.config_epoch
                     && current.authored_config_digest == existing.entry.config_digest
@@ -468,7 +513,11 @@ impl SqliteMcpRegistry {
                 &existing,
                 config,
                 None,
-                Some((authorization_policy_version, authorized_at_ms)),
+                Some((
+                    authorization_policy_version,
+                    authorized_at_ms,
+                    verified_file_identity_digest,
+                )),
             )?;
             let authorization = record
                 .launch_authorization
@@ -916,9 +965,74 @@ fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
+struct StartupLaunchAuthorizationValidation {
+    server_id: McpServerId,
+    revision: u64,
+    config_epoch: McpConfigEpoch,
+    config_digest: McpConfigDigest,
+    launch_spec_digest: McpLaunchSpecDigest,
+    valid: bool,
+}
+
+impl StartupLaunchAuthorizationValidation {
+    fn matches(&self, record: &McpPersistedRegistryRecord) -> bool {
+        self.server_id == record.entry.config.id
+            && self.revision == record.entry.revision
+            && self.config_epoch == record.entry.config_epoch
+            && self.config_digest == record.entry.config_digest
+            && self.launch_spec_digest == record.launch_spec_digest
+    }
+}
+
+fn inspect_startup_launch_authorizations(
+    connection: &mut Connection,
+) -> Result<BTreeMap<i64, StartupLaunchAuthorizationValidation>, McpRegistryPersistenceError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Deferred)
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    let candidates = scan_raw_records(&transaction, false)?
+        .into_iter()
+        .filter_map(|scanned| {
+            let raw = scanned.record?;
+            if scanned.already_invalid
+                || raw.record_state == RECORD_STATE_INVALID
+                || raw.schema_version != REGISTRY_SCHEMA_VERSION
+            {
+                return None;
+            }
+            let record = decode_record(raw).ok()?;
+            (record.entry.config.enabled
+                || record.entry.config.trust == McpTrustLevel::UserApproved)
+                .then_some((scanned.row_id, record))
+        })
+        .collect::<Vec<_>>();
+    transaction
+        .commit()
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+
+    Ok(candidates
+        .into_iter()
+        .map(|(row_id, record)| {
+            let validation = StartupLaunchAuthorizationValidation {
+                server_id: record.entry.config.id,
+                revision: record.entry.revision,
+                config_epoch: record.entry.config_epoch,
+                config_digest: record.entry.config_digest.clone(),
+                launch_spec_digest: record.launch_spec_digest.clone(),
+                valid: launch_authorization_is_valid(&record),
+            };
+            (row_id, validation)
+        })
+        .collect())
+}
+
 fn reconcile_startup(
     connection: &mut Connection,
 ) -> Result<McpStartupReconciliationReport, McpRegistryPersistenceError> {
+    // Filesystem identity validation may touch slow or unavailable mounts.
+    // Perform that bounded I/O outside the short write transaction, then bind
+    // each result back to the exact row identity before trusting it.
+    let launch_authorizations = inspect_startup_launch_authorizations(connection)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
@@ -960,8 +1074,19 @@ fn reconcile_startup(
             report.revision = next;
             continue;
         }
-        if decode_record(raw.clone()).is_ok() {
-            continue;
+        if let Ok(record) = decode_record(raw.clone()) {
+            let requires_live_authorization = record.entry.config.enabled
+                || record.entry.config.trust == McpTrustLevel::UserApproved;
+            let live_authorization_valid = launch_authorizations
+                .get(&scanned.row_id)
+                .is_some_and(|validation| validation.matches(&record) && validation.valid);
+            if requires_live_authorization && !live_authorization_valid {
+                // Continue through the fail-closed recovery path below. A
+                // replaced executable or script must never remain enabled
+                // across Host restart.
+            } else {
+                continue;
+            }
         }
         match recover_config(&raw) {
             Ok(config) => {
@@ -1093,7 +1218,7 @@ fn commit_updated_record(
     existing: &McpPersistedRegistryRecord,
     config: McpServerConfig,
     authorization: Option<McpLaunchAuthorizationRecord>,
-    new_authorization: Option<(u32, i64)>,
+    new_authorization: Option<(u32, i64, McpLaunchSpecDigest)>,
 ) -> Result<McpPersistedRegistryRecord, McpRegistryPersistenceError> {
     let config = normalize_config(config)?;
     let revision = next_revision(transaction)?;
@@ -1101,32 +1226,34 @@ fn commit_updated_record(
     let config_digest =
         config_digest(&config).map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
     let launch_spec_digest = compute_launch_spec_digest(&config)?;
-    let authorization = if let Some((policy_version, authorized_at_ms)) = new_authorization {
-        Some(McpLaunchAuthorizationRecord {
-            authorization_format_version: MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION,
-            server_id: config.id,
-            launch_spec_digest: launch_spec_digest.clone(),
-            authored_config_epoch: config_epoch,
-            authored_config_digest: config_digest.clone(),
-            authorization_policy_version: policy_version,
-            authorized_at_ms,
-        })
-    } else {
-        authorization.and_then(|mut authorization| {
-            if authorization.server_id != config.id
-                || authorization.launch_spec_digest != launch_spec_digest
-                || authorization.authorization_format_version
-                    != MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION
-                || authorization.authorization_policy_version
-                    != MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION
-            {
-                return None;
-            }
-            authorization.authored_config_epoch = config_epoch;
-            authorization.authored_config_digest = config_digest.clone();
-            Some(authorization)
-        })
-    };
+    let authorization =
+        if let Some((policy_version, authorized_at_ms, file_identity_digest)) = new_authorization {
+            Some(McpLaunchAuthorizationRecord {
+                authorization_format_version: MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION,
+                server_id: config.id,
+                launch_spec_digest: launch_spec_digest.clone(),
+                file_identity_digest,
+                authored_config_epoch: config_epoch,
+                authored_config_digest: config_digest.clone(),
+                authorization_policy_version: policy_version,
+                authorized_at_ms,
+            })
+        } else {
+            authorization.and_then(|mut authorization| {
+                if authorization.server_id != config.id
+                    || authorization.launch_spec_digest != launch_spec_digest
+                    || authorization.authorization_format_version
+                        != MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION
+                    || authorization.authorization_policy_version
+                        != MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION
+                {
+                    return None;
+                }
+                authorization.authored_config_epoch = config_epoch;
+                authorization.authored_config_digest = config_digest.clone();
+                Some(authorization)
+            })
+        };
     if config.enabled && (config.trust != McpTrustLevel::UserApproved || authorization.is_none()) {
         return Err(McpRegistryPersistenceError::AuthorizationRequired);
     }
@@ -1202,7 +1329,21 @@ fn ensure_precondition(
     }
 }
 
-fn authorization_is_valid(record: &McpPersistedRegistryRecord) -> bool {
+pub(crate) fn launch_authorization_is_valid(record: &McpPersistedRegistryRecord) -> bool {
+    launch_authorization_identity_is_valid(record)
+        && record
+            .launch_authorization
+            .as_ref()
+            .is_some_and(|authorization| {
+                compute_launch_file_identity_digest(
+                    &record.entry.config,
+                    &record.launch_spec_digest,
+                )
+                .is_ok_and(|digest| digest == authorization.file_identity_digest)
+            })
+}
+
+pub(crate) fn launch_authorization_identity_is_valid(record: &McpPersistedRegistryRecord) -> bool {
     record.entry.config.trust == McpTrustLevel::UserApproved
         && record
             .launch_authorization
@@ -1375,6 +1516,302 @@ pub(crate) fn compute_launch_spec_digest(
     Ok(McpLaunchSpecDigest(output))
 }
 
+pub(crate) fn compute_launch_file_identity_digest(
+    config: &McpServerConfig,
+    launch_spec_digest: &McpLaunchSpecDigest,
+) -> Result<McpLaunchSpecDigest, McpRegistryPersistenceError> {
+    prepare_launch_file_identity(config, launch_spec_digest).map(|(digest, _)| digest)
+}
+
+pub(crate) fn prepare_launch_file_identity(
+    config: &McpServerConfig,
+    launch_spec_digest: &McpLaunchSpecDigest,
+) -> Result<(McpLaunchSpecDigest, McpServerConfig), McpRegistryPersistenceError> {
+    let config = normalize_config(config.clone())?;
+    let McpTransportConfig::Stdio(stdio) = &config.transport else {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(LAUNCH_FILE_IDENTITY_DOMAIN);
+    hash_identity_field(&mut hasher, launch_spec_digest.as_str().as_bytes());
+    let canonical_program =
+        hash_required_launch_path(&mut hasher, b"executable", &stdio.program, true)?;
+    let canonical_cwd = hash_required_launch_path(&mut hasher, b"cwd", &stdio.cwd, false)?;
+
+    let mut code_inputs = 0_usize;
+    let mut canonical_arguments = stdio.arguments.clone();
+    for (index, argument) in stdio.arguments.iter().enumerate() {
+        let Some(code_input) = launch_code_input(argument) else {
+            continue;
+        };
+        code_inputs = code_inputs
+            .checked_add(1)
+            .filter(|count| *count <= MAX_LAUNCH_CODE_INPUTS)
+            .ok_or(McpRegistryPersistenceError::InvalidConfig)?;
+        hash_identity_field(&mut hasher, b"code-input");
+        hasher.update((index as u64).to_le_bytes());
+        let candidate = if code_input.path.is_absolute() {
+            code_input.path.to_path_buf()
+        } else {
+            stdio.cwd.join(code_input.path)
+        };
+        let canonical =
+            hash_required_launch_path(&mut hasher, b"code-input-path", &candidate, true)?;
+        let canonical = path_text(&canonical)?;
+        canonical_arguments[index] = match code_input.inline_prefix {
+            Some(prefix) => format!("{prefix}{canonical}"),
+            None => canonical.to_string(),
+        };
+    }
+
+    let digest = hasher.finalize();
+    let mut output = String::with_capacity(64);
+    use fmt::Write as _;
+    for byte in digest {
+        write!(output, "{byte:02x}")
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    }
+    let mut canonical_config = config;
+    let McpTransportConfig::Stdio(stdio) = &mut canonical_config.transport else {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    };
+    stdio.program = canonical_program;
+    stdio.cwd = canonical_cwd;
+    stdio.arguments = canonical_arguments;
+    Ok((McpLaunchSpecDigest(output), canonical_config))
+}
+
+fn hash_required_launch_path(
+    hasher: &mut Sha256,
+    role: &[u8],
+    path: &Path,
+    require_file: bool,
+) -> Result<PathBuf, McpRegistryPersistenceError> {
+    hash_identity_field(hasher, role);
+    hash_identity_field(hasher, path_text(path)?.as_bytes());
+    let canonical =
+        std::fs::canonicalize(path).map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    if (require_file && !metadata.is_file()) || (!require_file && !metadata.is_dir()) {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    }
+    hash_canonical_launch_object(hasher, &canonical, metadata)?;
+    Ok(canonical)
+}
+
+#[derive(Clone, Copy)]
+struct LaunchCodeInput<'a> {
+    path: &'a Path,
+    inline_prefix: Option<&'static str>,
+}
+
+fn launch_code_input(argument: &str) -> Option<LaunchCodeInput<'_>> {
+    const INLINE_CODE_PATH_FLAGS: [&str; 5] = [
+        "--require=",
+        "--import=",
+        "--loader=",
+        "--experimental-loader=",
+        "--module=",
+    ];
+    if let Some((prefix, value)) = INLINE_CODE_PATH_FLAGS
+        .iter()
+        .find_map(|prefix| argument.strip_prefix(prefix).map(|value| (*prefix, value)))
+    {
+        let path = Path::new(value);
+        let explicit_filesystem_path = path.is_absolute()
+            || matches!(
+                path.components().next(),
+                Some(Component::CurDir | Component::ParentDir)
+            );
+        if !explicit_filesystem_path {
+            // URL imports and package specifiers are resolved by the runtime;
+            // guessing them as cwd-relative files would reject valid launches.
+            return None;
+        }
+        return has_code_extension(path).then_some(LaunchCodeInput {
+            path,
+            inline_prefix: Some(prefix),
+        });
+    }
+    let path = Path::new(argument);
+    if argument.is_empty()
+        || argument.starts_with('-')
+        || (!path.is_absolute() && has_uri_scheme(argument))
+    {
+        return None;
+    }
+    has_code_extension(path).then_some(LaunchCodeInput {
+        path,
+        inline_prefix: None,
+    })
+}
+
+fn has_uri_scheme(value: &str) -> bool {
+    let Some(separator) = value.find(':') else {
+        return false;
+    };
+    let scheme = &value[..separator];
+    !scheme.is_empty()
+        && scheme
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+fn has_code_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(
+                extension.as_str(),
+                "js" | "mjs"
+                    | "cjs"
+                    | "ts"
+                    | "mts"
+                    | "cts"
+                    | "py"
+                    | "pyw"
+                    | "rb"
+                    | "pl"
+                    | "php"
+                    | "sh"
+                    | "bash"
+                    | "zsh"
+                    | "fish"
+                    | "ps1"
+                    | "bat"
+                    | "cmd"
+                    | "jar"
+                    | "wasm"
+            )
+        })
+}
+
+fn hash_canonical_launch_object(
+    hasher: &mut Sha256,
+    canonical: &Path,
+    metadata_before: std::fs::Metadata,
+) -> Result<(), McpRegistryPersistenceError> {
+    hash_identity_field(hasher, path_text(canonical)?.as_bytes());
+    let before = LaunchMetadataSnapshot::from_metadata(&metadata_before)?;
+    before.hash_into(hasher);
+
+    let metadata_after =
+        std::fs::metadata(canonical).map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    if before != LaunchMetadataSnapshot::from_metadata(&metadata_after)? {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    }
+    Ok(())
+}
+
+fn hash_identity_field(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+#[derive(PartialEq, Eq)]
+struct LaunchMetadataSnapshot {
+    kind: u8,
+    len: u64,
+    modified_nanos: Option<u128>,
+    readonly: bool,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanos: i64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    owner: u32,
+    #[cfg(unix)]
+    group: u32,
+}
+
+impl LaunchMetadataSnapshot {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Result<Self, McpRegistryPersistenceError> {
+        let is_file = metadata.is_file();
+        let kind = if is_file {
+            1
+        } else if metadata.is_dir() {
+            2
+        } else {
+            return Err(McpRegistryPersistenceError::InvalidConfig);
+        };
+        let modified_nanos = is_file
+            .then(|| {
+                metadata.modified().ok().and_then(|modified| {
+                    modified
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_nanos())
+                })
+            })
+            .flatten();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(Self {
+                kind,
+                // Directory size, mtime, permissions, and ownership legitimately
+                // change as applications create files under an authorized cwd.
+                // Its canonical target plus device/inode are the stable identity.
+                len: if is_file { metadata.len() } else { 0 },
+                modified_nanos,
+                readonly: is_file && metadata.permissions().readonly(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                changed_seconds: if is_file { metadata.ctime() } else { 0 },
+                changed_nanos: if is_file { metadata.ctime_nsec() } else { 0 },
+                mode: if is_file { metadata.mode() } else { 0 },
+                owner: if is_file { metadata.uid() } else { 0 },
+                group: if is_file { metadata.gid() } else { 0 },
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                kind,
+                len: if is_file { metadata.len() } else { 0 },
+                modified_nanos,
+                readonly: is_file && metadata.permissions().readonly(),
+            })
+        }
+    }
+
+    fn hash_into(&self, hasher: &mut Sha256) {
+        hasher.update([self.kind]);
+        hasher.update(self.len.to_le_bytes());
+        match self.modified_nanos {
+            Some(value) => {
+                hasher.update([1]);
+                hasher.update(value.to_le_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        hasher.update([u8::from(self.readonly)]);
+        #[cfg(unix)]
+        {
+            hasher.update(self.device.to_le_bytes());
+            hasher.update(self.inode.to_le_bytes());
+            hasher.update(self.changed_seconds.to_le_bytes());
+            hasher.update(self.changed_nanos.to_le_bytes());
+            hasher.update(self.mode.to_le_bytes());
+            hasher.update(self.owner.to_le_bytes());
+            hasher.update(self.group.to_le_bytes());
+        }
+    }
+}
+
 fn insert_row(
     transaction: &Transaction<'_>,
     record: &McpPersistedRegistryRecord,
@@ -1533,7 +1970,7 @@ fn authorization_parts(
     authorization: Option<&McpLaunchAuthorizationRecord>,
 ) -> AuthorizationSqlParts<'_> {
     AuthorizationSqlParts {
-        launch_digest: authorization.map(|value| value.launch_spec_digest.as_str()),
+        launch_digest: authorization.map(|value| value.file_identity_digest.as_str()),
         config_epoch: authorization.map(|value| value.authored_config_epoch.to_string()),
         config_digest: authorization.map(|value| value.authored_config_digest.as_str()),
         format_version: authorization.map(|value| i64::from(value.authorization_format_version)),
@@ -1754,10 +2191,11 @@ fn decode_record(
         created_at_ms: raw.created_at,
         updated_at_ms: raw.updated_at,
     };
-    if record.entry.config.enabled && !authorization_is_valid(&record) {
+    if record.entry.config.enabled && !launch_authorization_identity_is_valid(&record) {
         return Err(McpRegistryPersistenceError::CorruptRecord);
     }
-    if record.entry.config.trust == McpTrustLevel::UserApproved && !authorization_is_valid(&record)
+    if record.entry.config.trust == McpTrustLevel::UserApproved
+        && !launch_authorization_identity_is_valid(&record)
     {
         return Err(McpRegistryPersistenceError::CorruptRecord);
     }
@@ -1825,14 +2263,13 @@ fn decode_authorization(
             && policy_version > 0
             && authorized_at >= 0 =>
         {
-            let launch_spec_digest = McpLaunchSpecDigest::from_str(launch_digest)?;
-            if launch_spec_digest.as_str() != raw.launch_spec_digest {
-                return Err(McpRegistryPersistenceError::CorruptRecord);
-            }
+            let launch_spec_digest = McpLaunchSpecDigest::from_str(&raw.launch_spec_digest)?;
+            let file_identity_digest = McpLaunchSpecDigest::from_str(launch_digest)?;
             Ok(Some(McpLaunchAuthorizationRecord {
                 authorization_format_version: MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION,
                 server_id,
                 launch_spec_digest,
+                file_identity_digest,
                 authored_config_epoch: McpConfigEpoch::from_str(config_epoch)
                     .map_err(|_| McpRegistryPersistenceError::CorruptRecord)?,
                 authored_config_digest: McpConfigDigest::from_str(config_digest)
@@ -2095,9 +2532,9 @@ mod tests {
             approval_mode: McpApprovalMode::Prompt,
             enabled: false,
             transport: McpTransportConfig::Stdio(McpStdioConfig {
-                program: PathBuf::from("/owned/fixture"),
+                program: std::env::current_exe().expect("resolve repository-owned test executable"),
                 arguments: vec!["--mode".to_string(), "stdio".to_string(), String::new()],
-                cwd: PathBuf::from("/owned"),
+                cwd: std::env::current_dir().expect("resolve repository-owned test cwd"),
                 environment: Vec::new(),
             }),
             connect_timeout_ms: 1_000,
@@ -2366,10 +2803,14 @@ mod tests {
             McpRegistryPersistenceError::AuthorizationRequired
         );
         let before = registry.get_persisted(id).unwrap().unwrap();
+        let file_identity_digest =
+            compute_launch_file_identity_digest(&before.entry.config, &before.launch_spec_digest)
+                .unwrap();
         let authorization = registry
             .authorize_launch(
                 &McpRegistryMutationPrecondition::from_entry(&before.entry),
                 &before.launch_spec_digest,
+                &file_identity_digest,
                 MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
                 123_456,
             )
@@ -2438,6 +2879,103 @@ mod tests {
             .unwrap()
             .launch_authorization
             .is_none());
+    }
+
+    #[test]
+    fn launch_identity_tracks_code_not_mutable_data_and_never_blocks_disable() {
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("owned-fixture-executable");
+        let script = directory.path().join("owned-server.js");
+        let mutable_data = directory.path().join("owned-fixture-data");
+        std::fs::write(&executable, b"owned executable version one").unwrap();
+        std::fs::write(&script, b"owned script version one").unwrap();
+        std::fs::write(&mutable_data, b"mutable data version one").unwrap();
+        let id = McpServerId::new();
+        let mut server = config(id, "selective identity");
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.program = executable.clone();
+        stdio.arguments = vec![
+            script.to_string_lossy().into_owned(),
+            mutable_data.to_string_lossy().into_owned(),
+            "--config=missing.js".to_string(),
+            "https://owned.invalid/remote-server.js".to_string(),
+        ];
+        stdio.cwd = directory.path().to_path_buf();
+        let registry = SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap();
+        let added = registry.add(server).unwrap();
+        let persisted = registry.get_persisted(id).unwrap().unwrap();
+        let file_identity_digest = compute_launch_file_identity_digest(
+            &persisted.entry.config,
+            &persisted.launch_spec_digest,
+        )
+        .unwrap();
+        registry
+            .authorize_launch(
+                &McpRegistryMutationPrecondition::from_entry(&added),
+                &persisted.launch_spec_digest,
+                &file_identity_digest,
+                MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                1,
+            )
+            .unwrap();
+
+        // Extensionless runtime data and unknown option values are not
+        // misclassified as executable code authority.
+        std::fs::write(&mutable_data, b"mutable data version two with a new size").unwrap();
+        let authorized = registry.get(id).unwrap().unwrap();
+        let enabled = registry
+            .set_enabled(
+                &McpRegistryMutationPrecondition::from_entry(&authorized),
+                true,
+            )
+            .unwrap();
+
+        // Executable replacement invalidates future starts, but stale launch
+        // identity must never prevent the fail-closed disable path.
+        std::fs::write(&executable, b"owned executable version two with a new size").unwrap();
+        let disabled = registry
+            .set_enabled(
+                &McpRegistryMutationPrecondition::from_entry(&enabled),
+                false,
+            )
+            .unwrap();
+        assert!(!disabled.config.enabled);
+        assert_eq!(
+            registry
+                .set_enabled(
+                    &McpRegistryMutationPrecondition::from_entry(&disabled),
+                    true,
+                )
+                .unwrap_err(),
+            McpRegistryPersistenceError::AuthorizationRequired
+        );
+    }
+
+    #[test]
+    fn explicit_inline_code_paths_are_identity_bound() {
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("owned-fixture-executable");
+        let imported = directory.path().join("owned-import.js");
+        std::fs::write(&executable, b"owned executable").unwrap();
+        std::fs::write(&imported, b"owned import version one").unwrap();
+        let mut server = config(McpServerId::new(), "inline code identity");
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.program = executable;
+        stdio.cwd = directory.path().to_path_buf();
+        stdio.arguments = vec![
+            format!("--import={}", imported.to_string_lossy()),
+            "--import=file:///owned/remote-style.js".to_string(),
+            "--loader=owned-package.js".to_string(),
+        ];
+        let launch_digest = compute_launch_spec_digest(&server).unwrap();
+        let first = compute_launch_file_identity_digest(&server, &launch_digest).unwrap();
+        std::fs::write(&imported, b"owned import version two with a new size").unwrap();
+        let second = compute_launch_file_identity_digest(&server, &launch_digest).unwrap();
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -2517,11 +3055,17 @@ mod tests {
         let registry = SqliteMcpRegistry::open(&path).unwrap();
         let added = registry.add(config(id, "first")).unwrap();
         let persisted = registry.get_persisted(id).unwrap().unwrap();
+        let file_identity_digest = compute_launch_file_identity_digest(
+            &persisted.entry.config,
+            &persisted.launch_spec_digest,
+        )
+        .unwrap();
         let authorization = registry
             .authorize_launch(
                 &McpRegistryMutationPrecondition::from_entry(&added),
                 &persisted.launch_spec_digest,
-                1,
+                &file_identity_digest,
+                MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
                 1,
             )
             .unwrap();
@@ -2571,6 +3115,118 @@ mod tests {
             .unwrap()
             .launch_authorization
             .is_none());
+    }
+
+    #[test]
+    fn startup_invalidates_legacy_launch_authorization_without_losing_configuration() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let id = McpServerId::new();
+        {
+            let registry = SqliteMcpRegistry::open(&path).unwrap();
+            let added = registry.add(config(id, "legacy-authorization")).unwrap();
+            let persisted = registry.get_persisted(id).unwrap().unwrap();
+            let file_identity_digest = compute_launch_file_identity_digest(
+                &persisted.entry.config,
+                &persisted.launch_spec_digest,
+            )
+            .unwrap();
+            registry
+                .authorize_launch(
+                    &McpRegistryMutationPrecondition::from_entry(&added),
+                    &persisted.launch_spec_digest,
+                    &file_identity_digest,
+                    MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                    1,
+                )
+                .unwrap();
+            let authorized = registry.get(id).unwrap().unwrap();
+            registry
+                .set_enabled(
+                    &McpRegistryMutationPrecondition::from_entry(&authorized),
+                    true,
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE mcp_registry_servers
+                 SET authorization_format_version = 1,
+                     authorization_policy_version = 1,
+                     authorized_launch_spec_digest = launch_spec_digest
+                 WHERE server_id = ?1",
+                [id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        let recovered = reopened.get_persisted(id).unwrap().unwrap();
+        assert_eq!(recovered.entry.config.display_name, "legacy-authorization");
+        assert!(!recovered.entry.config.enabled);
+        assert_eq!(recovered.entry.config.trust, McpTrustLevel::Untrusted);
+        assert!(recovered.launch_authorization.is_none());
+        assert_eq!(
+            recovered.safe_error_code.as_deref(),
+            Some(SAFE_ERROR_RECONCILED)
+        );
+    }
+
+    #[test]
+    fn startup_disables_v2_authorization_after_executable_replacement() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let executable = directory.path().join("owned-startup-executable");
+        std::fs::write(&executable, b"owned executable version one").unwrap();
+        let id = McpServerId::new();
+        {
+            let registry = SqliteMcpRegistry::open(&path).unwrap();
+            let mut server = config(id, "startup physical drift");
+            let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+                panic!("test config must use stdio");
+            };
+            stdio.program = executable.clone();
+            stdio.cwd = directory.path().to_path_buf();
+            let added = registry.add(server).unwrap();
+            let persisted = registry.get_persisted(id).unwrap().unwrap();
+            let file_identity_digest = compute_launch_file_identity_digest(
+                &persisted.entry.config,
+                &persisted.launch_spec_digest,
+            )
+            .unwrap();
+            registry
+                .authorize_launch(
+                    &McpRegistryMutationPrecondition::from_entry(&added),
+                    &persisted.launch_spec_digest,
+                    &file_identity_digest,
+                    MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                    1,
+                )
+                .unwrap();
+            let authorized = registry.get(id).unwrap().unwrap();
+            registry
+                .set_enabled(
+                    &McpRegistryMutationPrecondition::from_entry(&authorized),
+                    true,
+                )
+                .unwrap();
+        }
+
+        std::fs::write(
+            &executable,
+            b"owned executable version two with a different size",
+        )
+        .unwrap();
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        let recovered = reopened.get_persisted(id).unwrap().unwrap();
+        assert!(!recovered.entry.config.enabled);
+        assert_eq!(recovered.entry.config.trust, McpTrustLevel::Untrusted);
+        assert!(recovered.launch_authorization.is_none());
+        assert_eq!(
+            recovered.safe_error_code.as_deref(),
+            Some(SAFE_ERROR_RECONCILED)
+        );
     }
 
     #[test]

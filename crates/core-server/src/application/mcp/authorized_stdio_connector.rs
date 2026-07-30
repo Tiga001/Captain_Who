@@ -8,9 +8,9 @@ use mycopilot_mcp_client::{
 };
 
 use super::sqlite_registry::{
-    compute_launch_spec_digest, McpPersistedRegistryRecord, McpRegistryPersistenceError,
-    McpServerSource, SqliteMcpRegistry, MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION,
-    MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+    compute_launch_spec_digest, prepare_launch_file_identity, McpPersistedRegistryRecord,
+    McpRegistryPersistenceError, McpServerSource, SqliteMcpRegistry,
+    MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION, MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
 };
 
 /// Host-owned connector that turns a durable, exact logical launch authorization into
@@ -19,9 +19,10 @@ use super::sqlite_registry::{
 /// The Connection Manager supplies only an `McpServerConfig`, so this boundary
 /// re-reads the durable Registry on every attempt. A stale in-memory config,
 /// an authorization for another Server, or a changed persisted path/argv/cwd
-/// specification is rejected before the stdio connector can spawn. This does
-/// not bind the executable's filesystem object identity; descriptor-bound
-/// process launch remains a separate platform-hardening requirement.
+/// specification is rejected before the stdio connector can spawn. Format v2
+/// additionally revalidates the canonical executable and filesystem-backed
+/// code-entrypoint identities immediately before delegating to the concrete
+/// connector.
 pub(crate) struct AuthorizedMcpStdioConnector {
     registry: Arc<SqliteMcpRegistry>,
     policy_template: McpStdioPolicy,
@@ -60,9 +61,11 @@ impl AuthorizedMcpStdioConnector {
             .map_err(map_registry_read_error)?
             .ok_or_else(|| authorization_error("MCP stdio launch is not authorized"))?;
 
-        validate_persisted_authorization(requested, &persisted)?;
-
-        let McpTransportConfig::Stdio(stdio) = &persisted.entry.config.transport else {
+        // The returned launch plan and compared identity digest come from one
+        // canonicalization pass. They cannot describe different symlink
+        // targets even if a path is retargeted immediately afterward.
+        let config = validate_persisted_authorization(requested, &persisted)?;
+        let McpTransportConfig::Stdio(stdio) = &config.transport else {
             return Err(authorization_error(
                 "MCP stdio launch transport is not authorized",
             ));
@@ -71,10 +74,7 @@ impl AuthorizedMcpStdioConnector {
         policy.allowed_programs = BTreeSet::from([stdio.program.clone()]);
         policy.allowed_host_variables.clear();
 
-        Ok(AuthorizedStdioLaunch {
-            config: persisted.entry.config,
-            policy,
-        })
+        Ok(AuthorizedStdioLaunch { config, policy })
     }
 }
 
@@ -97,7 +97,7 @@ struct AuthorizedStdioLaunch {
 fn validate_persisted_authorization(
     requested: &McpServerConfig,
     persisted: &McpPersistedRegistryRecord,
-) -> Result<(), McpError> {
+) -> Result<McpServerConfig, McpError> {
     let requested_digest = config_digest(requested)
         .map_err(|_| authorization_error("MCP stdio launch configuration is invalid"))?;
     if persisted.entry.config.id != requested.id
@@ -147,9 +147,13 @@ fn validate_persisted_authorization(
         .launch_authorization
         .as_ref()
         .ok_or_else(|| authorization_error("MCP stdio launch is not authorized"))?;
+    let (file_identity_digest, canonical_config) =
+        prepare_launch_file_identity(&persisted.entry.config, &computed_launch_digest)
+            .map_err(map_registry_validation_error)?;
     if authorization.authorization_format_version != MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION
         || authorization.server_id != persisted.entry.config.id
         || authorization.launch_spec_digest != computed_launch_digest
+        || file_identity_digest != authorization.file_identity_digest
         || authorization.authored_config_epoch != persisted.entry.config_epoch
         || authorization.authored_config_digest != persisted.entry.config_digest
         || authorization.authorization_policy_version != MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION
@@ -159,7 +163,7 @@ fn validate_persisted_authorization(
         ));
     }
 
-    Ok(())
+    Ok(canonical_config)
 }
 
 fn authorization_error(message: &'static str) -> McpError {
@@ -191,10 +195,14 @@ mod tests {
 
     use super::*;
     use crate::application::mcp::sqlite_registry::{
-        McpRegistryMutationPrecondition, SqliteMcpRegistry,
+        compute_launch_file_identity_digest, McpRegistryMutationPrecondition, SqliteMcpRegistry,
     };
 
     const PRIVATE_ARGUMENT_CANARY: &str = "MCP_PRIVATE_ARGUMENT_CANARY";
+
+    fn owned_executable() -> PathBuf {
+        std::env::current_exe().expect("resolve repository-owned test executable")
+    }
 
     fn config(id: McpServerId, executable: PathBuf, cwd: PathBuf) -> McpServerConfig {
         McpServerConfig {
@@ -223,10 +231,16 @@ mod tests {
     ) -> McpServerConfig {
         let entry = registry.add(config).unwrap();
         let persisted = registry.get_persisted(entry.config.id).unwrap().unwrap();
+        let file_identity_digest = compute_launch_file_identity_digest(
+            &persisted.entry.config,
+            &persisted.launch_spec_digest,
+        )
+        .unwrap();
         registry
             .authorize_launch(
                 &McpRegistryMutationPrecondition::from_entry(&persisted.entry),
                 &persisted.launch_spec_digest,
+                &file_identity_digest,
                 policy_version,
                 1,
             )
@@ -258,7 +272,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let registry =
             Arc::new(SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap());
-        let executable = directory.path().join("owned-fixture");
+        let executable = owned_executable();
         let authorized = authorize_and_enable(
             &registry,
             config(
@@ -280,9 +294,152 @@ mod tests {
             AuthorizedMcpStdioConnector::with_policy(Arc::clone(&registry), broad_template);
         let launch = connector.prepare_authorized_launch(&authorized).unwrap();
 
-        assert_eq!(launch.policy.allowed_programs, BTreeSet::from([executable]));
+        let canonical_executable = std::fs::canonicalize(executable).unwrap();
+        let canonical_cwd = std::fs::canonicalize(directory.path()).unwrap();
+        assert_eq!(
+            launch.policy.allowed_programs,
+            BTreeSet::from([canonical_executable.clone()])
+        );
         assert!(launch.policy.allowed_host_variables.is_empty());
-        assert_eq!(launch.config, authorized);
+        let mut expected = authorized;
+        let McpTransportConfig::Stdio(stdio) = &mut expected.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.program = canonical_executable;
+        stdio.cwd = canonical_cwd;
+        assert_eq!(launch.config, expected);
+    }
+
+    #[test]
+    fn executable_replacement_invalidates_exact_launch_authorization() {
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("owned-fixture");
+        std::fs::write(&executable, b"owned fixture version one")
+            .expect("write repository-owned executable fixture");
+        let registry =
+            Arc::new(SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap());
+        let authorized = authorize_and_enable(
+            &registry,
+            config(
+                McpServerId::new(),
+                executable.clone(),
+                directory.path().to_path_buf(),
+            ),
+            MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+        );
+        std::fs::write(&executable, b"owned fixture version two")
+            .expect("replace repository-owned executable fixture");
+
+        let connector = AuthorizedMcpStdioConnector::new(registry);
+        let error = expect_mcp_error(connector.prepare_authorized_launch(&authorized));
+        assert_eq!(error.kind, McpErrorKind::Config);
+        assert_eq!(error.message, "MCP stdio launch authorization is stale");
+        assert_eq!(
+            error.dispatch_certainty,
+            Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+    }
+
+    #[test]
+    fn interpreter_script_replacement_invalidates_exact_launch_authorization() {
+        let directory = tempdir().unwrap();
+        let script = directory.path().join("owned-server-script.js");
+        std::fs::write(&script, b"owned script version one")
+            .expect("write repository-owned script fixture");
+        let mut server = config(
+            McpServerId::new(),
+            owned_executable(),
+            directory.path().to_path_buf(),
+        );
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.arguments = vec![script.to_string_lossy().into_owned()];
+        let registry =
+            Arc::new(SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap());
+        let authorized =
+            authorize_and_enable(&registry, server, MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION);
+        std::fs::write(&script, b"owned script version two")
+            .expect("replace repository-owned script fixture");
+
+        let connector = AuthorizedMcpStdioConnector::new(registry);
+        let error = expect_mcp_error(connector.prepare_authorized_launch(&authorized));
+        assert_eq!(error.kind, McpErrorKind::Config);
+        assert_eq!(error.message, "MCP stdio launch authorization is stale");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_symlink_retarget_invalidates_exact_launch_authorization() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("owned-first");
+        let second = directory.path().join("owned-second");
+        let link = directory.path().join("owned-link");
+        std::fs::write(&first, b"first target").expect("write first repository target");
+        std::fs::write(&second, b"second target").expect("write second repository target");
+        symlink(&first, &link).expect("create repository-owned executable symlink");
+        let registry =
+            Arc::new(SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap());
+        let authorized = authorize_and_enable(
+            &registry,
+            config(
+                McpServerId::new(),
+                link.clone(),
+                directory.path().to_path_buf(),
+            ),
+            MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+        );
+        std::fs::remove_file(&link).expect("remove repository-owned executable symlink");
+        symlink(&second, &link).expect("retarget repository-owned executable symlink");
+
+        let connector = AuthorizedMcpStdioConnector::new(registry);
+        let error = expect_mcp_error(connector.prepare_authorized_launch(&authorized));
+        assert_eq!(error.kind, McpErrorKind::Config);
+        assert_eq!(error.message, "MCP stdio launch authorization is stale");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_code_symlink_is_frozen_to_its_canonical_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("owned-first.js");
+        let second = directory.path().join("owned-second.js");
+        let link = directory.path().join("owned-entrypoint.js");
+        std::fs::write(&first, b"first owned script").unwrap();
+        std::fs::write(&second, b"second owned script").unwrap();
+        symlink(&first, &link).unwrap();
+        let registry =
+            Arc::new(SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap());
+        let mut server = config(
+            McpServerId::new(),
+            owned_executable(),
+            directory.path().to_path_buf(),
+        );
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.arguments = vec![link.to_string_lossy().into_owned()];
+        let authorized =
+            authorize_and_enable(&registry, server, MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION);
+        let connector = AuthorizedMcpStdioConnector::new(registry);
+        let launch = connector.prepare_authorized_launch(&authorized).unwrap();
+
+        std::fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        let McpTransportConfig::Stdio(stdio) = &launch.config.transport else {
+            panic!("prepared launch must use stdio");
+        };
+        assert_eq!(
+            stdio.arguments,
+            vec![std::fs::canonicalize(first)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
+        );
     }
 
     #[tokio::test]
@@ -316,7 +473,7 @@ mod tests {
             &registry,
             config(
                 McpServerId::new(),
-                directory.path().join("does-not-exist"),
+                owned_executable(),
                 directory.path().to_path_buf(),
             ),
             MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
@@ -342,7 +499,7 @@ mod tests {
             &registry,
             config(
                 McpServerId::new(),
-                directory.path().join("does-not-exist"),
+                owned_executable(),
                 directory.path().to_path_buf(),
             ),
             MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
@@ -365,7 +522,7 @@ mod tests {
             &registry,
             config(
                 McpServerId::new(),
-                directory.path().join("does-not-exist"),
+                owned_executable(),
                 directory.path().to_path_buf(),
             ),
             MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
@@ -400,7 +557,7 @@ mod tests {
             &registry,
             config(
                 McpServerId::new(),
-                directory.path().join("does-not-exist"),
+                owned_executable(),
                 directory.path().to_path_buf(),
             ),
             MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
@@ -437,7 +594,7 @@ mod tests {
             &registry,
             config(
                 McpServerId::new(),
-                directory.path().join("does-not-exist"),
+                owned_executable(),
                 directory.path().to_path_buf(),
             ),
             MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,

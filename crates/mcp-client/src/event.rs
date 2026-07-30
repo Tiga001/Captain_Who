@@ -194,6 +194,10 @@ impl From<&McpError> for McpSafeError {
                 "mcp_protocol_error",
                 "The MCP server returned an invalid protocol response.",
             ),
+            McpErrorKind::Capacity => (
+                "mcp_capacity",
+                "The MCP operation could not start because Host capacity is full.",
+            ),
             McpErrorKind::OutputTooLarge => (
                 "mcp_output_too_large",
                 "The MCP server returned a tool result that exceeded safety limits.",

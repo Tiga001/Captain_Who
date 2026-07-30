@@ -583,10 +583,10 @@ impl McpApprovalPayloadStore for InMemoryMcpApprovalPayloadStore {
                 Err(McpApprovalPayloadStoreError::PayloadNotFound)
             };
         }
-        Ok(payloads
+        let entry = payloads
             .remove(invocation_id)
-            .expect("entry was checked while holding the same lock")
-            .payload)
+            .ok_or(McpApprovalPayloadStoreError::PayloadNotFound)?;
+        Ok(entry.payload)
     }
 
     fn delete(

@@ -13,6 +13,7 @@ pub enum McpErrorKind {
     Spawn,
     Negotiation,
     Protocol,
+    Capacity,
     OutputTooLarge,
     Timeout,
     Cancelled,
@@ -40,6 +41,7 @@ pub struct McpError {
 impl McpError {
     pub fn config(message: impl Into<String>) -> Self {
         Self::new(McpErrorKind::Config, message)
+            .with_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
     }
 
     pub fn spawn(message: impl Into<String>) -> Self {
@@ -52,6 +54,11 @@ impl McpError {
 
     pub fn protocol(message: impl Into<String>) -> Self {
         Self::new(McpErrorKind::Protocol, message)
+            .with_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
+    }
+
+    pub fn capacity(message: impl Into<String>) -> Self {
+        Self::new(McpErrorKind::Capacity, message)
             .with_dispatch_certainty(McpDispatchCertainty::DefinitelyNotDispatched)
     }
 
@@ -149,6 +156,7 @@ impl fmt::Display for McpErrorKind {
             Self::Spawn => "spawn",
             Self::Negotiation => "negotiation",
             Self::Protocol => "protocol",
+            Self::Capacity => "capacity",
             Self::OutputTooLarge => "output_too_large",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",

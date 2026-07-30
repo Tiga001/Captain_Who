@@ -28,9 +28,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::sqlite_registry::{
-    compute_launch_spec_digest, McpLaunchSpecDigest, McpPersistedRegistryRecord,
-    McpRegistryMutationPrecondition, McpRegistryPersistenceError, SqliteMcpRegistry,
-    MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+    compute_launch_spec_digest, launch_authorization_identity_is_valid,
+    launch_authorization_is_valid, prepare_launch_file_identity, McpLaunchSpecDigest,
+    McpPersistedRegistryRecord, McpRegistryMutationPrecondition, McpRegistryPersistenceError,
+    SqliteMcpRegistry, MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
 };
 
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
@@ -52,6 +53,7 @@ struct FrozenLaunchAuthorization {
     server_id: McpServerId,
     precondition: McpRegistryMutationPrecondition,
     launch_spec_digest: McpLaunchSpecDigest,
+    file_identity_digest: McpLaunchSpecDigest,
     expires_at_ms: u64,
 }
 
@@ -378,7 +380,17 @@ impl McpManagementService {
                 Some(precondition.server_id),
             ));
         }
-        let stdio = match &record.entry.config.transport {
+        let authorization_id = Uuid::new_v4();
+        let (file_identity_digest, launch_config) =
+            prepare_launch_file_identity(&record.entry.config, &record.launch_spec_digest)
+                .map_err(|error| {
+                    self.registry_failure(
+                        McpManagementOperationDto::PrepareLaunchAuthorization,
+                        Some(precondition.server_id),
+                        error,
+                    )
+                })?;
+        let stdio = match &launch_config.transport {
             McpTransportConfig::Stdio(stdio) => stdio,
             _ => {
                 return Err(self.failure(
@@ -390,7 +402,6 @@ impl McpManagementService {
                 ))
             }
         };
-        let authorization_id = Uuid::new_v4();
         let expires_at_ms = now_ms()
             .checked_add(LAUNCH_AUTHORIZATION_PREVIEW_TTL_MS)
             .ok_or_else(|| {
@@ -437,6 +448,7 @@ impl McpManagementService {
                     server_id: precondition.server_id,
                     precondition: precondition.clone(),
                     launch_spec_digest: record.launch_spec_digest.clone(),
+                    file_identity_digest,
                     expires_at_ms,
                 },
             );
@@ -536,6 +548,7 @@ impl McpManagementService {
             .authorize_launch(
                 &frozen.precondition,
                 &frozen.launch_spec_digest,
+                &frozen.file_identity_digest,
                 MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
                 i64::try_from(now_ms()).unwrap_or(i64::MAX),
             )
@@ -849,18 +862,7 @@ impl McpManagementService {
                 Some(server_id),
             ));
         }
-        let valid = record.entry.config.trust == McpTrustLevel::UserApproved
-            && record
-                .launch_authorization
-                .as_ref()
-                .is_some_and(|authorization| {
-                    authorization.server_id == server_id
-                        && authorization.launch_spec_digest == record.launch_spec_digest
-                        && authorization.authored_config_epoch == record.entry.config_epoch
-                        && authorization.authored_config_digest == record.entry.config_digest
-                        && authorization.authorization_policy_version
-                            == MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION
-                });
+        let valid = launch_authorization_is_valid(&record);
         if valid {
             Ok(())
         } else {
@@ -880,7 +882,16 @@ impl McpManagementService {
         operation: McpManagementOperationDto,
     ) -> Result<McpServerDetailsOutput, McpManagementFailure> {
         let record = self.persisted(server_id, operation)?;
-        let summary = self.project_summary(&record)?;
+        let mut summary = self.project_summary(&record)?;
+        // A detail read is explicitly scoped to one Server, so it can afford
+        // the bounded live filesystem identity check that would be too costly
+        // across a large list. This lets the UI distinguish an authorization
+        // whose executable or code entrypoint changed after approval.
+        if summary.launch_authorization_state == McpLaunchAuthorizationStateDto::Authorized
+            && !launch_authorization_is_valid(&record)
+        {
+            summary.launch_authorization_state = McpLaunchAuthorizationStateDto::Stale;
+        }
         let status = self
             .manager
             .get_status(server_id)
@@ -954,20 +965,15 @@ impl McpManagementService {
             catalog.source_config_epoch == Some(record.entry.config_epoch)
                 && catalog.source_config_digest.as_ref() == Some(&record.entry.config_digest)
         });
-        let launch_authorization_state = match &record.launch_authorization {
-            Some(authorization)
-                if authorization.server_id == server_id
-                    && authorization.launch_spec_digest == record.launch_spec_digest
-                    && authorization.authored_config_epoch == record.entry.config_epoch
-                    && authorization.authored_config_digest == record.entry.config_digest
-                    && authorization.authorization_policy_version
-                        == MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION
-                    && record.entry.config.trust == McpTrustLevel::UserApproved =>
-            {
-                McpLaunchAuthorizationStateDto::Authorized
-            }
-            Some(_) => McpLaunchAuthorizationStateDto::Stale,
-            None => McpLaunchAuthorizationStateDto::Required,
+        // Projection is intentionally structural and non-blocking. Enable/start
+        // and the final connector boundary re-hash the live executable/script
+        // identity before any process can be spawned.
+        let launch_authorization_state = if launch_authorization_identity_is_valid(record) {
+            McpLaunchAuthorizationStateDto::Authorized
+        } else if record.launch_authorization.is_some() {
+            McpLaunchAuthorizationStateDto::Stale
+        } else {
+            McpLaunchAuthorizationStateDto::Required
         };
         let state = if !record.entry.config.enabled {
             McpConnectionStateDto::Disabled
@@ -1251,6 +1257,11 @@ impl McpManagementService {
                 McpManagementErrorCodeDto::Timeout,
                 McpManagementRecoveryDto::Retry,
                 "The MCP server operation timed out.",
+            ),
+            McpErrorKind::Capacity => (
+                McpManagementErrorCodeDto::InvalidState,
+                McpManagementRecoveryDto::Retry,
+                "MCP Host capacity is temporarily full.",
             ),
             McpErrorKind::Shutdown => (
                 McpManagementErrorCodeDto::CleanupIncomplete,
@@ -2107,6 +2118,115 @@ mod tests {
             McpManagementErrorCodeDto::AuthorizationStale
         );
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn launch_authorization_commit_rejects_file_identity_drift_and_details_show_stale() {
+        let owned_launch = tempfile::tempdir().expect("temporary owned launch directory");
+        let executable = owned_launch.path().join("owned-mcp-fixture");
+        std::fs::write(&executable, b"owned executable version one")
+            .expect("write repository-owned launch fixture");
+        let mut input = create_input("physical identity fixture");
+        input.executable = executable.to_string_lossy().into_owned();
+        input.cwd = owned_launch.path().to_string_lossy().into_owned();
+
+        let harness = TestHarness::new();
+        let added = harness.service.add_server(input).expect("add server");
+        let stale_preview = harness
+            .service
+            .prepare_launch_authorization(mutation_input(&added.server))
+            .expect("prepare launch authorization");
+        std::fs::write(
+            &executable,
+            b"owned executable version two with different length",
+        )
+        .expect("replace repository-owned launch fixture");
+        let conflict = harness
+            .service
+            .commit_launch_authorization(commit_input(&stale_preview))
+            .expect_err("file drift during native confirmation must fail");
+        assert_eq!(failure_code(conflict), McpManagementErrorCodeDto::Conflict);
+
+        let current = harness
+            .service
+            .get_server(
+                McpServerIdInput {
+                    schema_version: MCP_MANAGEMENT_SCHEMA_VERSION,
+                    server_id: added.server.summary.server_id.clone(),
+                },
+                McpManagementOperationDto::Get,
+            )
+            .expect("read current server details");
+        let authorized = authorize(&harness.service, &current.server);
+        assert_eq!(
+            authorized.server.summary.launch_authorization_state,
+            McpLaunchAuthorizationStateDto::Authorized
+        );
+        std::fs::write(&executable, b"third owned executable replacement")
+            .expect("replace authorized repository launch fixture");
+        let stale = harness
+            .service
+            .get_server(
+                McpServerIdInput {
+                    schema_version: MCP_MANAGEMENT_SCHEMA_VERSION,
+                    server_id: added.server.summary.server_id,
+                },
+                McpManagementOperationDto::Get,
+            )
+            .expect("read stale launch authorization details");
+        assert_eq!(
+            stale.server.summary.launch_authorization_state,
+            McpLaunchAuthorizationStateDto::Stale
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launch_authorization_preview_shows_the_canonical_process_plan() {
+        use std::os::unix::fs::symlink;
+
+        let owned_launch = tempfile::tempdir().expect("temporary owned launch directory");
+        let executable_target = owned_launch.path().join("owned-executable-target");
+        let executable_link = owned_launch.path().join("owned-executable-link");
+        let script_target = owned_launch.path().join("owned-script-target.js");
+        let script_link = owned_launch.path().join("owned-script-link.js");
+        std::fs::write(&executable_target, b"owned executable target").unwrap();
+        std::fs::write(&script_target, b"owned script target").unwrap();
+        symlink(&executable_target, &executable_link).unwrap();
+        symlink(&script_target, &script_link).unwrap();
+        let mut input = create_input("canonical preview fixture");
+        input.executable = executable_link.to_string_lossy().into_owned();
+        input.arguments = vec![script_link.to_string_lossy().into_owned()];
+        input.cwd = owned_launch.path().to_string_lossy().into_owned();
+
+        let harness = TestHarness::new();
+        let added = harness.service.add_server(input).expect("add server");
+        let preview = harness
+            .service
+            .prepare_launch_authorization(mutation_input(&added.server))
+            .expect("prepare canonical launch preview");
+        assert_eq!(
+            preview.executable,
+            std::fs::canonicalize(executable_target)
+                .unwrap()
+                .to_string_lossy()
+        );
+        assert_eq!(
+            preview.arguments,
+            vec![std::fs::canonicalize(script_target)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
+        );
+        assert_eq!(
+            preview.cwd,
+            std::fs::canonicalize(owned_launch.path())
+                .unwrap()
+                .to_string_lossy()
+        );
         harness.shutdown().await;
     }
 

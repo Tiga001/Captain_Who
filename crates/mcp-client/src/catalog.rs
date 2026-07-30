@@ -663,10 +663,9 @@ fn build_tools(
                 occurrence_count: duplicate_count,
             });
         }
-        let candidate = duplicates
-            .into_iter()
-            .next()
-            .expect("grouped descriptor must not be empty");
+        let Some(candidate) = duplicates.into_iter().next() else {
+            continue;
+        };
         let descriptor_valid = candidate.issues.is_empty();
         let descriptor = candidate.descriptor;
         let model_name = build_model_name(server_id, &raw_name, policy.limits.max_model_name_bytes);

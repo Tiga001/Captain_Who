@@ -1,23 +1,25 @@
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use rmcp::model::{
     CacheScope, CallToolRequest, CallToolRequestParams, ClientInfo, ClientRequest, ContentBlock,
-    ListToolsRequest, PaginatedRequestParams, ResourceContents, ServerResult, Tool,
+    ListToolsRequest, PaginatedRequestParams, ProgressNotificationParam, ResourceContents,
+    ServerResult, Tool,
 };
 use rmcp::service::{
     NotificationContext, PeerRequestOptions, RequestHandle, RunningService, ServiceError,
 };
 use rmcp::{ClientHandler, RoleClient};
 use serde_json::Value;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::config::MAX_TIMEOUT_MS;
 use crate::connector::BoxMcpFuture;
+use crate::limits::validate_tool_result;
 use crate::transports::stdio::{
     spawn_process_supervisor, ProcessContainment, ProcessExitCode, StderrAccumulator,
     StdioProcessSupervisor,
@@ -62,6 +64,16 @@ impl ClientHandler for McpClientEventHandler {
         self.signals.tools_changed();
         std::future::ready(())
     }
+
+    fn on_progress(
+        &self,
+        _params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        // Progress is intentionally consumed without retention in the stdio
+        // MVP. In particular it never resets the Host-owned hard deadline.
+        std::future::ready(())
+    }
 }
 
 type RmcpClientService = RunningService<RoleClient, McpClientEventHandler>;
@@ -97,7 +109,13 @@ pub trait McpPeer: Send + Sync {
         let call = self.call_tool(call, cancellation);
         Box::pin(async move {
             let result = call.await;
-            if result.is_ok() {
+            let response_received = match &result {
+                Ok(_) => true,
+                Err(error) => {
+                    error.dispatch_certainty == Some(McpDispatchCertainty::ResponseReceived)
+                }
+            };
+            if response_received {
                 dispatch.mark_response_received();
             }
             result
@@ -122,16 +140,18 @@ pub struct McpClientHandle {
     server_id: McpServerId,
     protocol: McpProtocolSnapshot,
     peer: rmcp::Peer<RoleClient>,
-    resources: Mutex<Option<ConnectionResources>>,
-    shutdown_task: Mutex<Option<JoinHandle<Result<(), McpError>>>>,
+    resources: StdMutex<Option<ConnectionResources>>,
+    shutdown_task: StdMutex<Option<JoinHandle<()>>>,
     close_result: Arc<StdMutex<Option<Result<(), McpError>>>>,
+    close_started: AtomicBool,
+    close_settled: Arc<Notify>,
     process_exit_code: ProcessExitCode,
     stderr: Arc<Mutex<StderrAccumulator>>,
     request_timeout: Duration,
     shutdown_timeout: Duration,
+    security_limits: crate::McpSecurityLimits,
     state: Arc<AtomicU8>,
     force_close: McpCancellationToken,
-    close_guard: Mutex<()>,
     signals: McpPeerSignalPublisher,
 }
 
@@ -161,6 +181,7 @@ impl McpClientHandle {
         signals: McpPeerSignalPublisher,
         request_timeout: Duration,
         shutdown_timeout: Duration,
+        security_limits: crate::McpSecurityLimits,
     ) -> Self {
         let state = Arc::new(AtomicU8::new(STATE_READY));
         let force_close = McpCancellationToken::new();
@@ -183,7 +204,7 @@ impl McpClientHandle {
             server_id,
             protocol,
             peer,
-            resources: Mutex::new(Some(ConnectionResources {
+            resources: StdMutex::new(Some(ConnectionResources {
                 service,
                 process,
                 stderr_task,
@@ -191,15 +212,17 @@ impl McpClientHandle {
                 transport_monitor_cancel,
                 transport_monitor_task,
             })),
-            shutdown_task: Mutex::new(None),
+            shutdown_task: StdMutex::new(None),
             close_result: Arc::new(StdMutex::new(None)),
+            close_started: AtomicBool::new(false),
+            close_settled: Arc::new(Notify::new()),
             process_exit_code,
             stderr,
             request_timeout,
             shutdown_timeout,
+            security_limits,
             state,
             force_close,
-            close_guard: Mutex::new(()),
             signals,
         }
     }
@@ -348,21 +371,43 @@ impl McpClientHandle {
             .peer
             .send_cancellable_request(request, PeerRequestOptions::no_options());
         tokio::pin!(send_request);
-        let mut handle = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => {
-                return Err(McpError::cancelled("tools/call"));
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                return Err(McpError::timeout("tools/call", timeout.as_millis() as u64));
-            }
-            result = &mut send_request => {
-                result.map_err(|error| self.map_service_error_sync("tools/call", error))?
-            }
-        };
+        // Polling the SDK send future may enqueue the request before the Host
+        // regains control. Cross the conservative uncertainty boundary before
+        // that first poll; the pre-cancel/config checks above remain
+        // DefinitelyNotDispatched.
         if let Some(dispatch) = &dispatch {
             dispatch.mark_request_queued();
         }
+        let mut handle = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(tracked_interruption(
+                    &dispatch,
+                    McpOutcomeUnknownReason::Cancelled,
+                    || McpError::cancelled("tools/call"),
+                ));
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(tracked_interruption(
+                    &dispatch,
+                    McpOutcomeUnknownReason::TimedOut,
+                    || McpError::timeout("tools/call", timeout.as_millis() as u64),
+                ));
+            }
+            result = &mut send_request => {
+                match result {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        let error = self.map_service_error_sync("tools/call", error);
+                        return Err(tracked_interruption(
+                            &dispatch,
+                            outcome_unknown_reason_for_error(&error),
+                            || error,
+                        ));
+                    }
+                }
+            }
+        };
 
         enum CallWait {
             Response(Box<Result<ServerResult, ServiceError>>),
@@ -381,14 +426,17 @@ impl McpClientHandle {
         };
         let result = match wait {
             CallWait::Response(result) => match *result {
-                Ok(result) => {
-                    if let Some(dispatch) = &dispatch {
-                        dispatch.mark_response_received();
-                    }
-                    result
-                }
+                Ok(result) => result,
                 Err(error) => {
-                    let error = self.map_service_error_sync("tools/call", error);
+                    let response_received = matches!(error, ServiceError::McpError(_));
+                    let mut error = self.map_service_error_sync("tools/call", error);
+                    if response_received {
+                        if let Some(dispatch) = &dispatch {
+                            dispatch.mark_response_received();
+                        }
+                        error.dispatch_certainty = Some(McpDispatchCertainty::ResponseReceived);
+                        return Err(error);
+                    }
                     return Err(tracked_interruption(
                         &dispatch,
                         outcome_unknown_reason_for_error(&error),
@@ -423,38 +471,55 @@ impl McpClientHandle {
         };
 
         let ServerResult::CallToolResult(result) = result else {
-            return Err(
-                McpError::protocol("tools/call returned an unsupported response type")
-                    .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived),
-            );
+            return Err(tracked_interruption(
+                &dispatch,
+                McpOutcomeUnknownReason::ProtocolFailure,
+                || McpError::protocol("tools/call returned an unsupported response type"),
+            ));
         };
         if result
             .result_type
             .as_ref()
             .is_some_and(|result_type| !result_type.is_complete())
         {
-            return Err(McpError::protocol(
-                "tools/call returned a non-complete result unsupported in MCP client round 1",
-            )
-            .with_dispatch_certainty(McpDispatchCertainty::ResponseReceived));
+            return Err(tracked_interruption(
+                &dispatch,
+                McpOutcomeUnknownReason::ProtocolFailure,
+                || {
+                    McpError::protocol(
+                        "tools/call returned a non-complete result unsupported by this client",
+                    )
+                },
+            ));
         }
-        let content = result
+        // A complete tools/call result is the authoritative Server response,
+        // even if a future content block cannot yet be represented by this
+        // client. Do not turn a local projection failure into OutcomeUnknown.
+        if let Some(dispatch) = &dispatch {
+            dispatch.mark_response_received();
+        }
+        let content = match result
             .content
             .into_iter()
             .map(map_content)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                error.with_dispatch_certainty(McpDispatchCertainty::ResponseReceived)
-            })?;
-        Ok(McpToolResult {
+        {
+            Ok(content) => content,
+            Err(mut error) => {
+                error.dispatch_certainty = Some(McpDispatchCertainty::ResponseReceived);
+                return Err(error);
+            }
+        };
+        let result = McpToolResult {
             content,
             structured_content: result.structured_content,
             is_error: result.is_error.unwrap_or(false),
-        })
+        };
+        validate_tool_result(&result, &self.security_limits)?;
+        Ok(result)
     }
 
     pub async fn close(&self) -> Result<(), McpError> {
-        let _close_guard = self.close_guard.lock().await;
         if let Some(result) = self
             .close_result
             .lock()
@@ -464,44 +529,82 @@ impl McpClientHandle {
             return result;
         }
 
-        let mut shutdown_task = self.shutdown_task.lock().await;
-        if shutdown_task.is_none() {
-            let Some(resources) = self.resources.lock().await.take() else {
+        if self
+            .close_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let resources = self
+                .resources
+                .lock()
+                .ok()
+                .and_then(|mut resources| resources.take());
+            let Some(resources) = resources else {
                 let error = McpError::shutdown("MCP shutdown resources were unavailable");
                 self.state.store(STATE_FAILED, Ordering::Release);
                 if let Ok(mut close_result) = self.close_result.lock() {
                     *close_result = Some(Err(error.clone()));
                 }
+                self.close_settled.notify_waiters();
                 return Err(error);
             };
             self.state.store(STATE_CLOSING, Ordering::Release);
             let state = Arc::clone(&self.state);
             let close_result = Arc::clone(&self.close_result);
+            let close_settled = Arc::clone(&self.close_settled);
             let shutdown_timeout = self.shutdown_timeout;
+            let mut shutdown_task = match self.shutdown_task.lock() {
+                Ok(task) => task,
+                Err(_) => {
+                    let error = McpError::shutdown("MCP shutdown supervisor lock was unavailable");
+                    self.state.store(STATE_FAILED, Ordering::Release);
+                    if let Ok(mut close_result) = self.close_result.lock() {
+                        *close_result = Some(Err(error.clone()));
+                    }
+                    self.close_settled.notify_waiters();
+                    return Err(error);
+                }
+            };
             *shutdown_task = Some(tokio::spawn(async move {
                 let result =
                     shutdown_resources(resources, shutdown_timeout, Arc::clone(&state)).await;
                 if let Ok(mut stored_result) = close_result.lock() {
-                    *stored_result = Some(result.clone());
+                    if stored_result.is_none() {
+                        *stored_result = Some(result);
+                    }
                 }
-                result
+                close_settled.notify_waiters();
             }));
         }
 
-        let joined = shutdown_task
-            .as_mut()
-            .expect("shutdown task must exist")
-            .await;
-        shutdown_task.take();
-        match joined {
-            Ok(result) => result,
-            Err(_) => {
-                let error = McpError::shutdown("MCP shutdown supervisor task failed");
+        let deadline = tokio::time::Instant::now()
+            + self
+                .shutdown_timeout
+                .saturating_mul(4)
+                .saturating_add(Duration::from_secs(1));
+        loop {
+            let notified = self.close_settled.notified();
+            if let Some(result) = self
+                .close_result
+                .lock()
+                .ok()
+                .and_then(|result| result.clone())
+            {
+                return result;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                self.force_close.cancel();
                 self.state.store(STATE_FAILED, Ordering::Release);
+                let error = McpError::shutdown("MCP shutdown supervisor did not settle");
                 if let Ok(mut close_result) = self.close_result.lock() {
-                    *close_result = Some(Err(error.clone()));
+                    if close_result.is_none() {
+                        *close_result = Some(Err(error.clone()));
+                    } else if let Some(result) = close_result.clone() {
+                        return result;
+                    }
                 }
-                Err(error)
+                self.close_settled.notify_waiters();
+                return Err(error);
             }
         }
     }
