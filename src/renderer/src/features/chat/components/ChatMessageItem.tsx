@@ -48,6 +48,7 @@ import {
   hasCollapsibleTimelineContent,
   hasDisplayableContent,
   hasRecentFileWriteActivity,
+  isContentFullyRepresentedByTimeline,
   isRunSettled,
   isTokenLimitFinishReason,
   shouldShowAssistantActions,
@@ -477,6 +478,10 @@ function AgentRunView({
     if (finalMessageIndex < 0) return timeline
     return timeline.filter((_, index) => index !== finalMessageIndex)
   }, [finalAnswerContent, run, timeline])
+  const finalAnswerRepresentedByTimeline = useMemo(
+    () => isContentFullyRepresentedByTimeline(finalAnswerContent, timelineWithoutFinalAnswer),
+    [finalAnswerContent, timelineWithoutFinalAnswer]
+  )
   const displayTimeline = useMemo(
     () => (run ? groupTimelineItems(run, timelineWithoutFinalAnswer) : []),
     [run, timelineWithoutFinalAnswer]
@@ -543,7 +548,9 @@ function AgentRunView({
     : false
   const showTimeline = hasTimeline && !(canToggleTimeline && timelineCollapsed)
   const showFinalContent =
-    hasDisplayableContent(finalAnswerContent) && (runIsSettled || !hasTimeline)
+    hasDisplayableContent(finalAnswerContent) &&
+    (runIsSettled || !hasTimeline) &&
+    !(showTimeline && finalAnswerRepresentedByTimeline)
   const isStreamingAssistantText =
     !isRunSettled(run) &&
     Boolean(run.lastResponseAt) &&

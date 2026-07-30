@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest'
 import type { ChatMessage } from '../chatTypes'
 
 const storage = vi.hoisted(() => ({
+  loadConversation: vi.fn(),
   saveChatMessageState: vi.fn()
 }))
 
@@ -9,7 +10,67 @@ vi.mock('../../../host/hostClient', () => ({
   hostClient: { storage }
 }))
 
-const { saveChatMessageState } = await import('../../storage/storageClient')
+const { loadConversation, saveChatMessageState } = await import('../../storage/storageClient')
+
+function storedMcpApprovalAction(callId: string) {
+  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
+  return {
+    type: 'mcp_tool_call',
+    approval: {
+      identity: {
+        actionId: '94c2f39c-ddaa-49bb-a3ef-8756053d68c8',
+        invocationId: 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f',
+        runId: 'run-mcp-approval-only',
+        callId,
+        provenance: {
+          serverId,
+          scope: { type: 'user' },
+          rawToolName: 'move_file',
+          modelToolName: 'mcp__filesystem_test__move_file',
+          configEpoch: '41818332-0842-4d2e-808f-175b70eb4628',
+          registryRevision: 7,
+          configDigest: 'a'.repeat(64),
+          catalogGeneration: 2,
+          catalogDigest: 'b'.repeat(64),
+          catalogSchemaDigest: 'c'.repeat(64),
+          schemaDigest: 'd'.repeat(64),
+          schemaNormalizerVersion: 1
+        }
+      },
+      call: {
+        id: callId,
+        tool: 'mcp__filesystem_test__move_file',
+        args: {},
+        approvalStatus: 'required'
+      },
+      summary: {
+        serverId,
+        serverDisplayName: 'Filesystem Test',
+        scope: { type: 'user' },
+        rawToolName: 'move_file',
+        modelToolName: 'mcp__filesystem_test__move_file',
+        arguments: {
+          encodedBytes: 24,
+          topLevelPropertyCount: 1,
+          stringValueCount: 1,
+          numberValueCount: 0,
+          booleanValueCount: 0,
+          nullValueCount: 0,
+          objectValueCount: 1,
+          arrayValueCount: 0,
+          maxDepth: 2,
+          truncated: false
+        },
+        risk: 'side_effects_possible',
+        external: true
+      },
+      approvalMode: 'prompt',
+      payloadPersistence: 'process_only',
+      createdAt: 1_753_843_200_000,
+      expiresAt: 1_753_844_100_000
+    }
+  }
+}
 
 it('keeps live command output transient while persisting the final tool result', async () => {
   const message: ChatMessage = {
@@ -62,4 +123,288 @@ it('keeps live command output transient while persisting the final tool result',
   const storedRun = JSON.parse(storedMessage.agentRunJson) as Record<string, unknown>
   expect(storedRun.commandOutputPreviews).toBeUndefined()
   expect(storedRun.toolResults).toEqual(message.agentRun?.toolResults)
+})
+
+it('fails closed when a restored terminal run still contains a running MCP invocation', async () => {
+  const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
+  const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
+  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
+  const callId = `tc1_${'a'.repeat(43)}`
+  const canary = 'MCP_STORAGE_CANARY_DO_NOT_RETAIN'
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-mcp-recovery',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'MCP recovery',
+    messages: [
+      {
+        id: 'assistant-mcp-recovery',
+        role: 'assistant',
+        content: 'partial',
+        createdAt: 1,
+        status: 'error',
+        attachments: [],
+        agentRunJson: JSON.stringify({
+          runId: 'run-mcp-recovery',
+          status: 'failed',
+          completedAt: 10,
+          toolDefinitions: [],
+          toolCalls: [
+            {
+              id: callId,
+              tool: 'mcp__filesystem_test__move_file',
+              args: { rawArguments: canary },
+              approvalStatus: 'approved'
+            }
+          ],
+          toolResults: [
+            {
+              callId,
+              tool: 'mcp__filesystem_test__move_file',
+              ok: true,
+              result: { rawResult: canary },
+              error: canary
+            }
+          ],
+          approvals: [{ type: 'mcp_tool_call', rawArguments: canary }],
+          diffs: [],
+          timeline: [
+            {
+              id: `mcp-invocation-${invocationId}`,
+              type: 'mcp_tool_call',
+              invocationId,
+              payloadRef: canary
+            },
+            {
+              id: `tool-call-${callId}`,
+              type: 'tool_call',
+              callId
+            }
+          ],
+          mcpInvocations: [
+            {
+              actionId,
+              invocationId,
+              callId,
+              serverId,
+              serverDisplayName: 'Filesystem Test',
+              rawToolName: 'move_file',
+              modelToolName: 'mcp__filesystem_test__move_file',
+              external: true,
+              state: 'running',
+              dispatchCertainty: 'possibly_dispatched',
+              outputTruncated: false,
+              rawArguments: canary,
+              rawResult: canary,
+              structuredContent: canary,
+              stderr: canary,
+              payloadRef: canary,
+              ciphertext: canary
+            }
+          ]
+        }),
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 10,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restored = await loadConversation('conversation-mcp-recovery')
+  expect(restored?.messages[0].agentRun?.mcpInvocations?.[0]).toMatchObject({
+    state: 'outcome_unknown',
+    outcome: 'outcome_unknown',
+    dispatchCertainty: 'possibly_dispatched',
+    errorCode: 'mcp.tool_outcome_unknown'
+  })
+  const restoredRun = restored?.messages[0].agentRun
+  expect(restoredRun?.toolCalls).toEqual([])
+  expect(restoredRun?.toolResults).toEqual([])
+  expect(restoredRun?.approvals).toEqual([])
+  expect(JSON.stringify(restoredRun)).not.toContain(canary)
+  expect(Object.keys(restoredRun?.mcpInvocations?.[0] ?? {})).not.toContain('rawArguments')
+})
+
+it('normalizes a minimal terminal recovery record before settling activities', async () => {
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-minimal-recovery',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'Minimal recovery',
+    messages: [
+      {
+        id: 'assistant-minimal-recovery',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        status: 'error',
+        attachments: [],
+        agentRunJson: JSON.stringify({
+          runId: 'run-minimal-recovery',
+          status: 'failed'
+        }),
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 2,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restored = await loadConversation('conversation-minimal-recovery')
+  expect(restored?.messages[0].agentRun).toMatchObject({
+    runId: 'run-minimal-recovery',
+    status: 'failed',
+    toolDefinitions: [],
+    toolCalls: [],
+    toolResults: [],
+    approvals: [],
+    diffs: [],
+    timeline: [],
+    mcpInvocations: []
+  })
+})
+
+it('removes legacy generic MCP bodies using a valid approval identity even without an invocation', async () => {
+  const callId = `tc1_${'b'.repeat(43)}`
+  const canary = 'MCP_APPROVAL_ONLY_BODY_CANARY'
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-mcp-approval-only',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'MCP approval recovery',
+    messages: [
+      {
+        id: 'assistant-mcp-approval-only',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        status: 'error',
+        attachments: [],
+        agentRunJson: JSON.stringify({
+          runId: 'run-mcp-approval-only',
+          status: 'failed',
+          toolDefinitions: [],
+          toolCalls: [
+            {
+              id: callId,
+              tool: 'mcp__filesystem_test__move_file',
+              args: { rawArguments: canary },
+              approvalStatus: 'required'
+            }
+          ],
+          toolResults: [
+            {
+              callId,
+              tool: 'mcp__filesystem_test__move_file',
+              ok: false,
+              error: canary
+            }
+          ],
+          approvals: [storedMcpApprovalAction(callId)],
+          diffs: [],
+          timeline: [{ id: `tool-call-${callId}`, type: 'tool_call', callId }]
+        }),
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 2,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restoredRun = (await loadConversation('conversation-mcp-approval-only'))?.messages[0]
+    .agentRun
+  expect(restoredRun?.approvals).toEqual([])
+  expect(restoredRun?.toolCalls).toEqual([])
+  expect(restoredRun?.toolResults).toEqual([])
+  expect(restoredRun?.timeline).toEqual([])
+  expect(JSON.stringify(restoredRun)).not.toContain(canary)
+})
+
+it('deduplicates legacy invocation identities and preserves the authoritative terminal projection', async () => {
+  const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
+  const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
+  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
+  const callId = `tc1_${'c'.repeat(43)}`
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-mcp-duplicate',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'MCP duplicate recovery',
+    messages: [
+      {
+        id: 'assistant-mcp-duplicate',
+        role: 'assistant',
+        content: '',
+        createdAt: 1,
+        status: 'error',
+        attachments: [],
+        agentRunJson: JSON.stringify({
+          runId: 'run-mcp-duplicate',
+          status: 'failed',
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: [],
+          mcpInvocations: [
+            {
+              actionId,
+              invocationId,
+              callId,
+              serverId,
+              serverDisplayName: 'Filesystem Test',
+              rawToolName: 'move_file',
+              modelToolName: 'mcp__filesystem_test__move_file',
+              external: true,
+              state: 'running',
+              dispatchCertainty: 'possibly_dispatched',
+              outputTruncated: false
+            },
+            {
+              actionId,
+              invocationId,
+              callId,
+              serverId,
+              serverDisplayName: 'Filesystem Test',
+              rawToolName: 'move_file',
+              modelToolName: 'mcp__filesystem_test__move_file',
+              external: true,
+              state: 'completed',
+              dispatchCertainty: 'response_received',
+              outcome: 'succeeded',
+              isError: false,
+              durationMs: 25,
+              outputTruncated: false
+            }
+          ]
+        }),
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 2,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const invocations = (await loadConversation('conversation-mcp-duplicate'))?.messages[0].agentRun
+    ?.mcpInvocations
+  expect(invocations).toHaveLength(1)
+  expect(invocations?.[0]).toMatchObject({
+    invocationId,
+    state: 'completed',
+    dispatchCertainty: 'response_received',
+    outcome: 'succeeded'
+  })
 })

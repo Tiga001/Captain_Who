@@ -2,8 +2,25 @@ use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
 use crate::storage::{context_compaction_repository, now_ms, world_state_repository};
+use crate::AgentMcpServerScope;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
+
+pub(crate) struct McpInvocationTerminalProjection<'a> {
+    pub action_id: &'a str,
+    pub invocation_id: &'a str,
+    pub call_id: &'a str,
+    pub server_id: &'a str,
+    pub server_display_name: &'a str,
+    pub scope: &'a AgentMcpServerScope,
+    pub raw_tool_name: &'a str,
+    pub model_tool_name: &'a str,
+    pub state: &'static str,
+    pub dispatch_certainty: &'static str,
+    pub outcome: &'static str,
+    pub is_error: Option<bool>,
+    pub error_code: &'static str,
+}
 
 pub fn conversation_exists(
     connection: &Connection,
@@ -550,6 +567,101 @@ pub fn update_message_run_terminal_state(
     connection.execute(
         "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
         params![completed_at, conversation_id],
+    )?;
+    Ok(())
+}
+
+/// Settles the Renderer-safe projection of one typed MCP invocation.
+///
+/// The projection is presentation state, but leaving it non-terminal after the owning run was
+/// durably terminalized produces a permanent spinner after restart. Locate the Host-generated
+/// invocation identity rather than a model-visible name, replace any drifted presentation copy,
+/// and remove duplicates. If the Renderer never persisted the approval projection, append the
+/// same bounded, secret-free identity available in the durable pending action so recovery still
+/// explains why the external result is unknown.
+pub(crate) fn update_message_mcp_invocation_terminal_state(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    projection: &McpInvocationTerminalProjection<'_>,
+) -> rusqlite::Result<()> {
+    let existing_agent_run_json = connection
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(raw) = existing_agent_run_json else {
+        return Ok(());
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(());
+    };
+    let Some(run) = value.as_object_mut() else {
+        return Ok(());
+    };
+    let scope = serde_json::to_value(projection.scope)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let mut terminal = serde_json::json!({
+        "actionId": projection.action_id,
+        "invocationId": projection.invocation_id,
+        "callId": projection.call_id,
+        "serverId": projection.server_id,
+        "serverDisplayName": projection.server_display_name,
+        "scope": scope,
+        "rawToolName": projection.raw_tool_name,
+        "modelToolName": projection.model_tool_name,
+        "external": true,
+        "state": projection.state,
+        "dispatchCertainty": projection.dispatch_certainty,
+        "outcome": projection.outcome,
+        "errorCode": projection.error_code,
+        "outputTruncated": false,
+    });
+    if let Some(is_error) = projection.is_error {
+        terminal["isError"] = is_error.into();
+    }
+    let invocations = run
+        .entry("mcpInvocations".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !invocations.is_array() {
+        *invocations = serde_json::json!([]);
+    }
+    let Some(invocations) = invocations.as_array_mut() else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+
+    // `invocationId` is the Host-generated one-time identity. Old projections may be missing a
+    // display field or contain drifted presentation data, so requiring every field to match would
+    // append a second record and leave the original `running` entry spinning forever. Replace the
+    // first occurrence with the authoritative typed projection and remove every duplicate.
+    let first_index = invocations.iter().position(|candidate| {
+        candidate
+            .get("invocationId")
+            .and_then(serde_json::Value::as_str)
+            == Some(projection.invocation_id)
+    });
+    invocations.retain(|candidate| {
+        candidate
+            .get("invocationId")
+            .and_then(serde_json::Value::as_str)
+            != Some(projection.invocation_id)
+    });
+    if let Some(index) = first_index {
+        invocations.insert(index.min(invocations.len()), terminal);
+    } else {
+        invocations.push(terminal);
+    }
+
+    let next_agent_run_json = serde_json::to_string(&value)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute(
+        "UPDATE messages
+         SET agent_run_json = ?1
+         WHERE conversation_id = ?2 AND id = ?3",
+        params![next_agent_run_json, conversation_id, message_id],
     )?;
     Ok(())
 }

@@ -1,8 +1,10 @@
 import type {
   AgentInputAttachment,
+  AgentMcpServerScope,
   AgentPermissions,
   AgentPromptPreferences
 } from '@mycopilot/protocol'
+import { parseAgentMcpProposedAction, parseAgentMcpToolInvocationEvent } from '@mycopilot/protocol'
 import type {
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
@@ -20,14 +22,17 @@ import type {
 import type { ModelConfig, SearchMode } from '../../config/modelConfig'
 import type { AppProject } from '../../config/projectConfig'
 import type {
+  ChatAgentTimelineItem,
   ChatAgentRunView,
   ChatComposerDraft,
   ChatConversation,
   ChatMessage,
   ChatMessageAttachment,
   ChatMessageUiState,
+  ChatMcpToolInvocationView,
   ChatQueuedMessage
 } from '../chat/chatTypes'
+import { ensureAgentRun, settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
 import { normalizeSkillSelections, parseStoredSkillSelections } from '../skills/skillSelection'
 import { hostClient } from '../../host/hostClient'
 import {
@@ -413,7 +418,207 @@ function mapConversationMetaToStorage(
   }
 }
 
+const STORED_MCP_EVENT_KEYS = [
+  'actionId',
+  'invocationId',
+  'callId',
+  'serverId',
+  'serverDisplayName',
+  'rawToolName',
+  'modelToolName',
+  'external',
+  'state',
+  'dispatchCertainty',
+  'outcome',
+  'isError',
+  'errorCode',
+  'durationMs',
+  'outputTruncated'
+] as const
+const STORED_MCP_TERMINAL_STATES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'outcome_unknown',
+  'rejected',
+  'expired',
+  'payload_unavailable',
+  'policy_denied'
+])
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function projectStoredMcpScope(value: unknown): AgentMcpServerScope | undefined {
+  if (!isUnknownRecord(value) || typeof value.type !== 'string') return undefined
+  const keys = Object.keys(value)
+  if (value.type === 'builtin' || value.type === 'user' || value.type === 'managed') {
+    return keys.length === 1 ? { type: value.type } : undefined
+  }
+  if (
+    value.type === 'project' &&
+    keys.length === 2 &&
+    typeof value.projectId === 'string' &&
+    value.projectId.length > 0 &&
+    value.projectId.length <= 1024
+  ) {
+    return { type: 'project', projectId: value.projectId }
+  }
+  if (
+    value.type === 'plugin' &&
+    keys.length === 2 &&
+    typeof value.pluginId === 'string' &&
+    value.pluginId.length > 0 &&
+    value.pluginId.length <= 1024
+  ) {
+    return { type: 'plugin', pluginId: value.pluginId }
+  }
+  return undefined
+}
+
+function projectStoredMcpInvocation(value: unknown): ChatMcpToolInvocationView | undefined {
+  if (!isUnknownRecord(value)) return undefined
+  const eventCandidate: Record<string, unknown> = {}
+  for (const key of STORED_MCP_EVENT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      eventCandidate[key] = value[key]
+    }
+  }
+
+  try {
+    const event = parseAgentMcpToolInvocationEvent(eventCandidate)
+    const scope = projectStoredMcpScope(value.scope)
+    return {
+      actionId: event.actionId,
+      invocationId: event.invocationId,
+      callId: event.callId,
+      serverId: event.serverId,
+      serverDisplayName: event.serverDisplayName,
+      ...(scope ? { scope } : {}),
+      rawToolName: event.rawToolName,
+      modelToolName: event.modelToolName,
+      external: true,
+      state: event.state,
+      dispatchCertainty: event.dispatchCertainty,
+      outcome: event.outcome,
+      isError: event.isError,
+      errorCode: event.errorCode,
+      durationMs: event.durationMs,
+      outputTruncated: event.outputTruncated
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView {
+  const normalized = ensureAgentRun(storedRun, storedRun.runId, storedRun.status)
+  const rawMcpInvocations = Array.isArray(storedRun.mcpInvocations) ? storedRun.mcpInvocations : []
+  const referencedMcpCallIds = new Set<string>(
+    rawMcpInvocations.flatMap((invocation) =>
+      isUnknownRecord(invocation) &&
+      typeof invocation.callId === 'string' &&
+      invocation.callId.length <= 1024
+        ? [invocation.callId]
+        : []
+    )
+  )
+  const approvals = normalized.approvals.filter((action) => {
+    if (!isUnknownRecord(action) || action.type !== 'mcp_tool_call') return true
+    try {
+      referencedMcpCallIds.add(parseAgentMcpProposedAction(action).approval.identity.callId)
+    } catch {
+      // Corrupt MCP approvals are always discarded. Without a fully valid typed identity, do not
+      // infer routing or retain any of their untrusted nested fields.
+    }
+    return false
+  })
+  const invocationById = new Map<string, ChatMcpToolInvocationView>()
+  for (const rawInvocation of rawMcpInvocations) {
+    const projected = projectStoredMcpInvocation(rawInvocation)
+    if (!projected) continue
+    const existing = invocationById.get(projected.invocationId)
+    const existingIsTerminal = existing ? STORED_MCP_TERMINAL_STATES.has(existing.state) : false
+    const projectedIsTerminal = STORED_MCP_TERMINAL_STATES.has(projected.state)
+    if (!existing || projectedIsTerminal || !existingIsTerminal) {
+      invocationById.set(projected.invocationId, projected)
+    }
+  }
+  const mcpInvocations = [...invocationById.values()]
+  const validInvocationIds = new Set(mcpInvocations.map((invocation) => invocation.invocationId))
+  const timeline: ChatAgentTimelineItem[] = []
+  for (const item of normalized.timeline) {
+    if (!isUnknownRecord(item) || typeof item.type !== 'string') continue
+    if (item.type === 'tool_call') {
+      if (typeof item.callId !== 'string' || referencedMcpCallIds.has(item.callId)) continue
+      timeline.push(item)
+      continue
+    }
+    if (item.type === 'mcp_tool_call') {
+      if (
+        typeof item.id !== 'string' ||
+        typeof item.invocationId !== 'string' ||
+        !validInvocationIds.has(item.invocationId)
+      ) {
+        continue
+      }
+      timeline.push({
+        id: item.id,
+        type: 'mcp_tool_call',
+        invocationId: item.invocationId
+      })
+      continue
+    }
+    timeline.push(item)
+  }
+  for (const invocation of mcpInvocations) {
+    if (
+      !timeline.some(
+        (item) => item.type === 'mcp_tool_call' && item.invocationId === invocation.invocationId
+      )
+    ) {
+      timeline.push({
+        id: `mcp-invocation-${invocation.invocationId}`,
+        type: 'mcp_tool_call',
+        invocationId: invocation.invocationId
+      })
+    }
+  }
+
+  return {
+    ...normalized,
+    approvals,
+    toolCalls: normalized.toolCalls.filter(
+      (call) =>
+        isUnknownRecord(call) && typeof call.id === 'string' && !referencedMcpCallIds.has(call.id)
+    ),
+    toolResults: normalized.toolResults.filter(
+      (result) =>
+        isUnknownRecord(result) &&
+        typeof result.callId === 'string' &&
+        !referencedMcpCallIds.has(result.callId)
+    ),
+    timeline,
+    mcpInvocations
+  }
+}
+
 function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
+  const parsedRun = parseJson<ChatAgentRunView>(message.agentRunJson)
+  const storedRun = parsedRun ? normalizeStoredAgentRun(parsedRun) : undefined
+  const agentRun =
+    storedRun &&
+    (storedRun.status === 'completed' ||
+      storedRun.status === 'failed' ||
+      storedRun.status === 'cancelled')
+      ? settleAgentRunToolActivities(
+          storedRun,
+          storedRun.status,
+          storedRun.completedAt ?? message.createdAt
+        )
+      : storedRun
+
   return {
     id: message.id,
     role: message.role === 'user' ? 'user' : 'assistant',
@@ -421,7 +626,7 @@ function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
     createdAt: message.createdAt,
     status: normalizeMessageStatus(message.status),
     attachments: message.attachments?.map(mapMessageAttachmentFromStorage),
-    agentRun: parseJson<ChatAgentRunView>(message.agentRunJson),
+    agentRun,
     uiState: parseJson<ChatMessageUiState>(message.uiStateJson)
   }
 }

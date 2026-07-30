@@ -176,6 +176,61 @@ describe('Skill and Office chat timeline', () => {
     expect(screen.container.textContent?.match(/这是后端持久化的最终总结。/g)).toHaveLength(1)
   })
 
+  it('does not repeat a restored multi-segment answer around MCP activity', async () => {
+    const invocationId = '22222222-2222-4222-8222-222222222222'
+    const message = assistantMessage({
+      status: 'failed',
+      mcpInvocations: [
+        {
+          actionId: '11111111-1111-4111-8111-111111111111',
+          invocationId,
+          callId: `tc1_${'a'.repeat(43)}`,
+          serverId: '33333333-3333-4333-8333-333333333333',
+          serverDisplayName: 'Filesystem Test',
+          scope: { type: 'user' },
+          rawToolName: 'move_file',
+          modelToolName: 'mcp__filesystem_test__move_file',
+          external: true,
+          state: 'outcome_unknown',
+          dispatchCertainty: 'possibly_dispatched',
+          outcome: 'outcome_unknown',
+          errorCode: 'mcp.tool_outcome_unknown',
+          outputTruncated: false
+        }
+      ],
+      timeline: [
+        { id: 'message-stream-1', type: 'message', content: '第一段。' },
+        {
+          id: `mcp-invocation-${invocationId}`,
+          type: 'mcp_tool_call',
+          invocationId
+        },
+        { id: 'message-stream-2', type: 'message', content: '第二段。' },
+        { id: 'message-stream-3', type: 'message', content: '第三段。' }
+      ]
+    })
+    message.content = '第一段。第二段。第三段。'
+
+    const expanded = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(expanded.container.textContent?.match(/第一段。/g)).toHaveLength(1)
+    expect(expanded.container.textContent?.match(/第二段。/g)).toHaveLength(1)
+    expect(expanded.container.textContent?.match(/第三段。/g)).toHaveLength(1)
+
+    const collapsed = await render(
+      <ChatMessageItem
+        message={{ ...message, uiState: { timelineCollapsed: true } }}
+        projectId="project-1"
+        showTokenUsageDetails={false}
+      />
+    )
+    expect(collapsed.container.textContent?.match(/第一段。/g)).toHaveLength(1)
+    expect(collapsed.container.textContent?.match(/第二段。/g)).toHaveLength(1)
+    expect(collapsed.container.textContent?.match(/第三段。/g)).toHaveLength(1)
+  })
+
   it('keeps the final image Artifact card visible after expanding the timeline', async () => {
     const hash = 'f'.repeat(64)
     const message = assistantMessage({

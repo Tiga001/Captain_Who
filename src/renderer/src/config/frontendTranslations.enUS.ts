@@ -743,6 +743,8 @@ export const enUSTranslations = {
   'chat.queueMessage': 'Add to message queue',
   'chat.stop': 'Stop generating',
   'chat.stopFailed': 'Unable to stop the current run. Please try again.',
+  'chat.stopStatusUnknown':
+    'Unable to confirm whether the run stopped. External effects may have occurred; check the authoritative result.',
   'chat.guidanceQueue': 'Pending message queue',
   'chat.reorderQueuedMessage': 'Drag or use arrow keys to reorder this message',
   'chat.attachmentOnlyMessage': 'Attachment message',

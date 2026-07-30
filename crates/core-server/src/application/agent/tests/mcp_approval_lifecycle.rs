@@ -7,7 +7,7 @@ use mycopilot_core::{
     McpToolInvocationResult, McpToolInvoker, MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
 };
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -22,6 +22,7 @@ enum ApprovalInvocationBehavior {
     Success,
     BareCancellation,
     TruncatedSuccess,
+    WaitForCancellation,
 }
 
 #[derive(Default)]
@@ -30,6 +31,8 @@ struct ApprovalLifecycleInvoker {
     invocation_count: AtomicU64,
     descriptor: Mutex<Option<McpAgentToolDescriptor>>,
     behavior: ApprovalInvocationBehavior,
+    invocation_started: AtomicBool,
+    invocation_started_notify: tokio::sync::Notify,
 }
 
 impl ApprovalLifecycleInvoker {
@@ -46,7 +49,18 @@ impl ApprovalLifecycleInvoker {
             invocation_count: AtomicU64::new(0),
             descriptor: Mutex::new(Some(descriptor)),
             behavior,
+            invocation_started: AtomicBool::new(false),
+            invocation_started_notify: tokio::sync::Notify::new(),
         })
+    }
+
+    async fn wait_until_invocation_started(&self) {
+        loop {
+            if self.invocation_started.load(Ordering::SeqCst) {
+                return;
+            }
+            self.invocation_started_notify.notified().await;
+        }
     }
 }
 
@@ -132,6 +146,15 @@ impl McpToolInvoker for ApprovalLifecycleInvoker {
                 return Err(AgentError::new("test approval payload changed"));
             }
             self.invocation_count.fetch_add(1, Ordering::SeqCst);
+            self.invocation_started.store(true, Ordering::SeqCst);
+            self.invocation_started_notify.notify_waiters();
+            if matches!(
+                self.behavior,
+                ApprovalInvocationBehavior::WaitForCancellation
+            ) {
+                cancellation.cancelled().await;
+                return Err(AgentError::cancelled());
+            }
             if matches!(self.behavior, ApprovalInvocationBehavior::BareCancellation) {
                 return Err(AgentError::cancelled());
             }
@@ -501,6 +524,210 @@ async fn authoritative_truncation_reaches_the_terminal_lifecycle_event() {
     assert_eq!(terminal["state"], "completed");
     assert_eq!(terminal["dispatchCertainty"], "response_received");
     assert_eq!(terminal["outputTruncated"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelling_a_dispatched_mcp_call_finishes_the_agent_run_without_model_replay() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _first_request = read_json_request(&mut first).await;
+        write_tool_call_stream(&mut first).await;
+        drop(first);
+
+        tokio::time::timeout(Duration::from_millis(750), listener.accept())
+            .await
+            .is_err()
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(
+        StorageService::open(&fixture.path().join("mcp-cancel-lifecycle.sqlite")).unwrap(),
+    );
+    save_test_pending_provider(
+        &storage,
+        "mcp-cancel-lifecycle-model",
+        &format!("http://{address}/v1/chat/completions"),
+        "fixed-test-model-token",
+        "disabled",
+        "",
+    );
+    let invoker = ApprovalLifecycleInvoker::with_behavior(
+        lifecycle_descriptor(),
+        ApprovalInvocationBehavior::WaitForCancellation,
+    );
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-mcp-cancel-lifecycle".to_string()),
+                project_id: None,
+                model_id: "mcp-cancel-lifecycle-model".to_string(),
+                context_window_indicator_enabled: false,
+                content: "Call and then cancel the owned MCP fixture.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-mcp-cancel-lifecycle".to_string()),
+                assistant_message_id: Some("assistant-mcp-cancel-lifecycle".to_string()),
+                max_tokens: Some(1_024),
+                temperature: None,
+                prompt_preferences: None,
+                permissions: Default::default(),
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+    wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "approval_required"
+    })
+    .await;
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    service
+        .approve_action(&turn.run_id, &pending[0].action_id, notifications)
+        .unwrap();
+    invoker.wait_until_invocation_started().await;
+
+    assert!(service.cancel_run(&turn.run_id));
+    let (done, seen) = wait_for_notification_matching_with_seen(&mut receiver, |notification| {
+        notification["params"]["type"] == "done" && notification["params"]["status"] == "cancelled"
+    })
+    .await;
+    assert_eq!(done["params"]["success"], false);
+    let terminal_invocations = seen
+        .iter()
+        .filter(|notification| {
+            notification["params"]["type"] == "mcp_tool_invocation_state_changed"
+                && notification["params"]["invocation"]["state"] == "outcome_unknown"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_invocations.len(), 1);
+    assert_eq!(
+        terminal_invocations[0]["params"]["invocation"]["dispatchCertainty"],
+        "possibly_dispatched"
+    );
+    assert!(
+        model_server.await.unwrap(),
+        "a cancelled MCP result must not trigger a second model request"
+    );
+    assert!(!service.cancel_run(&turn.run_id));
+
+    let conversation = storage
+        .load_conversation("conversation-mcp-cancel-lifecycle")
+        .unwrap()
+        .unwrap();
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == "assistant-mcp-cancel-lifecycle")
+        .unwrap();
+    let run: Value = serde_json::from_str(assistant.agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "cancelled");
+    assert_eq!(assistant.status.as_deref(), Some("sent"));
+    assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_replay() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _first_request = read_json_request(&mut first).await;
+        write_tool_call_stream(&mut first).await;
+        drop(first);
+
+        tokio::time::timeout(Duration::from_millis(750), listener.accept())
+            .await
+            .is_err()
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("mcp-persistence-failure.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "mcp-persistence-failure-model",
+        &format!("http://{address}/v1/chat/completions"),
+        "fixed-test-model-token",
+        "disabled",
+        "",
+    );
+    let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-mcp-persistence-failure".to_string()),
+                project_id: None,
+                model_id: "mcp-persistence-failure-model".to_string(),
+                context_window_indicator_enabled: false,
+                content: "Call the owned MCP persistence fixture.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-mcp-persistence-failure".to_string()),
+                assistant_message_id: Some("assistant-mcp-persistence-failure".to_string()),
+                max_tokens: Some(1_024),
+                temperature: None,
+                prompt_preferences: None,
+                permissions: Default::default(),
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+    wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "approval_required"
+    })
+    .await;
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    let storage_id = pending_action_storage_id(&turn.run_id, &pending[0].action_id);
+    inject_manual_action_audit_failure(&storage_id, "completed");
+    service
+        .approve_action(&turn.run_id, &pending[0].action_id, notifications)
+        .unwrap();
+
+    let terminal_error = wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "error"
+            && notification["params"]["code"] == "mcp_result_persistence_failed"
+    })
+    .await;
+    assert_eq!(terminal_error["params"]["recoverable"], false);
+    assert!(!terminal_error.to_string().contains(ARGUMENT_CANARY));
+    assert!(!terminal_error.to_string().contains(RESULT_CANARY));
+    assert!(model_server.await.unwrap());
+    assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 1);
+    let executing_status: String = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(executing_status, "executing");
+
+    drop(service);
+    let restarted = AgentService::try_new(Arc::clone(&storage)).unwrap();
+    assert!(restarted.list_pending_actions().is_empty());
+    let (reconciled_status, reconciled_action): (String, String) =
+        rusqlite::Connection::open(database_path)
+            .unwrap()
+            .query_row(
+                "SELECT status, action_json FROM agent_pending_actions WHERE action_id = ?1",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(reconciled_status, "failed");
+    assert_eq!(reconciled_action, "{}");
 }
 
 async fn wait_for_notification_matching(

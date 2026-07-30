@@ -6,7 +6,7 @@ import type {
   AgentSteerRunOutput,
   SkillSelection
 } from '@mycopilot/protocol'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type {
   ChatComposerDraft,
@@ -428,6 +428,38 @@ function storedConversation(): ChatConversation {
   }
 }
 
+function storedConversationWithRun(
+  assistantMessageId: string,
+  runId: string,
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+): ChatConversation {
+  const stored = storedConversation()
+  return {
+    ...stored,
+    messages: [
+      ...stored.messages,
+      {
+        id: assistantMessageId,
+        role: 'assistant',
+        content: status === 'completed' ? 'authoritative answer' : '',
+        createdAt: 3,
+        status: status === 'running' ? 'pending' : status === 'failed' ? 'error' : 'sent',
+        agentRun: {
+          runId,
+          status,
+          completedAt: status === 'running' ? undefined : 4,
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: []
+        }
+      }
+    ]
+  }
+}
+
 function queuedMessage(id: string, content: string, createdAt: number): ChatQueuedMessage {
   return {
     id,
@@ -476,6 +508,10 @@ beforeEach(() => {
     status: 'queued'
   })
   testState.upsertChatMessages.mockReset().mockResolvedValue(undefined)
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 async function renderSelectedConversation() {
@@ -1041,6 +1077,80 @@ describe('authoritative run cancellation and conversation forking', () => {
       content: ''
     })
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+  })
+
+  it('reconciles authoritative storage even when cancel reports that no active registration exists', async () => {
+    mockSuccessfulTurnStarts()
+    testState.cancelAgentRun.mockResolvedValueOnce(false)
+    const screen = await renderSelectedConversation()
+    const initialLoadCount = testState.loadConversation.mock.calls.length
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
+    testState.loadConversation.mockResolvedValueOnce(
+      storedConversationWithRun(input.assistantMessageId!, 'run-1', 'cancelled')
+    )
+
+    vi.useFakeTimers()
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    await vi.advanceTimersByTimeAsync(400)
+    vi.useRealTimers()
+
+    await expect.poll(() => testState.loadConversation.mock.calls.length).toBe(initialLoadCount + 1)
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    expect(testState.showToast).not.toHaveBeenCalled()
+  })
+
+  it('ends the spinner with an explicit unknown status when cancellation hangs and storage checks fail', async () => {
+    mockSuccessfulTurnStarts()
+    testState.cancelAgentRun.mockReturnValueOnce(deferred<boolean>().promise)
+    const screen = await renderSelectedConversation()
+    const initialLoadCount = testState.loadConversation.mock.calls.length
+    testState.loadConversation.mockReturnValue(deferred<ChatConversation | null>().promise)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+
+    vi.useFakeTimers()
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    await vi.advanceTimersByTimeAsync(20_000)
+    vi.useRealTimers()
+
+    await expect.poll(() => testState.loadConversation.mock.calls.length).toBe(initialLoadCount + 3)
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
+    expect(testState.showToast).toHaveBeenCalledWith('chat.stopStatusUnknown')
+  })
+
+  it('does not let a stale storage response overwrite a terminal event received during the read', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+    const initialLoadCount = testState.loadConversation.mock.calls.length
+    const storageRead = deferred<ChatConversation | null>()
+    testState.loadConversation.mockReturnValueOnce(storageRead.promise)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
+
+    vi.useFakeTimers()
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    await vi.advanceTimersByTimeAsync(400)
+    expect(testState.loadConversation).toHaveBeenCalledTimes(initialLoadCount + 1)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: false,
+      status: 'cancelled',
+      content: ''
+    })
+    storageRead.resolve(storedConversationWithRun(input.assistantMessageId!, 'run-1', 'running'))
+    await vi.advanceTimersByTimeAsync(10_000)
+    vi.useRealTimers()
+
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    expect(testState.loadConversation).toHaveBeenCalledTimes(initialLoadCount + 1)
   })
 
   it('opens an existing continuation source at the original reply', async () => {

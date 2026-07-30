@@ -99,11 +99,23 @@ export function ensureAgentRun(
     completedAt: isCompletedAgentRunStatus(status)
       ? (currentRun.completedAt ?? Date.now())
       : currentRun.completedAt,
-    timeline: currentRun.timeline ?? [],
-    readActivities: currentRun.readActivities ?? [],
-    fileDrafts: currentRun.fileDrafts ?? [],
-    fileWritePreviews: currentRun.fileWritePreviews ?? [],
-    messageStreamCheckpoints: currentRun.messageStreamCheckpoints ?? {}
+    toolDefinitions: Array.isArray(currentRun.toolDefinitions) ? currentRun.toolDefinitions : [],
+    toolCalls: Array.isArray(currentRun.toolCalls) ? currentRun.toolCalls : [],
+    toolResults: Array.isArray(currentRun.toolResults) ? currentRun.toolResults : [],
+    approvals: Array.isArray(currentRun.approvals) ? currentRun.approvals : [],
+    diffs: Array.isArray(currentRun.diffs) ? currentRun.diffs : [],
+    timeline: Array.isArray(currentRun.timeline) ? currentRun.timeline : [],
+    readActivities: Array.isArray(currentRun.readActivities) ? currentRun.readActivities : [],
+    fileDrafts: Array.isArray(currentRun.fileDrafts) ? currentRun.fileDrafts : [],
+    fileWritePreviews: Array.isArray(currentRun.fileWritePreviews)
+      ? currentRun.fileWritePreviews
+      : [],
+    messageStreamCheckpoints:
+      currentRun.messageStreamCheckpoints &&
+      typeof currentRun.messageStreamCheckpoints === 'object' &&
+      !Array.isArray(currentRun.messageStreamCheckpoints)
+        ? currentRun.messageStreamCheckpoints
+        : {}
   }
 }
 
@@ -132,6 +144,38 @@ function normalizeAgentRunToolActivities(run: ChatAgentRunView): ChatAgentRunVie
   }
 }
 
+function settlePendingMcpInvocations(run: ChatAgentRunView): ChatMcpToolInvocationView[] {
+  const invocations = run.mcpInvocations ?? []
+  let changed = false
+  const settled = invocations.map((invocation): ChatMcpToolInvocationView => {
+    if (MCP_TERMINAL_STATES.has(invocation.state)) return invocation
+
+    changed = true
+    // A terminal parent Run plus a non-terminal child is an inconsistent projection. Renderer
+    // state may be behind the Host's dispatch boundary, so even `pending_approval` cannot prove
+    // that the external operation was never sent. Only an exact backend terminal projection may
+    // claim `definitely_not_dispatched`.
+    return {
+      actionId: invocation.actionId,
+      invocationId: invocation.invocationId,
+      callId: invocation.callId,
+      serverId: invocation.serverId,
+      serverDisplayName: invocation.serverDisplayName,
+      scope: invocation.scope,
+      rawToolName: invocation.rawToolName,
+      modelToolName: invocation.modelToolName,
+      external: true as const,
+      state: 'outcome_unknown',
+      dispatchCertainty: 'possibly_dispatched',
+      outcome: 'outcome_unknown',
+      errorCode: 'mcp.tool_outcome_unknown',
+      outputTruncated: invocation.outputTruncated
+    }
+  })
+
+  return changed ? settled : invocations
+}
+
 export function settleAgentRunToolActivities(
   run: ChatAgentRunView,
   status: ChatAgentRunView['status'],
@@ -154,7 +198,8 @@ export function settleAgentRunToolActivities(
       settledActivityStatus,
       settledAt
     ),
-    readActivities: settlePendingReadActivities(runWithStatus, settledActivityStatus, settledAt)
+    readActivities: settlePendingReadActivities(runWithStatus, settledActivityStatus, settledAt),
+    mcpInvocations: settlePendingMcpInvocations(runWithStatus)
   }
 }
 
@@ -629,6 +674,14 @@ export function applyAgentEventToChatMessage(
 ): ChatMessage {
   const runId = agentEvent.runId ?? message.agentRun?.runId ?? null
   const currentRun = ensureAgentRun(message.agentRun, runId)
+
+  // A durable terminal Run is a tombstone. Late buffered notifications must not resurrect it as
+  // pending/running or append post-terminal model/tool activity.
+  if (isCompletedAgentRunStatus(currentRun.status)) {
+    if (agentEvent.type !== 'done') return message
+    const doneStatus = agentEvent.status ?? (agentEvent.success ? 'completed' : 'failed')
+    if (doneStatus !== currentRun.status) return message
+  }
 
   if (agentEvent.type === 'started') {
     return {

@@ -265,6 +265,19 @@ export function getAssistantFinalContent(message: ChatMessage) {
   return hasDisplayableContent(message.content) ? message.content : timelineContent
 }
 
+export function isContentFullyRepresentedByTimeline(
+  content: string,
+  timeline: ChatAgentTimelineItem[]
+) {
+  const messageSegments = timeline
+    .filter(
+      (item): item is Extract<ChatAgentTimelineItem, { type: 'message' }> =>
+        item.type === 'message' && hasDisplayableContent(item.content)
+    )
+    .map((item) => item.content)
+  return messageSegments.length > 0 && messageSegments.join('') === content
+}
+
 export function getUserVisibleContent(message: ChatMessage) {
   if (message.role !== 'user' || !message.attachments?.length) return message.content
   return stripAttachmentSummary(message.content, message.attachments)

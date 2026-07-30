@@ -119,6 +119,50 @@ impl McpStartupActionTerminalOutcome {
             | Self::OutcomeUnknown => "error",
         }
     }
+
+    fn invocation_state(self) -> &'static str {
+        match self {
+            Self::PayloadUnavailable => "payload_unavailable",
+            Self::Expired => "expired",
+            Self::PolicyDenied => "policy_denied",
+            Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
+            Self::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+
+    fn invocation_outcome(self) -> &'static str {
+        match self {
+            Self::PayloadUnavailable => "payload_unavailable",
+            Self::Expired => "expired",
+            Self::PolicyDenied => "policy_denied",
+            Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
+            Self::OutcomeUnknown => "outcome_unknown",
+        }
+    }
+
+    fn dispatch_certainty(self) -> &'static str {
+        match self {
+            Self::OutcomeUnknown => "possibly_dispatched",
+            Self::PayloadUnavailable
+            | Self::Expired
+            | Self::PolicyDenied
+            | Self::Rejected
+            | Self::Cancelled => "definitely_not_dispatched",
+        }
+    }
+
+    fn invocation_is_error(self) -> Option<bool> {
+        match self {
+            Self::PayloadUnavailable => Some(true),
+            Self::Expired
+            | Self::PolicyDenied
+            | Self::Rejected
+            | Self::Cancelled
+            | Self::OutcomeUnknown => None,
+        }
+    }
 }
 
 fn valid_mcp_terminal_transition(
@@ -744,6 +788,34 @@ fn terminalize_mcp_action_in_transaction(
     if record.action_type != "mcp_tool_call" {
         return Err("MCP terminalization rejected a non-MCP action".to_string());
     }
+    let approval = match serde_json::from_str::<crate::AgentProposedAction>(&record.action_json)
+        .map_err(|_| "MCP terminalization rejected an invalid typed action".to_string())?
+    {
+        crate::AgentProposedAction::McpToolCall { approval } => approval,
+        _ => return Err("MCP terminalization rejected a non-MCP action body".to_string()),
+    };
+    let identity = &approval.identity;
+    let provenance = &identity.provenance;
+    let expected_storage_id = format!(
+        "v2:{}:{}:{}",
+        identity.run_id.len(),
+        identity.run_id,
+        identity.action_id
+    );
+    if record.action_id != expected_storage_id
+        || identity.run_id != record.run_id
+        || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
+        || record.tool_name != provenance.model_tool_name
+        || approval.call.id != identity.call_id
+        || approval.call.tool != provenance.model_tool_name
+        || approval.summary.server_id != provenance.server_id
+        || approval.summary.scope != provenance.scope
+        || approval.summary.raw_tool_name != provenance.raw_tool_name
+        || approval.summary.model_tool_name != provenance.model_tool_name
+        || !approval.summary.external
+    {
+        return Err("MCP terminalization rejected a drifted typed action identity".to_string());
+    }
 
     let terminal_status = request.outcome.pending_status();
     let run_status = request.outcome.run_status();
@@ -813,6 +885,27 @@ fn terminalize_mcp_action_in_transaction(
             Some(request.outcome.message_status()),
             run_status,
             updated_at,
+        )
+        .map_err(storage_error)?;
+        chat_repository::update_message_mcp_invocation_terminal_state(
+            transaction,
+            conversation_id,
+            message_id,
+            &chat_repository::McpInvocationTerminalProjection {
+                action_id: &identity.action_id,
+                invocation_id: &identity.invocation_id,
+                call_id: &identity.call_id,
+                server_id: &provenance.server_id,
+                server_display_name: &approval.summary.server_display_name,
+                scope: &provenance.scope,
+                raw_tool_name: &provenance.raw_tool_name,
+                model_tool_name: &provenance.model_tool_name,
+                state: request.outcome.invocation_state(),
+                dispatch_certainty: request.outcome.dispatch_certainty(),
+                outcome: request.outcome.invocation_outcome(),
+                is_error: request.outcome.invocation_is_error(),
+                error_code: request.outcome.error_code(),
+            },
         )
         .map_err(storage_error)?;
     }

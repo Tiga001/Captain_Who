@@ -1020,13 +1020,64 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         expired_run_id,
         &expired_action_id,
     ));
+    let live_action =
+        test_mcp_pending_action(live_run_id, &live_action_id, &live_invocation_id, now);
+    let AgentProposedAction::McpToolCall {
+        approval: live_approval,
+    } = &live_action
+    else {
+        unreachable!();
+    };
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "mcp-envelope-live-conversation".to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "MCP process-only recovery".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "mcp-envelope-live-assistant".to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: now,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some(
+                    json!({
+                        "runId": live_run_id,
+                        "status": "waiting_for_approval",
+                        "mcpInvocations": [{
+                            "actionId": live_action_id,
+                            "invocationId": live_invocation_id,
+                            "callId": live_approval.identity.call_id,
+                            "serverId": live_approval.identity.provenance.server_id,
+                            "serverDisplayName": live_approval.summary.server_display_name,
+                            "scope": live_approval.identity.provenance.scope,
+                            "rawToolName": live_approval.identity.provenance.raw_tool_name,
+                            "modelToolName": live_approval.identity.provenance.model_tool_name,
+                            "external": true,
+                            "state": "pending_approval",
+                            "dispatchCertainty": "definitely_not_dispatched",
+                            "outputTruncated": false
+                        }]
+                    })
+                    .to_string(),
+                ),
+                ui_state_json: None,
+            }],
+            created_at: now,
+            updated_at: now,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
 
     assert!(service
         .store_pending_action(
             live_run_id,
             "mcp-envelope-live-conversation",
             "mcp-envelope-live-assistant",
-            test_mcp_pending_action(live_run_id, &live_action_id, &live_invocation_id, now),
+            live_action,
             live_agent_input,
         )
         .unwrap());
@@ -1090,10 +1141,69 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         .load_mcp_approval_envelope(&orphan_invocation_id)
         .unwrap()
         .is_none());
+    let recovered = storage
+        .load_conversation("mcp-envelope-live-conversation")
+        .unwrap()
+        .unwrap();
+    let run: Value =
+        serde_json::from_str(recovered.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "failed");
+    assert_eq!(run["mcpInvocations"][0]["state"], "payload_unavailable");
+    assert_eq!(
+        run["mcpInvocations"][0]["dispatchCertainty"],
+        "definitely_not_dispatched"
+    );
+    assert_eq!(run["mcpInvocations"][0]["isError"], true);
+}
+
+#[test]
+fn mcp_startup_terminalization_rolls_back_when_the_typed_action_is_corrupt() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = StorageService::open(&database_path).unwrap();
+    let storage_id = "corrupt-mcp-terminalization";
+    storage
+        .store_pending_agent_action(AgentPendingActionRecord {
+            action_id: storage_id.to_string(),
+            run_id: "corrupt-mcp-run".to_string(),
+            conversation_id: None,
+            assistant_message_id: None,
+            action_type: "mcp_tool_call".to_string(),
+            tool_name: "mcp__corrupt__tool".to_string(),
+            tool_call_id: Some(format!("tc1_{}", "a".repeat(43))),
+            status: "executing".to_string(),
+            target_status: None,
+            action_json: "{invalid typed MCP action".to_string(),
+            agent_input_json: "{}".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+
+    let error = storage
+        .terminalize_mcp_agent_action_on_startup(
+            storage_id,
+            "executing",
+            McpStartupActionTerminalOutcome::OutcomeUnknown,
+            2,
+        )
+        .unwrap_err();
+    assert!(error.contains("invalid typed action"));
+    let (status, action_json): (String, String) = rusqlite::Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status, action_json FROM agent_pending_actions WHERE action_id = ?1",
+            [storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "executing");
+    assert_eq!(action_json, "{invalid typed MCP action");
 }
 
 #[test]
 fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing() {
+    const MCP_PROJECTION_CANARY: &str = "MCP_RECOVERY_PROJECTION_CANARY_DO_NOT_RETAIN";
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -1118,6 +1228,81 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
         let action_id = uuid::Uuid::new_v4().to_string();
         let invocation_id = uuid::Uuid::new_v4().to_string();
         let storage_id = pending_action_storage_id(&run_id, &action_id);
+        let conversation_id = format!("conversation-{label}");
+        let assistant_message_id = format!("assistant-{label}");
+        let action = test_mcp_pending_action(&run_id, &action_id, &invocation_id, now);
+        let AgentProposedAction::McpToolCall { approval } = &action else {
+            unreachable!();
+        };
+        let mut invocation_projection = json!({
+            "actionId": action_id,
+            "invocationId": invocation_id,
+            "callId": approval.identity.call_id,
+            "serverId": approval.identity.provenance.server_id,
+            "serverDisplayName": approval.summary.server_display_name,
+            "scope": approval.identity.provenance.scope,
+            "rawToolName": approval.identity.provenance.raw_tool_name,
+            "modelToolName": approval.identity.provenance.model_tool_name,
+            "external": true,
+            "state": if status == PendingActionStatus::Executing {
+                "running"
+            } else {
+                "pending_approval"
+            },
+            "dispatchCertainty": if status == PendingActionStatus::Executing {
+                "possibly_dispatched"
+            } else {
+                "definitely_not_dispatched"
+            },
+            "outputTruncated": false
+        });
+        if status == PendingActionStatus::Executing {
+            invocation_projection["rawArguments"] =
+                Value::String(MCP_PROJECTION_CANARY.to_string());
+            invocation_projection["rawResult"] = Value::String(MCP_PROJECTION_CANARY.to_string());
+        }
+        let invocation_projections = if status == PendingActionStatus::Executing {
+            let mut drifted = invocation_projection.clone();
+            drifted["modelToolName"] = Value::String("legacy_drifted_name".to_string());
+            vec![drifted, invocation_projection]
+        } else {
+            vec![invocation_projection]
+        };
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: conversation_id.clone(),
+                project_id: None,
+                model_id: Some("test-model".to_string()),
+                title: format!("MCP {label} recovery"),
+                messages: vec![ChatMessageRecord {
+                    id: assistant_message_id.clone(),
+                    role: "assistant".to_string(),
+                    content: "partial response".to_string(),
+                    created_at: now,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some(
+                        json!({
+                            "runId": run_id,
+                            "status": "running",
+                            "mcpInvocations": invocation_projections,
+                            "timeline": [{
+                                "id": format!("mcp-invocation-{invocation_id}"),
+                                "type": "mcp_tool_call",
+                                "invocationId": invocation_id
+                            }]
+                        })
+                        .to_string(),
+                    ),
+                    ui_state_json: None,
+                }],
+                created_at: now,
+                updated_at: now,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
         let mut input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "test-token",
@@ -1129,9 +1314,9 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
         assert!(service
             .store_pending_action(
                 &run_id,
-                &format!("conversation-{label}"),
-                &format!("assistant-{label}"),
-                test_mcp_pending_action(&run_id, &action_id, &invocation_id, now),
+                &conversation_id,
+                &assistant_message_id,
+                action,
                 input,
             )
             .unwrap());
@@ -1163,7 +1348,13 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
                     .unwrap();
             }
         }
-        identities.push((status, storage_id));
+        identities.push((
+            status,
+            storage_id,
+            conversation_id,
+            assistant_message_id,
+            invocation_id,
+        ));
     }
     drop(service);
 
@@ -1178,7 +1369,7 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
         .pending_actions
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    for (status, storage_id) in &identities {
+    for (status, storage_id, _, _, _) in &identities {
         match status {
             PendingActionStatus::Pending | PendingActionStatus::Approved => {
                 assert_eq!(in_memory[storage_id].snapshot.status, *status);
@@ -1204,8 +1395,8 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
     let connection = rusqlite::Connection::open(database_path).unwrap();
     let executing_id = identities
         .iter()
-        .find(|(status, _)| *status == PendingActionStatus::Executing)
-        .map(|(_, storage_id)| storage_id)
+        .find(|(status, _, _, _, _)| *status == PendingActionStatus::Executing)
+        .map(|(_, storage_id, _, _, _)| storage_id)
         .unwrap();
     let terminal: (String, String, String) = connection
         .query_row(
@@ -1220,6 +1411,45 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
     assert_eq!(terminal.0, "failed");
     assert_eq!(terminal.1, "{}");
     assert_eq!(terminal.2, "mcp.tool_outcome_unknown");
+
+    let (_, _, conversation_id, _, invocation_id) = identities
+        .iter()
+        .find(|(status, _, _, _, _)| *status == PendingActionStatus::Executing)
+        .unwrap();
+    let recovered = storage.load_conversation(conversation_id).unwrap().unwrap();
+    let run: Value =
+        serde_json::from_str(recovered.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "failed");
+    let invocations = run["mcpInvocations"].as_array().unwrap();
+    assert_eq!(
+        invocations
+            .iter()
+            .filter(|candidate| candidate["invocationId"] == invocation_id.as_str())
+            .count(),
+        1
+    );
+    let invocation = invocations
+        .iter()
+        .find(|candidate| candidate["invocationId"] == invocation_id.as_str())
+        .unwrap();
+    assert_eq!(invocation["state"], "outcome_unknown");
+    assert_eq!(invocation["outcome"], "outcome_unknown");
+    assert_eq!(invocation["dispatchCertainty"], "possibly_dispatched");
+    assert_eq!(invocation["errorCode"], "mcp.tool_outcome_unknown");
+    let persisted_run = serde_json::to_string(&run).unwrap();
+    assert!(!persisted_run.contains(MCP_PROJECTION_CANARY));
+    for forbidden in [
+        "rawArguments",
+        "rawResult",
+        "stderr",
+        "payloadRef",
+        "ciphertext",
+    ] {
+        assert!(
+            !invocation.as_object().unwrap().contains_key(forbidden),
+            "terminal MCP projection must remove {forbidden}"
+        );
+    }
 }
 
 #[test]

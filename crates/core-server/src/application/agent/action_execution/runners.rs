@@ -838,6 +838,13 @@ impl AgentService {
             // The invocation is never retried. Leaving the durable row in `executing` makes a
             // restart conservatively reconcile it as outcome-unknown.
             self.unregister_cancellation_if_current(&run_id, &cancellation);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id),
+                message: "The MCP Tool result could not be durably recorded. Its external outcome must be treated as unknown until restart reconciliation completes.".to_string(),
+                recoverable: false,
+                code: Some("mcp_result_persistence_failed".to_string()),
+                details: None,
+            }));
             return;
         }
 
@@ -1739,6 +1746,102 @@ impl AgentService {
         .await;
     }
 
+    fn finish_cancelled_action_continuation(
+        &self,
+        record: &PendingActionRecord,
+        notifications: &CoreServerNotificationSender,
+        cancellation_token: &AgentCancellationToken,
+    ) {
+        const REASON: &str =
+            "Agent run was cancelled after the approved tool result was durably recorded.";
+        const PERSISTENCE_ERROR: &str =
+            "The cancelled Agent run could not be durably finalized. It will be reconciled on restart.";
+        let run_id = &record.snapshot.run_id;
+
+        // Order the final assistant receipt against the same lifecycle marker used by destructive
+        // mutations. Keep the guard through the synchronous durable finalization so deletion
+        // cannot win after this check and then have this worker recreate message state.
+        let deletion_lifecycle = self
+            .deletion_lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if deletion_lifecycle.contains_input(&record.agent_input) {
+            self.discard_usage_context(run_id);
+            self.unregister_cancellation_if_current(run_id, cancellation_token);
+            return;
+        }
+
+        let snapshot = self
+            .trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned();
+        let mut output = AgentChatOutput {
+            content: String::new(),
+            status: AgentRunStatus::Cancelled,
+            run_id: run_id.clone(),
+            events: Vec::new(),
+            tool_definitions: Vec::new(),
+            todo: None,
+            usage: None,
+            finish_reason: Some(REASON.to_string()),
+            proposed_actions: Vec::new(),
+            conversation_turn_trace: None,
+        };
+        let persisted = match (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+            snapshot,
+        ) {
+            (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) => {
+                output.conversation_turn_trace = Some(cancelled_conversation_trace_from_snapshot(
+                    snapshot,
+                    run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    REASON,
+                ));
+                self.persist_final_assistant_output(
+                    conversation_id,
+                    assistant_message_id,
+                    &mut output,
+                )
+                .map(|()| self.invalidate_conversation_context_state(conversation_id))
+            }
+            _ => Err(
+                "cancelled action continuation is missing its durable conversation trace snapshot"
+                    .to_string(),
+            ),
+        };
+        drop(deletion_lifecycle);
+
+        self.unregister_cancellation_if_current(run_id, cancellation_token);
+        if let Err(error) = persisted {
+            self.discard_usage_context(run_id);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id.clone()),
+                message: PERSISTENCE_ERROR.to_string(),
+                recoverable: false,
+                code: Some("cancelled_run_persistence_failed".to_string()),
+                details: None,
+            }));
+            eprintln!("failed to persist cancelled action continuation: {error}");
+            return;
+        }
+
+        self.discard_trace_snapshot(run_id);
+        let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+            run_id: run_id.clone(),
+            success: false,
+            status: Some(AgentRunStatus::Cancelled),
+            content: None,
+            usage: output.usage,
+            finish_reason: output.finish_reason,
+            proposed_actions: Vec::new(),
+        }));
+    }
+
     pub(in crate::application::agent) async fn run_action_continuation(
         &self,
         record: PendingActionRecord,
@@ -1750,8 +1853,7 @@ impl AgentService {
         let run_id = record.snapshot.run_id.clone();
         let cancellation_token = existing_cancellation_token.unwrap_or_default();
         if cancellation_token.is_cancelled() {
-            self.discard_usage_context(&run_id);
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            self.finish_cancelled_action_continuation(&record, &notifications, &cancellation_token);
             return;
         }
         if self.is_agent_input_scope_deleting(&record.agent_input) {

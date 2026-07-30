@@ -386,4 +386,76 @@ describe('MCP lifecycle Renderer projection', () => {
   it('marks lifecycle events as durable conversation changes', () => {
     expect(shouldTouchConversationForAgentEvent(lifecycle('running'))).toBe(true)
   })
+
+  it('settles a dispatched MCP invocation as outcome unknown when its parent run stops', () => {
+    const running = applyAgentEventToChatMessage(message(), lifecycle('running'))
+    const stopped = applyAgentEventToChatMessage(running, {
+      type: 'done',
+      runId: RUN_ID,
+      success: false,
+      status: 'cancelled',
+      proposedActions: []
+    })
+
+    expect(stopped.status).toBe('sent')
+    expect(stopped.agentRun?.status).toBe('cancelled')
+    expect(stopped.agentRun?.mcpInvocations?.[0]).toMatchObject({
+      state: 'outcome_unknown',
+      outcome: 'outcome_unknown',
+      dispatchCertainty: 'possibly_dispatched',
+      errorCode: 'mcp.tool_outcome_unknown'
+    })
+  })
+
+  it('conservatively settles a stale pre-dispatch projection when its parent run stops', () => {
+    const waiting = applyAgentEventToChatMessage(message(), {
+      type: 'approval_required',
+      runId: RUN_ID,
+      action: { type: 'mcp_tool_call', approval: approval() }
+    })
+    const stopped = applyAgentEventToChatMessage(waiting, {
+      type: 'done',
+      runId: RUN_ID,
+      success: false,
+      status: 'cancelled',
+      proposedActions: []
+    })
+
+    expect(stopped.agentRun?.mcpInvocations?.[0]).toMatchObject({
+      state: 'outcome_unknown',
+      outcome: 'outcome_unknown',
+      dispatchCertainty: 'possibly_dispatched',
+      errorCode: 'mcp.tool_outcome_unknown'
+    })
+  })
+
+  it('never lets late buffered activity resurrect a terminal parent run', () => {
+    const stopped = applyAgentEventToChatMessage(message(), {
+      type: 'done',
+      runId: RUN_ID,
+      success: false,
+      status: 'cancelled',
+      proposedActions: []
+    })
+    const lateDelta = applyAgentEventToChatMessage(stopped, {
+      type: 'message_delta',
+      runId: RUN_ID,
+      streamId: 'late-stream',
+      delta: SECRET_CANARY
+    })
+    const lateRunning = applyAgentEventToChatMessage(lateDelta, {
+      type: 'state',
+      runId: RUN_ID,
+      state: {
+        status: 'running',
+        activeRunId: RUN_ID,
+        lastError: null,
+        updatedAt: 20
+      }
+    })
+
+    expect(lateRunning).toEqual(stopped)
+    expect(JSON.stringify(lateRunning)).not.toContain(SECRET_CANARY)
+    expect(lateRunning.agentRun?.status).toBe('cancelled')
+  })
 })

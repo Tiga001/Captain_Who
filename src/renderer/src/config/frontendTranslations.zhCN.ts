@@ -710,6 +710,7 @@ export const zhCNTranslations = {
   'chat.queueMessage': '加入消息队列',
   'chat.stop': '停止生成',
   'chat.stopFailed': '无法停止当前运行，请稍后重试。',
+  'chat.stopStatusUnknown': '无法确认当前运行是否已停止；外部操作可能已经发生，请检查实际结果。',
   'chat.guidanceQueue': '待处理消息队列',
   'chat.reorderQueuedMessage': '拖拽或使用方向键调整消息顺序',
   'chat.attachmentOnlyMessage': '附件消息',
