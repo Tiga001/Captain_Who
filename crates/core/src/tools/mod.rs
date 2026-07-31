@@ -99,7 +99,8 @@ use limits::*;
 use mcp::McpAgentTool;
 pub use mcp::{
     mcp_normalized_input_schema_identity, mcp_tool_arguments_digest, mcp_tool_invocation_event,
-    mcp_tool_result_from_approved_invocation, mcp_tool_result_persistence_projection,
+    mcp_tool_result_from_approved_invocation, mcp_tool_result_from_rejected_approval,
+    mcp_tool_result_model_projection, mcp_tool_result_persistence_projection,
     validate_mcp_approval_arguments, McpAgentToolAnnotations, McpAgentToolDescriptor,
     McpApprovedToolInvocation, McpNormalizedInputSchemaIdentity, McpOmittedContentKind,
     McpRuntimeProjectionLimits, McpToolApprovalRequest, McpToolCatalogContext, McpToolContentBlock,
@@ -357,6 +358,10 @@ impl AgentToolHandler {
         self.tool().model_call_projection(call)
     }
 
+    fn checkpoint_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tool().checkpoint_call_projection(call)
+    }
+
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         self.tool().trace_projection(result)
     }
@@ -605,12 +610,22 @@ impl ToolRegistry {
             .unwrap_or_else(|| unknown_tool_call_projection(call))
     }
 
-    /// Produces the security projection retained in the current model timeline and resumable
-    /// checkpoint. Execution always receives the original call.
+    /// Produces the clone retained in the current in-memory model timeline.
+    ///
+    /// This projection is ephemeral and must not be reused as a persistence projection.
     pub(crate) fn model_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
         self.tools
             .get(&call.tool)
             .map(|tool| tool.model_call_projection(call))
+            .unwrap_or_else(|| unknown_tool_call_projection(call))
+    }
+
+    /// Produces the durable-safe clone retained in resumable checkpoints and
+    /// persisted model-context history.
+    pub(crate) fn checkpoint_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tools
+            .get(&call.tool)
+            .map(|tool| tool.checkpoint_call_projection(call))
             .unwrap_or_else(|| unknown_tool_call_projection(call))
     }
 
@@ -1147,11 +1162,21 @@ pub(crate) trait AgentTool: Send + Sync {
         self.trace_call_projection(call)
     }
 
-    /// Returns the clone retained in current-turn model context and approval checkpoints.
+    /// Returns the clone retained in the current in-memory model context.
     ///
-    /// This is deliberately separate from execution arguments. External tools can redact
-    /// credential-shaped values without changing what was sent to the selected implementation.
+    /// The live model must be able to inspect the arguments it generated when a
+    /// Tool returns a correctable error. Durable storage uses the separate
+    /// checkpoint projection below.
     fn model_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        call.clone()
+    }
+
+    /// Returns the durable-safe clone retained in checkpoints and persisted
+    /// model-context history.
+    ///
+    /// By default this matches the live projection. Tools whose arguments
+    /// cannot be persisted must override this hook explicitly.
+    fn checkpoint_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
         call.clone()
     }
 
@@ -1704,6 +1729,10 @@ mod tests {
         assert_eq!(ordinary_event.args, ordinary_trace.args);
         assert_eq!(ordinary_event.reason, ordinary_trace.reason);
         assert_eq!(
+            registry.checkpoint_call_projection(&ordinary_call),
+            ordinary_call
+        );
+        assert_eq!(
             ordinary_event.approval_status,
             ordinary_trace.approval_status
         );
@@ -1724,6 +1753,7 @@ mod tests {
             registry.trace_call_projection(&unknown_call),
             registry.event_call_projection(&unknown_call),
             registry.model_call_projection(&unknown_call),
+            registry.checkpoint_call_projection(&unknown_call),
         ] {
             assert_eq!(projection.args, json!({}));
             assert_eq!(projection.reason, None);

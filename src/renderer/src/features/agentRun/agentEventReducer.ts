@@ -34,6 +34,7 @@ import {
   upsertWebSearchActivityFromResult
 } from '../chat/agentWebSearch'
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
+import { toSafeMcpDisplayText } from '../mcp/mcpSafeDisplay'
 import { getActionToolCall } from './actionProjection'
 import {
   createRejectedToolResult,
@@ -55,6 +56,13 @@ import {
 } from './messageTimeline'
 
 const MAX_LIVE_COMMAND_OUTPUT_CHARS = 256 * 1024
+const MAX_MCP_REJECTION_REASON_CODE_POINTS = 512
+
+function projectMcpRejectionReason(message: string | undefined): string | undefined {
+  if (!message) return undefined
+  const projected = toSafeMcpDisplayText(message, MAX_MCP_REJECTION_REASON_CODE_POINTS).trim()
+  return projected || undefined
+}
 
 function createAgentRun(
   runId: string | null,
@@ -338,6 +346,7 @@ function chooseMcpInvocationUpdate(
           outcome: current.outcome,
           isError: current.isError,
           errorCode: current.errorCode,
+          rejectionReason: current.rejectionReason,
           durationMs: current.durationMs,
           outputTruncated: current.outputTruncated
         }
@@ -359,6 +368,7 @@ function chooseMcpInvocationUpdate(
     outcome: next.outcome,
     isError: next.isError,
     errorCode: next.errorCode,
+    rejectionReason: currentWithScope.rejectionReason ?? next.rejectionReason,
     durationMs: next.durationMs,
     outputTruncated: next.outputTruncated
   }
@@ -1285,6 +1295,21 @@ export function applyAgentActionDecisionToChatMessage(
   const rejectedToolResult =
     decision === 'rejected' ? createRejectedToolResult(action, rejectionMessage) : null
   const mcpCallId = action.type === 'mcp_tool_call' ? action.approval.identity.callId : undefined
+  const mcpInvocationId =
+    action.type === 'mcp_tool_call' ? action.approval.identity.invocationId : undefined
+  const rejectionReason =
+    decision === 'rejected' ? projectMcpRejectionReason(rejectionMessage) : undefined
+  const mcpInvocations =
+    mcpInvocationId && decision === 'rejected'
+      ? (currentRun.mcpInvocations ?? []).map((invocation) =>
+          invocation.invocationId === mcpInvocationId
+            ? {
+                ...invocation,
+                ...(rejectionReason === undefined ? {} : { rejectionReason })
+              }
+            : invocation
+        )
+      : (currentRun.mcpInvocations ?? [])
   const runWithDecision = normalizeAgentRunToolActivities({
     ...currentRun,
     status: 'running',
@@ -1297,6 +1322,7 @@ export function applyAgentActionDecisionToChatMessage(
         : currentRun.toolResults,
     diffs: updateDiffApprovalStatus(currentRun.diffs, action, approvalStatus),
     fileDrafts: updateFileDraftApprovalStatus(currentRun.fileDrafts ?? [], action, approvalStatus),
+    mcpInvocations,
     timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
       (item) => item.type !== 'tool_call' || item.callId !== mcpCallId
     )
@@ -1311,7 +1337,8 @@ export function applyAgentActionDecisionToChatMessage(
 
 export function applyAgentActionExecutionToChatMessage(
   message: ChatMessage,
-  execution: AgentActionExecutionOutput
+  execution: AgentActionExecutionOutput,
+  mcpRejectionMessage?: string
 ): ChatMessage {
   const messageWithAgentOutput = applyAgentOutputToChatMessage(message, execution.agentOutput)
   const outputRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
@@ -1335,6 +1362,8 @@ export function applyAgentActionExecutionToChatMessage(
       : undefined)
 
   if (execution.actionType === 'mcp_tool_call' || mcpCallId) {
+    const rejectionReason =
+      execution.status === 'rejected' ? projectMcpRejectionReason(mcpRejectionMessage) : undefined
     const nextRun = normalizeAgentRunToolActivities({
       ...currentRun,
       approvals: removeAgentAction(currentRun.approvals, execution.actionId),
@@ -1344,6 +1373,11 @@ export function applyAgentActionExecutionToChatMessage(
       toolResults: mcpCallId
         ? currentRun.toolResults.filter((result) => result.callId !== mcpCallId)
         : currentRun.toolResults,
+      mcpInvocations: (currentRun.mcpInvocations ?? []).map((invocation) =>
+        invocation.actionId === execution.actionId && rejectionReason
+          ? { ...invocation, rejectionReason }
+          : invocation
+      ),
       timeline: removeTransientToolTimelineItems(currentRun.timeline).filter(
         (item) => item.type !== 'tool_call' || item.callId !== mcpCallId
       )

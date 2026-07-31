@@ -742,6 +742,50 @@ impl AgentService {
         completed_at: i64,
         notifications: &CoreServerNotificationSender,
     ) -> Result<(), String> {
+        self.commit_audited_result_trace_with_continuation_for_decision(
+            record,
+            agent_input,
+            "approved",
+            target_status,
+            command_result,
+            completed_at,
+            notifications,
+        )
+    }
+
+    /// Commits a user's explicit MCP rejection before the external dispatch boundary.
+    ///
+    /// `agent_input` must contain the durable MCP projection, not the live feedback-bearing
+    /// result. The live continuation is retained only in process for the next model request.
+    pub(super) fn commit_rejected_mcp_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        completed_at: i64,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
+        self.commit_audited_result_trace_with_continuation_for_decision(
+            record,
+            agent_input,
+            "rejected",
+            PendingActionStatus::Rejected,
+            None,
+            completed_at,
+            notifications,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn commit_audited_result_trace_with_continuation_for_decision(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        decision: &str,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        completed_at: i64,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
         let checkpoint = record
             .agent_input
             .resume_checkpoint
@@ -780,15 +824,25 @@ impl AgentService {
             self.context_window_tool_projection(&record.agent_input, skill_resources)?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let model_context_items = snapshot.committed_prefix().model_context_items;
-        let trace_changed = self.persist_manual_audited_result_trace(
-            record,
-            target_status,
-            command_result,
-            &continuation.result,
-            &trace,
-            &model_context_items,
-            completed_at,
-        )?;
+        let trace_changed = if decision == "rejected" {
+            self.persist_rejected_mcp_audited_result_trace(
+                record,
+                &continuation.result,
+                &trace,
+                &model_context_items,
+                completed_at,
+            )?
+        } else {
+            self.persist_manual_audited_result_trace(
+                record,
+                target_status,
+                command_result,
+                &continuation.result,
+                &trace,
+                &model_context_items,
+                completed_at,
+            )?
+        };
 
         self.trace_snapshots
             .lock()
@@ -851,6 +905,46 @@ impl AgentService {
         command_result: Option<&AgentCommandExecutionResult>,
         completed_at: i64,
     ) -> Result<AgentPendingActionSettlementInspection, String> {
+        self.inspect_audited_result_trace_with_continuation_for_decision(
+            record,
+            agent_input,
+            "approved",
+            target_status,
+            command_result,
+            completed_at,
+        )
+    }
+
+    /// Reconciles an explicit pre-dispatch MCP rejection whose durable commit returned an error.
+    ///
+    /// The same `completed_at` used by the commit attempt is required so the candidate audit and
+    /// trace identity remain byte-for-byte authoritative.
+    pub(super) fn inspect_rejected_mcp_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
+        self.inspect_audited_result_trace_with_continuation_for_decision(
+            record,
+            agent_input,
+            "rejected",
+            PendingActionStatus::Rejected,
+            None,
+            completed_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inspect_audited_result_trace_with_continuation_for_decision(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        decision: &str,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
         let checkpoint = record
             .agent_input
             .resume_checkpoint
@@ -881,15 +975,25 @@ impl AgentService {
         )?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let model_context_items = snapshot.committed_prefix().model_context_items;
-        let outcome = self.inspect_manual_audited_result_trace(
-            record,
-            target_status,
-            command_result,
-            &continuation.result,
-            &trace,
-            &model_context_items,
-            completed_at,
-        )?;
+        let outcome = if decision == "rejected" {
+            self.inspect_rejected_mcp_audited_result_trace(
+                record,
+                &continuation.result,
+                &trace,
+                &model_context_items,
+                completed_at,
+            )?
+        } else {
+            self.inspect_manual_audited_result_trace(
+                record,
+                target_status,
+                command_result,
+                &continuation.result,
+                &trace,
+                &model_context_items,
+                completed_at,
+            )?
+        };
         match outcome {
             AgentPendingActionSettlementInspection::CommittedAtBoundary => {
                 self.trace_snapshots

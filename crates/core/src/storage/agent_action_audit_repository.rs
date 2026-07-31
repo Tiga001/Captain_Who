@@ -249,7 +249,7 @@ pub fn settle_manual_terminal_action_audit(
 
     if matches!(
         existing.status.as_str(),
-        "completed" | "failed" | "cancelled"
+        "completed" | "failed" | "cancelled" | "rejected"
     ) {
         return Ok(if has_same_manual_terminal_result(&existing, terminal) {
             ManualTerminalActionAuditOutcome::Idempotent
@@ -280,16 +280,23 @@ pub fn settle_manual_terminal_action_audit(
         });
     }
 
+    let terminal_decided_at = terminal.decided_at.unwrap_or(fallback_decided_at);
     let changed = connection.execute(
         "
         UPDATE agent_action_audit
-        SET decision = COALESCE(decision, ?2),
+        SET decision = CASE
+                WHEN ?3 = 'rejected' THEN ?2
+                ELSE COALESCE(decision, ?2)
+            END,
             status = ?3,
             patch_result_json = ?4,
             command_result_json = ?5,
             tool_result_json = ?6,
             error = ?7,
-            decided_at = COALESCE(decided_at, ?8),
+            decided_at = CASE
+                WHEN ?3 = 'rejected' THEN ?8
+                ELSE COALESCE(decided_at, ?8)
+            END,
             completed_at = ?9,
             blocked_reason = ?10,
             decision_source = 'manual'
@@ -304,7 +311,7 @@ pub fn settle_manual_terminal_action_audit(
             &terminal.command_result_json,
             &terminal.tool_result_json,
             &terminal.error,
-            fallback_decided_at,
+            terminal_decided_at,
             terminal.completed_at,
             &terminal.blocked_reason,
         ],
@@ -408,6 +415,9 @@ fn has_same_manual_terminal_result(
     candidate: &AgentActionAuditRecord,
 ) -> bool {
     existing.status == candidate.status
+        && existing.decision == candidate.decision
+        && existing.decision_source == candidate.decision_source
+        && (candidate.status != "rejected" || existing.decided_at == candidate.decided_at)
         && existing.patch_result_json == candidate.patch_result_json
         && existing.command_result_json == candidate.command_result_json
         && existing.tool_result_json == candidate.tool_result_json
@@ -850,6 +860,65 @@ mod tests {
                 tool_result_json: Some(r#"{"ok":true}"#.to_string()),
             }
         );
+    }
+
+    #[test]
+    fn recovered_approved_action_can_record_a_later_explicit_rejection() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let approved = AgentActionAuditRecord {
+            action_id: "mcp-action-1".to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "mcp_tool_call".to_string(),
+            tool_name: "mcp__fixture__echo".to_string(),
+            decision: Some("approved".to_string()),
+            status: "approved".to_string(),
+            action_json: r#"{"type":"mcp_tool_call"}"#.to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: None,
+            error: None,
+            created_at: 1,
+            decided_at: Some(10),
+            completed_at: None,
+            effective_permissions_json: Some(r#"{"write":"workspace_only"}"#.to_string()),
+            path_scope: None,
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("manual".to_string()),
+        };
+        upsert_action_audit_record(&connection, &approved).unwrap();
+
+        let mut rejected = approved.clone();
+        rejected.decision = Some("rejected".to_string());
+        rejected.status = "rejected".to_string();
+        rejected.tool_result_json = Some(r#"{"status":"rejected"}"#.to_string());
+        rejected.decided_at = Some(20);
+        rejected.completed_at = Some(20);
+        assert_eq!(
+            settle_manual_terminal_action_audit(&connection, &rejected, 20).unwrap(),
+            ManualTerminalActionAuditOutcome::Advanced
+        );
+
+        let persisted = load_action_audit_record(&connection, &rejected.action_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, "rejected");
+        assert_eq!(persisted.decision.as_deref(), Some("rejected"));
+        assert_eq!(persisted.decided_at, Some(20));
+        assert_eq!(
+            settle_manual_terminal_action_audit(&connection, &rejected, 20).unwrap(),
+            ManualTerminalActionAuditOutcome::Idempotent
+        );
+
+        let mut contradictory = rejected.clone();
+        contradictory.decision = Some("approved".to_string());
+        assert!(matches!(
+            settle_manual_terminal_action_audit(&connection, &contradictory, 20).unwrap(),
+            ManualTerminalActionAuditOutcome::Conflict { .. }
+        ));
     }
 
     #[test]

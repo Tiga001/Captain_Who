@@ -887,7 +887,7 @@ fn test_mcp_envelope(
     }
 }
 
-fn assert_recovered_approved_terminal_decision(cancelled: bool) {
+fn assert_recovered_approved_cancellation() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -901,11 +901,7 @@ fn assert_recovered_approved_terminal_decision(cancelled: bool) {
     );
     let service = AgentService::new(Arc::clone(&storage));
     let now = mycopilot_core::storage::now_ms();
-    let run_id = if cancelled {
-        "recovered-approved-cancel-run"
-    } else {
-        "recovered-approved-reject-run"
-    };
+    let run_id = "recovered-approved-cancel-run";
     let action_id = uuid::Uuid::new_v4().to_string();
     let invocation_id = uuid::Uuid::new_v4().to_string();
     let storage_id = pending_action_storage_id(run_id, &action_id);
@@ -954,24 +950,8 @@ fn assert_recovered_approved_terminal_decision(cancelled: bool) {
     assert_eq!(restarted.reconcile_startup_mcp_actions().unwrap(), 0);
     assert_eq!(restarted.list_pending_actions().len(), 1);
 
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    if cancelled {
-        assert!(restarted.cancel_action(run_id, &action_id).unwrap());
-    } else {
-        let output = restarted
-            .reject_action(run_id, &action_id, None, notifications.clone())
-            .unwrap();
-        assert_eq!(output.status, "rejected");
-        assert_eq!(output.agent_output.status, AgentRunStatus::Failed);
-        assert!(
-            output.tool_result.is_none(),
-            "recovered MCP rejection is represented by its typed lifecycle, not generic ToolResult"
-        );
-        let lifecycle = receiver.try_recv().expect("rejection lifecycle event");
-        let rendered = lifecycle.to_string();
-        assert!(rendered.contains("definitely_not_dispatched"));
-        assert!(rendered.contains("mcp.approval_rejected"));
-    }
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    assert!(restarted.cancel_action(run_id, &action_id).unwrap());
 
     assert!(restarted.list_pending_actions().is_empty());
     assert!(restarted
@@ -1012,11 +992,7 @@ fn assert_recovered_approved_terminal_decision(cancelled: bool) {
             },
         )
         .unwrap();
-    let (expected_status, expected_error) = if cancelled {
-        ("cancelled", "mcp.approval_cancelled")
-    } else {
-        ("rejected", "mcp.approval_rejected")
-    };
+    let (expected_status, expected_error) = ("cancelled", "mcp.approval_cancelled");
     assert_eq!(terminal.0, expected_status);
     assert_eq!(terminal.1.as_deref(), Some(expected_status));
     assert_eq!(terminal.2, "{}");
@@ -1025,13 +1001,8 @@ fn assert_recovered_approved_terminal_decision(cancelled: bool) {
 }
 
 #[test]
-fn recovered_approved_mcp_can_be_rejected_with_a_definitely_not_dispatched_terminal_cas() {
-    assert_recovered_approved_terminal_decision(false);
-}
-
-#[test]
 fn recovered_approved_mcp_can_be_cancelled_with_a_definitely_not_dispatched_terminal_cas() {
-    assert_recovered_approved_terminal_decision(true);
+    assert_recovered_approved_cancellation();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

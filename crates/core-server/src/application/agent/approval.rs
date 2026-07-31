@@ -1,55 +1,5 @@
 use super::*;
 
-#[derive(Clone, Copy)]
-enum RecoveredMcpApprovalDecision {
-    Rejected,
-    Cancelled,
-}
-
-impl RecoveredMcpApprovalDecision {
-    fn terminal_outcome(self) -> McpStartupActionTerminalOutcome {
-        match self {
-            Self::Rejected => McpStartupActionTerminalOutcome::Rejected,
-            Self::Cancelled => McpStartupActionTerminalOutcome::Cancelled,
-        }
-    }
-
-    fn pending_status(self) -> PendingActionStatus {
-        match self {
-            Self::Rejected => PendingActionStatus::Rejected,
-            Self::Cancelled => PendingActionStatus::Cancelled,
-        }
-    }
-
-    fn invocation_state(self) -> AgentMcpToolInvocationState {
-        match self {
-            Self::Rejected => AgentMcpToolInvocationState::Rejected,
-            Self::Cancelled => AgentMcpToolInvocationState::Cancelled,
-        }
-    }
-
-    fn invocation_outcome(self) -> AgentMcpToolInvocationOutcome {
-        match self {
-            Self::Rejected => AgentMcpToolInvocationOutcome::Rejected,
-            Self::Cancelled => AgentMcpToolInvocationOutcome::Cancelled,
-        }
-    }
-
-    fn error_code(self) -> &'static str {
-        match self {
-            Self::Rejected => "mcp.approval_rejected",
-            Self::Cancelled => "mcp.approval_cancelled",
-        }
-    }
-
-    fn run_status(self) -> AgentRunStatus {
-        match self {
-            Self::Rejected => AgentRunStatus::Failed,
-            Self::Cancelled => AgentRunStatus::Cancelled,
-        }
-    }
-}
-
 pub(super) fn publish_inline_file_write_tool_result(
     notifications: &CoreServerNotificationSender,
     run_id: &str,
@@ -158,14 +108,6 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
-        if let Some(output) = self.try_terminalize_recovered_approved_mcp_action(
-            run_id,
-            action_id,
-            RecoveredMcpApprovalDecision::Rejected,
-            Some(&notifications),
-        )? {
-            return Ok(output);
-        }
         self.queue_action_continuation(
             run_id,
             action_id,
@@ -177,12 +119,7 @@ impl AgentService {
 
     pub fn cancel_action(&self, run_id: &str, action_id: &str) -> Result<bool, String> {
         if self
-            .try_terminalize_recovered_approved_mcp_action(
-                run_id,
-                action_id,
-                RecoveredMcpApprovalDecision::Cancelled,
-                None,
-            )?
+            .try_cancel_recovered_approved_mcp_action(run_id, action_id)?
             .is_some()
         {
             return Ok(true);
@@ -301,19 +238,16 @@ impl AgentService {
         Ok(true)
     }
 
-    /// Atomically settles an MCP approval which was durable `approved` across a process restart
+    /// Atomically cancels an MCP approval which was durable `approved` across a process restart
     /// but has not crossed the `executing` dispatch boundary.
     ///
     /// The pending-action mutex serializes decisions inside this Host, while the SQLite status CAS
-    /// is authoritative across stale/restarted Host instances. The same transaction scrubs the
-    /// frozen action/input projection and durable envelope, so approve/reject/cancel have exactly
-    /// one winner and a losing decision can never recover the arguments.
-    fn try_terminalize_recovered_approved_mcp_action(
+    /// is authoritative across stale/restarted Host instances. Rejection takes the normal
+    /// ToolResult continuation path; cancellation intentionally terminates the run here.
+    fn try_cancel_recovered_approved_mcp_action(
         &self,
         run_id: &str,
         action_id: &str,
-        decision: RecoveredMcpApprovalDecision,
-        notifications: Option<&CoreServerNotificationSender>,
     ) -> Result<Option<AgentActionExecutionOutput>, String> {
         let deletion_lifecycle = self
             .deletion_lifecycle
@@ -353,7 +287,7 @@ impl AgentService {
             .terminalize_mcp_agent_action_on_startup(
                 &storage_id,
                 pending_status_label(PendingActionStatus::Approved),
-                decision.terminal_outcome(),
+                McpStartupActionTerminalOutcome::Cancelled,
                 self.mcp_approval_now_ms(),
             )
             .map_err(|_| "Recovered MCP approval could not be terminalized safely.".to_string())?;
@@ -372,35 +306,11 @@ impl AgentService {
         drop(deletion_lifecycle);
 
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
-        let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
-            unreachable!("recovered MCP action was checked before its durable CAS");
-        };
-        if let Some(notifications) = notifications {
-            if let Ok(invocation) = mcp_tool_invocation_event(
-                approval,
-                McpToolInvocationEventUpdate {
-                    state: decision.invocation_state(),
-                    dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
-                    outcome: Some(decision.invocation_outcome()),
-                    is_error: None,
-                    error_code: Some(decision.error_code()),
-                    duration_ms: None,
-                    output_truncated: false,
-                },
-            ) {
-                let _ = notifications.send(agent_event_notification(
-                    AgentEvent::McpToolInvocationStateChanged {
-                        run_id: record.snapshot.run_id.clone(),
-                        invocation,
-                    },
-                ));
-            }
-        }
         Ok(Some(AgentActionExecutionOutput {
             action_id: record.snapshot.action_id,
             action_type: record.snapshot.action_type,
             tool_name: record.snapshot.tool_name,
-            status: pending_status_label(decision.pending_status()).to_string(),
+            status: pending_status_label(PendingActionStatus::Cancelled).to_string(),
             patch_result: None,
             file_write_result: None,
             command_result: None,
@@ -410,7 +320,7 @@ impl AgentService {
             tool_result: None,
             agent_output: AgentChatOutput {
                 content: String::new(),
-                status: decision.run_status(),
+                status: AgentRunStatus::Cancelled,
                 run_id: record.snapshot.run_id,
                 events: Vec::new(),
                 tool_definitions: Vec::new(),
@@ -496,6 +406,95 @@ impl AgentService {
         Ok(())
     }
 
+    /// Commits the exact pre-dispatch rejection receipt and resolves a commit-unknown response
+    /// from durable state. Every retry and inspection uses the same timestamp so the audit and
+    /// trace identity remain byte-for-byte stable.
+    fn commit_rejected_mcp_receipt(
+        &self,
+        record: &PendingActionRecord,
+        persisted_agent_input: &AgentChatInput,
+        completed_at: i64,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
+        for _ in 0..2 {
+            if self
+                .commit_rejected_mcp_result_trace_with_continuation(
+                    record,
+                    persisted_agent_input,
+                    completed_at,
+                    notifications,
+                )
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
+        match self.inspect_rejected_mcp_result_trace_with_continuation(
+            record,
+            persisted_agent_input,
+            completed_at,
+        ) {
+            Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => Ok(()),
+            Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => Err(
+                "MCP rejection receipt was already advanced by another continuation; duplicate continuation was stopped."
+                    .to_string(),
+            ),
+            Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => Err(
+                "MCP rejection receipt was not committed; continuation was stopped.".to_string(),
+            ),
+            Ok(AgentPendingActionSettlementInspection::Diverged { component, reason }) => Err(
+                format!(
+                    "MCP rejection receipt diverged at {component}; continuation was stopped: {reason}"
+                ),
+            ),
+            Err(_) => Err(
+                "MCP rejection receipt could not be inspected safely; continuation was stopped."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Elects the single Host continuation after the durable rejection receipt exists.
+    ///
+    /// The receipt transaction already owns `target_status=rejected`. This final status CAS is
+    /// therefore both the same-process single-flight guard and the cross-Host arbitration point:
+    /// only its winner may clear the payload, publish lifecycle, or spawn a model continuation.
+    fn claim_rejected_mcp_continuation(&self, record: &PendingActionRecord) -> Result<(), String> {
+        let mut pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let pending = pending_actions
+            .get_mut(&record.storage_id)
+            .ok_or_else(|| "MCP rejection no longer has a pending action.".to_string())?;
+        let current = pending.snapshot.status;
+        let is_recovered_approved = current == PendingActionStatus::Approved
+            && self
+                .startup_recoverable_mcp_approvals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains(&record.storage_id);
+        if current != PendingActionStatus::Pending && !is_recovered_approved {
+            return Err(
+                "MCP rejection was already settled by another approval decision.".to_string(),
+            );
+        }
+        self.persist_pending_status(pending, current, PendingActionStatus::Rejected)
+            .map_err(|_| {
+                "MCP rejection lost its durable status arbitration; continuation was stopped."
+                    .to_string()
+            })?;
+        pending.snapshot.status = PendingActionStatus::Rejected;
+        if is_recovered_approved {
+            self.startup_recoverable_mcp_approvals
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&record.storage_id);
+        }
+        Ok(())
+    }
+
     pub(super) fn queue_action_continuation(
         &self,
         run_id: &str,
@@ -537,7 +536,21 @@ impl AgentService {
             let record = pending_actions
                 .get_mut(&storage_id)
                 .expect("resolved pending action exists");
-            if record.snapshot.status != PendingActionStatus::Pending {
+            let is_rejected_mcp = decision_status == AgentApprovalDecisionStatus::Rejected
+                && matches!(
+                    record.snapshot.action,
+                    AgentProposedAction::McpToolCall { .. }
+                );
+            let is_recovered_approved_mcp_rejection = is_rejected_mcp
+                && record.snapshot.status == PendingActionStatus::Approved
+                && self
+                    .startup_recoverable_mcp_approvals
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .contains(&storage_id);
+            if record.snapshot.status != PendingActionStatus::Pending
+                && !is_recovered_approved_mcp_rejection
+            {
                 return Err(format!("待审批操作已经处理：{action_id}"));
             }
             if deletion_lifecycle
@@ -612,7 +625,7 @@ impl AgentService {
                     &record.storage_id,
                 )
             });
-            let inline_continuation_guard = (!is_approved_process).then(|| {
+            let inline_continuation_guard = (!is_approved_process && !is_rejected_mcp).then(|| {
                 // Synchronous decisions still queue an async model continuation. Register its
                 // pre-spawn lease under the lifecycle lock so message deletion cannot pass
                 // between durable action settlement and worker startup.
@@ -621,11 +634,23 @@ impl AgentService {
             });
             let execution_status = if is_approved_process || is_approved_materialization {
                 PendingActionStatus::Approved
+            } else if is_rejected_mcp {
+                // Rejection is definitely pre-dispatch. Keep either the original `pending`
+                // state or a startup-recovered `approved` state until the paired audit,
+                // target and ToolResult receipt commit atomically. `executing` remains reserved
+                // for the conservative external-dispatch boundary.
+                record.snapshot.status
             } else {
                 PendingActionStatus::Executing
             };
-            self.persist_pending_status(record, PendingActionStatus::Pending, execution_status)?;
-            record.snapshot.status = execution_status;
+            if execution_status != record.snapshot.status {
+                self.persist_pending_status(
+                    record,
+                    PendingActionStatus::Pending,
+                    execution_status,
+                )?;
+                record.snapshot.status = execution_status;
+            }
             (
                 record.clone(),
                 call,
@@ -635,14 +660,21 @@ impl AgentService {
             )
         };
         let mut approved_materialization_guard = approved_materialization_guard;
+        let mut inline_continuation_guard = inline_continuation_guard;
 
         let mut call = call;
-        call.approval_status = match decision_status {
-            AgentApprovalDecisionStatus::Approved => AgentApprovalStatus::Approved,
-            AgentApprovalDecisionStatus::Rejected => AgentApprovalStatus::Rejected,
-        };
+        let is_mcp_action = matches!(
+            record.snapshot.action,
+            AgentProposedAction::McpToolCall { .. }
+        );
+        if !is_mcp_action {
+            call.approval_status = match decision_status {
+                AgentApprovalDecisionStatus::Approved => AgentApprovalStatus::Approved,
+                AgentApprovalDecisionStatus::Rejected => AgentApprovalStatus::Rejected,
+            };
+        }
         let decided_at = now_ms();
-        if decision_status == AgentApprovalDecisionStatus::Rejected {
+        if decision_status == AgentApprovalDecisionStatus::Rejected && !is_mcp_action {
             self.invalidate_mcp_pending_payload(&record.snapshot.action);
         }
         if decision_status == AgentApprovalDecisionStatus::Approved
@@ -758,7 +790,29 @@ impl AgentService {
             drop(deletion_lifecycle.take());
         }
 
-        let execution = if decision_status == AgentApprovalDecisionStatus::Approved {
+        let mut continuation_message = message.clone();
+        let execution = if decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action
+        {
+            let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
+                unreachable!("typed MCP action was checked above");
+            };
+            let tool_result = mcp_tool_result_from_rejected_approval(approval, message.as_deref())
+                .map_err(|error| error.to_string())?;
+            continuation_message = tool_result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("userFeedback"))
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            ActionExecutionDecision {
+                status: "rejected".to_string(),
+                final_pending_status: PendingActionStatus::Rejected,
+                patch_result: None,
+                file_write_result: None,
+                file_change: None,
+                tool_result,
+            }
+        } else if decision_status == AgentApprovalDecisionStatus::Approved {
             if let AgentProposedAction::SkillMaterialization { materialization } =
                 &record.snapshot.action
             {
@@ -828,7 +882,64 @@ impl AgentService {
         let mut final_pending_status = execution.final_pending_status;
         let mut tool_result = execution.tool_result.clone();
         let mut execution_status = execution.status.clone();
-        let agent_input = if is_approved_materialization {
+        let is_rejected_mcp =
+            decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action;
+        let agent_input = if is_rejected_mcp {
+            let mut agent_input = record.agent_input.clone();
+            agent_input.approval_decision = Some(AgentApprovalDecision {
+                action_id: record.snapshot.action_id.clone(),
+                status: decision_status,
+                message: continuation_message.clone(),
+            });
+            agent_input.tool_continuation = Some(AgentToolContinuation {
+                call: call.clone(),
+                result: tool_result.clone(),
+            });
+            let mut persisted_agent_input = agent_input.clone();
+            if let Some(continuation) = persisted_agent_input.tool_continuation.as_mut() {
+                continuation.result =
+                    mycopilot_core::mcp_tool_result_persistence_projection(&continuation.result);
+            }
+            let completed_at = now_ms();
+            self.commit_rejected_mcp_receipt(
+                &record,
+                &persisted_agent_input,
+                completed_at,
+                &notifications,
+            )?;
+            self.claim_rejected_mcp_continuation(&record)?;
+            // Only the durable status-CAS winner owns the pre-spawn lease. Registering before
+            // arbitration would let a duplicate reject overwrite the winner's action-keyed guard
+            // and unregister it when the losing guard drops.
+            inline_continuation_guard = Some(
+                self.process_runs
+                    .register(&record.storage_id, &record.snapshot.run_id),
+            );
+            self.invalidate_mcp_pending_payload(&record.snapshot.action);
+            let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
+                unreachable!("typed MCP rejection was checked before settlement");
+            };
+            if let Ok(invocation) = mcp_tool_invocation_event(
+                approval,
+                McpToolInvocationEventUpdate {
+                    state: AgentMcpToolInvocationState::Rejected,
+                    dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                    outcome: Some(AgentMcpToolInvocationOutcome::Rejected),
+                    is_error: None,
+                    error_code: Some("mcp.approval_rejected"),
+                    duration_ms: None,
+                    output_truncated: false,
+                },
+            ) {
+                let _ = notifications.send(agent_event_notification(
+                    AgentEvent::McpToolInvocationStateChanged {
+                        run_id: record.snapshot.run_id.clone(),
+                        invocation,
+                    },
+                ));
+            }
+            agent_input
+        } else if is_approved_materialization {
             match self.settle_manual_file_effect(
                 &record,
                 &call,
@@ -893,7 +1004,7 @@ impl AgentService {
             agent_input.approval_decision = Some(AgentApprovalDecision {
                 action_id: record.snapshot.action_id.clone(),
                 status: decision_status,
-                message: message.clone(),
+                message: continuation_message.clone(),
             });
             agent_input.tool_continuation = Some(AgentToolContinuation {
                 call: call.clone(),
@@ -1086,8 +1197,10 @@ impl AgentService {
         invoker
             .revalidate_approved(approval)
             .map_err(|error| error.to_string())?;
-        let mut call = tool_call_for_pending_record(record)?;
-        call.approval_status = AgentApprovalStatus::Approved;
+        // Preserve the frozen Provider ToolCall exactly as it appeared in the checkpoint.
+        // Approval is carried by the typed action journal and lifecycle, not by rewriting the
+        // append-only call from `required` to `approved` after restart.
+        let call = tool_call_for_pending_record(record)?;
         self.persist_pending_status(
             record,
             PendingActionStatus::Approved,

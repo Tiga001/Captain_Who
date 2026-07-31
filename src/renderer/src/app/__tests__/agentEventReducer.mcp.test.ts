@@ -321,13 +321,26 @@ describe('MCP lifecycle Renderer projection', () => {
       contaminated,
       action,
       'rejected',
-      SECRET_CANARY
+      'Use a different directory\u202E'
     )
 
     expect(rejected.agentRun?.toolCalls).toEqual([])
     expect(rejected.agentRun?.toolResults).toEqual([])
     expect(rejected.agentRun?.timeline.some((item) => item.type === 'tool_call')).toBe(false)
+    expect(rejected.agentRun?.mcpInvocations?.[0].rejectionReason).toBe('Use a different directory')
     expect(JSON.stringify(rejected.agentRun)).not.toContain(SECRET_CANARY)
+
+    const settled = applyAgentEventToChatMessage(
+      rejected,
+      lifecycle('rejected', {
+        outcome: 'rejected',
+        errorCode: 'mcp.approval_rejected'
+      })
+    )
+    expect(settled.agentRun?.mcpInvocations?.[0]).toMatchObject({
+      state: 'rejected',
+      rejectionReason: 'Use a different directory'
+    })
   })
 
   it('ignores a generic ToolResult body on an MCP action execution output', () => {
@@ -360,6 +373,44 @@ describe('MCP lifecycle Renderer projection', () => {
 
     expect(executed.agentRun?.toolResults).toEqual([])
     expect(JSON.stringify(executed.agentRun)).not.toContain(SECRET_CANARY)
+  })
+
+  it('keeps bounded user rejection guidance beside the authoritative MCP lifecycle', () => {
+    const action = { type: 'mcp_tool_call' as const, approval: approval() }
+    const waiting = applyAgentEventToChatMessage(message(), {
+      type: 'approval_required',
+      runId: RUN_ID,
+      action
+    })
+    const rejected = applyAgentActionExecutionToChatMessage(
+      waiting,
+      {
+        actionId: ACTION_ID,
+        actionType: 'mcp_tool_call',
+        toolName: 'provider-safe-name',
+        status: 'rejected',
+        agentOutput: {
+          status: 'running',
+          content: '',
+          runId: RUN_ID,
+          events: [
+            lifecycle('rejected', {
+              outcome: 'rejected',
+              errorCode: 'mcp.approval_rejected'
+            })
+          ],
+          toolDefinitions: [],
+          proposedActions: []
+        }
+      },
+      'Use another directory\u202E'
+    )
+
+    expect(rejected.agentRun?.mcpInvocations?.[0]).toMatchObject({
+      state: 'rejected',
+      rejectionReason: 'Use another directory'
+    })
+    expect(rejected.agentRun?.toolResults).toEqual([])
   })
 
   it('does not infer MCP identity from an mcp__ model name', () => {

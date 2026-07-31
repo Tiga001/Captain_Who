@@ -214,12 +214,15 @@ export function McpServerEditor({
       </div>
 
       <div className="mcp-auto-execute-row">
-        <label htmlFor={`${id}-auto-execute`}>
-          {t('mcp.form.autoExecute')}
-          {draft.approvalMode === 'deny' ? (
-            <small>{t('mcp.form.callsCurrentlyDenied')}</small>
-          ) : null}
-        </label>
+        <div className="mcp-auto-execute-copy">
+          <label htmlFor={`${id}-auto-execute`}>
+            {t('mcp.form.autoExecute')}
+            {draft.approvalMode === 'deny' ? (
+              <small>{t('mcp.form.callsCurrentlyDenied')}</small>
+            ) : null}
+          </label>
+          <small>{t('mcp.form.toolApprovalHelp')}</small>
+        </div>
         <button
           aria-checked={draft.approvalMode === 'auto'}
           aria-label={t('mcp.form.autoExecute')}
@@ -238,11 +241,6 @@ export function McpServerEditor({
         >
           <span aria-hidden="true" className="settings-switch__thumb" />
         </button>
-      </div>
-
-      <div className="mcp-security-notice" role="status">
-        <strong>{t('mcp.form.securityTitle')}</strong>
-        <p>{t('mcp.form.simpleSecurityHelp')}</p>
       </div>
 
       {launchChanged && (

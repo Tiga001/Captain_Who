@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn invocation_debug_redacts_arguments_and_call_projections_remove_credentials() {
+fn invocation_debug_redacts_arguments_while_live_model_projection_retains_them() {
     let model_name = "mcp__fixture__credential_projection";
     let invoker = MockMcpToolInvoker::returning(
         vec![descriptor(
@@ -25,12 +25,13 @@ fn invocation_debug_redacts_arguments_and_call_projections_remove_credentials() 
     for projected in [
         registry.trace_call_projection(&call),
         registry.event_call_projection(&call),
-        registry.model_call_projection(&call),
+        registry.checkpoint_call_projection(&call),
     ] {
         assert_eq!(projected.args, json!({}));
         assert_eq!(projected.reason, None);
         assert!(!serde_json::to_string(&projected).unwrap().contains(secret));
     }
+    assert_eq!(registry.model_call_projection(&call), call);
     assert_eq!(
         registry.checkpoint_persistence(model_name),
         AgentToolCallCheckpointPersistence::DeniedMcp
@@ -59,7 +60,19 @@ fn invocation_debug_redacts_arguments_and_call_projections_remove_credentials() 
     ] {
         let rendered = serde_json::to_string(&durable).unwrap();
         assert!(!rendered.contains(secret));
-        assert!(rendered.contains("externalToolOutputNotPersisted"));
+        assert_eq!(
+            durable.result,
+            Some(json!({
+                "schemaVersion": 1,
+                "type": "mcp_tool",
+                "external": true,
+                "status": "completed",
+                "outcome": "succeeded",
+                "dispatchCertainty": "response_received",
+                "contentOmitted": true,
+                "isError": false,
+            }))
+        );
     }
 
     let approval = propose(&registry, model_name, call.args.clone()).unwrap();

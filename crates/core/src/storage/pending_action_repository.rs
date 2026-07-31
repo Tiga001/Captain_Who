@@ -155,8 +155,20 @@ pub fn list_interrupted_actions(
             created_at,
             updated_at
         FROM agent_pending_actions
-        WHERE status IN ('approved', 'executing')
-          AND action_type <> 'mcp_tool_call'
+        WHERE (
+                status IN ('approved', 'executing')
+                AND action_type <> 'mcp_tool_call'
+              )
+           OR (
+                -- A pre-dispatch rejection receipt may be committed just before the in-memory
+                -- lifecycle status advances. Only that exact crash window belongs to the generic
+                -- receipt reconciler. `executing` MCP rows have crossed the conservative
+                -- dispatch boundary and must remain owned by MCP startup recovery, which marks
+                -- them OutcomeUnknown rather than trusting a stray target label.
+                status IN ('pending', 'approved')
+                AND action_type = 'mcp_tool_call'
+                AND target_status = 'rejected'
+              )
         ORDER BY created_at ASC
         ",
     )?;

@@ -53,7 +53,8 @@ pub(super) struct PersistedAgentResumeInput {
     world_state_records: Vec<AnchoredWorldStateRecord>,
     skill_activation: Option<AgentSkillActivation>,
     skill_discovery: Option<AgentSkillDiscoverySnapshot>,
-    /// The checkpoint owns the exact resumed model timeline; raw messages are not duplicated.
+    /// The checkpoint owns the replay-safe resumed model projection; process-only MCP arguments
+    /// and raw messages are not duplicated.
     messages: Vec<AgentChatMessage>,
 }
 

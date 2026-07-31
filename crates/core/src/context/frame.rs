@@ -537,12 +537,24 @@ impl ContextItem {
         self
     }
 
+    /// Keeps the live Tool arguments in memory while replacing only the
+    /// durable Tool-call projection. All other assistant message fields remain
+    /// byte-for-byte identical.
+    pub(crate) fn with_checkpoint_tool_calls(mut self, tool_calls: Vec<LlmToolCall>) -> Self {
+        let mut projected = self.message.clone();
+        projected.tool_calls = tool_calls;
+        if projected != self.message {
+            self.checkpoint_message = Some(projected);
+        }
+        self
+    }
+
     /// Keeps a richer message in the live model loop while supplying a durable-safe replacement
     /// for approval checkpoints.
     ///
     /// `to_checkpoint` remains the enforcement boundary: the replacement may remove transient
-    /// images or text, but it cannot change the role, tool identity, tool calls, or error
-    /// semantics of the live message.
+    /// images or text and may redact Tool arguments, but it cannot change the role, Tool call
+    /// count/order, Tool identity, or error semantics of the live message.
     pub(crate) fn with_checkpoint_message(mut self, projected: LlmMessage) -> Self {
         if projected != self.message {
             self.checkpoint_message = Some(projected);

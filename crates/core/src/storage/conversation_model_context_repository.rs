@@ -1,9 +1,9 @@
-//! Durable storage for the uncompressed model-visible conversation projection.
+//! Durable storage for the uncompressed, replay-safe conversation projection.
 //!
-//! These rows are not raw tool output and are not the audit trace. Each payload is the exact
-//! provider-neutral, length-bounded text message accepted into model context for one trace
-//! sequence. Keeping this projection separate lets Durable Trace remain small while allowing a
-//! new run or process restart to reconstruct the same uncompressed context.
+//! These rows are not raw tool output and are not the audit trace. Each payload is a
+//! provider-neutral, length-bounded message safe to survive a process restart. Process-only MCP
+//! arguments may be redacted from this projection even while the current in-memory model loop
+//! retains them for error correction.
 
 use crate::conversation_trace::validate_model_context_prefix;
 use crate::storage::conversation_trace_repository;

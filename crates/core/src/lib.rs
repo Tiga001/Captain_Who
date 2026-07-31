@@ -223,6 +223,7 @@ pub use tools::{
     agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
     agent_image_generation_tool_result_from_service_error, mcp_normalized_input_schema_identity,
     mcp_tool_arguments_digest, mcp_tool_invocation_event, mcp_tool_result_from_approved_invocation,
+    mcp_tool_result_from_rejected_approval, mcp_tool_result_model_projection,
     mcp_tool_result_persistence_projection, normalize_agent_image_generation_reason,
     validate_mcp_approval_arguments, McpAgentToolAnnotations, McpAgentToolDescriptor,
     McpApprovedToolInvocation, McpNormalizedInputSchemaIdentity, McpOmittedContentKind,

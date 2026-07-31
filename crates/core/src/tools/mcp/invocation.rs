@@ -2,6 +2,10 @@
 
 use super::*;
 
+const MCP_APPROVAL_REJECTED_CODE: &str = "mcp.approval_rejected";
+const MCP_REJECTION_WITHOUT_FEEDBACK_MESSAGE: &str = "The user explicitly rejected this external MCP tool call. Its arguments and call reason were already validated, but the historical arguments are redacted for privacy. The MCP server was not called. Do not retry this call or an equivalent call unless the user gives a new explicit instruction.";
+const MCP_REJECTION_WITH_FEEDBACK_MESSAGE: &str = "The user explicitly rejected this external MCP tool call. Its arguments and call reason were already validated, but the historical arguments are redacted for privacy. The MCP server was not called. Follow userFeedback, and do not repeat the same call unchanged.";
+
 fn invocation_result_value(
     provenance: &AgentMcpToolProvenance,
     result: &McpToolInvocationResult,
@@ -11,6 +15,18 @@ fn invocation_result_value(
         .map_err(|_| AgentError::new("MCP tool content could not be normalized."))?;
     let mut object = Map::from_iter([
         ("schemaVersion".to_string(), json!(1)),
+        ("type".to_string(), json!("mcp_tool")),
+        ("external".to_string(), json!(true)),
+        ("status".to_string(), json!("completed")),
+        (
+            "outcome".to_string(),
+            json!(if result.is_error {
+                "tool_error"
+            } else {
+                "succeeded"
+            }),
+        ),
+        ("dispatchCertainty".to_string(), json!("response_received")),
         ("content".to_string(), content),
         ("isError".to_string(), json!(result.is_error)),
         (
@@ -176,7 +192,7 @@ pub(super) fn project_mcp_tool_call(
     let mut projected = call.clone();
     // MCP arguments are execution-only until the Host has a Secret Store and an explicit
     // per-tool persistence policy. Server-authored schemas and field names cannot prove that a
-    // scalar is safe to retain in traces, events, model history, or approval checkpoints.
+    // scalar is safe to retain in traces, events, durable model history, or approval checkpoints.
     projected.args = Value::Object(Map::new());
     projected.reason = None;
     projected
@@ -390,6 +406,206 @@ pub fn mcp_tool_result_from_approved_invocation(
     })
 }
 
+/// Converts a user's explicit MCP rejection into an ordinary, paired ToolResult.
+///
+/// Rejection happens before the external dispatch boundary. It is therefore a successful Host
+/// decision result (`ok = true`), not a transport failure and never `OutcomeUnknown`. The optional
+/// feedback is bounded Host input for the immediate model continuation; the durable projection
+/// records only whether feedback was present.
+pub fn mcp_tool_result_from_rejected_approval(
+    approval: &AgentMcpToolApproval,
+    feedback: Option<&str>,
+) -> AgentResult<AgentToolResult> {
+    validate_mcp_tool_approval(approval)?;
+    let feedback = feedback
+        .map(|feedback| {
+            feedback
+                .chars()
+                .map(|character| {
+                    if is_unsafe_mcp_display_character(character) {
+                        ' '
+                    } else {
+                        character
+                    }
+                })
+                .collect::<String>()
+        })
+        .map(|feedback| truncate_utf8(feedback.trim(), MAX_MCP_CALL_REASON_BYTES))
+        .filter(|feedback| !feedback.is_empty());
+    let mut value = Map::from_iter([
+        ("schemaVersion".to_string(), json!(1)),
+        ("type".to_string(), json!("mcp_tool")),
+        ("external".to_string(), json!(true)),
+        ("status".to_string(), json!("rejected")),
+        ("outcome".to_string(), json!("rejected")),
+        (
+            "dispatchCertainty".to_string(),
+            json!("definitely_not_dispatched"),
+        ),
+        ("isError".to_string(), json!(false)),
+        ("code".to_string(), json!(MCP_APPROVAL_REJECTED_CODE)),
+        ("retryable".to_string(), json!(false)),
+    ]);
+    if let Some(feedback) = feedback {
+        value.insert("userFeedback".to_string(), Value::String(feedback));
+    }
+    Ok(AgentToolResult {
+        exact_archive_file: None,
+        call_id: approval.identity.call_id.clone(),
+        tool: approval.identity.provenance.model_tool_name.clone(),
+        ok: true,
+        result: Some(Value::Object(value)),
+        error: None,
+    })
+}
+
+/// Produces the bounded current-model view of a typed MCP result.
+///
+/// Routing and audit provenance remain Host-owned. The model needs the Server's bounded content
+/// and the wrapper outcome, but not config, catalog, or schema digests.
+pub fn mcp_tool_result_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let mut projected = crate::tools::canonical_tool_result_for_context(result);
+    if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
+        object.remove("provenance");
+        if is_explicit_user_rejected_mcp_result(object) {
+            let has_feedback = object
+                .get("userFeedback")
+                .and_then(Value::as_str)
+                .is_some_and(|feedback| !feedback.trim().is_empty());
+            object.insert("decisionBy".to_string(), json!("user"));
+            object.insert("executionAttempted".to_string(), json!(false));
+            object.insert("argumentsValidated".to_string(), json!(true));
+            object.insert("callReasonAccepted".to_string(), json!(true));
+            object.insert("argumentsInHistoryRedacted".to_string(), json!(true));
+            object.insert("code".to_string(), json!(MCP_APPROVAL_REJECTED_CODE));
+            object.insert("retryable".to_string(), json!(false));
+            object.insert(
+                "retryPolicy".to_string(),
+                json!(if has_feedback {
+                    "follow_user_feedback_without_repeating_same_call"
+                } else {
+                    "new_explicit_user_instruction_required"
+                }),
+            );
+            object.insert(
+                "message".to_string(),
+                json!(if has_feedback {
+                    MCP_REJECTION_WITH_FEEDBACK_MESSAGE
+                } else {
+                    MCP_REJECTION_WITHOUT_FEEDBACK_MESSAGE
+                }),
+            );
+        }
+    }
+    projected
+}
+
+fn is_explicit_user_rejected_mcp_result(value: &Map<String, Value>) -> bool {
+    value.get("schemaVersion").and_then(Value::as_u64) == Some(1)
+        && value.get("type").and_then(Value::as_str) == Some("mcp_tool")
+        && value.get("external").and_then(Value::as_bool) == Some(true)
+        && value.get("status").and_then(Value::as_str) == Some("rejected")
+        && value.get("outcome").and_then(Value::as_str) == Some("rejected")
+        && value.get("dispatchCertainty").and_then(Value::as_str)
+            == Some("definitely_not_dispatched")
+        && value.get("isError").and_then(Value::as_bool) == Some(false)
+}
+
+fn projected_mcp_status(
+    result: &AgentToolResult,
+    value: Option<&Map<String, Value>>,
+) -> &'static str {
+    match value
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+    {
+        Some("completed") => "completed",
+        Some("rejected") => "rejected",
+        Some("cancelled") => "cancelled",
+        Some("expired") => "expired",
+        Some("payload_unavailable") => "payload_unavailable",
+        Some("policy_denied") => "policy_denied",
+        Some("outcome_unknown") => "outcome_unknown",
+        Some("failed") => "failed",
+        _ if value
+            .and_then(|value| value.get("code"))
+            .and_then(Value::as_str)
+            == Some("mcp.tool_outcome_unknown") =>
+        {
+            "outcome_unknown"
+        }
+        _ if result.ok => "completed",
+        _ => "failed",
+    }
+}
+
+fn projected_mcp_outcome(
+    result: &AgentToolResult,
+    value: Option<&Map<String, Value>>,
+    status: &str,
+    is_error: bool,
+) -> &'static str {
+    match value
+        .and_then(|value| value.get("outcome"))
+        .and_then(Value::as_str)
+    {
+        Some("succeeded") => "succeeded",
+        Some("tool_error") => "tool_error",
+        Some("output_too_large") => "output_too_large",
+        Some("transport_error") => "transport_error",
+        Some("timed_out") => "timed_out",
+        Some("cancelled") => "cancelled",
+        Some("rejected") => "rejected",
+        Some("expired") => "expired",
+        Some("payload_unavailable") => "payload_unavailable",
+        Some("policy_denied") => "policy_denied",
+        Some("outcome_unknown") => "outcome_unknown",
+        _ => match status {
+            "completed" if is_error || !result.ok => "tool_error",
+            "completed" => "succeeded",
+            "rejected" => "rejected",
+            "cancelled" => "cancelled",
+            "expired" => "expired",
+            "payload_unavailable" => "payload_unavailable",
+            "policy_denied" => "policy_denied",
+            "outcome_unknown" => "outcome_unknown",
+            _ => "transport_error",
+        },
+    }
+}
+
+fn projected_mcp_dispatch_certainty(
+    value: Option<&Map<String, Value>>,
+    status: &str,
+) -> &'static str {
+    match value
+        .and_then(|value| value.get("dispatchCertainty"))
+        .and_then(Value::as_str)
+    {
+        Some("definitely_not_dispatched") => "definitely_not_dispatched",
+        Some("possibly_dispatched") => "possibly_dispatched",
+        Some("response_received") => "response_received",
+        _ => match status {
+            "completed" => "response_received",
+            "outcome_unknown" => "possibly_dispatched",
+            _ => "definitely_not_dispatched",
+        },
+    }
+}
+
+fn safe_mcp_result_code(value: Option<&Map<String, Value>>) -> Option<&str> {
+    value
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 128
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+}
+
 /// Produces the only MCP ToolResult representation permitted in durable traces, checkpoints,
 /// action audits, and history archives.
 ///
@@ -398,17 +614,52 @@ pub fn mcp_tool_result_from_approved_invocation(
 /// smuggle returned content into SQLite or a replayable checkpoint. Keeping this projection in
 /// core avoids subtle prefix drift between the runtime and its Host persistence adapter.
 pub fn mcp_tool_result_persistence_projection(result: &AgentToolResult) -> AgentToolResult {
+    let value = result.result.as_ref().and_then(Value::as_object);
+    let status = projected_mcp_status(result, value);
+    let is_error = value
+        .and_then(|value| value.get("isError"))
+        .and_then(Value::as_bool)
+        .unwrap_or(!result.ok);
+    let outcome = projected_mcp_outcome(result, value, status, is_error);
+    let dispatch_certainty = projected_mcp_dispatch_certainty(value, status);
+    let feedback_provided = value.is_some_and(|value| {
+        value
+            .get("feedbackProvided")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || value
+                .get("userFeedback")
+                .and_then(Value::as_str)
+                .is_some_and(|feedback| !feedback.trim().is_empty())
+    });
+    let mut projected = Map::from_iter([
+        ("schemaVersion".to_string(), json!(1)),
+        ("type".to_string(), json!("mcp_tool")),
+        ("external".to_string(), json!(true)),
+        ("status".to_string(), json!(status)),
+        ("outcome".to_string(), json!(outcome)),
+        ("dispatchCertainty".to_string(), json!(dispatch_certainty)),
+        ("contentOmitted".to_string(), json!(true)),
+        ("isError".to_string(), json!(is_error)),
+    ]);
+    if feedback_provided {
+        projected.insert("feedbackProvided".to_string(), json!(true));
+    }
+    if let Some(code) = safe_mcp_result_code(value) {
+        projected.insert("code".to_string(), json!(code));
+    }
+    if let Some(retryable) = value
+        .and_then(|value| value.get("retryable"))
+        .and_then(Value::as_bool)
+    {
+        projected.insert("retryable".to_string(), json!(retryable));
+    }
     AgentToolResult {
         exact_archive_file: None,
         call_id: result.call_id.clone(),
         tool: result.tool.clone(),
         ok: result.ok,
-        result: Some(json!({
-            "type": "mcp_tool",
-            "external": true,
-            "contentOmitted": true,
-            "isError": !result.ok,
-        })),
+        result: Some(Value::Object(projected)),
         error: (!result.ok).then(|| "The external MCP tool reported an error.".to_string()),
     }
 }

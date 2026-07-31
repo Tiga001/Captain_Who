@@ -57,13 +57,13 @@ pub enum ConversationTraceToolResultStatus {
     Cancelled,
 }
 
-/// One provider-neutral message from the uncompressed model-visible conversation timeline.
+/// One provider-neutral message from the durable, replay-safe conversation timeline.
 ///
 /// This is deliberately separate from [`ConversationTurnTraceItem`]. The durable trace is a
-/// bounded audit/search projection, while this record preserves the exact text projection that
-/// was supplied to the model until context compaction covers it. Raw tool output and binary
-/// delivery data never enter this record; those belong to Exact History Archive and transient
-/// provider messages respectively.
+/// bounded audit/search projection, while this record preserves the bounded projection that can
+/// safely survive a process restart until context compaction covers it. Process-only MCP
+/// arguments, raw Tool output, and binary delivery data never enter this record; they belong to
+/// transient provider messages or the Exact History Archive as appropriate.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationModelContextItem {

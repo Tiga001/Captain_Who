@@ -228,6 +228,13 @@ impl AgentTool for McpAgentTool {
         &self,
         call: &crate::protocol::AgentToolCall,
     ) -> crate::protocol::AgentToolCall {
+        call.clone()
+    }
+
+    fn checkpoint_call_projection(
+        &self,
+        call: &crate::protocol::AgentToolCall,
+    ) -> crate::protocol::AgentToolCall {
         project_mcp_tool_call(call)
     }
 
@@ -235,11 +242,7 @@ impl AgentTool for McpAgentTool {
         &self,
         result: &crate::protocol::AgentToolResult,
     ) -> crate::protocol::AgentToolResult {
-        let mut projected = crate::tools::canonical_tool_result_for_context(result);
-        if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
-            object.remove("provenance");
-        }
-        projected
+        crate::tools::mcp_tool_result_model_projection(result)
     }
 
     fn trace_projection(
@@ -269,23 +272,7 @@ impl McpAgentTool {
         &self,
         result: &crate::protocol::AgentToolResult,
     ) -> crate::protocol::AgentToolResult {
-        crate::protocol::AgentToolResult {
-            call_id: result.call_id.clone(),
-            tool: result.tool.clone(),
-            ok: result.ok,
-            result: Some(json!({
-                "mcp": {
-                    "contentOmitted": true,
-                    "reason": "externalToolOutputNotPersisted",
-                    "isError": !result.ok,
-                },
-                "provenance": self.provenance,
-            })),
-            error: (!result.ok).then(|| {
-                "MCP tool reported an error; external error details were not persisted.".to_string()
-            }),
-            exact_archive_file: None,
-        }
+        crate::tools::mcp_tool_result_persistence_projection(result)
     }
 }
 

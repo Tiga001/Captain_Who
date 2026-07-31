@@ -353,15 +353,8 @@ export const enUSTranslations = {
   'mcp.form.autoExecute': 'Allow tools to run automatically',
   'mcp.form.callsCurrentlyDenied': 'Calls currently denied',
   'mcp.form.denyCalls': 'Deny all calls',
-  'mcp.form.securityTitle': 'Local process security',
-  'mcp.form.persistenceWarning':
-    'The executable, ordered arguments, and working directory are stored as non-secret configuration.',
-  'mcp.form.noSecretsWarning':
-    'Do not put tokens, passwords, or credentials in arguments. Secret environment variables are not supported in this version.',
   'mcp.form.toolApprovalHelp':
-    'When automatic execution is off, every external tool call asks for your approval.',
-  'mcp.form.simpleSecurityHelp':
-    'The executable, arguments, and working directory are saved in MyCopilot. Do not put credentials in arguments.',
+    'Turn this on to run tools automatically; leave it off to approve each call.',
   'mcp.form.launchChangedWarning':
     'Changing launch details stops the old connection. The next time you turn it on, the system will confirm the new launch information.',
   'mcp.form.validationFailed': 'Review the following fields',
@@ -1151,6 +1144,7 @@ export const enUSTranslations = {
   'agent.mcp.activity.outcomeUnknownWarning':
     'The call may have produced side effects, but no authoritative result was received. Check the authoritative system before deciding what to do next.',
   'agent.mcp.activity.duration': 'Duration',
+  'agent.mcp.activity.rejectionReason': 'Rejection reason',
   'agent.mcp.activity.outputTruncated': 'Some output was truncated or omitted.',
   'agent.mcp.activity.errorCode': 'Safe error code',
   'agent.detail.args': 'Arguments',

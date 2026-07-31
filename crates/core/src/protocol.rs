@@ -236,10 +236,11 @@ pub struct AgentRunCheckpoint {
     pub pending_tool_call_id: String,
     #[serde(default)]
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
-    /// Exact bounded text projection of the active run's uncompressed model timeline.
+    /// Bounded, replay-safe projection of the active run's uncompressed model timeline.
     ///
-    /// Older checkpoints omit this field and remain readable; their durable trace is used as the
-    /// compatibility fallback.
+    /// Process-only MCP arguments may be redacted even when the current in-memory model loop
+    /// retains them. Older checkpoints omit this field and remain readable; their durable trace
+    /// is used as the compatibility fallback.
     #[serde(default)]
     pub conversation_model_context_items: Vec<ConversationModelContextItem>,
     #[serde(default)]

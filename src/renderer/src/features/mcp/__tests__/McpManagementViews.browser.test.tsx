@@ -95,6 +95,8 @@ describe('MCP Server editor', () => {
     )
     const toggle = screen.getByRole('switch', { name: 'mcp.form.autoExecute' })
     await expect.element(toggle).toHaveAttribute('aria-checked', 'false')
+    await expect.element(screen.getByText('mcp.form.toolApprovalHelp')).toBeVisible()
+    expect(screen.getByText('mcp.form.securityTitle').query()).toBeNull()
     await toggle.click()
     await expect.element(toggle).toHaveAttribute('aria-checked', 'true')
     await screen.getByLabelText('mcp.form.name').fill('fixture')

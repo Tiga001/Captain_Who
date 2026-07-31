@@ -381,8 +381,11 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     } else {
         canonical_tool_result_for_context(&continuation.result)
     };
-    let llm_result =
-        crate::tools::model_projection_for_persisted_continuation(&continuation.result);
+    let llm_result = if is_mcp {
+        crate::tools::mcp_tool_result_model_projection(&continuation.result)
+    } else {
+        crate::tools::model_projection_for_persisted_continuation(&continuation.result)
+    };
     let model_observation = super::finalize_model_tool_observation(
         model_tool_result_gate,
         &continuation.call.id,
@@ -404,6 +407,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     context.append_tool_continuation(
         &continuation_call,
         model_observation.clone(),
+        is_mcp.then_some(persisted_model_observation.clone()),
         !continuation.result.ok,
         is_mcp,
         assistant_message_id.map(|assistant_message_id| {
@@ -470,10 +474,120 @@ fn project_mcp_result_context_for_checkpoint(items: &mut [AgentContextCheckpoint
             .iter()
             .any(|source| source == ContextSource::McpToolResult.as_str())
         {
-            item.content = MCP_DURABLE_RESULT_PLACEHOLDER.to_string();
+            if !is_safe_mcp_durable_observation(&item.content) {
+                item.content = MCP_DURABLE_RESULT_PLACEHOLDER.to_string();
+            }
             item.images.clear();
         }
     }
+}
+
+fn is_safe_mcp_durable_observation(content: &str) -> bool {
+    let Ok(serde_json::Value::Object(value)) = serde_json::from_str(content) else {
+        return content == MCP_DURABLE_RESULT_PLACEHOLDER;
+    };
+    const ALLOWED_FIELDS: &[&str] = &[
+        "schemaVersion",
+        "type",
+        "external",
+        "status",
+        "outcome",
+        "dispatchCertainty",
+        "contentOmitted",
+        "isError",
+        "feedbackProvided",
+        "code",
+        "retryable",
+        "error",
+    ];
+    if value
+        .keys()
+        .any(|key| !ALLOWED_FIELDS.contains(&key.as_str()))
+    {
+        return false;
+    }
+    if value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || value.get("type").and_then(serde_json::Value::as_str) != Some("mcp_tool")
+        || value.get("external").and_then(serde_json::Value::as_bool) != Some(true)
+        || value
+            .get("contentOmitted")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return false;
+    }
+    let status_is_valid = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| {
+            matches!(
+                status,
+                "completed"
+                    | "rejected"
+                    | "cancelled"
+                    | "expired"
+                    | "payload_unavailable"
+                    | "policy_denied"
+                    | "outcome_unknown"
+                    | "failed"
+            )
+        });
+    let outcome_is_valid = value
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|outcome| {
+            matches!(
+                outcome,
+                "succeeded"
+                    | "tool_error"
+                    | "output_too_large"
+                    | "transport_error"
+                    | "timed_out"
+                    | "cancelled"
+                    | "rejected"
+                    | "expired"
+                    | "payload_unavailable"
+                    | "policy_denied"
+                    | "outcome_unknown"
+            )
+        });
+    let dispatch_is_valid = value
+        .get("dispatchCertainty")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|certainty| {
+            matches!(
+                certainty,
+                "definitely_not_dispatched" | "possibly_dispatched" | "response_received"
+            )
+        });
+    let code_is_safe = value.get("code").is_none_or(|code| {
+        code.as_str().is_some_and(|code| {
+            code.starts_with("mcp.")
+                && code.len() <= 128
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+    });
+    status_is_valid
+        && outcome_is_valid
+        && dispatch_is_valid
+        && value
+            .get("isError")
+            .is_some_and(serde_json::Value::is_boolean)
+        && value
+            .get("feedbackProvided")
+            .is_none_or(|feedback| feedback.as_bool() == Some(true))
+        && value
+            .get("retryable")
+            .is_none_or(serde_json::Value::is_boolean)
+        && code_is_safe
+        && value
+            .get("error")
+            .is_none_or(|error| error.as_str() == Some("The external MCP tool reported an error."))
 }
 
 fn validate_checkpoint_world_state(
@@ -1014,13 +1128,14 @@ mod tests {
 
         let restored =
             restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
-        let mut live_context_items = restored.context.checkpoint_items().unwrap();
+        let live_messages = restored.context.to_messages();
         assert!(
-            serde_json::to_string(&live_context_items)
-                .unwrap()
-                .contains(RESULT_CANARY),
+            live_messages
+                .iter()
+                .any(|message| message.content.contains(RESULT_CANARY)),
             "the current process must still supply the bounded authoritative result to the model"
         );
+        let mut live_context_items = restored.context.checkpoint_items().unwrap();
 
         let (trace_items, model_items, _, _) = restored.conversation_trace.checkpoint();
         assert!(!serde_json::to_string(&trace_items)
@@ -1033,7 +1148,10 @@ mod tests {
         project_mcp_result_context_for_checkpoint(&mut live_context_items);
         let durable_context = serde_json::to_string(&live_context_items).unwrap();
         assert!(!durable_context.contains(RESULT_CANARY));
-        assert!(durable_context.contains(MCP_DURABLE_RESULT_PLACEHOLDER));
+        assert!(!durable_context.contains(MCP_DURABLE_RESULT_PLACEHOLDER));
+        assert!(durable_context.contains(r#"\"status\":\"completed\""#));
+        assert!(durable_context.contains(r#"\"outcome\":\"succeeded\""#));
+        assert!(durable_context.contains(r#"\"contentOmitted\":true"#));
     }
 
     fn assert_invalid_tool_call_id(error: AgentError) {

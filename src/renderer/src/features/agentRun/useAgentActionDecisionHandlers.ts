@@ -82,7 +82,8 @@ export function useAgentActionDecisionHandlers({
           updateAssistantMessage(
             conversationId,
             messageId,
-            (currentMessage) => applyAgentActionExecutionToChatMessage(currentMessage, execution),
+            (currentMessage) =>
+              applyAgentActionExecutionToChatMessage(currentMessage, execution, message),
             { touchConversation: true }
           )
         },

@@ -1,5 +1,14 @@
 use super::*;
 
+fn same_tool_call_identity(live: &LlmMessage, projected: &LlmMessage) -> bool {
+    live.tool_calls.len() == projected.tool_calls.len()
+        && live
+            .tool_calls
+            .iter()
+            .zip(&projected.tool_calls)
+            .all(|(live, projected)| live.id == projected.id && live.name == projected.name)
+}
+
 impl ContextItem {
     pub(super) fn same_context_content(&self, other: &Self) -> bool {
         self.message == other.message
@@ -17,7 +26,7 @@ impl ContextItem {
         if message.role != self.message.role
             || message.tool_call_id != self.message.tool_call_id
             || message.is_error != self.message.is_error
-            || message.tool_calls != self.message.tool_calls
+            || !same_tool_call_identity(&self.message, message)
         {
             return Err(AgentError::new(
                 "运行检查点投影不能改变消息角色、工具身份或错误语义。",

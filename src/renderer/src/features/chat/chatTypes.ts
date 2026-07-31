@@ -122,6 +122,8 @@ export interface ChatMcpToolInvocationView {
   outcome?: AgentMcpToolInvocationOutcome
   isError?: boolean
   errorCode?: string
+  /** Current-process user guidance attached to an explicit rejection. Never sourced from MCP. */
+  rejectionReason?: string
   durationMs?: number
   outputTruncated: boolean
 }

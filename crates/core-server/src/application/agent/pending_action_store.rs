@@ -545,20 +545,71 @@ impl AgentService {
         model_context_items: &[mycopilot_core::ConversationModelContextItem],
         completed_at: i64,
     ) -> Result<bool, String> {
+        self.persist_manual_audited_result_trace_for_decision(
+            record,
+            "approved",
+            target_status,
+            command_result,
+            tool_result,
+            trace,
+            model_context_items,
+            completed_at,
+        )
+    }
+
+    /// Commits an explicit pre-dispatch MCP rejection using the same immutable
+    /// audit/target/ToolResult boundary as an approved command result.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_rejected_mcp_audited_result_trace(
+        &self,
+        record: &PendingActionRecord,
+        tool_result: &AgentToolResult,
+        trace: &mycopilot_core::ConversationTurnTrace,
+        model_context_items: &[mycopilot_core::ConversationModelContextItem],
+        completed_at: i64,
+    ) -> Result<bool, String> {
+        self.persist_manual_audited_result_trace_for_decision(
+            record,
+            "rejected",
+            PendingActionStatus::Rejected,
+            None,
+            tool_result,
+            trace,
+            model_context_items,
+            completed_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_manual_audited_result_trace_for_decision(
+        &self,
+        record: &PendingActionRecord,
+        decision: &str,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: &AgentToolResult,
+        trace: &mycopilot_core::ConversationTurnTrace,
+        model_context_items: &[mycopilot_core::ConversationModelContextItem],
+        completed_at: i64,
+    ) -> Result<bool, String> {
         let status = pending_status_label(target_status);
         #[cfg(test)]
         if let Some(error) = take_manual_action_audit_failure(&record.storage_id, status) {
             return Err(error);
         }
+        // A rejection is itself the user's terminal decision, so its timestamp must describe
+        // that click rather than fall back to the proposal's creation time. Approved actions
+        // retain the original approval timestamp already stored by the lifecycle transaction.
+        let decided_at = (decision == "rejected").then_some(completed_at);
         let audit = action_audit_record(
             record,
-            Some("approved"),
+            Some(decision),
             status,
             None,
             command_result,
             Some(tool_result),
             tool_result.error.as_deref(),
-            None,
+            decided_at,
             Some(completed_at),
         );
         let outcome = self
@@ -598,16 +649,64 @@ impl AgentService {
         model_context_items: &[mycopilot_core::ConversationModelContextItem],
         completed_at: i64,
     ) -> Result<AgentPendingActionSettlementInspection, String> {
+        self.inspect_manual_audited_result_trace_for_decision(
+            record,
+            "approved",
+            target_status,
+            command_result,
+            tool_result,
+            trace,
+            model_context_items,
+            completed_at,
+        )
+    }
+
+    /// Inspects whether an explicit pre-dispatch MCP rejection reached the durable
+    /// audit/target/ToolResult boundary after the commit call returned an error.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn inspect_rejected_mcp_audited_result_trace(
+        &self,
+        record: &PendingActionRecord,
+        tool_result: &AgentToolResult,
+        trace: &mycopilot_core::ConversationTurnTrace,
+        model_context_items: &[mycopilot_core::ConversationModelContextItem],
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
+        self.inspect_manual_audited_result_trace_for_decision(
+            record,
+            "rejected",
+            PendingActionStatus::Rejected,
+            None,
+            tool_result,
+            trace,
+            model_context_items,
+            completed_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inspect_manual_audited_result_trace_for_decision(
+        &self,
+        record: &PendingActionRecord,
+        decision: &str,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: &AgentToolResult,
+        trace: &mycopilot_core::ConversationTurnTrace,
+        model_context_items: &[mycopilot_core::ConversationModelContextItem],
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
         let status = pending_status_label(target_status);
+        let decided_at = (decision == "rejected").then_some(completed_at);
         let audit = action_audit_record(
             record,
-            Some("approved"),
+            Some(decision),
             status,
             None,
             command_result,
             Some(tool_result),
             tool_result.error.as_deref(),
-            None,
+            decided_at,
             Some(completed_at),
         );
         self.storage
@@ -1450,6 +1549,7 @@ pub(super) fn ensure_pending_status_transition(
         (current, next),
         (PendingActionStatus::Pending, PendingActionStatus::Approved)
             | (PendingActionStatus::Pending, PendingActionStatus::Executing)
+            | (PendingActionStatus::Pending, PendingActionStatus::Rejected)
             | (PendingActionStatus::Pending, PendingActionStatus::Cancelled)
             | (PendingActionStatus::Approved, PendingActionStatus::Executing)
             | (PendingActionStatus::Approved, PendingActionStatus::Completed)

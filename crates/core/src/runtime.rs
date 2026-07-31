@@ -1115,7 +1115,7 @@ impl AgentRuntime {
                         suppressed_narration,
                         |call| {
                             let projected =
-                                tool_registry.model_call_projection(&AgentToolCall {
+                                tool_registry.checkpoint_call_projection(&AgentToolCall {
                                     id: call.id.clone(),
                                     tool: call.name.clone(),
                                     args: call.args.clone(),
@@ -1329,6 +1329,7 @@ impl AgentRuntime {
                     }
                     let trace_call = tool_registry.trace_call_projection(&call);
                     let model_call = tool_registry.model_call_projection(&call);
+                    let checkpoint_call = tool_registry.checkpoint_call_projection(&call);
                     let tool_identity = tool_registry.identity(&call.tool).cloned();
                     let is_mcp_tool =
                         matches!(tool_identity.as_ref(), Some(AgentToolIdentity::Mcp { .. }));
@@ -1345,36 +1346,43 @@ impl AgentRuntime {
                                 &LlmMessage::assistant(
                                     "",
                                     vec![crate::llm::LlmToolCall {
-                                        id: model_call.id.clone(),
-                                        name: model_call.tool.clone(),
-                                        args: model_call.args.clone(),
+                                        id: checkpoint_call.id.clone(),
+                                        name: checkpoint_call.tool.clone(),
+                                        args: checkpoint_call.args.clone(),
                                     }],
                                 ),
                             );
-                            if trace_call.args != call.args || model_call.args != call.args {
+                            if trace_call.args != call.args || checkpoint_call.args != call.args {
                                 recorder.mark_truncated();
                             }
                         }
                         sequence
                     };
-                    active_context.push(ContextItem::assistant(
-                        assistant_tool_content,
-                        vec![crate::llm::LlmToolCall {
-                            id: model_call.id,
-                            name: model_call.tool,
-                            args: model_call.args,
-                        }],
-                        with_trace_origin(
-                            ContextMetadata::new(
-                                ContextSource::ModelResponse,
-                                ContextScope::Run,
-                                ContextRetention::Retained,
-                            )
-                            .with_group(tool_exchange_group.clone()),
-                            trace_assistant_message_id.as_deref(),
-                            call_sequence,
-                        ),
-                    ));
+                    active_context.push(
+                        ContextItem::assistant(
+                            assistant_tool_content,
+                            vec![crate::llm::LlmToolCall {
+                                id: model_call.id,
+                                name: model_call.tool,
+                                args: model_call.args,
+                            }],
+                            with_trace_origin(
+                                ContextMetadata::new(
+                                    ContextSource::ModelResponse,
+                                    ContextScope::Run,
+                                    ContextRetention::Retained,
+                                )
+                                .with_group(tool_exchange_group.clone()),
+                                trace_assistant_message_id.as_deref(),
+                                call_sequence,
+                            ),
+                        )
+                        .with_checkpoint_tool_calls(vec![crate::llm::LlmToolCall {
+                            id: checkpoint_call.id,
+                            name: checkpoint_call.tool,
+                            args: checkpoint_call.args,
+                        }]),
+                    );
                     publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if !is_mcp_tool {
                         let event_call = tool_registry.event_call_projection(&call);

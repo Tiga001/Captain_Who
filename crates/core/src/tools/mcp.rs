@@ -37,6 +37,7 @@ use invocation::{
 };
 pub use invocation::{
     mcp_tool_arguments_digest, mcp_tool_invocation_event, mcp_tool_result_from_approved_invocation,
+    mcp_tool_result_from_rejected_approval, mcp_tool_result_model_projection,
     mcp_tool_result_persistence_projection, validate_mcp_approval_arguments,
     McpToolInvocationEventUpdate,
 };

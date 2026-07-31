@@ -463,6 +463,7 @@ impl ContextFrame {
         &mut self,
         call: &LlmToolCall,
         observation: String,
+        checkpoint_observation: Option<String>,
         is_error: bool,
         is_mcp: bool,
         origin: Option<ContextOrigin>,
@@ -499,12 +500,12 @@ impl ContextFrame {
         if let Some(origin) = origin {
             metadata = metadata.with_origin(origin);
         }
-        self.push(ContextItem::tool_result(
-            call.id.clone(),
-            observation,
-            is_error,
-            metadata,
-        ));
+        let mut item = ContextItem::tool_result(call.id.clone(), observation, is_error, metadata);
+        if let Some(checkpoint_observation) = checkpoint_observation {
+            item =
+                item.with_checkpoint_tool_result(call.id.clone(), checkpoint_observation, is_error);
+        }
+        self.push(item);
         self.validate_complete_tool_protocol()
     }
 

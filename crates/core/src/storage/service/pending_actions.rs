@@ -821,7 +821,7 @@ fn terminalize_mcp_action_in_transaction(
     else {
         return Ok(None);
     };
-    if record.status != request.expected_status {
+    if record.status != request.expected_status || record.target_status.is_some() {
         return Ok(None);
     }
     if record.action_type != "mcp_tool_call" {
@@ -869,6 +869,7 @@ fn terminalize_mcp_action_in_transaction(
                 updated_at = ?4
             WHERE action_id = ?1
               AND status = ?2
+              AND target_status IS NULL
               AND action_type = 'mcp_tool_call'
             ",
             rusqlite::params![
@@ -2020,6 +2021,153 @@ fn settlement_diverged(
     }
 }
 
+fn validate_durable_mcp_tool_result(
+    tool_result: &AgentToolResult,
+    target_status: &str,
+) -> Result<bool, String> {
+    let value = tool_result
+        .result
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "MCP durable ToolResult must be a typed object".to_string())?;
+    const ALLOWED_FIELDS: &[&str] = &[
+        "schemaVersion",
+        "type",
+        "external",
+        "status",
+        "outcome",
+        "dispatchCertainty",
+        "contentOmitted",
+        "isError",
+        "feedbackProvided",
+        "code",
+        "retryable",
+    ];
+    if value
+        .keys()
+        .any(|key| !ALLOWED_FIELDS.contains(&key.as_str()))
+    {
+        return Err("MCP durable ToolResult contains an unknown field".to_string());
+    }
+    if value
+        .get("schemaVersion")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+        || value.get("type").and_then(serde_json::Value::as_str) != Some("mcp_tool")
+        || value.get("external").and_then(serde_json::Value::as_bool) != Some(true)
+        || value
+            .get("contentOmitted")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || tool_result.exact_archive_file.is_some()
+    {
+        return Err("MCP durable ToolResult is not the safe Host projection".to_string());
+    }
+    let code = value.get("code").and_then(serde_json::Value::as_str);
+    if let Some(code) = code {
+        if code.is_empty()
+            || code.len() > 128
+            || !code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err("MCP durable ToolResult has an invalid safe error code".to_string());
+        }
+    } else if value.contains_key("code") {
+        return Err("MCP durable ToolResult error code must be a string".to_string());
+    }
+    let retryable = value.get("retryable").and_then(serde_json::Value::as_bool);
+    if value.contains_key("retryable") && retryable.is_none() {
+        return Err("MCP durable ToolResult retryable flag must be boolean".to_string());
+    }
+
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MCP durable ToolResult lacks status".to_string())?;
+    let outcome = value
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MCP durable ToolResult lacks outcome".to_string())?;
+    let dispatch_certainty = value
+        .get("dispatchCertainty")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "MCP durable ToolResult lacks dispatch certainty".to_string())?;
+    let is_error = value
+        .get("isError")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "MCP durable ToolResult lacks isError".to_string())?;
+    let feedback_provided = value.get("feedbackProvided");
+
+    let is_rejection = target_status == "rejected";
+    let semantic_shape_is_valid = match target_status {
+        "completed" => {
+            status == "completed"
+                && dispatch_certainty == "response_received"
+                && matches!(
+                    (outcome, is_error, tool_result.ok),
+                    ("succeeded", false, true) | ("tool_error", true, false)
+                )
+                && feedback_provided.is_none()
+                && code.is_none()
+                && retryable.is_none()
+        }
+        "rejected" => {
+            status == "rejected"
+                && outcome == "rejected"
+                && dispatch_certainty == "definitely_not_dispatched"
+                && !is_error
+                && tool_result.ok
+                && feedback_provided.is_none_or(|feedback| feedback.as_bool() == Some(true))
+                && code == Some("mcp.approval_rejected")
+                && retryable == Some(false)
+        }
+        "cancelled" => {
+            status == "cancelled"
+                && outcome == "cancelled"
+                && dispatch_certainty == "definitely_not_dispatched"
+                && is_error
+                && !tool_result.ok
+                && feedback_provided.is_none()
+                && code.is_some()
+                && retryable.is_some()
+        }
+        "failed" => {
+            !tool_result.ok
+                && is_error
+                && feedback_provided.is_none()
+                && code.is_some()
+                && retryable.is_some()
+                && matches!(
+                    (status, outcome),
+                    ("failed", "output_too_large")
+                        | ("failed", "transport_error")
+                        | ("failed", "timed_out")
+                        | ("expired", "expired")
+                        | ("payload_unavailable", "payload_unavailable")
+                        | ("policy_denied", "policy_denied")
+                        | ("outcome_unknown", "outcome_unknown")
+                )
+                && matches!(
+                    dispatch_certainty,
+                    "definitely_not_dispatched" | "possibly_dispatched" | "response_received"
+                )
+        }
+        _ => false,
+    };
+    if !semantic_shape_is_valid {
+        return Err("MCP durable ToolResult terminal semantics are inconsistent".to_string());
+    }
+
+    const PERSISTED_MCP_ERROR: &str = "The external MCP tool reported an error.";
+    if (tool_result.ok && tool_result.error.is_some())
+        || (!tool_result.ok && tool_result.error.as_deref() != Some(PERSISTED_MCP_ERROR))
+    {
+        return Err("MCP durable ToolResult error projection is inconsistent".to_string());
+    }
+    Ok(is_rejection)
+}
+
 fn validate_manual_file_effect_settlement_request(
     audit: &AgentActionAuditRecord,
     expected_pending_status: &str,
@@ -2027,15 +2175,26 @@ fn validate_manual_file_effect_settlement_request(
     trace: &ConversationTurnTrace,
     committed_at: i64,
 ) -> Result<(), String> {
-    if !matches!(target_status, "completed" | "failed" | "cancelled")
-        || audit.status != target_status
+    if !matches!(
+        target_status,
+        "completed" | "failed" | "cancelled" | "rejected"
+    ) || audit.status != target_status
     {
         return Err(format!(
             "manual file-effect terminal status mismatch: audit={}, target={target_status}",
             audit.status
         ));
     }
-    if audit.decision.as_deref() != Some("approved")
+    let action = serde_json::from_str::<AgentProposedAction>(&audit.action_json)
+        .map_err(|error| format!("frozen file-effect action is invalid: {error}"))?;
+    let is_mcp_action = matches!(action, AgentProposedAction::McpToolCall { .. });
+    let is_mcp_rejection = is_mcp_action && target_status == "rejected";
+    let valid_decision = if is_mcp_rejection {
+        audit.decision.as_deref() == Some("rejected")
+    } else {
+        audit.decision.as_deref() == Some("approved")
+    };
+    if !valid_decision
         || audit.decision_source.as_deref() != Some("manual")
         || audit.patch_result_json.is_some()
     {
@@ -2043,11 +2202,10 @@ fn validate_manual_file_effect_settlement_request(
             "manual file-effect settlement contains an invalid audit lifecycle".to_string(),
         );
     }
-    let action = serde_json::from_str::<AgentProposedAction>(&audit.action_json)
-        .map_err(|error| format!("frozen file-effect action is invalid: {error}"))?;
     let (expected_action_type, expected_tool, expected_call_id, is_command) =
         manual_file_effect_identity(&action)?;
-    let pending_status_is_valid = expected_pending_status == "approved"
+    let pending_status_is_valid = (is_mcp_rejection && expected_pending_status == "pending")
+        || expected_pending_status == "approved"
         || (expected_action_type == "skill_materialization"
             && expected_pending_status == "executing")
         || (expected_action_type == "mcp_tool_call" && expected_pending_status == "executing");
@@ -2090,9 +2248,20 @@ fn validate_manual_file_effect_settlement_request(
     if let Some(command_result) = command_result.as_ref() {
         validate_manual_command_result_projection(command_result, &tool_result, target_status)?;
     }
+    if is_mcp_action {
+        let validated_rejection = validate_durable_mcp_tool_result(&tool_result, target_status)?;
+        if validated_rejection != is_mcp_rejection {
+            return Err("MCP durable ToolResult rejection state is inconsistent".to_string());
+        }
+    }
+    let expected_ok = if is_mcp_action {
+        tool_result.ok
+    } else {
+        target_status == "completed"
+    };
     if tool_result.tool != expected_tool
         || tool_result.call_id != expected_call_id
-        || (target_status == "completed") != tool_result.ok
+        || expected_ok != tool_result.ok
         || audit.error != tool_result.error
     {
         return Err("manual file-effect audit and ToolResult terminal state differ".to_string());
@@ -2110,7 +2279,15 @@ fn validate_manual_file_effect_settlement_request(
     else {
         return Err("manual file-effect settlement trace lacks a final ToolResult".to_string());
     };
-    if call_id != &tool_result.call_id || tool != &expected_tool || *success != tool_result.ok {
+    // A rejected MCP approval is a successfully delivered Host ToolResult for the model, while
+    // the append-only trace deliberately records the external operation itself as not succeeded.
+    // Keeping those two meanings separate prevents rejection from becoming an execution error
+    // without falsely claiming that the MCP tool ran.
+    let expected_trace_success = tool_result.ok && !is_mcp_rejection;
+    if call_id != &tool_result.call_id
+        || tool != &expected_tool
+        || *success != expected_trace_success
+    {
         return Err(
             "manual file-effect trace result identity differs from terminal audit".to_string(),
         );

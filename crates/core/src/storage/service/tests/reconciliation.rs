@@ -495,6 +495,156 @@ fn manual_non_command_file_effect_settlement(
     (pending, approved_audit, terminal_audit, trace)
 }
 
+fn mcp_rejection_settlement(
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+) -> (
+    AgentPendingActionRecord,
+    AgentActionAuditRecord,
+    AgentActionAuditRecord,
+    ConversationTurnTrace,
+    AgentToolCall,
+) {
+    let action_id = "31522e9e-0f12-4d7c-9a7d-2c6e91c1f0d1";
+    let call_id =
+        crate::llm::model_response_tool_call_id(run_id, 0, 0, "fixture-mcp-rejection-call");
+    let model_tool_name = "mcp__fixture__list_directory";
+    let provenance = crate::AgentMcpToolProvenance {
+        server_id: "7f4a2d91-24ab-4d24-9eed-63daf26a6c15".to_string(),
+        scope: crate::AgentMcpServerScope::User,
+        raw_tool_name: "list_directory".to_string(),
+        model_tool_name: model_tool_name.to_string(),
+        config_epoch: "66dcbb6b-92a3-4d4e-9591-f0707e4ca3e3".to_string(),
+        registry_revision: 3,
+        config_digest: "a".repeat(64),
+        catalog_generation: 4,
+        catalog_digest: "b".repeat(64),
+        catalog_schema_digest: "c".repeat(64),
+        schema_digest: "d".repeat(64),
+        schema_normalizer_version: crate::MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
+    };
+    let call = AgentToolCall {
+        id: call_id.to_string(),
+        tool: model_tool_name.to_string(),
+        args: serde_json::json!({}),
+        approval_status: crate::AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let approval = crate::AgentMcpToolApproval {
+        identity: crate::AgentMcpToolInvocationIdentity {
+            action_id: action_id.to_string(),
+            invocation_id: "8e8272e7-a27b-4b82-a7bf-c90b98b2d76c".to_string(),
+            run_id: run_id.to_string(),
+            call_id: call_id.to_string(),
+            provenance: provenance.clone(),
+            arguments_digest: crate::mcp_tool_arguments_digest(&serde_json::json!({})).unwrap(),
+        },
+        call: call.clone(),
+        summary: crate::AgentMcpToolApprovalSummary {
+            server_id: provenance.server_id.clone(),
+            server_display_name: "Fixture MCP".to_string(),
+            scope: provenance.scope.clone(),
+            raw_tool_name: provenance.raw_tool_name.clone(),
+            model_tool_name: provenance.model_tool_name.clone(),
+            display_reason: Some("List the allowed fixture directory.".to_string()),
+            arguments: crate::AgentMcpArgumentSummary {
+                encoded_bytes: 2,
+                top_level_property_count: 0,
+                string_value_count: 0,
+                number_value_count: 0,
+                boolean_value_count: 0,
+                null_value_count: 0,
+                object_value_count: 1,
+                array_value_count: 0,
+                max_depth: 0,
+                truncated: false,
+            },
+            risk: crate::AgentMcpToolRisk::ReadOnlyClaimed,
+            external: true,
+        },
+        approval_mode: crate::AgentMcpApprovalMode::Prompt,
+        payload_persistence: crate::AgentMcpApprovalPayloadPersistence::ProcessOnly,
+        created_at: 10,
+        expires_at: 1_000,
+    };
+    let action = AgentProposedAction::McpToolCall {
+        approval: Box::new(approval.clone()),
+    };
+    let action_json = serde_json::to_string(&action).unwrap();
+    let storage_id = format!("v2:{}:{run_id}:{action_id}", run_id.len());
+    let pending = AgentPendingActionRecord {
+        action_id: storage_id.clone(),
+        run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        assistant_message_id: Some(assistant_message_id.to_string()),
+        action_type: "mcp_tool_call".to_string(),
+        tool_name: model_tool_name.to_string(),
+        tool_call_id: Some(call_id.to_string()),
+        status: "pending".to_string(),
+        target_status: None,
+        action_json: action_json.clone(),
+        agent_input_json: "{}".to_string(),
+        created_at: 10,
+        updated_at: 11,
+    };
+    let pending_audit = AgentActionAuditRecord {
+        action_id: storage_id,
+        run_id: run_id.to_string(),
+        conversation_id: Some(conversation_id.to_string()),
+        assistant_message_id: Some(assistant_message_id.to_string()),
+        action_type: "mcp_tool_call".to_string(),
+        tool_name: model_tool_name.to_string(),
+        decision: None,
+        status: "pending".to_string(),
+        action_json,
+        patch_result_json: None,
+        command_result_json: None,
+        tool_result_json: None,
+        error: None,
+        created_at: 10,
+        decided_at: None,
+        completed_at: None,
+        effective_permissions_json: Some("{}".to_string()),
+        path_scope: None,
+        command_cwd_scope: None,
+        blocked_reason: None,
+        decision_source: Some("manual_pending".to_string()),
+    };
+    let rejected_result = crate::mcp_tool_result_persistence_projection(
+        &crate::mcp_tool_result_from_rejected_approval(&approval, None).unwrap(),
+    );
+    let mut terminal_audit = pending_audit.clone();
+    terminal_audit.decision = Some("rejected".to_string());
+    terminal_audit.status = "rejected".to_string();
+    terminal_audit.tool_result_json = Some(serde_json::to_string(&rejected_result).unwrap());
+    terminal_audit.decided_at = Some(12);
+    terminal_audit.completed_at = Some(12);
+    terminal_audit.decision_source = Some("manual".to_string());
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call_id.to_string(),
+                tool: model_tool_name.to_string(),
+                provenance: Some(crate::AgentToolIdentity::Mcp { provenance }),
+                operation: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::Required,
+                truncated: false,
+            },
+            crate::conversation_trace::projected_tool_result_trace_item(1, &call, &rejected_result),
+        ],
+    };
+    (pending, pending_audit, terminal_audit, trace, call)
+}
+
 fn assert_manual_file_effect_is_uncommitted(
     service: &StorageService,
     storage_id: &str,
@@ -668,6 +818,333 @@ fn interrupted_file_effect(
     pending.created_at = created_at;
     pending.updated_at = created_at;
     pending
+}
+
+#[test]
+fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let run_id = "run-mcp-rejection-crash";
+    let conversation_id = "conversation-mcp-rejection-crash";
+    let assistant_message_id = "assistant-mcp-rejection-crash";
+    let (pending, pending_audit, terminal_audit, expected_trace, _) =
+        mcp_rejection_settlement(run_id, conversation_id, assistant_message_id);
+    let action_id = pending.action_id.clone();
+    save_assistant_conversation(&service, conversation_id, assistant_message_id);
+    service.store_pending_agent_action(pending).unwrap();
+    service.upsert_agent_action_audit(pending_audit).unwrap();
+
+    assert_eq!(
+        service
+            .commit_pending_agent_action_audited_result_trace(
+                &terminal_audit,
+                "pending",
+                "rejected",
+                &expected_trace,
+                12,
+            )
+            .unwrap(),
+        AgentPendingActionResultCommitOutcome::Committed {
+            trace_changed: true,
+        }
+    );
+
+    // Reproduce the exact crash boundary: the rejection receipt is fully committed, but the
+    // following pending-status CAS never ran before the process exited.
+    let connection = service.state.connection().unwrap();
+    let committed_state: (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = connection
+        .query_row(
+            "
+            SELECT pending.status,
+                   pending.target_status,
+                   audit.status,
+                   audit.decision,
+                   audit.error,
+                   audit.blocked_reason
+            FROM agent_pending_actions pending
+            JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+            WHERE pending.action_id = ?1
+            ",
+            [&action_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(committed_state.0, "pending");
+    assert_eq!(committed_state.1.as_deref(), Some("rejected"));
+    assert_eq!(committed_state.2, "rejected");
+    assert_eq!(committed_state.3.as_deref(), Some("rejected"));
+    assert_eq!(committed_state.4, None);
+    assert_eq!(committed_state.5, None);
+    drop(connection);
+    assert_eq!(
+        service
+            .get_conversation_turn_trace(assistant_message_id)
+            .unwrap()
+            .as_ref(),
+        Some(&expected_trace)
+    );
+
+    let reconciled = service
+        .reconcile_interrupted_pending_agent_actions(42)
+        .unwrap();
+    assert_eq!(reconciled.len(), 1);
+    assert_eq!(reconciled[0].action_id, action_id);
+    assert_eq!(reconciled[0].status, "pending");
+    assert_eq!(reconciled[0].target_status.as_deref(), Some("rejected"));
+
+    let connection = service.state.connection().unwrap();
+    let recovered_state: (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = connection
+        .query_row(
+            "
+            SELECT pending.status,
+                   pending.target_status,
+                   audit.status,
+                   audit.decision,
+                   audit.error,
+                   audit.tool_result_json
+            FROM agent_pending_actions pending
+            JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+            WHERE pending.action_id = ?1
+            ",
+            [&action_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(recovered_state.0, "rejected");
+    assert_eq!(recovered_state.1.as_deref(), Some("rejected"));
+    assert_eq!(recovered_state.2, "rejected");
+    assert_eq!(recovered_state.3.as_deref(), Some("rejected"));
+    assert_eq!(recovered_state.4, None);
+    assert!(!recovered_state.5.contains("outcome_unknown"));
+    assert!(!recovered_state.5.contains("mcp.tool_outcome_unknown"));
+    drop(connection);
+
+    let recovered_trace = service
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered_trace, expected_trace);
+    assert_eq!(
+        recovered_trace
+            .items
+            .iter()
+            .filter(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
+            .count(),
+        1,
+        "startup reconciliation must not append or replay the rejected MCP call"
+    );
+
+    assert!(service
+        .reconcile_interrupted_pending_agent_actions(43)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        service
+            .get_conversation_turn_trace(assistant_message_id)
+            .unwrap()
+            .as_ref(),
+        Some(&expected_trace)
+    );
+}
+
+#[test]
+fn mcp_server_tool_error_is_a_completed_authoritative_receipt() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let run_id = "run-mcp-tool-error";
+    let conversation_id = "conversation-mcp-tool-error";
+    let assistant_message_id = "assistant-mcp-tool-error";
+    let (mut pending, mut preterminal_audit, _, mut trace, call) =
+        mcp_rejection_settlement(run_id, conversation_id, assistant_message_id);
+    pending.status = "executing".to_string();
+    preterminal_audit.status = "approved".to_string();
+    preterminal_audit.decision = Some("approved".to_string());
+    preterminal_audit.decided_at = Some(11);
+    preterminal_audit.decision_source = Some("manual".to_string());
+
+    let live_result = AgentToolResult {
+        exact_archive_file: None,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "schemaVersion": 1,
+            "type": "mcp_tool",
+            "external": true,
+            "status": "completed",
+            "outcome": "tool_error",
+            "dispatchCertainty": "response_received",
+            "isError": true,
+            "content": [{ "type": "text", "text": "fixture error omitted durably" }]
+        })),
+        error: Some("fixture server returned isError".to_string()),
+    };
+    let durable_result = crate::mcp_tool_result_persistence_projection(&live_result);
+    let mut terminal_audit = preterminal_audit.clone();
+    terminal_audit.status = "completed".to_string();
+    terminal_audit.tool_result_json = Some(serde_json::to_string(&durable_result).unwrap());
+    terminal_audit.error = durable_result.error.clone();
+    terminal_audit.blocked_reason = durable_result.error.clone();
+    terminal_audit.completed_at = Some(12);
+    trace.items[1] =
+        crate::conversation_trace::projected_tool_result_trace_item(1, &call, &durable_result);
+
+    save_assistant_conversation(&service, conversation_id, assistant_message_id);
+    service.store_pending_agent_action(pending).unwrap();
+    service
+        .upsert_agent_action_audit(preterminal_audit)
+        .unwrap();
+    assert_eq!(
+        service
+            .commit_pending_agent_action_audited_result_trace(
+                &terminal_audit,
+                "executing",
+                "completed",
+                &trace,
+                12,
+            )
+            .unwrap(),
+        AgentPendingActionResultCommitOutcome::Committed {
+            trace_changed: true,
+        }
+    );
+
+    let connection = service.state.connection().unwrap();
+    let (pending_status, target_status, audit_status, persisted_result): (
+        String,
+        Option<String>,
+        String,
+        String,
+    ) = connection
+        .query_row(
+            "
+            SELECT pending.status, pending.target_status, audit.status, audit.tool_result_json
+            FROM agent_pending_actions pending
+            JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+            WHERE pending.run_id = ?1
+            ",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "executing");
+    assert_eq!(target_status.as_deref(), Some("completed"));
+    assert_eq!(audit_status, "completed");
+    assert_eq!(
+        serde_json::to_value(serde_json::from_str::<AgentToolResult>(&persisted_result).unwrap())
+            .unwrap(),
+        serde_json::to_value(durable_result).unwrap()
+    );
+}
+
+#[test]
+fn mcp_durable_receipt_rejects_unknown_canary_fields_without_partial_commit() {
+    const CANARY: &str = "MCP_NEUTRAL_FIELD_CANARY_MUST_NOT_PERSIST";
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let run_id = "run-mcp-rejection-canary";
+    let conversation_id = "conversation-mcp-rejection-canary";
+    let assistant_message_id = "assistant-mcp-rejection-canary";
+    let (pending, pending_audit, mut terminal_audit, mut trace, call) =
+        mcp_rejection_settlement(run_id, conversation_id, assistant_message_id);
+    let mut tampered_result = serde_json::from_str::<AgentToolResult>(
+        terminal_audit.tool_result_json.as_deref().unwrap(),
+    )
+    .unwrap();
+    tampered_result
+        .result
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap()
+        .insert(
+            "neutralData".to_string(),
+            serde_json::Value::String(CANARY.to_string()),
+        );
+    terminal_audit.tool_result_json = Some(serde_json::to_string(&tampered_result).unwrap());
+    trace.items[1] =
+        crate::conversation_trace::projected_tool_result_trace_item(1, &call, &tampered_result);
+
+    let storage_id = pending.action_id.clone();
+    save_assistant_conversation(&service, conversation_id, assistant_message_id);
+    service.store_pending_agent_action(pending).unwrap();
+    service.upsert_agent_action_audit(pending_audit).unwrap();
+    let error = service
+        .commit_pending_agent_action_audited_result_trace(
+            &terminal_audit,
+            "pending",
+            "rejected",
+            &trace,
+            12,
+        )
+        .unwrap_err();
+    assert!(error.contains("unknown field"), "{error}");
+
+    let connection = service.state.connection().unwrap();
+    let (target_status, audit_status, tool_result_json): (Option<String>, String, Option<String>) =
+        connection
+            .query_row(
+                "
+            SELECT pending.target_status, audit.status, audit.tool_result_json
+            FROM agent_pending_actions pending
+            JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+            WHERE pending.action_id = ?1
+            ",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+    assert_eq!(target_status, None);
+    assert_eq!(audit_status, "pending");
+    assert_eq!(tool_result_json, None);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT instr(COALESCE(tool_result_json, ''), ?2)
+                 FROM agent_action_audit
+                 WHERE action_id = ?1",
+                rusqlite::params![storage_id, CANARY],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    assert!(service
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

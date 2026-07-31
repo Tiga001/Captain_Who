@@ -71,7 +71,7 @@
 .mcp-secondary-button:hover:not(:disabled),
 .mcp-danger-button:hover:not(:disabled),
 .mcp-icon-button:hover:not(:disabled),
-.mcp-editor button:hover:not(:disabled) {
+.mcp-editor button:not(.settings-switch):hover:not(:disabled) {
   background: var(--mc-color-state-hover);
 }
 
@@ -453,13 +453,19 @@
   gap: 8px;
 }
 
-.mcp-auto-execute-row small {
+.mcp-auto-execute-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mcp-auto-execute-copy small {
   color: var(--settings-content-muted-color);
   font-size: var(--mc-font-size-xs);
   font-weight: var(--mc-font-weight-medium);
 }
 
-.mcp-security-notice,
 .mcp-reauthorization-warning,
 .mcp-editor__errors,
 .mcp-safe-error,
@@ -472,7 +478,6 @@
   font-size: var(--mc-font-size-sm);
 }
 
-.mcp-security-notice p,
 .mcp-editor__errors p,
 .mcp-safe-error p,
 .mcp-detail-callout p {

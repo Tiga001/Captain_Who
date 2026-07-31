@@ -108,7 +108,13 @@ export function McpToolActivity({ invocation }: { invocation?: ChatMcpToolInvoca
   const presentation = getStatusPresentation(invocation, t)
   const serverName = safePlainText(invocation.serverDisplayName, 128)
   const toolName = safePlainText(invocation.rawToolName, 1024)
-  const errorCode = invocation.errorCode ? safePlainText(invocation.errorCode, 128) : undefined
+  const isRejected = invocation.state === 'rejected'
+  const rejectionReason =
+    isRejected && invocation.rejectionReason
+      ? toSafeMcpDisplayText(invocation.rejectionReason, 512).trim() || undefined
+      : undefined
+  const errorCode =
+    !isRejected && invocation.errorCode ? safePlainText(invocation.errorCode, 128) : undefined
 
   return (
     <>
@@ -133,10 +139,16 @@ export function McpToolActivity({ invocation }: { invocation?: ChatMcpToolInvoca
               <dt>{t('agent.mcp.activity.tool')}</dt>
               <dd>{toolName}</dd>
             </div>
-            {invocation.durationMs !== undefined && (
+            {!isRejected && invocation.durationMs !== undefined && (
               <div>
                 <dt>{t('agent.mcp.activity.duration')}</dt>
                 <dd>{Math.max(0, Math.trunc(invocation.durationMs)).toLocaleString()} ms</dd>
+              </div>
+            )}
+            {rejectionReason && (
+              <div>
+                <dt>{t('agent.mcp.activity.rejectionReason')}</dt>
+                <dd>{rejectionReason}</dd>
               </div>
             )}
             {errorCode && (

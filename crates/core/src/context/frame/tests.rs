@@ -188,6 +188,71 @@ fn checkpoint_message_can_remove_transient_model_images_without_changing_live_co
 }
 
 #[test]
+fn checkpoint_message_can_redact_tool_arguments_without_mutating_live_context() {
+    let secret = "MCP_LIVE_ARGUMENT_CANARY";
+    let live = LlmMessage::assistant(
+        "I will inspect the requested file.",
+        vec![LlmToolCall {
+            id: "mcp-call-1".to_string(),
+            name: "mcp__fixture__read_text_file".to_string(),
+            args: json!({ "path": secret }),
+        }],
+    );
+    let frame = ContextFrame::new(vec![ContextItem::new(
+        live,
+        ContextMetadata::new(
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+    )
+    .with_checkpoint_tool_calls(vec![LlmToolCall {
+        id: "mcp-call-1".to_string(),
+        name: "mcp__fixture__read_text_file".to_string(),
+        args: json!({}),
+    }])]);
+
+    assert_eq!(frame.to_messages()[0].tool_calls[0].args["path"], secret);
+    let checkpoint = frame.checkpoint_items().unwrap();
+    assert_eq!(checkpoint[0].content, "I will inspect the requested file.");
+    assert_eq!(checkpoint[0].tool_calls[0].args, json!({}));
+    assert!(!serde_json::to_string(&checkpoint).unwrap().contains(secret));
+    let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
+    assert_eq!(restored.to_messages()[0].tool_calls[0].args, json!({}));
+}
+
+#[test]
+fn checkpoint_message_cannot_change_tool_call_identity() {
+    let live = LlmMessage::assistant(
+        "",
+        vec![LlmToolCall {
+            id: "mcp-call-1".to_string(),
+            name: "mcp__fixture__read_text_file".to_string(),
+            args: json!({ "path": "live-only" }),
+        }],
+    );
+    let durable = LlmMessage::assistant(
+        "",
+        vec![LlmToolCall {
+            id: "different-call".to_string(),
+            name: "mcp__fixture__read_text_file".to_string(),
+            args: json!({}),
+        }],
+    );
+    let frame = ContextFrame::new(vec![ContextItem::new(
+        live,
+        ContextMetadata::new(
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+    )
+    .with_checkpoint_message(durable)]);
+
+    assert!(frame.checkpoint_items().is_err());
+}
+
+#[test]
 fn persistent_replacement_keeps_run_overlay_and_discards_old_history() {
     let detector =
         ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[]);

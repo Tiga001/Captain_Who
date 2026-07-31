@@ -6,17 +6,31 @@ fn failed_mcp_tool_result(
     message: &str,
     dispatch_certainty: AgentMcpDispatchCertainty,
 ) -> AgentToolResult {
+    let (status, outcome) = match code {
+        "mcp.tool_outcome_unknown" => ("outcome_unknown", "outcome_unknown"),
+        "mcp.tool_output_too_large" => ("failed", "output_too_large"),
+        "mcp.approval_payload_expired" => ("expired", "expired"),
+        "mcp.approval_payload_unavailable" => ("payload_unavailable", "payload_unavailable"),
+        "mcp.approval_policy_denied" => ("policy_denied", "policy_denied"),
+        "mcp.tool_cancelled_before_dispatch" => ("cancelled", "cancelled"),
+        "mcp.tool_timeout" => ("failed", "timed_out"),
+        _ => ("failed", "transport_error"),
+    };
     AgentToolResult {
         exact_archive_file: None,
         call_id: approval.identity.call_id.clone(),
         tool: approval.identity.provenance.model_tool_name.clone(),
         ok: false,
         result: Some(serde_json::json!({
+            "schemaVersion": 1,
             "type": "mcp_tool",
+            "status": status,
+            "outcome": outcome,
             "code": code,
             "retryable": false,
             "external": true,
             "dispatchCertainty": mcp_dispatch_certainty_label(dispatch_certainty),
+            "isError": true,
         })),
         error: Some(message.to_string()),
     }
@@ -928,7 +942,7 @@ impl AgentService {
     pub(in crate::application::agent) async fn run_mcp_tool_execution(
         &self,
         mut record: PendingActionRecord,
-        mut call: AgentToolCall,
+        call: AgentToolCall,
         guard: CommandRunGuard,
         notifications: CoreServerNotificationSender,
         dispatch_already_claimed: bool,
@@ -1040,7 +1054,9 @@ impl AgentService {
         let dispatch_certainty = settlement.dispatch_certainty;
         let output_truncated = settlement.output_truncated;
 
-        call.approval_status = AgentApprovalStatus::Approved;
+        // The Provider ToolCall frozen in the checkpoint is immutable. Approval is represented by
+        // the typed decision, invocation lifecycle and paired ToolResult; rewriting the committed
+        // call from `required` to `approved` would violate the append-only trace contract.
         let mut agent_input = record.agent_input.clone();
         agent_input.approval_decision = Some(AgentApprovalDecision {
             action_id: record.snapshot.action_id.clone(),

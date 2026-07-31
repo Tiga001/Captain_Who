@@ -350,12 +350,7 @@ export const zhCNTranslations = {
   'mcp.form.autoExecute': '允许自动执行工具',
   'mcp.form.callsCurrentlyDenied': '当前禁止调用',
   'mcp.form.denyCalls': '禁止所有调用',
-  'mcp.form.securityTitle': '本地进程安全',
-  'mcp.form.persistenceWarning': '可执行文件、有序参数和工作目录会作为非敏感配置持久化。',
-  'mcp.form.noSecretsWarning': '不要把 Token、密码或凭据放入参数。本版本不支持机密环境变量。',
-  'mcp.form.toolApprovalHelp': '关闭自动执行时，每次外部工具调用都会单独询问你。',
-  'mcp.form.simpleSecurityHelp':
-    '启动文件、参数和工作目录会保存在 MyCopilot 中；不要在参数里放凭据。',
+  'mcp.form.toolApprovalHelp': '开启后自动执行工具，关闭时每次调用都需要审批。',
   'mcp.form.launchChangedWarning':
     '修改启动信息会停止旧连接。保存后，下次打开开关时会重新核对启动信息。',
   'mcp.form.validationFailed': '请检查以下字段',
@@ -1100,6 +1095,7 @@ export const zhCNTranslations = {
   'agent.mcp.activity.outcomeUnknownWarning':
     '这次调用可能已经产生副作用，但没有收到权威结果。决定下一步前，请先检查权威系统中的实际状态。',
   'agent.mcp.activity.duration': '耗时',
+  'agent.mcp.activity.rejectionReason': '拒绝理由',
   'agent.mcp.activity.outputTruncated': '部分输出已被截断或省略。',
   'agent.mcp.activity.errorCode': '安全错误码',
   'agent.detail.args': '参数',

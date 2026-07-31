@@ -29,6 +29,11 @@ async fn structured_content_and_typed_route_survive_successful_execution() {
 
     assert!(result.ok);
     let value = result.result.as_ref().unwrap();
+    assert_eq!(value["type"], "mcp_tool");
+    assert_eq!(value["external"], true);
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["outcome"], "succeeded");
+    assert_eq!(value["dispatchCertainty"], "response_received");
     assert_eq!(value["content"][0]["text"], "sum ready");
     assert_eq!(
         value["structuredContent"],
@@ -41,9 +46,14 @@ async fn structured_content_and_typed_route_survive_successful_execution() {
     );
     let projection_registry = registry_with(invoker.clone());
     let trace_projection = projection_registry.trace_projection(&result);
-    assert_eq!(
-        trace_projection.result.as_ref().unwrap()["provenance"],
-        serde_json::to_value(&expected_provenance).unwrap()
+    assert!(
+        trace_projection
+            .result
+            .as_ref()
+            .unwrap()
+            .get("provenance")
+            .is_none(),
+        "MCP routing provenance belongs to the typed ToolCall, not the persisted result"
     );
     let model_projection = projection_registry.model_projection(&result);
     assert!(
@@ -67,6 +77,26 @@ async fn structured_content_and_typed_route_survive_successful_execution() {
     assert_eq!(
         invoker.consumed_arguments.lock().unwrap()[0],
         json!({"left": 2})
+    );
+
+    let durable = mcp_tool_result_persistence_projection(&result);
+    assert_eq!(
+        durable.result,
+        Some(json!({
+            "schemaVersion": 1,
+            "type": "mcp_tool",
+            "external": true,
+            "status": "completed",
+            "outcome": "succeeded",
+            "dispatchCertainty": "response_received",
+            "contentOmitted": true,
+            "isError": false,
+        }))
+    );
+    assert_eq!(
+        serde_json::to_value(mcp_tool_result_persistence_projection(&durable)).unwrap(),
+        serde_json::to_value(&durable).unwrap(),
+        "the durable projection must be idempotent"
     );
 }
 
@@ -98,9 +128,188 @@ async fn server_is_error_becomes_failed_tool_result_not_transport_failure() {
     assert!(!result.ok);
     assert!(result.error.unwrap().contains("MCP server reported"));
     let value = result.result.expect("structured MCP error result");
+    assert_eq!(value["type"], "mcp_tool");
+    assert_eq!(value["external"], true);
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["outcome"], "tool_error");
+    assert_eq!(value["dispatchCertainty"], "response_received");
     assert_eq!(value["isError"], true);
     assert_eq!(value["content"][0]["text"], "fixture rejected the request");
     assert_eq!(value["structuredContent"]["reason"], "fixture_error");
+}
+
+#[test]
+fn rejected_approval_is_an_authoritative_normal_tool_result() {
+    let model_name = "mcp__fixture__rejected";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "rejected",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker);
+    let approval = propose(&registry, model_name, json!({})).unwrap();
+
+    let without_feedback =
+        mcp_tool_result_from_rejected_approval(&approval, None).expect("valid rejection result");
+    assert_eq!(without_feedback.call_id, approval.identity.call_id);
+    assert_eq!(
+        without_feedback.tool,
+        approval.identity.provenance.model_tool_name
+    );
+    assert!(without_feedback.ok);
+    assert_eq!(without_feedback.error, None);
+    assert_eq!(
+        without_feedback.result,
+        Some(json!({
+            "schemaVersion": 1,
+            "type": "mcp_tool",
+            "external": true,
+            "status": "rejected",
+            "outcome": "rejected",
+            "dispatchCertainty": "definitely_not_dispatched",
+            "isError": false,
+            "code": "mcp.approval_rejected",
+            "retryable": false,
+        }))
+    );
+
+    let feedback = "Please use a safer approach.";
+    let with_feedback = mcp_tool_result_from_rejected_approval(&approval, Some(feedback))
+        .expect("valid rejection result with feedback");
+    assert!(with_feedback.ok);
+    assert_eq!(with_feedback.error, None);
+    assert_eq!(
+        with_feedback
+            .result
+            .as_ref()
+            .and_then(|value| value.get("userFeedback")),
+        Some(&json!(feedback))
+    );
+}
+
+#[test]
+fn rejected_result_persistence_keeps_control_fields_but_removes_feedback() {
+    let model_name = "mcp__fixture__rejected_projection";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "rejected_projection",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker);
+    let approval = propose(&registry, model_name, json!({})).unwrap();
+    let private_feedback = "private feedback that must not enter durable state";
+    let live_result = mcp_tool_result_from_rejected_approval(&approval, Some(private_feedback))
+        .expect("valid rejection result");
+
+    let durable = mcp_tool_result_persistence_projection(&live_result);
+    assert_eq!(durable.call_id, live_result.call_id);
+    assert_eq!(durable.tool, live_result.tool);
+    assert!(durable.ok);
+    assert_eq!(durable.error, None);
+    assert_eq!(
+        durable.result,
+        Some(json!({
+            "schemaVersion": 1,
+            "type": "mcp_tool",
+            "external": true,
+            "status": "rejected",
+            "outcome": "rejected",
+            "dispatchCertainty": "definitely_not_dispatched",
+            "contentOmitted": true,
+            "isError": false,
+            "feedbackProvided": true,
+            "code": "mcp.approval_rejected",
+            "retryable": false,
+        }))
+    );
+    let durable_json = serde_json::to_string(&durable).unwrap();
+    assert!(!durable_json.contains(private_feedback));
+    for forbidden_field in ["content", "structuredContent", "provenance", "userFeedback"] {
+        assert!(
+            durable
+                .result
+                .as_ref()
+                .and_then(|value| value.get(forbidden_field))
+                .is_none(),
+            "{forbidden_field} must not survive the durable projection"
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(mcp_tool_result_persistence_projection(&durable)).unwrap(),
+        serde_json::to_value(&durable).unwrap(),
+        "the durable projection must remain stable when applied repeatedly"
+    );
+}
+
+#[test]
+fn rejected_result_model_projection_explains_redacted_arguments_and_blocks_automatic_retry() {
+    let model_name = "mcp__fixture__rejected_model_projection";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "rejected_model_projection",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker);
+    let approval = propose(&registry, model_name, json!({})).unwrap();
+
+    let without_feedback =
+        mcp_tool_result_from_rejected_approval(&approval, None).expect("valid rejection result");
+    let projected = mcp_tool_result_model_projection(&without_feedback);
+    let value = projected.result.expect("model rejection envelope");
+    assert_eq!(value["decisionBy"], "user");
+    assert_eq!(value["executionAttempted"], false);
+    assert_eq!(value["argumentsValidated"], true);
+    assert_eq!(value["callReasonAccepted"], true);
+    assert_eq!(value["argumentsInHistoryRedacted"], true);
+    assert_eq!(value["code"], "mcp.approval_rejected");
+    assert_eq!(value["retryable"], false);
+    assert_eq!(
+        value["retryPolicy"],
+        "new_explicit_user_instruction_required"
+    );
+    assert!(value["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Do not retry")));
+
+    let feedback = "Use a different directory.";
+    let with_feedback = mcp_tool_result_from_rejected_approval(&approval, Some(feedback))
+        .expect("valid rejection result with feedback");
+    let projected = mcp_tool_result_model_projection(&with_feedback);
+    let value = projected.result.expect("model rejection envelope");
+    assert_eq!(value["userFeedback"], feedback);
+    assert_eq!(
+        value["retryPolicy"],
+        "follow_user_feedback_without_repeating_same_call"
+    );
+    assert!(value["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("do not repeat the same call unchanged")));
+
+    let durable = mcp_tool_result_persistence_projection(&with_feedback);
+    let restored_projection = mcp_tool_result_model_projection(&durable);
+    let restored = restored_projection
+        .result
+        .expect("restored model rejection envelope");
+    assert_eq!(restored["decisionBy"], "user");
+    assert_eq!(restored["argumentsInHistoryRedacted"], true);
+    assert_eq!(
+        restored["retryPolicy"],
+        "new_explicit_user_instruction_required"
+    );
+    assert!(restored.get("userFeedback").is_none());
+    let durable_json = serde_json::to_string(&durable).unwrap();
+    assert!(!durable_json.contains(feedback));
+    assert!(!durable_json.contains("decisionBy"));
+    assert!(!durable_json.contains("message"));
 }
 
 #[tokio::test]

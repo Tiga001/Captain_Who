@@ -20,6 +20,7 @@ const translations: Record<string, string> = {
   'agent.mcp.activity.payloadUnavailable': 'External MCP Tool payload unavailable',
   'agent.mcp.activity.policyDenied': 'External MCP Tool denied by policy',
   'agent.mcp.activity.rejected': 'External MCP Tool rejected',
+  'agent.mcp.activity.rejectionReason': 'Rejection reason',
   'agent.mcp.activity.server': 'Server',
   'agent.mcp.activity.tool': 'Tool',
   'agent.mcp.activity.toolError': 'External MCP Tool returned an error',
@@ -129,6 +130,42 @@ describe('McpToolActivity', () => {
     expect(screen.container.textContent).toContain('Some output was omitted')
     expect(screen.container.textContent).toContain('server_tool_error')
     expect(screen.container.textContent).not.toContain(SECRET_CANARY)
+  })
+
+  it('shows only Server, Tool and optional user guidance for a rejected call', async () => {
+    const withReason = await render(
+      <McpToolActivity
+        invocation={invocation({
+          state: 'rejected',
+          outcome: 'rejected',
+          errorCode: 'mcp.approval_rejected',
+          rejectionReason: 'Use a different directory',
+          durationMs: 80
+        })}
+      />
+    )
+
+    expect(withReason.container.textContent).toContain('Server')
+    expect(withReason.container.textContent).toContain('Owned fixture')
+    expect(withReason.container.textContent).toContain('Tool')
+    expect(withReason.container.textContent).toContain('echo_text')
+    expect(withReason.container.textContent).toContain('Rejection reason')
+    expect(withReason.container.textContent).toContain('Use a different directory')
+    expect(withReason.container.textContent).not.toContain('Error code')
+    expect(withReason.container.textContent).not.toContain('mcp.approval_rejected')
+    expect(withReason.container.textContent).not.toContain('80 ms')
+
+    const withoutReason = await render(
+      <McpToolActivity
+        invocation={invocation({
+          state: 'rejected',
+          outcome: 'rejected',
+          errorCode: 'mcp.approval_rejected'
+        })}
+      />
+    )
+    expect(withoutReason.container.textContent).not.toContain('Rejection reason')
+    expect(withoutReason.container.textContent).not.toContain('mcp.approval_rejected')
   })
 
   it('fails closed when typed MCP lifecycle details are unavailable', async () => {
