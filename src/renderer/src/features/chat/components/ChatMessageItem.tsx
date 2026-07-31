@@ -32,6 +32,7 @@ import {
   getApplyPatchGroupItems,
   getAssistantFinalContent,
   getConversationHistoryGroupItems,
+  getMcpActivityGroupItems,
   getOfficeGroupItems,
   getPreviousSuccessfulTodoResult,
   getReadGroupItems,
@@ -61,7 +62,7 @@ import { ImageGenerationArtifactsCard } from './ImageGenerationArtifactsCard'
 import { hostImageArtifactResolver } from '../../imageGeneration/artifacts/hostImageArtifactResolver'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
-import { McpToolActivity } from './toolActivities/McpToolActivity'
+import { McpToolActivity, McpToolActivityGroup } from './toolActivities/McpToolActivity'
 import { ContextCompactionActivity } from './toolActivities/ContextCompactionActivity'
 import { ConversationHistoryToolActivity } from './toolActivities/ConversationHistoryToolActivity'
 import { FileWriteToolActivityGroup } from './toolActivities/FileWriteToolActivity'
@@ -371,6 +372,12 @@ function AgentTimelineItemView({
     const items = getRunCommandGroupItems(run, item.callIds)
     if (items.length === 0) return null
     return <RunCommandToolActivityGroup items={items} />
+  }
+
+  if (item.type === 'mcp_activity_group') {
+    const items = getMcpActivityGroupItems(run, item.invocationIds)
+    if (items.length === 0) return null
+    return <McpToolActivityGroup items={items} />
   }
 
   if (item.type === 'apply_patch_group') {

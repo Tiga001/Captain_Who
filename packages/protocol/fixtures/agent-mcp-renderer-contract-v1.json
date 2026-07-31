@@ -76,6 +76,7 @@
       "serverDisplayName": "Owned fixture",
       "rawToolName": "echo_text",
       "modelToolName": "mcp__owned_fixture__echo_text",
+      "displayReason": "读取测试数据以完成用户请求",
       "external": true,
       "state": "running",
       "dispatchCertainty": "possibly_dispatched",

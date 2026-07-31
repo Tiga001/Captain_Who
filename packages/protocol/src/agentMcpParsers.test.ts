@@ -82,6 +82,7 @@ const invocation = {
   serverDisplayName: 'Owned fixture',
   rawToolName: 'echo_text',
   modelToolName: 'mcp__owned_fixture__echo_text',
+  displayReason: 'Read the requested fixture data',
   external: true,
   state: 'running',
   dispatchCertainty: 'possibly_dispatched',
@@ -224,8 +225,26 @@ describe('Round 4 MCP Agent contract', () => {
           rawToolName: `echo${disallowed}text`
         })
       ).toThrow(/disallowed control/)
+      expect(() =>
+        parseAgentMcpToolInvocationEvent({
+          ...invocation,
+          displayReason: `Read${disallowed}fixture`
+        })
+      ).toThrow(/disallowed control/)
     }
   )
+
+  it('accepts a missing legacy lifecycle reason and rejects an oversized one', () => {
+    const legacyInvocation = { ...invocation }
+    delete legacyInvocation.displayReason
+    expect(parseAgentMcpToolInvocationEvent(legacyInvocation)).toEqual(legacyInvocation)
+    expect(() =>
+      parseAgentMcpToolInvocationEvent({
+        ...invocation,
+        displayReason: '界'.repeat(171)
+      })
+    ).toThrow(/exceeded 512 UTF-8 bytes/)
+  })
 
   it('rejects contradictory invocation lifecycle combinations', () => {
     expect(() =>

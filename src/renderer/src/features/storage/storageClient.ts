@@ -426,6 +426,7 @@ const STORED_MCP_EVENT_KEYS = [
   'serverDisplayName',
   'rawToolName',
   'modelToolName',
+  'displayReason',
   'external',
   'state',
   'dispatchCertainty',
@@ -498,6 +499,7 @@ function projectStoredMcpInvocation(value: unknown): ChatMcpToolInvocationView |
       ...(scope ? { scope } : {}),
       rawToolName: event.rawToolName,
       modelToolName: event.modelToolName,
+      displayReason: event.displayReason,
       external: true,
       state: event.state,
       dispatchCertainty: event.dispatchCertainty,
@@ -547,11 +549,28 @@ function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView 
   }
   const mcpInvocations = [...invocationById.values()]
   const validInvocationIds = new Set(mcpInvocations.map((invocation) => invocation.invocationId))
+  const invocationByCallId = new Map(
+    mcpInvocations.map((invocation) => [invocation.callId, invocation] as const)
+  )
+  const emittedInvocationIds = new Set<string>()
   const timeline: ChatAgentTimelineItem[] = []
   for (const item of normalized.timeline) {
     if (!isUnknownRecord(item) || typeof item.type !== 'string') continue
     if (item.type === 'tool_call') {
-      if (typeof item.callId !== 'string' || referencedMcpCallIds.has(item.callId)) continue
+      if (typeof item.callId !== 'string') continue
+      const invocation = invocationByCallId.get(item.callId)
+      if (invocation) {
+        if (!emittedInvocationIds.has(invocation.invocationId)) {
+          timeline.push({
+            id: `mcp-invocation-${invocation.invocationId}`,
+            type: 'mcp_tool_call',
+            invocationId: invocation.invocationId
+          })
+          emittedInvocationIds.add(invocation.invocationId)
+        }
+        continue
+      }
+      if (referencedMcpCallIds.has(item.callId)) continue
       timeline.push(item)
       continue
     }
@@ -563,27 +582,16 @@ function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView 
       ) {
         continue
       }
+      if (emittedInvocationIds.has(item.invocationId)) continue
       timeline.push({
         id: item.id,
         type: 'mcp_tool_call',
         invocationId: item.invocationId
       })
+      emittedInvocationIds.add(item.invocationId)
       continue
     }
     timeline.push(item)
-  }
-  for (const invocation of mcpInvocations) {
-    if (
-      !timeline.some(
-        (item) => item.type === 'mcp_tool_call' && item.invocationId === invocation.invocationId
-      )
-    ) {
-      timeline.push({
-        id: `mcp-invocation-${invocation.invocationId}`,
-        type: 'mcp_tool_call',
-        invocationId: invocation.invocationId
-      })
-    }
   }
 
   return {

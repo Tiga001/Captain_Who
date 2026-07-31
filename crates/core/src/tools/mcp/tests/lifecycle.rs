@@ -13,7 +13,15 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
     );
     let registry = registry_with(invoker);
     let secret = "lifecycle-private-value";
-    let approval = propose(&registry, model_name, json!({"input": secret})).unwrap();
+    let approval = propose(
+        &registry,
+        model_name,
+        json!({
+            "input": secret,
+            "__mycopilot_call_reason": "Inspect the fixture metadata."
+        }),
+    )
+    .unwrap();
 
     let pending = mcp_tool_invocation_event(
         &approval,
@@ -35,9 +43,22 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
     );
     assert_eq!(pending.action_id, approval.identity.action_id);
     assert_eq!(pending.invocation_id, approval.identity.invocation_id);
+    assert_eq!(
+        pending.display_reason.as_deref(),
+        Some("Inspect the fixture metadata.")
+    );
     let rendered = serde_json::to_string(&pending).unwrap();
     assert!(!rendered.contains(secret));
     assert!(!rendered.contains("input"));
+
+    let mut legacy = serde_json::to_value(&pending).unwrap();
+    legacy.as_object_mut().unwrap().remove("displayReason");
+    assert_eq!(
+        serde_json::from_value::<AgentMcpToolInvocationEvent>(legacy)
+            .unwrap()
+            .display_reason,
+        None
+    );
 
     for (state, outcome, is_error) in [
         (

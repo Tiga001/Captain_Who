@@ -183,7 +183,10 @@ export interface AgentMcpToolApprovalSummary {
   scope: AgentMcpServerScope
   rawToolName: string
   modelToolName: string
-  /** Host-owned, bounded explanation that is never forwarded to the MCP Server. */
+  /**
+   * Bounded model-authored display text. It is never forwarded to the MCP Server, remains
+   * untrusted, and may contain user-provided sensitive text.
+   */
   displayReason?: string
   arguments: AgentMcpArgumentSummary
   risk: AgentMcpToolRisk
@@ -240,6 +243,11 @@ export interface AgentMcpToolInvocationEvent {
   serverDisplayName: string
   rawToolName: string
   modelToolName: string
+  /**
+   * Bounded model-authored display text copied from the frozen approval summary. Render as plain
+   * text; do not treat it as secret-redacted or log it separately.
+   */
+  displayReason?: string
   external: boolean
   state: AgentMcpToolInvocationState
   dispatchCertainty: AgentMcpDispatchCertainty

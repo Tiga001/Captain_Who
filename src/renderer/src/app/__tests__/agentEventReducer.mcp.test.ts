@@ -75,6 +75,7 @@ function approval(): AgentMcpToolApproval {
       scope: { type: 'user' },
       rawToolName: 'echo_text',
       modelToolName: 'model-visible-name-without-an-mcp-prefix',
+      displayReason: 'Read the fixture inventory',
       arguments: {
         encodedBytes: 24,
         topLevelPropertyCount: 1,
@@ -159,6 +160,7 @@ describe('MCP lifecycle Renderer projection', () => {
         scope: { type: 'user' },
         rawToolName: 'echo_text',
         modelToolName: 'model-visible-name-without-an-mcp-prefix',
+        displayReason: 'Read the fixture inventory',
         external: true,
         state: 'pending_approval',
         dispatchCertainty: 'definitely_not_dispatched',
@@ -174,8 +176,67 @@ describe('MCP lifecycle Renderer projection', () => {
     ])
   })
 
+  it('converts a generic Tool timeline placeholder in place without disturbing messages', () => {
+    const before = applyAgentEventToChatMessage(message(), {
+      type: 'message_delta',
+      runId: RUN_ID,
+      streamId: 'before-mcp',
+      delta: 'Before MCP'
+    })
+    const generic = applyAgentEventToChatMessage(before, {
+      type: 'tool_call',
+      runId: RUN_ID,
+      call: {
+        id: CALL_ID,
+        tool: 'model-visible-name-without-an-mcp-prefix',
+        args: {},
+        approvalStatus: 'approved'
+      }
+    })
+    const surrounded = applyAgentEventToChatMessage(generic, {
+      type: 'message_delta',
+      runId: RUN_ID,
+      streamId: 'after-mcp',
+      delta: 'After MCP'
+    })
+    const genericIndex =
+      surrounded.agentRun?.timeline.findIndex(
+        (item) => item.type === 'tool_call' && item.callId === CALL_ID
+      ) ?? -1
+
+    const converted = applyAgentEventToChatMessage(surrounded, lifecycle('running'))
+    const replayed = applyAgentEventToChatMessage(converted, lifecycle('running'))
+    const timeline = replayed.agentRun?.timeline ?? []
+
+    expect(genericIndex).toBe(1)
+    expect(timeline).toEqual([
+      {
+        id: 'message-stream-before-mcp',
+        type: 'message',
+        content: 'Before MCP',
+        streamId: 'before-mcp'
+      },
+      {
+        id: `mcp-invocation-${INVOCATION_ID}`,
+        type: 'mcp_tool_call',
+        invocationId: INVOCATION_ID
+      },
+      {
+        id: 'message-stream-after-mcp',
+        type: 'message',
+        content: 'After MCP',
+        streamId: 'after-mcp'
+      }
+    ])
+    expect(timeline.findIndex((item) => item.type === 'mcp_tool_call')).toBe(genericIndex)
+    expect(timeline.filter((item) => item.type === 'mcp_tool_call')).toHaveLength(1)
+    expect(timeline.some((item) => item.type === 'tool_call' && item.callId === CALL_ID)).toBe(
+      false
+    )
+  })
+
   it('projects lifecycle fields explicitly and does not retain future wire fields', () => {
-    const event = lifecycle('running')
+    const event = lifecycle('running', { displayReason: 'Read the fixture inventory' })
     Object.assign(event.invocation, {
       rawArguments: SECRET_CANARY,
       rawResult: SECRET_CANARY,
@@ -196,6 +257,7 @@ describe('MCP lifecycle Renderer projection', () => {
       serverDisplayName: 'Owned fixture',
       rawToolName: 'echo_text',
       modelToolName: 'model-visible-name-without-an-mcp-prefix',
+      displayReason: 'Read the fixture inventory',
       external: true,
       state: 'running',
       dispatchCertainty: 'possibly_dispatched',
@@ -217,7 +279,7 @@ describe('MCP lifecycle Renderer projection', () => {
     ).toHaveLength(1)
   })
 
-  it('enriches a lifecycle-first invocation with approval scope without regressing state', () => {
+  it('enriches a lifecycle-first invocation with approval metadata without regressing state', () => {
     const running = applyAgentEventToChatMessage(message(), lifecycle('running'))
     const withApproval = applyAgentEventToChatMessage(running, {
       type: 'approval_required',
@@ -227,7 +289,8 @@ describe('MCP lifecycle Renderer projection', () => {
 
     expect(withApproval.agentRun?.mcpInvocations?.[0]).toMatchObject({
       state: 'running',
-      scope: { type: 'user' }
+      scope: { type: 'user' },
+      displayReason: 'Read the fixture inventory'
     })
   })
 

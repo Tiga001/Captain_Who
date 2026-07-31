@@ -104,8 +104,9 @@ export interface ChatCommandOutputPreview {
  * Renderer-owned, allowlisted projection of an MCP invocation.
  *
  * Keep this separate from AgentToolCall/AgentToolResult: those generic DTOs can contain arguments
- * and result bodies, while MCP activity is intentionally limited to lifecycle and provenance
- * metadata that is safe to retain in chat state.
+ * and result bodies, while MCP activity is intentionally limited to an allowlisted lifecycle
+ * projection. The bounded model-authored display reason remains untrusted and must be rendered
+ * only as plain text.
  */
 export interface ChatMcpToolInvocationView {
   actionId: string
@@ -116,6 +117,11 @@ export interface ChatMcpToolInvocationView {
   scope?: AgentMcpServerScope
   rawToolName: string
   modelToolName: string
+  /**
+   * Bounded model-authored explanation for the call. Never derived from raw MCP arguments; render
+   * as plain text and do not assume it is secret-redacted.
+   */
+  displayReason?: string
   external: true
   state: AgentMcpToolInvocationState
   dispatchCertainty: AgentMcpDispatchCertainty

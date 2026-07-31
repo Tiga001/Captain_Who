@@ -172,6 +172,7 @@ function settlePendingMcpInvocations(run: ChatAgentRunView): ChatMcpToolInvocati
       scope: invocation.scope,
       rawToolName: invocation.rawToolName,
       modelToolName: invocation.modelToolName,
+      displayReason: invocation.displayReason,
       external: true as const,
       state: 'outcome_unknown',
       dispatchCertainty: 'possibly_dispatched',
@@ -261,6 +262,7 @@ function projectMcpInvocationEvent(event: AgentMcpToolInvocationEvent): ChatMcpT
     serverDisplayName: event.serverDisplayName,
     rawToolName: event.rawToolName,
     modelToolName: event.modelToolName,
+    displayReason: event.displayReason,
     external: true,
     state: event.state,
     dispatchCertainty: event.dispatchCertainty,
@@ -301,6 +303,7 @@ function projectMcpApproval(approval: AgentMcpToolApproval): ChatMcpToolInvocati
     scope: projectMcpScope(approval.identity.provenance.scope),
     rawToolName: approval.summary.rawToolName,
     modelToolName: approval.summary.modelToolName,
+    displayReason: approval.summary.displayReason,
     external: true,
     state: 'pending_approval',
     dispatchCertainty: 'definitely_not_dispatched',
@@ -328,8 +331,8 @@ function chooseMcpInvocationUpdate(
   next: ChatMcpToolInvocationView
 ): ChatMcpToolInvocationView {
   if (!isSameMcpInvocationIdentity(current, next)) return current
-  const currentWithScope =
-    current.scope || !next.scope
+  const currentWithSafeMetadata =
+    (current.scope || !next.scope) && (current.displayReason || !next.displayReason)
       ? current
       : {
           actionId: current.actionId,
@@ -337,9 +340,10 @@ function chooseMcpInvocationUpdate(
           callId: current.callId,
           serverId: current.serverId,
           serverDisplayName: current.serverDisplayName,
-          scope: projectMcpScope(next.scope),
+          scope: current.scope ?? (next.scope ? projectMcpScope(next.scope) : undefined),
           rawToolName: current.rawToolName,
           modelToolName: current.modelToolName,
+          displayReason: current.displayReason ?? next.displayReason,
           external: true as const,
           state: current.state,
           dispatchCertainty: current.dispatchCertainty,
@@ -350,25 +354,28 @@ function chooseMcpInvocationUpdate(
           durationMs: current.durationMs,
           outputTruncated: current.outputTruncated
         }
-  if (MCP_TERMINAL_STATES.has(current.state)) return currentWithScope
-  if (MCP_STATE_RANK[next.state] <= MCP_STATE_RANK[current.state]) return currentWithScope
+  if (MCP_TERMINAL_STATES.has(current.state)) return currentWithSafeMetadata
+  if (MCP_STATE_RANK[next.state] <= MCP_STATE_RANK[current.state]) {
+    return currentWithSafeMetadata
+  }
 
   return {
     actionId: next.actionId,
     invocationId: next.invocationId,
     callId: next.callId,
     serverId: next.serverId,
-    serverDisplayName: currentWithScope.serverDisplayName,
-    scope: currentWithScope.scope,
+    serverDisplayName: currentWithSafeMetadata.serverDisplayName,
+    scope: currentWithSafeMetadata.scope,
     rawToolName: next.rawToolName,
     modelToolName: next.modelToolName,
+    displayReason: currentWithSafeMetadata.displayReason ?? next.displayReason,
     external: true,
     state: next.state,
     dispatchCertainty: next.dispatchCertainty,
     outcome: next.outcome,
     isError: next.isError,
     errorCode: next.errorCode,
-    rejectionReason: currentWithScope.rejectionReason ?? next.rejectionReason,
+    rejectionReason: currentWithSafeMetadata.rejectionReason ?? next.rejectionReason,
     durationMs: next.durationMs,
     outputTruncated: next.outputTruncated
   }

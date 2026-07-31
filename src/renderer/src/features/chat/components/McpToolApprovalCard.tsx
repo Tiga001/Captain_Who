@@ -50,9 +50,9 @@ function getBlockingState(
 }
 
 function getMcpApprovalReason(approval: AgentMcpToolApproval, fallback: string): string {
-  // `displayReason`/`reason` are forward-compatible Renderer-safe summary fields. Until the Host
-  // supplies one, `call.reason` is the only typed safe reason and the generic prompt is the
-  // fail-closed fallback. Raw arguments are never inspected to synthesize a reason.
+  // `displayReason`/`reason` are bounded model-authored plain-text fields. They remain untrusted
+  // and may contain user-provided sensitive text. Until the Host supplies one, `call.reason` is
+  // the only typed fallback; raw arguments are never inspected to synthesize a reason.
   const summaryReason =
     'displayReason' in approval.summary
       ? approval.summary.displayReason

@@ -11,19 +11,23 @@ export function upsertMcpInvocationTimelineItem(
   callId: string
 ): ChatAgentTimelineItem[] {
   const id = `mcp-invocation-${invocationId}`
-  const withoutGenericCall = timeline.filter(
-    (item) => item.type !== 'tool_call' || item.callId !== callId
-  )
+  const marker: ChatAgentTimelineItem = {
+    id,
+    type: 'mcp_tool_call',
+    invocationId
+  }
+  const isInvocationAnchor = (item: ChatAgentTimelineItem) =>
+    (item.type === 'mcp_tool_call' && (item.id === id || item.invocationId === invocationId)) ||
+    (item.type === 'tool_call' && item.callId === callId)
+  const anchorIndex = timeline.findIndex(isInvocationAnchor)
 
-  if (withoutGenericCall.some((item) => item.id === id)) {
-    return withoutGenericCall.map((item) =>
-      item.id === id && item.type === 'mcp_tool_call'
-        ? { id, type: 'mcp_tool_call', invocationId }
-        : item
-    )
+  if (anchorIndex < 0) {
+    return [...timeline, marker]
   }
 
-  return [...withoutGenericCall, { id, type: 'mcp_tool_call', invocationId }]
+  return timeline.flatMap((item, index) =>
+    isInvocationAnchor(item) ? (index === anchorIndex ? [marker] : []) : [item]
+  )
 }
 
 export function appendMessageDeltaToTimeline(

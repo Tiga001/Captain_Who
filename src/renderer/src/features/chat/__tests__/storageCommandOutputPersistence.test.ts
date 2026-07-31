@@ -190,6 +190,7 @@ it('fails closed when a restored terminal run still contains a running MCP invoc
               serverDisplayName: 'Filesystem Test',
               rawToolName: 'move_file',
               modelToolName: 'mcp__filesystem_test__move_file',
+              displayReason: 'Move the approved fixture file',
               external: true,
               state: 'running',
               dispatchCertainty: 'possibly_dispatched',
@@ -218,7 +219,8 @@ it('fails closed when a restored terminal run still contains a running MCP invoc
     state: 'outcome_unknown',
     outcome: 'outcome_unknown',
     dispatchCertainty: 'possibly_dispatched',
-    errorCode: 'mcp.tool_outcome_unknown'
+    errorCode: 'mcp.tool_outcome_unknown',
+    displayReason: 'Move the approved fixture file'
   })
   const restoredRun = restored?.messages[0].agentRun
   expect(restoredRun?.toolCalls).toEqual([])
@@ -268,6 +270,113 @@ it('normalizes a minimal terminal recovery record before settling activities', a
     timeline: [],
     mcpInvocations: []
   })
+})
+
+it('replaces restored generic MCP trace anchors in place without moving calls above narration', async () => {
+  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
+  const firstInvocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
+  const secondInvocationId = '513520d2-d01c-4a98-aeed-4d106df58ce2'
+  const firstCallId = `tc1_${'d'.repeat(43)}`
+  const secondCallId = `tc1_${'e'.repeat(43)}`
+  const invocation = ({
+    actionId,
+    invocationId,
+    callId,
+    rawToolName
+  }: {
+    actionId: string
+    invocationId: string
+    callId: string
+    rawToolName: string
+  }) => ({
+    actionId,
+    invocationId,
+    callId,
+    serverId,
+    serverDisplayName: 'Filesystem Test',
+    rawToolName,
+    modelToolName: `mcp__filesystem_test__${rawToolName}`,
+    displayReason: `Use ${rawToolName}`,
+    external: true,
+    state: 'completed',
+    dispatchCertainty: 'response_received',
+    outcome: 'succeeded',
+    isError: false,
+    durationMs: 5,
+    outputTruncated: false
+  })
+
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-mcp-trace-order',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'MCP trace order',
+    messages: [
+      {
+        id: 'assistant-mcp-trace-order',
+        role: 'assistant',
+        content: '第一段。第二段。第三段。',
+        createdAt: 1,
+        status: 'sent',
+        attachments: [],
+        agentRunJson: JSON.stringify({
+          runId: 'run-mcp-trace-order',
+          status: 'completed',
+          completedAt: 10,
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: [
+            { id: 'message-before-first', type: 'message', content: '第一段。' },
+            { id: `tool-call-${firstCallId}`, type: 'tool_call', callId: firstCallId },
+            { id: 'message-between-calls', type: 'message', content: '第二段。' },
+            { id: `tool-call-${secondCallId}`, type: 'tool_call', callId: secondCallId },
+            { id: 'message-after-second', type: 'message', content: '第三段。' }
+          ],
+          mcpInvocations: [
+            invocation({
+              actionId: '94c2f39c-ddaa-49bb-a3ef-8756053d68c8',
+              invocationId: firstInvocationId,
+              callId: firstCallId,
+              rawToolName: 'list_allowed_directories'
+            }),
+            invocation({
+              actionId: 'ac55521b-c307-4d59-b292-ed86f7f198bb',
+              invocationId: secondInvocationId,
+              callId: secondCallId,
+              rawToolName: 'read_text_file'
+            })
+          ]
+        }),
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 10,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const timeline = (await loadConversation('conversation-mcp-trace-order'))?.messages[0].agentRun
+    ?.timeline
+  expect(timeline).toEqual([
+    { id: 'message-before-first', type: 'message', content: '第一段。' },
+    {
+      id: `mcp-invocation-${firstInvocationId}`,
+      type: 'mcp_tool_call',
+      invocationId: firstInvocationId
+    },
+    { id: 'message-between-calls', type: 'message', content: '第二段。' },
+    {
+      id: `mcp-invocation-${secondInvocationId}`,
+      type: 'mcp_tool_call',
+      invocationId: secondInvocationId
+    },
+    { id: 'message-after-second', type: 'message', content: '第三段。' }
+  ])
 })
 
 it('removes legacy generic MCP bodies using a valid approval identity even without an invocation', async () => {

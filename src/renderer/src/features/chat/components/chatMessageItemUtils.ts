@@ -6,6 +6,7 @@ import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
   ChatFileWritePreview,
+  ChatMcpToolInvocationView,
   ChatMessage,
   ChatReadActivityKind
 } from '../chatTypes'
@@ -76,6 +77,12 @@ export type RenderableTimelineItem =
       id: string
       type: 'run_command_group'
       callIds: string[]
+    }
+  | {
+      id: string
+      type: 'mcp_activity_group'
+      serverId: string
+      invocationIds: string[]
     }
   | {
       id: string
@@ -350,6 +357,36 @@ export function groupTimelineItems(
     // Whitespace-only stream messages are invisible in the timeline, so they must not split
     // otherwise adjacent tool activity groups across model turns.
     if (item.type === 'message' && !item.content.trim()) return items
+    if (item.type === 'mcp_tool_call') {
+      const invocation = run.mcpInvocations?.find(
+        (candidate) => candidate.invocationId === item.invocationId
+      )
+      if (!invocation) return [...items, item]
+
+      const previousItem = items[items.length - 1]
+      if (
+        previousItem?.type === 'mcp_activity_group' &&
+        previousItem.serverId === invocation.serverId
+      ) {
+        return [
+          ...items.slice(0, -1),
+          {
+            ...previousItem,
+            invocationIds: [...previousItem.invocationIds, item.invocationId]
+          }
+        ]
+      }
+
+      return [
+        ...items,
+        {
+          id: `mcp-activity-group-${item.invocationId}`,
+          type: 'mcp_activity_group',
+          serverId: invocation.serverId,
+          invocationIds: [item.invocationId]
+        }
+      ]
+    }
     if (item.type !== 'tool_call') return [...items, item]
 
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
@@ -766,6 +803,18 @@ export function getRunCommandGroupItems(
         settledStatus
       }
     ]
+  }, [])
+}
+
+export function getMcpActivityGroupItems(
+  run: ChatAgentRunView,
+  invocationIds: string[]
+): ChatMcpToolInvocationView[] {
+  return invocationIds.reduce<ChatMcpToolInvocationView[]>((items, invocationId) => {
+    const invocation = run.mcpInvocations?.find(
+      (candidate) => candidate.invocationId === invocationId
+    )
+    return invocation ? [...items, invocation] : items
   }, [])
 }
 

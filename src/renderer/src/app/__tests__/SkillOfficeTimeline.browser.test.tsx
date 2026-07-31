@@ -176,14 +176,15 @@ describe('Skill and Office chat timeline', () => {
     expect(screen.container.textContent?.match(/这是后端持久化的最终总结。/g)).toHaveLength(1)
   })
 
-  it('does not repeat a restored multi-segment answer around MCP activity', async () => {
-    const invocationId = '22222222-2222-4222-8222-222222222222'
-    const message = assistantMessage({
+  it('keeps MCP calls between their narration anchors from running through completion', async () => {
+    const firstInvocationId = '22222222-2222-4222-8222-222222222222'
+    const secondInvocationId = '44444444-4444-4444-8444-444444444444'
+    const terminalMessage = assistantMessage({
       status: 'failed',
       mcpInvocations: [
         {
           actionId: '11111111-1111-4111-8111-111111111111',
-          invocationId,
+          invocationId: firstInvocationId,
           callId: `tc1_${'a'.repeat(43)}`,
           serverId: '33333333-3333-4333-8333-333333333333',
           serverDisplayName: 'Filesystem Test',
@@ -196,39 +197,93 @@ describe('Skill and Office chat timeline', () => {
           outcome: 'outcome_unknown',
           errorCode: 'mcp.tool_outcome_unknown',
           outputTruncated: false
+        },
+        {
+          actionId: '55555555-5555-4555-8555-555555555555',
+          invocationId: secondInvocationId,
+          callId: `tc1_${'b'.repeat(43)}`,
+          serverId: '33333333-3333-4333-8333-333333333333',
+          serverDisplayName: 'Filesystem Test',
+          scope: { type: 'user' },
+          rawToolName: 'read_text_file',
+          modelToolName: 'mcp__filesystem_test__read_text_file',
+          external: true,
+          state: 'completed',
+          dispatchCertainty: 'response_received',
+          outcome: 'succeeded',
+          isError: false,
+          durationMs: 8,
+          outputTruncated: false
         }
       ],
       timeline: [
         { id: 'message-stream-1', type: 'message', content: '第一段。' },
         {
-          id: `mcp-invocation-${invocationId}`,
+          id: `mcp-invocation-${firstInvocationId}`,
           type: 'mcp_tool_call',
-          invocationId
+          invocationId: firstInvocationId
         },
         { id: 'message-stream-2', type: 'message', content: '第二段。' },
+        {
+          id: `mcp-invocation-${secondInvocationId}`,
+          type: 'mcp_tool_call',
+          invocationId: secondInvocationId
+        },
         { id: 'message-stream-3', type: 'message', content: '第三段。' }
       ]
     })
-    message.content = '第一段。第二段。第三段。'
+    terminalMessage.content = '第一段。第二段。第三段。'
+    const runningMessage: ChatMessage = {
+      ...terminalMessage,
+      status: 'pending',
+      agentRun: terminalMessage.agentRun
+        ? {
+            ...terminalMessage.agentRun,
+            status: 'running',
+            completedAt: undefined
+          }
+        : undefined
+    }
 
-    const expanded = await render(
-      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
-    )
-
-    expect(expanded.container.textContent?.match(/第一段。/g)).toHaveLength(1)
-    expect(expanded.container.textContent?.match(/第二段。/g)).toHaveLength(1)
-    expect(expanded.container.textContent?.match(/第三段。/g)).toHaveLength(1)
-
-    const collapsed = await render(
+    const screen = await render(
       <ChatMessageItem
-        message={{ ...message, uiState: { timelineCollapsed: true } }}
+        message={runningMessage}
         projectId="project-1"
         showTokenUsageDetails={false}
       />
     )
-    expect(collapsed.container.textContent?.match(/第一段。/g)).toHaveLength(1)
-    expect(collapsed.container.textContent?.match(/第二段。/g)).toHaveLength(1)
-    expect(collapsed.container.textContent?.match(/第三段。/g)).toHaveLength(1)
+
+    const expectInterleavedOrder = () => {
+      const narration = screen.container.querySelectorAll('.chat-agent-text')
+      const activities = screen.container.querySelectorAll('.mcp-tool-activity')
+      expect(narration).toHaveLength(3)
+      expect(activities).toHaveLength(2)
+      expect(
+        narration[0].compareDocumentPosition(activities[0]) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+      expect(
+        activities[0].compareDocumentPosition(narration[1]) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+      expect(
+        narration[1].compareDocumentPosition(activities[1]) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+      expect(
+        activities[1].compareDocumentPosition(narration[2]) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy()
+    }
+
+    expectInterleavedOrder()
+    await screen.rerender(
+      <ChatMessageItem
+        message={terminalMessage}
+        projectId="project-1"
+        showTokenUsageDetails={false}
+      />
+    )
+    expectInterleavedOrder()
+    expect(screen.container.textContent?.match(/第一段。/g)).toHaveLength(1)
+    expect(screen.container.textContent?.match(/第二段。/g)).toHaveLength(1)
+    expect(screen.container.textContent?.match(/第三段。/g)).toHaveLength(1)
   })
 
   it('keeps the final image Artifact card visible after expanding the timeline', async () => {

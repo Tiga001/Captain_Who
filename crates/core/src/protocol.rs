@@ -1237,7 +1237,11 @@ pub enum AgentMcpDispatchCertainty {
     ResponseReceived,
 }
 
-/// Secret-free lifecycle record suitable for AgentEvent and Renderer projection.
+/// Raw-argument-free lifecycle record suitable for AgentEvent and Renderer projection.
+///
+/// `display_reason` is bounded model-authored display text. It remains untrusted, may contain
+/// user-provided sensitive text, and must only be rendered as plain text or persisted through the
+/// explicitly allowlisted chat projection.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMcpToolInvocationEvent {
@@ -1248,6 +1252,12 @@ pub struct AgentMcpToolInvocationEvent {
     pub server_display_name: String,
     pub raw_tool_name: String,
     pub model_tool_name: String,
+    /// Bounded model-authored explanation copied from the frozen approval summary.
+    ///
+    /// This is never reconstructed from raw MCP arguments and is never forwarded to the Server.
+    /// It remains untrusted display text and legacy lifecycle records may not contain it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_reason: Option<String>,
     pub external: bool,
     pub state: AgentMcpToolInvocationState,
     pub dispatch_certainty: AgentMcpDispatchCertainty,

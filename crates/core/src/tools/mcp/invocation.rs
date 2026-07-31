@@ -806,6 +806,7 @@ pub fn mcp_tool_invocation_event(
         server_display_name: approval.summary.server_display_name.clone(),
         raw_tool_name: approval.identity.provenance.raw_tool_name.clone(),
         model_tool_name: approval.identity.provenance.model_tool_name.clone(),
+        display_reason: approval.summary.display_reason.clone(),
         external: true,
         state,
         dispatch_certainty,

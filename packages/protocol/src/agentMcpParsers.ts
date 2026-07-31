@@ -231,6 +231,7 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
       'serverDisplayName',
       'rawToolName',
       'modelToolName',
+      'displayReason',
       'external',
       'state',
       'dispatchCertainty',
@@ -272,6 +273,10 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     record.durationMs === undefined
       ? undefined
       : expectSafeInteger(record.durationMs, `${context}.durationMs`, 0)
+  const displayReason =
+    record.displayReason === undefined
+      ? undefined
+      : expectDisplayText(record.displayReason, `${context}.displayReason`, 512)
   const external = expectBoolean(record.external, `${context}.external`)
   if (!external) {
     throw invalidProtocolValue(context, 'external must be true')
@@ -326,6 +331,7 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     ),
     rawToolName: expectDisplayText(record.rawToolName, `${context}.rawToolName`, 1024),
     modelToolName: expectDisplayText(record.modelToolName, `${context}.modelToolName`, 64),
+    ...(displayReason === undefined ? {} : { displayReason }),
     external,
     state,
     dispatchCertainty,

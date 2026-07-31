@@ -1,6 +1,229 @@
 use super::*;
 
 #[test]
+fn conversation_load_rebuilds_mcp_timeline_items_at_their_trace_positions() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-mcp-trace-order";
+    let assistant_message_id = "assistant-mcp-trace-order";
+    let run_id = "run-mcp-trace-order";
+    service
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "MCP trace order".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-mcp-trace-order".to_string(),
+                    role: "user".to_string(),
+                    content: "Use two MCP tools.".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: assistant_message_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: "Done.".to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some(
+                        serde_json::json!({
+                            "runId": run_id,
+                            "status": "completed",
+                            "timeline": [
+                                {
+                                    "id": "stale-mcp-two",
+                                    "type": "mcp_tool_call",
+                                    "invocationId": "invocation-two"
+                                },
+                                {
+                                    "id": "legacy-without-trace-anchor",
+                                    "type": "mcp_tool_call",
+                                    "invocationId": "legacy-invocation"
+                                },
+                                {
+                                    "id": "stale-message",
+                                    "type": "message",
+                                    "content": "stale narration"
+                                },
+                                {
+                                    "id": "stale-mcp-one",
+                                    "type": "mcp_tool_call",
+                                    "invocationId": "invocation-one"
+                                },
+                                {
+                                    "id": "duplicate-mcp-one",
+                                    "type": "mcp_tool_call",
+                                    "invocationId": "invocation-one"
+                                }
+                            ],
+                            "mcpInvocations": [
+                                {
+                                    "callId": "call-mcp-one",
+                                    "invocationId": "invocation-one"
+                                },
+                                {
+                                    "callId": "call-mcp-one",
+                                    "invocationId": "invocation-one"
+                                },
+                                {
+                                    "callId": "call-mcp-two",
+                                    "invocationId": "invocation-two"
+                                },
+                                {
+                                    "callId": "call-without-trace",
+                                    "invocationId": "legacy-invocation"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ),
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let successful_result =
+        |sequence: u64, call_id: &str, tool: &str| ConversationTurnTraceItem::ToolResult {
+            sequence,
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            status: crate::ConversationTraceToolResultStatus::Succeeded,
+            success: true,
+            observation: serde_json::json!({ "ok": true }),
+            approval_status: crate::AgentApprovalStatus::NotRequired,
+            error: None,
+            truncated: false,
+            archive: Default::default(),
+        };
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 0,
+                content: "Before first MCP.".to_string(),
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 1,
+                call_id: "call-mcp-one".to_string(),
+                tool: "mcp_tool_one".to_string(),
+                provenance: None,
+                operation: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            successful_result(2, "call-mcp-one", "mcp_tool_one"),
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 3,
+                content: "Between MCP calls.".to_string(),
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 4,
+                call_id: "call-mcp-two".to_string(),
+                tool: "mcp_tool_two".to_string(),
+                provenance: None,
+                operation: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            successful_result(5, "call-mcp-two", "mcp_tool_two"),
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 6,
+                content: "Before ordinary tool.".to_string(),
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 7,
+                call_id: "call-ordinary".to_string(),
+                tool: "read_file".to_string(),
+                provenance: None,
+                operation: serde_json::json!({ "path": "notes.txt" }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            successful_result(8, "call-ordinary", "read_file"),
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 9,
+                content: "After ordinary tool.".to_string(),
+                truncated: false,
+            },
+        ],
+    };
+    service
+        .replace_conversation_turn_trace(&trace, 2, 3)
+        .unwrap();
+
+    let loaded = service.load_conversation(conversation_id).unwrap().unwrap();
+    let assistant = loaded
+        .messages
+        .iter()
+        .find(|message| message.id == assistant_message_id)
+        .unwrap();
+    let run = serde_json::from_str::<serde_json::Value>(
+        assistant.agent_run_json.as_deref().expect("agent run"),
+    )
+    .unwrap();
+    let timeline = run["timeline"].as_array().unwrap();
+    let restored = timeline
+        .iter()
+        .map(|item| match item["type"].as_str().unwrap() {
+            "message" => format!("message:{}", item["content"].as_str().unwrap()),
+            "mcp_tool_call" => {
+                format!("mcp:{}", item["invocationId"].as_str().unwrap())
+            }
+            "tool_call" => format!("tool:{}", item["callId"].as_str().unwrap()),
+            other => panic!("unexpected timeline item type: {other}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        restored,
+        vec![
+            "message:Before first MCP.",
+            "mcp:invocation-one",
+            "message:Between MCP calls.",
+            "mcp:invocation-two",
+            "message:Before ordinary tool.",
+            "tool:call-ordinary",
+            "message:After ordinary tool.",
+        ]
+    );
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|item| item["type"] == "mcp_tool_call")
+            .count(),
+        2,
+        "typed MCP timeline markers must be emitted once from durable trace anchors"
+    );
+    assert!(
+        timeline
+            .iter()
+            .all(|item| item["invocationId"] != "legacy-invocation"),
+        "an MCP presentation item without a durable trace anchor must fail closed"
+    );
+}
+
+#[test]
 fn deleting_conversation_and_project_removes_composer_drafts() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

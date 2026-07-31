@@ -570,6 +570,7 @@ fn project_guidance_timeline(
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
+    let mcp_trace_anchors = mcp_trace_anchors(&run);
     let existing_timeline = run
         .remove("timeline")
         .and_then(|value| value.as_array().cloned())
@@ -579,13 +580,14 @@ fn project_guidance_timeline(
         .filter(|item| {
             !matches!(
                 item.get("type").and_then(serde_json::Value::as_str),
-                Some("message" | "tool_call" | "user_guidance")
+                Some("message" | "tool_call" | "user_guidance" | "mcp_tool_call")
             )
         })
         .collect::<Vec<_>>();
-    // Renderer-only items are not derivable from the durable trace. Keep them in their existing
-    // leading order and rebuild only the canonical trace/guidance suffix.
+    // Renderer-only items that have no durable trace identity remain presentation-only. Typed MCP
+    // items are rebuilt below from their call-id anchors so they retain their original sequence.
     let mut timeline = presentation_only_items;
+    let mut emitted_mcp_invocations = HashSet::new();
 
     if let Some(trace) = trace {
         run.insert("runId".to_string(), trace.run_id.clone().into());
@@ -619,12 +621,24 @@ fn project_guidance_timeline(
                 })),
                 ConversationTurnTraceItem::ToolCall {
                     call_id, sequence, ..
-                } => timeline.push(serde_json::json!({
-                    "id": format!("tool-call-{call_id}"),
-                    "type": "tool_call",
-                    "callId": call_id,
-                    "traceSequence": sequence,
-                })),
+                } => {
+                    if let Some(invocation_id) = mcp_trace_anchors.get(call_id) {
+                        if emitted_mcp_invocations.insert(invocation_id.clone()) {
+                            timeline.push(serde_json::json!({
+                                "id": format!("mcp-invocation-{invocation_id}"),
+                                "type": "mcp_tool_call",
+                                "invocationId": invocation_id,
+                            }));
+                        }
+                    } else {
+                        timeline.push(serde_json::json!({
+                            "id": format!("tool-call-{call_id}"),
+                            "type": "tool_call",
+                            "callId": call_id,
+                            "traceSequence": sequence,
+                        }));
+                    }
+                }
                 ConversationTurnTraceItem::ToolResult { .. } => {}
             }
         }
@@ -716,4 +730,54 @@ fn project_guidance_timeline(
 
     serde_json::to_string(&serde_json::Value::Object(run))
         .map_err(|error| format!("serialize guidance timeline: {error}"))
+}
+
+fn mcp_trace_anchors(run: &serde_json::Map<String, serde_json::Value>) -> HashMap<String, String> {
+    let Some(invocations) = run
+        .get("mcpInvocations")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return HashMap::new();
+    };
+
+    let mut invocation_ids_by_call_id = HashMap::<String, HashSet<String>>::new();
+    let mut call_ids_by_invocation_id = HashMap::<String, HashSet<String>>::new();
+    for invocation in invocations {
+        let Some(call_id) = invocation
+            .get("callId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let Some(invocation_id) = invocation
+            .get("invocationId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        invocation_ids_by_call_id
+            .entry(call_id.to_string())
+            .or_default()
+            .insert(invocation_id.to_string());
+        call_ids_by_invocation_id
+            .entry(invocation_id.to_string())
+            .or_default()
+            .insert(call_id.to_string());
+    }
+
+    invocation_ids_by_call_id
+        .into_iter()
+        .filter_map(|(call_id, invocation_ids)| {
+            if invocation_ids.len() != 1 {
+                return None;
+            }
+            let invocation_id = invocation_ids.into_iter().next()?;
+            (call_ids_by_invocation_id
+                .get(&invocation_id)
+                .is_some_and(|call_ids| call_ids.len() == 1))
+            .then_some((call_id, invocation_id))
+        })
+        .collect()
 }
