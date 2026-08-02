@@ -13,6 +13,7 @@ import { CoreServer } from './core/coreServer'
 import { openExternalUrl, registerHostIpc } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
+import { shouldHideMainWindowOnClose, showExistingMainWindow } from './mainWindowLifecycle'
 
 // Electron is the sole authority for the application data location. Freeze it before
 // app.setName() can affect Electron's path resolution so existing development data stays
@@ -30,6 +31,7 @@ const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
 let disposeAdaptiveAppIcon: (() => void) | null = null
 let disposeHostIpc: (() => void) | null = null
+let mainWindow: BrowserWindow | null = null
 const trustedRendererEntries = new Map<number, string>()
 
 const macWindowChromeOptions =
@@ -108,7 +110,7 @@ function createWindow(): void {
     is.dev && process.env['ELECTRON_RENDERER_URL']
       ? new URL(process.env['ELECTRON_RENDERER_URL']).toString()
       : pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
-  const mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     title: 'MyCopilot',
     width: 1120,
     height: 760,
@@ -130,32 +132,40 @@ function createWindow(): void {
       webviewTag: true
     }
   })
+  mainWindow = window
 
-  const rendererWebContents = mainWindow.webContents
+  const rendererWebContents = window.webContents
   const rendererWebContentsId = rendererWebContents.id
   trustedRendererEntries.set(rendererWebContentsId, rendererEntryUrl)
   configureManagedWebviewHost(rendererWebContents)
-  installNativeImageContextMenu(mainWindow)
-  const handleWindowStateChange = (): void => sendAppWindowState(mainWindow)
+  installNativeImageContextMenu(window)
+  const handleWindowStateChange = (): void => sendAppWindowState(window)
 
   rendererWebContents.once('destroyed', () => {
     trustedRendererEntries.delete(rendererWebContentsId)
   })
-  mainWindow.once('closed', () => {
+  window.on('close', (event) => {
+    if (!shouldHideMainWindowOnClose(process.platform, isQuittingAfterServiceShutdown)) return
+
+    event.preventDefault()
+    window.hide()
+  })
+  window.once('closed', () => {
     trustedRendererEntries.delete(rendererWebContentsId)
+    if (mainWindow === window) mainWindow = null
   })
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
-    sendAppWindowState(mainWindow)
+  window.on('ready-to-show', () => {
+    window.show()
+    sendAppWindowState(window)
   })
 
   rendererWebContents.on('did-finish-load', handleWindowStateChange)
-  mainWindow.on('maximize', handleWindowStateChange)
-  mainWindow.on('unmaximize', handleWindowStateChange)
-  mainWindow.on('enter-full-screen', handleWindowStateChange)
-  mainWindow.on('leave-full-screen', handleWindowStateChange)
-  mainWindow.on('restore', handleWindowStateChange)
+  window.on('maximize', handleWindowStateChange)
+  window.on('unmaximize', handleWindowStateChange)
+  window.on('enter-full-screen', handleWindowStateChange)
+  window.on('leave-full-screen', handleWindowStateChange)
+  window.on('restore', handleWindowStateChange)
 
   rendererWebContents.setWindowOpenHandler((details) => {
     void openExternalUrl(details.url).catch((error: unknown) => {
@@ -173,11 +183,21 @@ function createWindow(): void {
     })
   })
 
-  void mainWindow.loadURL(rendererEntryUrl).catch((error: unknown) => {
-    if (!mainWindow.isDestroyed()) {
+  void window.loadURL(rendererEntryUrl).catch((error: unknown) => {
+    if (!window.isDestroyed()) {
       console.error('Failed to load renderer entry', error)
     }
   })
+}
+
+function activateMainWindow(): void {
+  const window = showExistingMainWindow(mainWindow)
+  if (!window) {
+    createWindow()
+    return
+  }
+
+  sendAppWindowState(window)
 }
 
 app.whenReady().then(() => {
@@ -201,9 +221,7 @@ app.whenReady().then(() => {
 
   createWindow()
 
-  app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
+  app.on('activate', activateMainWindow)
 })
 
 app.on('window-all-closed', () => {

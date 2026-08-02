@@ -6,6 +6,7 @@ import { defineConfig } from 'vitest/config'
 const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
 const rightSidebarTests = 'src/renderer/src/features/rightSidebar/__tests__'
 const filesTests = 'src/renderer/src/features/files/__tests__'
+const mainWindowLifecycleTest = 'src/main/mainWindowLifecycle.test.ts'
 const workspaceFilesTests = 'src/main/workspaceFiles'
 const coreMainTests = 'src/main/core'
 const terminalMainTests = 'src/main/terminal'
@@ -51,6 +52,7 @@ export default defineConfig({
           include: [
             `${gitReviewTests}/**/*.test.ts`,
             `${rightSidebarTests}/**/*.test.ts`,
+            mainWindowLifecycleTest,
             `${coreMainTests}/**/*.test.ts`,
             `${workspaceFilesTests}/**/*.test.ts`,
             `${terminalMainTests}/**/*.test.ts`,
