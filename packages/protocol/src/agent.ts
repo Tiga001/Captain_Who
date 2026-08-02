@@ -235,6 +235,34 @@ export type AgentMcpToolInvocationOutcome =
 export type AgentMcpDispatchCertainty =
   'definitely_not_dispatched' | 'possibly_dispatched' | 'response_received'
 
+export type AgentMcpInvocationFailureStage =
+  | 'preflight'
+  | 'approval_payload'
+  | 'policy'
+  | 'dispatch'
+  | 'transport'
+  | 'server_response'
+  | 'result_projection'
+  | 'persistence'
+  | 'shutdown'
+
+export interface AgentMcpResultSizeSummary {
+  contentBlockCount: number
+  textBytes: number
+  structuredBytes: number
+  omittedBlockCount: number
+  omittedEncodedBytes: number
+}
+
+export interface AgentMcpInvocationDiagnostics {
+  schemaVersion: 1
+  argumentEncodedBytes: number
+  argumentValueCount: number
+  argumentMaxDepth: number
+  result?: AgentMcpResultSizeSummary
+  failureStage?: AgentMcpInvocationFailureStage
+}
+
 export interface AgentMcpToolInvocationEvent {
   actionId: string
   invocationId: string
@@ -256,6 +284,8 @@ export interface AgentMcpToolInvocationEvent {
   errorCode?: string
   durationMs?: number
   outputTruncated: boolean
+  /** Value-free, Host-classified diagnostics. Renderer presentation should not persist it. */
+  diagnostics?: AgentMcpInvocationDiagnostics
 }
 
 export type AgentToolIdentity =

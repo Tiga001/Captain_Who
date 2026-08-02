@@ -1586,6 +1586,8 @@ impl AgentRuntime {
                                     error_code: None,
                                     duration_ms: None,
                                     output_truncated: false,
+                                    result_size: None,
+                                    failure_stage: None,
                                 },
                             ) {
                                 Ok(invocation) => invocation,

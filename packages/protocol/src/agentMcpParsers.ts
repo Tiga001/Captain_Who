@@ -3,6 +3,7 @@ import type {
   AgentChatOutput,
   AgentEvent,
   AgentMcpArgumentSummary,
+  AgentMcpInvocationDiagnostics,
   AgentMcpServerScope,
   AgentMcpToolApproval,
   AgentMcpToolApprovalSummary,
@@ -30,6 +31,11 @@ const MODEL_TOOL_CALL_ID_PATTERN = /^tc1_[a-zA-Z0-9_-]{43}$/
 const MCP_APPROVAL_TTL_MS = 15 * 60 * 1000
 const MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES = 1024 * 1024
 const MAX_RENDERER_SAFE_PROPOSED_ACTIONS = 1024
+const MAX_MCP_DIAGNOSTIC_ARGUMENT_BYTES = 64 * 1024
+const MAX_MCP_DIAGNOSTIC_ARGUMENT_VALUES = 4096
+const MAX_MCP_DIAGNOSTIC_ARGUMENT_DEPTH = 32
+const MAX_MCP_DIAGNOSTIC_RESULT_BLOCKS = 128
+const MAX_MCP_DIAGNOSTIC_RESULT_BYTES = 4 * 1024 * 1024
 
 /**
  * Parses the MCP-only Agent event boundary. Existing non-MCP events remain on their historical
@@ -239,7 +245,8 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
       'isError',
       'errorCode',
       'durationMs',
-      'outputTruncated'
+      'outputTruncated',
+      'diagnostics'
     ] as const,
     context
   )
@@ -310,6 +317,10 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     `${context}.dispatchCertainty`
   )
   const outputTruncated = expectBoolean(record.outputTruncated, `${context}.outputTruncated`)
+  const diagnostics =
+    record.diagnostics === undefined
+      ? undefined
+      : parseAgentMcpInvocationDiagnostics(record.diagnostics, `${context}.diagnostics`)
   assertValidInvocationLifecycle(
     context,
     state,
@@ -320,6 +331,9 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     durationMs,
     outputTruncated
   )
+  if (diagnostics !== undefined) {
+    assertValidInvocationDiagnostics(context, state, outcome, diagnostics)
+  }
   return {
     actionId,
     invocationId,
@@ -339,7 +353,171 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     ...(isError === undefined ? {} : { isError }),
     ...(errorCode === undefined ? {} : { errorCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
-    outputTruncated
+    outputTruncated,
+    ...(diagnostics === undefined ? {} : { diagnostics })
+  }
+}
+
+function parseAgentMcpInvocationDiagnostics(
+  value: unknown,
+  context: string
+): AgentMcpInvocationDiagnostics {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'argumentEncodedBytes',
+      'argumentValueCount',
+      'argumentMaxDepth',
+      'result',
+      'failureStage'
+    ] as const,
+    context
+  )
+  const schemaVersion = boundedDiagnosticInteger(
+    record.schemaVersion,
+    `${context}.schemaVersion`,
+    1
+  )
+  if (schemaVersion !== 1) {
+    throw invalidProtocolValue(context, 'unsupported diagnostics schema version')
+  }
+  const result =
+    record.result === undefined
+      ? undefined
+      : parseAgentMcpResultSizeSummary(record.result, `${context}.result`)
+  const failureStage =
+    record.failureStage === undefined
+      ? undefined
+      : expectEnum(
+          record.failureStage,
+          [
+            'preflight',
+            'approval_payload',
+            'policy',
+            'dispatch',
+            'transport',
+            'server_response',
+            'result_projection',
+            'persistence',
+            'shutdown'
+          ] as const,
+          `${context}.failureStage`
+        )
+  return {
+    schemaVersion: 1,
+    argumentEncodedBytes: boundedDiagnosticInteger(
+      record.argumentEncodedBytes,
+      `${context}.argumentEncodedBytes`,
+      MAX_MCP_DIAGNOSTIC_ARGUMENT_BYTES
+    ),
+    argumentValueCount: boundedDiagnosticInteger(
+      record.argumentValueCount,
+      `${context}.argumentValueCount`,
+      MAX_MCP_DIAGNOSTIC_ARGUMENT_VALUES
+    ),
+    argumentMaxDepth: boundedDiagnosticInteger(
+      record.argumentMaxDepth,
+      `${context}.argumentMaxDepth`,
+      MAX_MCP_DIAGNOSTIC_ARGUMENT_DEPTH
+    ),
+    ...(result === undefined ? {} : { result }),
+    ...(failureStage === undefined ? {} : { failureStage })
+  }
+}
+
+function parseAgentMcpResultSizeSummary(value: unknown, context: string) {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'contentBlockCount',
+      'textBytes',
+      'structuredBytes',
+      'omittedBlockCount',
+      'omittedEncodedBytes'
+    ] as const,
+    context
+  )
+  const contentBlockCount = boundedDiagnosticInteger(
+    record.contentBlockCount,
+    `${context}.contentBlockCount`,
+    MAX_MCP_DIAGNOSTIC_RESULT_BLOCKS
+  )
+  const omittedBlockCount = boundedDiagnosticInteger(
+    record.omittedBlockCount,
+    `${context}.omittedBlockCount`,
+    MAX_MCP_DIAGNOSTIC_RESULT_BLOCKS
+  )
+  if (omittedBlockCount > contentBlockCount) {
+    throw invalidProtocolValue(context, 'omitted block count exceeds content block count')
+  }
+  return {
+    contentBlockCount,
+    textBytes: boundedDiagnosticInteger(
+      record.textBytes,
+      `${context}.textBytes`,
+      MAX_MCP_DIAGNOSTIC_RESULT_BYTES
+    ),
+    structuredBytes: boundedDiagnosticInteger(
+      record.structuredBytes,
+      `${context}.structuredBytes`,
+      MAX_MCP_DIAGNOSTIC_RESULT_BYTES
+    ),
+    omittedBlockCount,
+    omittedEncodedBytes: boundedDiagnosticInteger(
+      record.omittedEncodedBytes,
+      `${context}.omittedEncodedBytes`,
+      MAX_MCP_DIAGNOSTIC_RESULT_BYTES
+    )
+  }
+}
+
+function boundedDiagnosticInteger(value: unknown, context: string, maximum: number): number {
+  const parsed = expectSafeInteger(value, context, 0)
+  if (parsed > maximum) {
+    throw invalidProtocolValue(context, `exceeded maximum ${maximum}`)
+  }
+  return parsed
+}
+
+function assertValidInvocationDiagnostics(
+  context: string,
+  state: AgentMcpToolInvocationEvent['state'],
+  outcome: AgentMcpToolInvocationEvent['outcome'],
+  diagnostics: AgentMcpInvocationDiagnostics
+): void {
+  const hasResult = diagnostics.result !== undefined
+  const stage = diagnostics.failureStage
+  const valid = (() => {
+    switch (state) {
+      case 'pending_approval':
+      case 'approved':
+      case 'dispatching':
+      case 'running':
+      case 'rejected':
+        return !hasResult && stage === undefined
+      case 'completed':
+        return (
+          hasResult &&
+          ((outcome === 'succeeded' && stage === undefined) ||
+            (outcome === 'tool_error' && stage === 'server_response'))
+        )
+      case 'expired':
+      case 'payload_unavailable':
+        return !hasResult && stage === 'approval_payload'
+      case 'policy_denied':
+        return !hasResult && stage === 'policy'
+      case 'cancelled':
+        return !hasResult && (stage === undefined || stage === 'preflight')
+      case 'failed':
+      case 'outcome_unknown':
+        return !hasResult && stage !== undefined
+    }
+  })()
+  if (!valid) {
+    throw invalidProtocolValue(context, 'diagnostics contradict the invocation lifecycle state')
   }
 }
 

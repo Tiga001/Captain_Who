@@ -42,6 +42,11 @@ impl McpConnectionManager {
                         .as_ref()
                         .cloned()
                         .ok_or_else(|| McpError::protocol("MCP server is not ready"))?;
+                    let lifecycle_cancel = state
+                        .lifecycle_cancel
+                        .as_ref()
+                        .cloned()
+                        .ok_or_else(|| McpError::cancelled("MCP catalog refresh"))?;
                     state.refresh_inflight = true;
                     let epoch = state.epoch;
                     transition_locked(
@@ -50,19 +55,24 @@ impl McpConnectionManager {
                         &mut state,
                         McpServerState::Discovering,
                     );
-                    Some((epoch, peer))
+                    Some((epoch, peer, lifecycle_cancel))
                 }
             };
-            let Some((epoch, peer)) = reserved else {
+            let Some((epoch, peer, lifecycle_cancel)) = reserved else {
                 notified.await;
                 continue;
             };
             let _inflight_guard = EntryInflightGuard {
                 entry: Arc::clone(&entry),
+                kind: EntryInflightKind::Refresh,
             };
-            return self
-                .finish_refresh(server_id, Arc::clone(&entry), epoch, peer)
-                .await;
+            return tokio::select! {
+                biased;
+                _ = lifecycle_cancel.cancelled() => {
+                    Err(McpError::cancelled("MCP catalog refresh"))
+                }
+                result = self.finish_refresh(server_id, Arc::clone(&entry), epoch, peer) => result,
+            };
         }
     }
 
@@ -86,14 +96,24 @@ impl McpConnectionManager {
                 empty
             }
         };
-        let discovered = discover_catalog_with_limits(
-            peer.as_ref(),
-            server_id,
-            Some(&previous),
-            &self.inner.policy.catalog,
-            &self.inner.policy.security_limits,
+        let catalog_refresh_timeout = self.inner.policy.catalog_refresh_timeout;
+        let discovered = tokio::time::timeout(
+            catalog_refresh_timeout,
+            discover_catalog_with_limits(
+                peer.as_ref(),
+                server_id,
+                Some(&previous),
+                &self.inner.policy.catalog,
+                &self.inner.policy.security_limits,
+            ),
         )
-        .await;
+        .await
+        .unwrap_or_else(|_| {
+            Err(McpError::timeout(
+                "MCP Catalog refresh",
+                u64::try_from(catalog_refresh_timeout.as_millis()).unwrap_or(u64::MAX),
+            ))
+        });
         let mut state = lock_entry(&entry)?;
         state.refresh_inflight = false;
         if state.epoch != epoch
@@ -221,7 +241,7 @@ impl McpConnectionManager {
     ) -> Result<(), McpError> {
         loop {
             let notified = entry.settled.notified();
-            let peer = {
+            let reserved = {
                 let mut state = lock_entry(&entry)?;
                 if state.epoch != epoch || state.removed {
                     return Ok(());
@@ -232,6 +252,9 @@ impl McpConnectionManager {
                     let Some(peer) = state.peer.as_ref().cloned() else {
                         return Ok(());
                     };
+                    let Some(lifecycle_cancel) = state.lifecycle_cancel.as_ref().cloned() else {
+                        return Ok(());
+                    };
                     state.refresh_inflight = true;
                     transition_locked(
                         &self.inner.events,
@@ -239,19 +262,24 @@ impl McpConnectionManager {
                         &mut state,
                         McpServerState::Discovering,
                     );
-                    Some(peer)
+                    Some((peer, lifecycle_cancel))
                 }
             };
-            let Some(peer) = peer else {
+            let Some((peer, lifecycle_cancel)) = reserved else {
                 notified.await;
                 continue;
             };
             let _inflight_guard = EntryInflightGuard {
                 entry: Arc::clone(&entry),
+                kind: EntryInflightKind::Refresh,
             };
-            let _ = self
-                .finish_refresh(server_id, Arc::clone(&entry), epoch, peer)
-                .await?;
+            let _ = tokio::select! {
+                biased;
+                _ = lifecycle_cancel.cancelled() => {
+                    Err(McpError::cancelled("MCP catalog refresh"))
+                }
+                result = self.finish_refresh(server_id, Arc::clone(&entry), epoch, peer) => result,
+            }?;
             return Ok(());
         }
     }
@@ -263,7 +291,7 @@ impl McpConnectionManager {
         epoch: u64,
         exit_code: Option<i32>,
     ) {
-        let (peer, active_calls) = {
+        let (lifecycle_cancel, watcher_cancel, peers, active_calls) = {
             let Ok(mut state) = entry.state.lock() else {
                 return;
             };
@@ -293,19 +321,38 @@ impl McpConnectionManager {
             emit_catalog_locked(&self.inner.events, &mut state);
             let error = McpError::server_exited(exit_code);
             set_error_locked(&self.inner.events, &entry, &mut state, &error);
-            state.watcher_cancel.take();
+            let lifecycle_cancel = state.lifecycle_cancel.take();
+            let watcher_cancel = state.watcher_cancel.take();
+            // This method executes inside the watcher task. Dropping its stored JoinHandle lets
+            // the current task return naturally without attempting to await or abort itself.
             state.watcher_task.take();
-            let peer = state.peer.take();
-            state.closing_peer = peer.clone();
+            let peers = take_cleanup_peers(&mut state);
             let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
-            (peer, active_calls)
+            (lifecycle_cancel, watcher_cancel, peers, active_calls)
         };
-        cancel_active_calls(&active_calls, McpOutcomeUnknownReason::ServerExited);
-        let _ =
-            settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout).await;
-        if let Some(peer) = peer {
-            let _ = peer.close().await;
-            clear_closing_peer(&entry, &peer);
+        if let Some(cancel) = lifecycle_cancel {
+            cancel.cancel();
+        }
+        if let Some(cancel) = watcher_cancel {
+            cancel.cancel();
+        }
+        let deadline = tokio::time::Instant::now() + self.inner.policy.lifecycle_cleanup_timeout;
+        if let Err(error) = self
+            .cleanup_connection_parts(
+                &entry,
+                peers,
+                None,
+                active_calls,
+                McpOutcomeUnknownReason::ServerExited,
+                deadline,
+            )
+            .await
+        {
+            if let Ok(mut state) = entry.state.lock() {
+                if state.epoch == epoch {
+                    set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                }
+            }
         }
     }
 

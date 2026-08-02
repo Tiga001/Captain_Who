@@ -101,13 +101,13 @@ pub use mcp::{
     mcp_normalized_input_schema_identity, mcp_tool_arguments_digest, mcp_tool_invocation_event,
     mcp_tool_result_from_approved_invocation, mcp_tool_result_from_rejected_approval,
     mcp_tool_result_model_projection, mcp_tool_result_persistence_projection,
-    validate_mcp_approval_arguments, McpAgentToolAnnotations, McpAgentToolDescriptor,
-    McpApprovedToolInvocation, McpNormalizedInputSchemaIdentity, McpOmittedContentKind,
-    McpRuntimeProjectionLimits, McpToolApprovalRequest, McpToolCatalogContext, McpToolContentBlock,
-    McpToolDiagnosticCode, McpToolInvocationEventUpdate, McpToolInvocationFuture,
-    McpToolInvocationResult, McpToolInvoker, McpToolRegistrationDiagnostic, McpToolRuntime,
-    MCP_INPUT_SCHEMA_NORMALIZER_VERSION, MCP_RUNTIME_MAX_CATALOG_BYTES,
-    MCP_RUNTIME_MAX_TOOL_DEFINITIONS,
+    mcp_tool_result_size_summary, validate_mcp_approval_arguments, McpAgentToolAnnotations,
+    McpAgentToolDescriptor, McpApprovedToolInvocation, McpNormalizedInputSchemaIdentity,
+    McpOmittedContentKind, McpRuntimeProjectionLimits, McpToolApprovalRequest,
+    McpToolCatalogContext, McpToolContentBlock, McpToolDiagnosticCode,
+    McpToolInvocationEventUpdate, McpToolInvocationFuture, McpToolInvocationResult, McpToolInvoker,
+    McpToolRegistrationDiagnostic, McpToolRuntime, MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
+    MCP_RUNTIME_MAX_CATALOG_BYTES, MCP_RUNTIME_MAX_TOOL_DEFINITIONS,
 };
 
 /// Rebuilds the model-only projection for a host result restored after approval.

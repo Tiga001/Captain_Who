@@ -76,8 +76,10 @@ impl McpConnectionManager {
                     && state.closing_peer.is_none()
                     && state.watcher_cancel.is_none()
                     && state.watcher_task.is_none()
+                    && state.lifecycle_cancel.is_none()
                     && !state.connect_inflight
                     && !state.refresh_inflight
+                    && !state.restart_inflight
                     && state.active_calls.is_empty()
                     && state.status.state == McpServerState::Disabled
                     && state.status.active_call_count == 0
@@ -116,7 +118,7 @@ impl McpConnectionManager {
         let mut results = Vec::with_capacity(entries.len());
         let mut active_calls_to_verify = Vec::new();
         for (server_id, entry) in &entries {
-            let (peers, cancel, watcher, active_calls, status) = {
+            let (peers, lifecycle_cancel, cancel, watcher, active_calls, status) = {
                 let mut state = match entry.state.lock() {
                     Ok(state) => state,
                     Err(poisoned) => {
@@ -128,6 +130,8 @@ impl McpConnectionManager {
                 state.epoch = state.epoch.saturating_add(1);
                 state.connect_inflight = false;
                 state.refresh_inflight = false;
+                state.restart_inflight = false;
+                let lifecycle_cancel = state.lifecycle_cancel.take();
                 let mut peers = Vec::new();
                 if let Some(peer) = state.peer.take() {
                     peers.push(peer);
@@ -153,8 +157,18 @@ impl McpConnectionManager {
                     &mut state,
                     McpServerState::Disabled,
                 );
-                (peers, cancel, watcher, active_calls, state.status.clone())
+                (
+                    peers,
+                    lifecycle_cancel,
+                    cancel,
+                    watcher,
+                    active_calls,
+                    state.status.clone(),
+                )
             };
+            if let Some(cancel) = lifecycle_cancel {
+                cancel.cancel();
+            }
             if let Some(cancel) = cancel {
                 cancel.cancel();
             }
@@ -221,8 +235,10 @@ impl McpConnectionManager {
                 && state.closing_peer.is_none()
                 && state.watcher_cancel.is_none()
                 && state.watcher_task.is_none()
+                && state.lifecycle_cancel.is_none()
                 && !state.connect_inflight
                 && !state.refresh_inflight
+                && !state.restart_inflight
                 && state.active_calls.is_empty()
                 && state.status.active_call_count == 0;
             cleanup_complete &= entry_complete;
@@ -269,6 +285,22 @@ impl McpConnectionManager {
         let _drain_permit = DrainPermit {
             inner: Arc::clone(&self.inner),
         };
+        let drain_deadline =
+            tokio::time::Instant::now() + self.inner.policy.lifecycle_cleanup_timeout;
+        let entries_to_cancel = self
+            .inner
+            .entries
+            .lock()
+            .map(|entries| entries.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for entry in entries_to_cancel {
+            if let Ok(state) = entry.state.lock() {
+                if let Some(cancel) = state.lifecycle_cancel.as_ref() {
+                    cancel.cancel();
+                }
+            }
+        }
+        let mut admitted_start_timeout = false;
         loop {
             let settled = self.inner.lifecycle_settled.notified();
             let active_starts = self
@@ -280,7 +312,13 @@ impl McpConnectionManager {
             if active_starts == 0 {
                 break;
             }
-            settled.await;
+            if tokio::time::timeout_at(drain_deadline, settled)
+                .await
+                .is_err()
+            {
+                admitted_start_timeout = true;
+                break;
+            }
         }
         let ids = self
             .inner
@@ -301,6 +339,9 @@ impl McpConnectionManager {
             if let Ok(result) = joined {
                 results.push(result);
             }
+        }
+        if admitted_start_timeout {
+            results.push(manager_task_batch_failure());
         }
         results.sort_by_key(|result| result.server_id);
         results

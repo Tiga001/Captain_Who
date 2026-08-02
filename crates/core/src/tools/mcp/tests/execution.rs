@@ -34,6 +34,11 @@ async fn structured_content_and_typed_route_survive_successful_execution() {
     assert_eq!(value["status"], "completed");
     assert_eq!(value["outcome"], "succeeded");
     assert_eq!(value["dispatchCertainty"], "response_received");
+    assert_eq!(value["contentCompleteness"], "complete");
+    assert!(
+        value.get("truncatedAtSource").is_none(),
+        "a complete MCP response must not expose a misleading negative truncation marker"
+    );
     assert_eq!(value["content"][0]["text"], "sum ready");
     assert_eq!(
         value["structuredContent"],
@@ -68,6 +73,19 @@ async fn structured_content_and_typed_route_survive_successful_execution() {
     let projected_json = serde_json::to_string(&model_projection).unwrap();
     assert!(!projected_json.contains(&expected_provenance.server_id));
     assert!(!projected_json.contains(&expected_provenance.config_digest));
+    let model_value = model_projection
+        .result
+        .as_ref()
+        .expect("successful MCP model projection");
+    assert_eq!(model_value["contentCompleteness"], "complete");
+    assert_eq!(model_value["responseAuthority"], "server");
+    assert_eq!(model_value["executionAttempted"], true);
+    assert_eq!(model_value["responseReceived"], true);
+    assert_eq!(model_value["retryable"], false);
+    assert_eq!(model_value["retryPolicy"], "do_not_repeat_completed_call");
+    assert!(model_value["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("authoritative Tool response")));
     let invocations = invoker.invocations.lock().unwrap();
     assert_eq!(invocations.len(), 1);
     assert_eq!(
@@ -126,8 +144,11 @@ async fn server_is_error_becomes_failed_tool_result_not_transport_failure() {
         .expect("isError is a settled Tool result, not a transport error");
 
     assert!(!result.ok);
-    assert!(result.error.unwrap().contains("MCP server reported"));
-    let value = result.result.expect("structured MCP error result");
+    assert!(result
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("MCP server reported")));
+    let value = result.result.as_ref().expect("structured MCP error result");
     assert_eq!(value["type"], "mcp_tool");
     assert_eq!(value["external"], true);
     assert_eq!(value["status"], "completed");
@@ -136,6 +157,149 @@ async fn server_is_error_becomes_failed_tool_result_not_transport_failure() {
     assert_eq!(value["isError"], true);
     assert_eq!(value["content"][0]["text"], "fixture rejected the request");
     assert_eq!(value["structuredContent"]["reason"], "fixture_error");
+
+    let projected = mcp_tool_result_model_projection(&result);
+    let projected = projected.result.expect("model MCP Tool-error envelope");
+    assert_eq!(projected["responseAuthority"], "server");
+    assert_eq!(projected["contentCompleteness"], "complete");
+    assert_eq!(projected["executionAttempted"], true);
+    assert_eq!(projected["responseReceived"], true);
+    assert_eq!(projected["retryable"], false);
+    assert_eq!(
+        projected["retryPolicy"],
+        "new_corrected_call_only_if_server_error_is_actionable"
+    );
+    assert!(projected["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("not a transport failure")));
+    assert_eq!(
+        projected["content"][0]["text"], "fixture rejected the request",
+        "the authoritative Server error detail must remain available to the model"
+    );
+}
+
+#[test]
+fn outcome_unknown_model_projection_never_authorizes_replay() {
+    let result = AgentToolResult {
+        exact_archive_file: None,
+        call_id: "mcp-outcome-unknown-call".to_string(),
+        tool: "mcp__fixture__uncertain".to_string(),
+        ok: false,
+        result: Some(json!({
+            "schemaVersion": 1,
+            "type": "mcp_tool",
+            "external": true,
+            "status": "outcome_unknown",
+            "outcome": "outcome_unknown",
+            "dispatchCertainty": "possibly_dispatched",
+            "isError": true,
+            "code": "mcp.tool_outcome_unknown",
+            "retryable": false,
+        })),
+        error: Some("The external outcome is unknown.".to_string()),
+    };
+
+    let projected = mcp_tool_result_model_projection(&result);
+    let value = projected.result.expect("outcome-unknown model envelope");
+    assert_eq!(value["responseAuthority"], "host");
+    assert_eq!(value["contentCompleteness"], "unavailable");
+    assert_eq!(value["executionAttempted"], true);
+    assert_eq!(value["responseReceived"], false);
+    assert_eq!(value["retryable"], false);
+    assert_eq!(
+        value["retryPolicy"],
+        "never_replay_check_authoritative_state"
+    );
+    assert!(value["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Never replay it automatically")));
+}
+
+#[test]
+fn restored_durable_success_is_a_receipt_not_replayable_response_content() {
+    let model_name = "mcp__fixture__durable_receipt";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "durable_receipt",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker);
+    let approval = propose(&registry, model_name, json!({})).unwrap();
+    let live = mcp_tool_result_from_approved_invocation(
+        &approval,
+        &McpToolInvocationResult {
+            content: vec![McpToolContentBlock::Text {
+                text: "ephemeral authoritative content".to_string(),
+            }],
+            structured_content: None,
+            is_error: false,
+            truncated_at_source: false,
+        },
+    )
+    .unwrap();
+    let durable = mcp_tool_result_persistence_projection(&live);
+
+    let projected = mcp_tool_result_model_projection(&durable);
+    let value = projected.result.expect("restored durable MCP receipt");
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["outcome"], "succeeded");
+    assert_eq!(value["responseAuthority"], "durable_receipt");
+    assert_eq!(value["contentCompleteness"], "unavailable_after_restart");
+    assert_eq!(value["executionAttempted"], true);
+    assert_eq!(value["responseReceived"], true);
+    assert_eq!(value["retryable"], false);
+    assert_eq!(value["retryPolicy"], "never_replay_terminal_receipt");
+    assert!(value.get("content").is_none());
+    assert!(value.get("structuredContent").is_none());
+    assert!(value["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Never replay")));
+}
+
+#[test]
+fn omitted_content_block_marks_the_model_response_partial() {
+    let model_name = "mcp__fixture__omitted_image";
+    let invoker = MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "omitted_image",
+            model_name,
+            json!({"type": "object"}),
+        )],
+        empty_result(),
+    );
+    let registry = registry_with(invoker);
+    let approval = propose(&registry, model_name, json!({})).unwrap();
+    let result = mcp_tool_result_from_approved_invocation(
+        &approval,
+        &McpToolInvocationResult {
+            content: vec![McpToolContentBlock::Omitted {
+                kind: McpOmittedContentKind::Image,
+                mime_type: Some("image/png".to_string()),
+                encoded_bytes: Some(512),
+            }],
+            structured_content: None,
+            is_error: false,
+            truncated_at_source: false,
+        },
+    )
+    .unwrap();
+
+    let raw = result.result.as_ref().expect("bounded MCP result");
+    assert_eq!(raw["contentCompleteness"], "partial");
+    assert_eq!(raw["truncatedAtSource"], true);
+    assert_eq!(raw["diagnostics"]["contentBlocksOmitted"], 1);
+    assert_eq!(raw["diagnostics"]["upstreamContentTruncated"], false);
+    assert_eq!(raw["content"][0]["type"], "omitted");
+    assert_eq!(raw["content"][0]["kind"], "image");
+
+    let projected = mcp_tool_result_model_projection(&result);
+    let projected = projected.result.expect("partial MCP model envelope");
+    assert_eq!(projected["contentCompleteness"], "partial");
+    assert_eq!(projected["responseAuthority"], "server");
+    assert_eq!(projected["retryPolicy"], "do_not_repeat_completed_call");
 }
 
 #[test]

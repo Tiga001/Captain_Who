@@ -1237,6 +1237,52 @@ pub enum AgentMcpDispatchCertainty {
     ResponseReceived,
 }
 
+/// Host-classified lifecycle boundary at which an MCP invocation failed.
+///
+/// This intentionally carries no Server text, transport message, arguments, result content,
+/// configuration, or secret reference. It is safe for structured diagnostics and strict IPC.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMcpInvocationFailureStage {
+    Preflight,
+    ApprovalPayload,
+    Policy,
+    Dispatch,
+    Transport,
+    ServerResponse,
+    ResultProjection,
+    Persistence,
+    Shutdown,
+}
+
+/// Bounded size-only summary of the Host projection of an MCP Tool response.
+///
+/// Counts describe the already bounded in-process projection, never the untrusted raw protocol
+/// body. No content, MIME data, URI, path, or Server-authored message is retained here.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentMcpResultSizeSummary {
+    pub content_block_count: u64,
+    pub text_bytes: u64,
+    pub structured_bytes: u64,
+    pub omitted_block_count: u64,
+    pub omitted_encoded_bytes: u64,
+}
+
+/// Versioned, value-free diagnostics for one MCP invocation lifecycle transition.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentMcpInvocationDiagnostics {
+    pub schema_version: u32,
+    pub argument_encoded_bytes: u64,
+    pub argument_value_count: u64,
+    pub argument_max_depth: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<AgentMcpResultSizeSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<AgentMcpInvocationFailureStage>,
+}
+
 /// Raw-argument-free lifecycle record suitable for AgentEvent and Renderer projection.
 ///
 /// `display_reason` is bounded model-authored display text. It remains untrusted, may contain
@@ -1271,6 +1317,9 @@ pub struct AgentMcpToolInvocationEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     pub output_truncated: bool,
+    /// Size-only and Host-classified diagnostics. Legacy events may omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<AgentMcpInvocationDiagnostics>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]

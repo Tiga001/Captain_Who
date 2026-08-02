@@ -175,10 +175,12 @@ pub(super) async fn stop_and_forget_removed_change(
         }
         should_stop
     };
-    if should_stop {
-        let _ = manager
+    if should_stop
+        && manager
             .stop_entry(server_id, Arc::clone(&entry), true)
-            .await;
+            .await
+            .is_ok()
+    {
         manager.remove_managed_entry_if_same(server_id, &entry);
     }
 }
@@ -211,10 +213,12 @@ async fn stop_and_forget_unregistered(manager: &McpConnectionManager, server_id:
         }
         should_stop
     };
-    if should_stop {
-        let _ = manager
+    if should_stop
+        && manager
             .stop_entry(server_id, Arc::clone(&entry), true)
-            .await;
+            .await
+            .is_ok()
+    {
         manager.remove_managed_entry_if_same(server_id, &entry);
     }
 }

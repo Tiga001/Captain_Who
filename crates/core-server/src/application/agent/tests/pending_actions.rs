@@ -2438,6 +2438,8 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
             error_code: None,
             duration_ms: None,
             output_truncated: false,
+            result_size: None,
+            failure_stage: None,
         },
     );
     assert!(

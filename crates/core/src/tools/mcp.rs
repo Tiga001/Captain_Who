@@ -9,11 +9,12 @@ use super::{
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentMcpApprovalMode, AgentMcpApprovalPayloadPersistence,
-    AgentMcpArgumentSummary, AgentMcpDispatchCertainty, AgentMcpServerScope, AgentMcpToolApproval,
-    AgentMcpToolApprovalSummary, AgentMcpToolInvocationEvent, AgentMcpToolInvocationIdentity,
-    AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState, AgentMcpToolProvenance,
-    AgentMcpToolRisk, AgentProposedAction, AgentResult, AgentToolApprovalMode, AgentToolCall,
-    AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentMcpArgumentSummary, AgentMcpDispatchCertainty, AgentMcpInvocationDiagnostics,
+    AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary, AgentMcpServerScope,
+    AgentMcpToolApproval, AgentMcpToolApprovalSummary, AgentMcpToolInvocationEvent,
+    AgentMcpToolInvocationIdentity, AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState,
+    AgentMcpToolProvenance, AgentMcpToolRisk, AgentProposedAction, AgentResult,
+    AgentToolApprovalMode, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::AgentCancellationToken;
 use serde::{Deserialize, Serialize};
@@ -38,8 +39,8 @@ use invocation::{
 pub use invocation::{
     mcp_tool_arguments_digest, mcp_tool_invocation_event, mcp_tool_result_from_approved_invocation,
     mcp_tool_result_from_rejected_approval, mcp_tool_result_model_projection,
-    mcp_tool_result_persistence_projection, validate_mcp_approval_arguments,
-    McpToolInvocationEventUpdate,
+    mcp_tool_result_persistence_projection, mcp_tool_result_size_summary,
+    validate_mcp_approval_arguments, McpToolInvocationEventUpdate,
 };
 #[cfg(test)]
 use schema::valid_canonical_uuid_v4;

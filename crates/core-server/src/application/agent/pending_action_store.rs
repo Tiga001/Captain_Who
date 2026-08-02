@@ -1072,6 +1072,8 @@ pub(super) fn mcp_pending_action_binding_matches(
             error_code: None,
             duration_ms: None,
             output_truncated: false,
+            result_size: None,
+            failure_stage: None,
         },
     )
     .is_err()

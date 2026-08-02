@@ -33,6 +33,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             error_code: None,
             duration_ms: None,
             output_truncated: false,
+            result_size: None,
+            failure_stage: None,
         },
     )
     .unwrap();
@@ -50,15 +52,23 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
     let rendered = serde_json::to_string(&pending).unwrap();
     assert!(!rendered.contains(secret));
     assert!(!rendered.contains("input"));
+    let diagnostics = pending.diagnostics.as_ref().unwrap();
+    assert_eq!(diagnostics.schema_version, 1);
+    assert!(diagnostics.argument_encoded_bytes > 0);
+    assert!(diagnostics.argument_value_count > 0);
+    assert!(diagnostics.result.is_none());
+    assert!(diagnostics.failure_stage.is_none());
 
     let mut legacy = serde_json::to_value(&pending).unwrap();
-    legacy.as_object_mut().unwrap().remove("displayReason");
-    assert_eq!(
-        serde_json::from_value::<AgentMcpToolInvocationEvent>(legacy)
-            .unwrap()
-            .display_reason,
-        None
-    );
+    let legacy = legacy.as_object_mut().unwrap();
+    legacy.remove("displayReason");
+    legacy.remove("diagnostics");
+    let legacy = serde_json::from_value::<AgentMcpToolInvocationEvent>(serde_json::Value::Object(
+        legacy.clone(),
+    ))
+    .unwrap();
+    assert_eq!(legacy.display_reason, None);
+    assert_eq!(legacy.diagnostics, None);
 
     for (state, outcome, is_error) in [
         (
@@ -132,6 +142,40 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             ) => AgentMcpDispatchCertainty::PossiblyDispatched,
             _ => AgentMcpDispatchCertainty::DefinitelyNotDispatched,
         };
+        let result_size = (state == AgentMcpToolInvocationState::Completed).then_some(
+            AgentMcpResultSizeSummary {
+                content_block_count: 1,
+                text_bytes: 7,
+                structured_bytes: 0,
+                omitted_block_count: 0,
+                omitted_encoded_bytes: 0,
+            },
+        );
+        let failure_stage = match outcome {
+            AgentMcpToolInvocationOutcome::Succeeded | AgentMcpToolInvocationOutcome::Rejected => {
+                None
+            }
+            AgentMcpToolInvocationOutcome::ToolError => {
+                Some(AgentMcpInvocationFailureStage::ServerResponse)
+            }
+            AgentMcpToolInvocationOutcome::OutputTooLarge => {
+                Some(AgentMcpInvocationFailureStage::ResultProjection)
+            }
+            AgentMcpToolInvocationOutcome::Expired
+            | AgentMcpToolInvocationOutcome::PayloadUnavailable => {
+                Some(AgentMcpInvocationFailureStage::ApprovalPayload)
+            }
+            AgentMcpToolInvocationOutcome::PolicyDenied => {
+                Some(AgentMcpInvocationFailureStage::Policy)
+            }
+            AgentMcpToolInvocationOutcome::Cancelled | AgentMcpToolInvocationOutcome::TimedOut => {
+                Some(AgentMcpInvocationFailureStage::Preflight)
+            }
+            AgentMcpToolInvocationOutcome::TransportError
+            | AgentMcpToolInvocationOutcome::OutcomeUnknown => {
+                Some(AgentMcpInvocationFailureStage::Transport)
+            }
+        };
         mcp_tool_invocation_event(
             &approval,
             McpToolInvocationEventUpdate {
@@ -143,6 +187,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
                     .then_some("mcp.lifecycle"),
                 duration_ms: Some(17),
                 output_truncated: dispatch_certainty == AgentMcpDispatchCertainty::ResponseReceived,
+                result_size,
+                failure_stage,
             },
         )
         .unwrap();
@@ -157,6 +203,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             error_code: None,
             duration_ms: None,
             output_truncated: false,
+            result_size: None,
+            failure_stage: None,
         },
     )
     .unwrap();
@@ -170,6 +218,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             error_code: Some("unsafe server message"),
             duration_ms: Some(17),
             output_truncated: false,
+            result_size: None,
+            failure_stage: Some(AgentMcpInvocationFailureStage::Transport),
         },
     )
     .is_err());
@@ -183,6 +233,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             error_code: None,
             duration_ms: Some(17),
             output_truncated: false,
+            result_size: None,
+            failure_stage: None,
         },
     )
     .is_err());
@@ -196,6 +248,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             error_code: None,
             duration_ms: None,
             output_truncated: false,
+            result_size: None,
+            failure_stage: None,
         },
     )
     .is_err());
@@ -209,6 +263,8 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
             error_code: Some("mcp.tool_timeout"),
             duration_ms: Some(17),
             output_truncated: false,
+            result_size: None,
+            failure_stage: Some(AgentMcpInvocationFailureStage::Transport),
         },
     )
     .is_err());

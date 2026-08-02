@@ -929,6 +929,8 @@ impl AgentService {
                     error_code: Some("mcp.approval_rejected"),
                     duration_ms: None,
                     output_truncated: false,
+                    result_size: None,
+                    failure_stage: None,
                 },
             ) {
                 let _ = notifications.send(agent_event_notification(

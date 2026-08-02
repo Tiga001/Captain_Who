@@ -52,6 +52,12 @@ pub struct McpManagerPolicy {
     pub catalog: McpCatalogPolicy,
     pub notification_debounce: Duration,
     pub active_call_settle_timeout: Duration,
+    /// Absolute Host budget for one normal stop/restart/remove cleanup sequence.
+    pub lifecycle_cleanup_timeout: Duration,
+    /// Grace before a transport-neutral peer close is escalated through `force_close`.
+    pub peer_close_timeout: Duration,
+    /// Total deadline for one complete paginated Catalog refresh.
+    pub catalog_refresh_timeout: Duration,
     pub max_active_calls_per_server: usize,
     pub max_active_calls_total: usize,
     pub security_limits: McpSecurityLimits,
@@ -63,6 +69,9 @@ impl Default for McpManagerPolicy {
             catalog: McpCatalogPolicy::default(),
             notification_debounce: Duration::from_millis(100),
             active_call_settle_timeout: Duration::from_millis(250),
+            lifecycle_cleanup_timeout: Duration::from_secs(10),
+            peer_close_timeout: Duration::from_secs(3),
+            catalog_refresh_timeout: Duration::from_secs(60),
             max_active_calls_per_server: 32,
             max_active_calls_total: 256,
             security_limits: McpSecurityLimits::default(),
@@ -136,6 +145,8 @@ struct ManagedEntryState {
     closing_peer: Option<Arc<dyn McpPeer>>,
     connect_inflight: bool,
     refresh_inflight: bool,
+    restart_inflight: bool,
+    lifecycle_cancel: Option<CancellationToken>,
     watcher_cancel: Option<CancellationToken>,
     watcher_task: Option<JoinHandle<()>>,
     active_calls: BTreeMap<McpActiveCallId, Arc<ActiveCallControl>>,
@@ -333,6 +344,8 @@ impl ManagedEntry {
                 closing_peer: None,
                 connect_inflight: false,
                 refresh_inflight: false,
+                restart_inflight: false,
+                lifecycle_cancel: None,
                 watcher_cancel: None,
                 watcher_task: None,
                 active_calls: BTreeMap::new(),
@@ -377,7 +390,18 @@ struct DrainPermit {
     inner: Arc<ManagerInner>,
 }
 
+#[derive(Clone, Copy)]
+enum EntryInflightKind {
+    Connect,
+    Refresh,
+}
+
 struct EntryInflightGuard {
+    entry: Arc<ManagedEntry>,
+    kind: EntryInflightKind,
+}
+
+struct EntryRestartGuard {
     entry: Arc<ManagedEntry>,
 }
 
@@ -405,11 +429,28 @@ impl Drop for EntryInflightGuard {
             let Ok(mut state) = self.entry.state.lock() else {
                 return;
             };
-            if !state.connect_inflight && !state.refresh_inflight {
+            match self.kind {
+                EntryInflightKind::Connect if !state.connect_inflight => return,
+                EntryInflightKind::Refresh if !state.refresh_inflight => return,
+                EntryInflightKind::Connect => state.connect_inflight = false,
+                EntryInflightKind::Refresh => state.refresh_inflight = false,
+            }
+            state.status.clone()
+        };
+        self.entry.publish_status(&status);
+    }
+}
+
+impl Drop for EntryRestartGuard {
+    fn drop(&mut self) {
+        let status = {
+            let Ok(mut state) = self.entry.state.lock() else {
+                return;
+            };
+            if !state.restart_inflight {
                 return;
             }
-            state.connect_inflight = false;
-            state.refresh_inflight = false;
+            state.restart_inflight = false;
             state.status.clone()
         };
         self.entry.publish_status(&status);
@@ -483,6 +524,17 @@ impl McpConnectionManager {
         {
             return Err(McpError::config(
                 "MCP active-call settlement timeout must be between 1 ms and 30 seconds",
+            ));
+        }
+        if policy.lifecycle_cleanup_timeout.is_zero()
+            || policy.lifecycle_cleanup_timeout > Duration::from_secs(30)
+            || policy.peer_close_timeout.is_zero()
+            || policy.peer_close_timeout > policy.lifecycle_cleanup_timeout
+            || policy.catalog_refresh_timeout.is_zero()
+            || policy.catalog_refresh_timeout > Duration::from_secs(300)
+        {
+            return Err(McpError::config(
+                "MCP lifecycle and Catalog deadlines are invalid",
             ));
         }
         if policy.max_active_calls_per_server == 0
@@ -639,6 +691,9 @@ impl McpConnectionManager {
         }
         let owns_reservation = state.epoch == epoch;
         if owns_reservation {
+            if let Some(cancel) = state.lifecycle_cancel.take() {
+                cancel.cancel();
+            }
             state.status.protocol = None;
             state.status.notification_state = McpPeerNotificationState::Unknown;
             transition_locked(
@@ -663,6 +718,185 @@ impl McpConnectionManager {
             .is_some_and(|entry| Arc::ptr_eq(entry, expected))
         {
             entries.remove(&server_id);
+        }
+    }
+
+    fn fail_start_if_owned(
+        &self,
+        entry: &Arc<ManagedEntry>,
+        epoch: u64,
+        error: &McpError,
+    ) -> Result<(), McpError> {
+        let mut state = lock_entry(entry)?;
+        state.connect_inflight = false;
+        if state.epoch == epoch && state.status.state == McpServerState::Starting {
+            if let Some(cancel) = state.lifecycle_cancel.take() {
+                cancel.cancel();
+            }
+            set_error_locked(&self.inner.events, entry, &mut state, error);
+        } else {
+            let status = state.status.clone();
+            entry.publish_status(&status);
+        }
+        Ok(())
+    }
+
+    async fn cleanup_connection_parts(
+        &self,
+        entry: &Arc<ManagedEntry>,
+        peers: Vec<Arc<dyn McpPeer>>,
+        watcher: Option<JoinHandle<()>>,
+        active_calls: Vec<Arc<ActiveCallControl>>,
+        reason: McpOutcomeUnknownReason,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), McpError> {
+        cancel_active_calls(&active_calls, reason);
+        let settled_before_close = match remaining_until(deadline) {
+            Some(remaining) => {
+                settle_active_calls(
+                    &active_calls,
+                    remaining.min(self.inner.policy.active_call_settle_timeout),
+                )
+                .await
+            }
+            None => active_calls.is_empty(),
+        };
+        if !settled_before_close {
+            for peer in &peers {
+                let _ = peer.force_close();
+            }
+        }
+
+        let mut close_tasks = JoinSet::new();
+        for peer in peers {
+            let peer_close_timeout = self.inner.policy.peer_close_timeout;
+            close_tasks.spawn(async move {
+                let result =
+                    close_peer_until(Arc::clone(&peer), peer_close_timeout, deadline).await;
+                (peer, result)
+            });
+        }
+        let mut close_failed = false;
+        let mut failed_peer = None;
+        while let Some(joined) = close_tasks.join_next().await {
+            match joined {
+                Ok((peer, Ok(()))) => clear_closing_peer(entry, &peer),
+                Ok((peer, Err(_))) => {
+                    close_failed = true;
+                    failed_peer.get_or_insert(peer);
+                }
+                Err(_) => close_failed = true,
+            }
+        }
+        if let Some(peer) = failed_peer {
+            let mut state = lock_entry(entry)?;
+            if state.closing_peer.is_none() {
+                state.closing_peer = Some(peer);
+            }
+        }
+
+        let watcher_complete = if let Some(mut watcher) = watcher {
+            match tokio::time::timeout_at(deadline, &mut watcher).await {
+                Ok(result) => result.is_ok() || result.is_err_and(|error| error.is_cancelled()),
+                Err(_) => {
+                    watcher.abort();
+                    let _ = watcher.await;
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        let settled_after_close = match remaining_until(deadline) {
+            Some(remaining) if !remaining.is_zero() => {
+                settle_active_calls(
+                    &active_calls,
+                    remaining.min(self.inner.policy.active_call_settle_timeout),
+                )
+                .await
+            }
+            _ => active_calls.is_empty(),
+        };
+        let registry_empty = lock_entry(entry)?.active_calls.is_empty();
+        if close_failed || !watcher_complete || !settled_after_close || !registry_empty {
+            return Err(McpError::shutdown(
+                "MCP connection cleanup did not settle within the Host lifecycle deadline",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Close a peer that was created but never committed as the active connection.
+    ///
+    /// A peer that does not settle after forced close remains retained as `closing_peer` so a
+    /// later start cannot silently create a second process for the same server identity.
+    async fn close_uncommitted_peer(
+        &self,
+        entry: &Arc<ManagedEntry>,
+        peer: Arc<dyn McpPeer>,
+    ) -> Result<(), McpError> {
+        let deadline = tokio::time::Instant::now() + self.inner.policy.lifecycle_cleanup_timeout;
+        let result = close_peer_until(
+            Arc::clone(&peer),
+            self.inner.policy.peer_close_timeout,
+            deadline,
+        )
+        .await;
+        if result.is_ok() {
+            clear_closing_peer(entry, &peer);
+        } else {
+            let mut state = lock_entry(entry)?;
+            if state.closing_peer.is_none() {
+                state.closing_peer = Some(peer);
+            }
+            let status = state.status.clone();
+            entry.publish_status(&status);
+        }
+        result
+    }
+}
+
+fn take_cleanup_peers(state: &mut ManagedEntryState) -> Vec<Arc<dyn McpPeer>> {
+    let mut peers = Vec::with_capacity(2);
+    if let Some(peer) = state.peer.take() {
+        peers.push(peer);
+    }
+    if let Some(peer) = state.closing_peer.take() {
+        if !peers.iter().any(|existing| Arc::ptr_eq(existing, &peer)) {
+            peers.push(peer);
+        }
+    }
+    state.closing_peer = peers.first().cloned();
+    peers
+}
+
+fn remaining_until(deadline: tokio::time::Instant) -> Option<Duration> {
+    let remaining = deadline.checked_duration_since(tokio::time::Instant::now())?;
+    (!remaining.is_zero()).then_some(remaining)
+}
+
+async fn close_peer_until(
+    peer: Arc<dyn McpPeer>,
+    graceful_timeout: Duration,
+    deadline: tokio::time::Instant,
+) -> Result<(), McpError> {
+    let Some(remaining) = remaining_until(deadline) else {
+        let _ = peer.force_close();
+        return Err(McpError::shutdown(
+            "MCP peer close did not start before the lifecycle deadline",
+        ));
+    };
+    let graceful_deadline = tokio::time::Instant::now() + remaining.min(graceful_timeout);
+    match tokio::time::timeout_at(graceful_deadline, peer.close()).await {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = peer.force_close();
+            match tokio::time::timeout_at(deadline, peer.close()).await {
+                Ok(result) => result,
+                Err(_) => Err(McpError::shutdown(
+                    "MCP peer close did not settle after forced cleanup",
+                )),
+            }
         }
     }
 }

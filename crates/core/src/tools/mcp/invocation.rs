@@ -5,6 +5,12 @@ use super::*;
 const MCP_APPROVAL_REJECTED_CODE: &str = "mcp.approval_rejected";
 const MCP_REJECTION_WITHOUT_FEEDBACK_MESSAGE: &str = "The user explicitly rejected this external MCP tool call. Its arguments and call reason were already validated, but the historical arguments are redacted for privacy. The MCP server was not called. Do not retry this call or an equivalent call unless the user gives a new explicit instruction.";
 const MCP_REJECTION_WITH_FEEDBACK_MESSAGE: &str = "The user explicitly rejected this external MCP tool call. Its arguments and call reason were already validated, but the historical arguments are redacted for privacy. The MCP server was not called. Follow userFeedback, and do not repeat the same call unchanged.";
+const MCP_SUCCESS_MODEL_MESSAGE: &str = "The MCP server returned an authoritative Tool response. The content is complete unless contentCompleteness is partial. Do not repeat this completed call merely to verify the result.";
+const MCP_TOOL_ERROR_MODEL_MESSAGE: &str = "The MCP server returned an authoritative Tool-level error response. This is not a transport failure. Use the returned error content, and do not repeat the same call unchanged.";
+const MCP_OUTCOME_UNKNOWN_MODEL_MESSAGE: &str = "The MCP call may have reached the external server, but no authoritative response was received. Never replay it automatically; check the authoritative system state first.";
+const MCP_DURABLE_RECEIPT_MODEL_MESSAGE: &str = "This is a durable terminal receipt restored without the original external response content. Never replay the completed call to reconstruct that content.";
+const MCP_INVOCATION_DIAGNOSTICS_SCHEMA_VERSION: u32 = 1;
+const MAX_MCP_DIAGNOSTIC_RESULT_BYTES: u64 = 4 * 1_024 * 1_024;
 
 fn invocation_result_value(
     provenance: &AgentMcpToolProvenance,
@@ -72,19 +78,36 @@ fn invocation_result_value(
             }
         }
     }
-    if result.truncated_at_source || text_truncated || blocks_truncated || structured_truncated {
+    let omitted_content_blocks = result
+        .content
+        .iter()
+        .filter(|block| matches!(block, McpToolContentBlock::Omitted { .. }))
+        .count();
+    let content_is_partial = result.truncated_at_source
+        || text_truncated
+        || blocks_truncated
+        || structured_truncated
+        || omitted_content_blocks > 0;
+    object.insert(
+        "contentCompleteness".to_string(),
+        json!(if content_is_partial {
+            "partial"
+        } else {
+            "complete"
+        }),
+    );
+    if content_is_partial {
         object.insert("truncatedAtSource".to_string(), Value::Bool(true));
         object.insert(
             "diagnostics".to_string(),
             json!({
                 "textTruncated": text_truncated,
                 "contentBlocksTruncated": blocks_truncated,
+                "contentBlocksOmitted": omitted_content_blocks,
                 "structuredContentTruncated": structured_truncated,
                 "upstreamContentTruncated": result.truncated_at_source,
             }),
         );
-    } else {
-        object.insert("truncatedAtSource".to_string(), Value::Bool(false));
     }
     Ok(Value::Object(object))
 }
@@ -467,6 +490,22 @@ pub fn mcp_tool_result_model_projection(result: &AgentToolResult) -> AgentToolRe
     let mut projected = crate::tools::canonical_tool_result_for_context(result);
     if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
         object.remove("provenance");
+        let status = object
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let outcome = object
+            .get("outcome")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let dispatch_certainty = object
+            .get("dispatchCertainty")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let content_omitted = object
+            .get("contentOmitted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if is_explicit_user_rejected_mcp_result(object) {
             let has_feedback = object
                 .get("userFeedback")
@@ -493,6 +532,94 @@ pub fn mcp_tool_result_model_projection(result: &AgentToolResult) -> AgentToolRe
                     MCP_REJECTION_WITH_FEEDBACK_MESSAGE
                 } else {
                     MCP_REJECTION_WITHOUT_FEEDBACK_MESSAGE
+                }),
+            );
+        } else if content_omitted {
+            object.insert("responseAuthority".to_string(), json!("durable_receipt"));
+            object.insert(
+                "contentCompleteness".to_string(),
+                json!("unavailable_after_restart"),
+            );
+            object.insert(
+                "executionAttempted".to_string(),
+                json!(dispatch_certainty.as_deref() != Some("definitely_not_dispatched")),
+            );
+            object.insert(
+                "responseReceived".to_string(),
+                json!(dispatch_certainty.as_deref() == Some("response_received")),
+            );
+            object.insert("retryable".to_string(), json!(false));
+            object.insert(
+                "retryPolicy".to_string(),
+                json!("never_replay_terminal_receipt"),
+            );
+            object.insert(
+                "message".to_string(),
+                json!(MCP_DURABLE_RECEIPT_MODEL_MESSAGE),
+            );
+        } else if status.as_deref() == Some("completed") && outcome.as_deref() == Some("succeeded")
+        {
+            object.insert("responseAuthority".to_string(), json!("server"));
+            object.insert("executionAttempted".to_string(), json!(true));
+            object.insert("responseReceived".to_string(), json!(true));
+            object.insert("retryable".to_string(), json!(false));
+            object.insert(
+                "retryPolicy".to_string(),
+                json!("do_not_repeat_completed_call"),
+            );
+            object.insert("message".to_string(), json!(MCP_SUCCESS_MODEL_MESSAGE));
+        } else if status.as_deref() == Some("completed") && outcome.as_deref() == Some("tool_error")
+        {
+            object.insert("responseAuthority".to_string(), json!("server"));
+            object.insert("executionAttempted".to_string(), json!(true));
+            object.insert("responseReceived".to_string(), json!(true));
+            object.insert("retryable".to_string(), json!(false));
+            object.insert(
+                "retryPolicy".to_string(),
+                json!("new_corrected_call_only_if_server_error_is_actionable"),
+            );
+            object.insert("message".to_string(), json!(MCP_TOOL_ERROR_MODEL_MESSAGE));
+        } else if status.as_deref() == Some("outcome_unknown")
+            || outcome.as_deref() == Some("outcome_unknown")
+        {
+            object.insert("responseAuthority".to_string(), json!("host"));
+            object.insert("contentCompleteness".to_string(), json!("unavailable"));
+            object.insert("executionAttempted".to_string(), json!(true));
+            object.insert("responseReceived".to_string(), json!(false));
+            object.insert("retryable".to_string(), json!(false));
+            object.insert(
+                "retryPolicy".to_string(),
+                json!("never_replay_check_authoritative_state"),
+            );
+            object.insert(
+                "message".to_string(),
+                json!(MCP_OUTCOME_UNKNOWN_MODEL_MESSAGE),
+            );
+        } else if status.as_deref() == Some("failed") {
+            let definitely_not_dispatched =
+                dispatch_certainty.as_deref() == Some("definitely_not_dispatched");
+            let retryable = definitely_not_dispatched
+                && object
+                    .get("retryable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            object.insert("responseAuthority".to_string(), json!("host"));
+            object.insert("contentCompleteness".to_string(), json!("unavailable"));
+            object.insert(
+                "executionAttempted".to_string(),
+                json!(!definitely_not_dispatched),
+            );
+            object.insert(
+                "responseReceived".to_string(),
+                json!(dispatch_certainty.as_deref() == Some("response_received")),
+            );
+            object.insert("retryable".to_string(), json!(retryable));
+            object.insert(
+                "retryPolicy".to_string(),
+                json!(if retryable {
+                    "new_corrected_call_may_be_proposed"
+                } else {
+                    "do_not_repeat_unchanged_call"
                 }),
             );
         }
@@ -664,8 +791,61 @@ pub fn mcp_tool_result_persistence_projection(result: &AgentToolResult) -> Agent
     }
 }
 
+/// Builds a content-free size summary from the already bounded Host-side MCP result projection.
+pub fn mcp_tool_result_size_summary(
+    result: &McpToolInvocationResult,
+) -> AgentResult<AgentMcpResultSizeSummary> {
+    let mut text_bytes = 0_u64;
+    let mut omitted_block_count = 0_u64;
+    let mut omitted_encoded_bytes = 0_u64;
+    for block in &result.content {
+        match block {
+            McpToolContentBlock::Text { text } => {
+                text_bytes =
+                    text_bytes.saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
+            }
+            McpToolContentBlock::Omitted { encoded_bytes, .. } => {
+                omitted_block_count = omitted_block_count.saturating_add(1);
+                omitted_encoded_bytes =
+                    omitted_encoded_bytes.saturating_add(encoded_bytes.unwrap_or_default());
+            }
+        }
+    }
+    let structured_bytes = result
+        .structured_content
+        .as_ref()
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|_| AgentError::new("MCP structured-result diagnostics could not be encoded."))?
+        .map(|encoded| u64::try_from(encoded.len()).unwrap_or(u64::MAX))
+        .unwrap_or_default();
+    let summary = AgentMcpResultSizeSummary {
+        content_block_count: u64::try_from(result.content.len()).unwrap_or(u64::MAX),
+        text_bytes,
+        structured_bytes,
+        omitted_block_count,
+        omitted_encoded_bytes,
+    };
+    validate_mcp_result_size_summary(&summary)?;
+    Ok(summary)
+}
+
+fn validate_mcp_result_size_summary(summary: &AgentMcpResultSizeSummary) -> AgentResult<()> {
+    if summary.content_block_count > MAX_MCP_CONTENT_BLOCKS as u64
+        || summary.omitted_block_count > summary.content_block_count
+        || summary.text_bytes > MAX_MCP_DIAGNOSTIC_RESULT_BYTES
+        || summary.structured_bytes > MAX_MCP_DIAGNOSTIC_RESULT_BYTES
+        || summary.omitted_encoded_bytes > MAX_MCP_DIAGNOSTIC_RESULT_BYTES
+    {
+        return Err(AgentError::new(
+            "MCP result diagnostics exceeded the Host safety limits.",
+        ));
+    }
+    Ok(())
+}
+
 /// Complete Host-classified lifecycle projection used to build one presentation-safe event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpToolInvocationEventUpdate<'a> {
     pub state: AgentMcpToolInvocationState,
     pub dispatch_certainty: AgentMcpDispatchCertainty,
@@ -674,6 +854,8 @@ pub struct McpToolInvocationEventUpdate<'a> {
     pub error_code: Option<&'a str>,
     pub duration_ms: Option<u64>,
     pub output_truncated: bool,
+    pub result_size: Option<AgentMcpResultSizeSummary>,
+    pub failure_stage: Option<AgentMcpInvocationFailureStage>,
 }
 
 /// Builds a presentation-safe lifecycle event from a frozen approval.
@@ -690,7 +872,12 @@ pub fn mcp_tool_invocation_event(
         error_code,
         duration_ms,
         output_truncated,
+        result_size,
+        failure_stage,
     } = update;
+    if let Some(result_size) = result_size.as_ref() {
+        validate_mcp_result_size_summary(result_size)?;
+    }
     let valid_state = match state {
         AgentMcpToolInvocationState::PendingApproval | AgentMcpToolInvocationState::Approved => {
             dispatch_certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
@@ -699,6 +886,8 @@ pub fn mcp_tool_invocation_event(
                 && error_code.is_none()
                 && duration_ms.is_none()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage.is_none()
         }
         AgentMcpToolInvocationState::Dispatching | AgentMcpToolInvocationState::Running => {
             dispatch_certainty == AgentMcpDispatchCertainty::PossiblyDispatched
@@ -707,6 +896,8 @@ pub fn mcp_tool_invocation_event(
                 && error_code.is_none()
                 && duration_ms.is_none()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage.is_none()
         }
         AgentMcpToolInvocationState::Completed => {
             dispatch_certainty == AgentMcpDispatchCertainty::ResponseReceived
@@ -723,11 +914,18 @@ pub fn mcp_tool_invocation_event(
                         Some(_)
                     )
                 )
+                && result_size.is_some()
+                && failure_stage
+                    == outcome
+                        .filter(|outcome| *outcome == AgentMcpToolInvocationOutcome::ToolError)
+                        .map(|_| AgentMcpInvocationFailureStage::ServerResponse)
         }
         AgentMcpToolInvocationState::Failed => {
             duration_ms.is_some()
                 && error_code.is_some()
                 && is_error == Some(true)
+                && result_size.is_none()
+                && failure_stage.is_some()
                 && match outcome {
                     Some(AgentMcpToolInvocationOutcome::OutputTooLarge) => {
                         dispatch_certainty == AgentMcpDispatchCertainty::ResponseReceived
@@ -753,6 +951,11 @@ pub fn mcp_tool_invocation_event(
                 && is_error.is_none()
                 && error_code.is_some()
                 && !output_truncated
+                && result_size.is_none()
+                && matches!(
+                    failure_stage,
+                    None | Some(AgentMcpInvocationFailureStage::Preflight)
+                )
         }
         AgentMcpToolInvocationState::Rejected => {
             dispatch_certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
@@ -760,6 +963,8 @@ pub fn mcp_tool_invocation_event(
                 && is_error.is_none()
                 && error_code.is_some()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage.is_none()
         }
         AgentMcpToolInvocationState::Expired => {
             dispatch_certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
@@ -767,6 +972,8 @@ pub fn mcp_tool_invocation_event(
                 && is_error.is_none()
                 && error_code.is_some()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage == Some(AgentMcpInvocationFailureStage::ApprovalPayload)
         }
         AgentMcpToolInvocationState::PayloadUnavailable => {
             dispatch_certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
@@ -774,6 +981,8 @@ pub fn mcp_tool_invocation_event(
                 && is_error == Some(true)
                 && error_code.is_some()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage == Some(AgentMcpInvocationFailureStage::ApprovalPayload)
         }
         AgentMcpToolInvocationState::PolicyDenied => {
             dispatch_certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
@@ -781,6 +990,8 @@ pub fn mcp_tool_invocation_event(
                 && is_error.is_none()
                 && error_code.is_some()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage == Some(AgentMcpInvocationFailureStage::Policy)
         }
         AgentMcpToolInvocationState::OutcomeUnknown => {
             dispatch_certainty == AgentMcpDispatchCertainty::PossiblyDispatched
@@ -788,6 +999,8 @@ pub fn mcp_tool_invocation_event(
                 && is_error.is_none()
                 && error_code.is_some()
                 && !output_truncated
+                && result_size.is_none()
+                && failure_stage.is_some()
         }
     };
     if !valid_state
@@ -798,6 +1011,22 @@ pub fn mcp_tool_invocation_event(
         ));
     }
     let error_code = error_code.map(normalize_mcp_event_error_code).transpose()?;
+    let arguments = &approval.summary.arguments;
+    let argument_value_count = arguments
+        .string_value_count
+        .saturating_add(arguments.number_value_count)
+        .saturating_add(arguments.boolean_value_count)
+        .saturating_add(arguments.null_value_count)
+        .saturating_add(arguments.object_value_count)
+        .saturating_add(arguments.array_value_count);
+    let diagnostics = AgentMcpInvocationDiagnostics {
+        schema_version: MCP_INVOCATION_DIAGNOSTICS_SCHEMA_VERSION,
+        argument_encoded_bytes: arguments.encoded_bytes,
+        argument_value_count,
+        argument_max_depth: arguments.max_depth,
+        result: result_size,
+        failure_stage,
+    };
     Ok(AgentMcpToolInvocationEvent {
         action_id: approval.identity.action_id.clone(),
         invocation_id: approval.identity.invocation_id.clone(),
@@ -815,6 +1044,7 @@ pub fn mcp_tool_invocation_event(
         error_code,
         duration_ms,
         output_truncated,
+        diagnostics: Some(diagnostics),
     })
 }
 

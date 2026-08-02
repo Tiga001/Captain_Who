@@ -16,6 +16,7 @@ fn failed_mcp_tool_result(
         "mcp.tool_timeout" => ("failed", "timed_out"),
         _ => ("failed", "transport_error"),
     };
+    let retryable = mcp_failure_is_retryable(code, dispatch_certainty);
     AgentToolResult {
         exact_archive_file: None,
         call_id: approval.identity.call_id.clone(),
@@ -27,13 +28,21 @@ fn failed_mcp_tool_result(
             "status": status,
             "outcome": outcome,
             "code": code,
-            "retryable": false,
+            "retryable": retryable,
             "external": true,
             "dispatchCertainty": mcp_dispatch_certainty_label(dispatch_certainty),
             "isError": true,
         })),
         error: Some(message.to_string()),
     }
+}
+
+fn mcp_failure_is_retryable(code: &str, certainty: AgentMcpDispatchCertainty) -> bool {
+    certainty == AgentMcpDispatchCertainty::DefinitelyNotDispatched
+        && matches!(
+            code,
+            "mcp.tool_timeout" | "mcp.tool_snapshot_stale" | "mcp.tool_unavailable"
+        )
 }
 
 fn persisted_mcp_tool_result(result: &AgentToolResult) -> AgentToolResult {
@@ -94,6 +103,7 @@ fn emit_mcp_lifecycle_event(
 ) {
     match mcp_tool_invocation_event(approval, update) {
         Ok(invocation) => {
+            record_safe_mcp_invocation_event(&invocation);
             let _ = notifications.send(agent_event_notification(
                 AgentEvent::McpToolInvocationStateChanged {
                     run_id: run_id.to_string(),
@@ -113,6 +123,31 @@ fn emit_mcp_lifecycle_event(
     }
 }
 
+fn record_safe_mcp_invocation_event(invocation: &mycopilot_core::AgentMcpToolInvocationEvent) {
+    let diagnostics = invocation.diagnostics.as_ref();
+    let result = diagnostics.and_then(|diagnostics| diagnostics.result.as_ref());
+    tracing::info!(
+        target: "mycopilot_core_server::mcp_invocation",
+        invocation_id = %invocation.invocation_id,
+        server_id = %invocation.server_id,
+        state = ?invocation.state,
+        outcome = ?invocation.outcome,
+        dispatch_certainty = ?invocation.dispatch_certainty,
+        duration_ms = invocation.duration_ms,
+        error_code = invocation.error_code.as_deref(),
+        output_truncated = invocation.output_truncated,
+        argument_encoded_bytes = diagnostics.map(|value| value.argument_encoded_bytes),
+        argument_value_count = diagnostics.map(|value| value.argument_value_count),
+        argument_max_depth = diagnostics.map(|value| value.argument_max_depth),
+        result_content_blocks = result.map(|value| value.content_block_count),
+        result_text_bytes = result.map(|value| value.text_bytes),
+        result_structured_bytes = result.map(|value| value.structured_bytes),
+        result_omitted_blocks = result.map(|value| value.omitted_block_count),
+        failure_stage = ?diagnostics.and_then(|value| value.failure_stage),
+        "MCP invocation lifecycle transition"
+    );
+}
+
 struct McpInvocationSettlement {
     tool_result: AgentToolResult,
     state: AgentMcpToolInvocationState,
@@ -120,6 +155,8 @@ struct McpInvocationSettlement {
     error_code: Option<String>,
     dispatch_certainty: AgentMcpDispatchCertainty,
     output_truncated: bool,
+    result_size: Option<AgentMcpResultSizeSummary>,
+    failure_stage: Option<AgentMcpInvocationFailureStage>,
 }
 
 fn settle_mcp_invocation(
@@ -134,9 +171,12 @@ fn settle_mcp_invocation(
         error_code,
         dispatch_certainty,
         output_truncated,
+        result_size,
+        failure_stage,
     ) = match invocation_result {
         Ok(result) => {
             let is_error = result.is_error;
+            let result_size = mcp_tool_result_size_summary(&result).ok();
             match mcp_tool_result_from_approved_invocation(approval, &result) {
                 Ok(tool_result) => {
                     let output_truncated =
@@ -152,6 +192,8 @@ fn settle_mcp_invocation(
                         is_error.then(|| "mcp.tool_error".to_string()),
                         AgentMcpDispatchCertainty::ResponseReceived,
                         output_truncated,
+                        result_size,
+                        is_error.then_some(AgentMcpInvocationFailureStage::ServerResponse),
                     )
                 }
                 Err(error) => (
@@ -171,6 +213,8 @@ fn settle_mcp_invocation(
                     ),
                     AgentMcpDispatchCertainty::ResponseReceived,
                     result.truncated_at_source,
+                    None,
+                    Some(AgentMcpInvocationFailureStage::ResultProjection),
                 ),
             }
         }
@@ -186,6 +230,8 @@ fn settle_mcp_invocation(
             Some("mcp.tool_outcome_unknown".to_string()),
             AgentMcpDispatchCertainty::PossiblyDispatched,
             false,
+            None,
+            Some(AgentMcpInvocationFailureStage::Transport),
         ),
         Err(error) if error.code() == Some("mcp.tool_output_too_large") => (
             failed_mcp_tool_result(
@@ -199,6 +245,8 @@ fn settle_mcp_invocation(
             Some("mcp.tool_output_too_large".to_string()),
             AgentMcpDispatchCertainty::ResponseReceived,
             true,
+            None,
+            Some(AgentMcpInvocationFailureStage::ResultProjection),
         ),
         Err(error) if error.code() == Some("mcp.approval_payload_expired") => (
             failed_mcp_tool_result(
@@ -212,6 +260,8 @@ fn settle_mcp_invocation(
             Some("mcp.approval_payload_expired".to_string()),
             AgentMcpDispatchCertainty::DefinitelyNotDispatched,
             false,
+            None,
+            Some(AgentMcpInvocationFailureStage::ApprovalPayload),
         ),
         Err(error)
             if matches!(
@@ -231,6 +281,8 @@ fn settle_mcp_invocation(
                 Some("mcp.approval_payload_unavailable".to_string()),
                 AgentMcpDispatchCertainty::DefinitelyNotDispatched,
                 false,
+                None,
+                Some(AgentMcpInvocationFailureStage::ApprovalPayload),
             )
         }
         Err(error) if error.code() == Some("mcp.approval_policy_denied") => (
@@ -245,6 +297,8 @@ fn settle_mcp_invocation(
             Some("mcp.approval_policy_denied".to_string()),
             AgentMcpDispatchCertainty::DefinitelyNotDispatched,
             false,
+            None,
+            Some(AgentMcpInvocationFailureStage::Policy),
         ),
         Err(error) if failed_before_dispatch && error.is_cancelled() => (
             failed_mcp_tool_result(
@@ -258,6 +312,8 @@ fn settle_mcp_invocation(
             Some("mcp.tool_cancelled".to_string()),
             AgentMcpDispatchCertainty::DefinitelyNotDispatched,
             false,
+            None,
+            Some(AgentMcpInvocationFailureStage::Preflight),
         ),
         Err(error) => {
             let dispatch_certainty = if failed_before_dispatch {
@@ -278,6 +334,8 @@ fn settle_mcp_invocation(
                     Some("mcp.tool_outcome_unknown".to_string()),
                     dispatch_certainty,
                     false,
+                    None,
+                    Some(AgentMcpInvocationFailureStage::Transport),
                 )
             } else {
                 let outcome = if error.code() == Some("mcp.tool_timeout")
@@ -299,6 +357,11 @@ fn settle_mcp_invocation(
                     Some(error.code().unwrap_or("mcp.tool_failed").to_string()),
                     dispatch_certainty,
                     false,
+                    None,
+                    Some(mcp_invocation_failure_stage(
+                        failed_before_dispatch,
+                        dispatch_certainty,
+                    )),
                 )
             }
         }
@@ -310,6 +373,26 @@ fn settle_mcp_invocation(
         error_code,
         dispatch_certainty,
         output_truncated,
+        result_size,
+        failure_stage,
+    }
+}
+
+fn mcp_invocation_failure_stage(
+    failed_before_dispatch: bool,
+    dispatch_certainty: AgentMcpDispatchCertainty,
+) -> AgentMcpInvocationFailureStage {
+    if failed_before_dispatch {
+        return AgentMcpInvocationFailureStage::Preflight;
+    }
+    match dispatch_certainty {
+        AgentMcpDispatchCertainty::DefinitelyNotDispatched => {
+            AgentMcpInvocationFailureStage::Dispatch
+        }
+        AgentMcpDispatchCertainty::PossiblyDispatched => AgentMcpInvocationFailureStage::Transport,
+        AgentMcpDispatchCertainty::ResponseReceived => {
+            AgentMcpInvocationFailureStage::ServerResponse
+        }
     }
 }
 
@@ -835,6 +918,8 @@ impl AgentService {
                         error_code: settlement.error_code.as_deref(),
                         duration_ms: Some(elapsed_ms),
                         output_truncated: settlement.output_truncated,
+                        result_size: settlement.result_size.clone(),
+                        failure_stage: settlement.failure_stage,
                     },
                 );
             }
@@ -872,6 +957,8 @@ impl AgentService {
                     error_code: None,
                     duration_ms: None,
                     output_truncated: false,
+                    result_size: None,
+                    failure_stage: None,
                 },
             );
         }
@@ -917,6 +1004,8 @@ impl AgentService {
                 error_code: Some("mcp.tool_outcome_unknown".to_string()),
                 dispatch_certainty: AgentMcpDispatchCertainty::PossiblyDispatched,
                 output_truncated: false,
+                result_size: None,
+                failure_stage: Some(AgentMcpInvocationFailureStage::Persistence),
             };
         }
         if let Some(notifications) = context.notifications.as_ref() {
@@ -933,6 +1022,8 @@ impl AgentService {
                     error_code: settlement.error_code.as_deref(),
                     duration_ms: Some(elapsed_ms),
                     output_truncated: settlement.output_truncated,
+                    result_size: settlement.result_size.clone(),
+                    failure_stage: settlement.failure_stage,
                 },
             );
         }
@@ -1021,6 +1112,8 @@ impl AgentService {
                     error_code: None,
                     duration_ms: None,
                     output_truncated: false,
+                    result_size: None,
+                    failure_stage: None,
                 },
             );
         }
@@ -1053,6 +1146,8 @@ impl AgentService {
         let event_error_code = settlement.error_code;
         let dispatch_certainty = settlement.dispatch_certainty;
         let output_truncated = settlement.output_truncated;
+        let result_size = settlement.result_size;
+        let failure_stage = settlement.failure_stage;
 
         // The Provider ToolCall frozen in the checkpoint is immutable. Approval is represented by
         // the typed decision, invocation lifecycle and paired ToolResult; rewriting the committed
@@ -1115,6 +1210,8 @@ impl AgentService {
                 error_code: event_error_code.as_deref(),
                 duration_ms: Some(elapsed_ms),
                 output_truncated,
+                result_size,
+                failure_stage,
             },
         );
         self.run_action_continuation(
@@ -2641,5 +2738,37 @@ mod mcp_lifecycle_tests {
         ] {
             assert_eq!(mcp_lifecycle_is_error(outcome), None);
         }
+    }
+
+    #[test]
+    fn failure_retry_and_stage_are_bound_to_dispatch_evidence() {
+        assert!(mcp_failure_is_retryable(
+            "mcp.tool_snapshot_stale",
+            AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+        ));
+        assert!(!mcp_failure_is_retryable(
+            "mcp.tool_snapshot_stale",
+            AgentMcpDispatchCertainty::PossiblyDispatched,
+        ));
+        assert!(!mcp_failure_is_retryable(
+            "mcp.tool_output_too_large",
+            AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+        ));
+        assert_eq!(
+            mcp_invocation_failure_stage(false, AgentMcpDispatchCertainty::DefinitelyNotDispatched,),
+            AgentMcpInvocationFailureStage::Dispatch
+        );
+        assert_eq!(
+            mcp_invocation_failure_stage(false, AgentMcpDispatchCertainty::PossiblyDispatched),
+            AgentMcpInvocationFailureStage::Transport
+        );
+        assert_eq!(
+            mcp_invocation_failure_stage(false, AgentMcpDispatchCertainty::ResponseReceived),
+            AgentMcpInvocationFailureStage::ServerResponse
+        );
+        assert_eq!(
+            mcp_invocation_failure_stage(true, AgentMcpDispatchCertainty::PossiblyDispatched),
+            AgentMcpInvocationFailureStage::Preflight
+        );
     }
 }

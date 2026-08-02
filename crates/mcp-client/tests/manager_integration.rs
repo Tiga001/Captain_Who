@@ -31,6 +31,13 @@ struct MockServer {
     connect_delay_ms: AtomicU64,
     list_delay_ms: AtomicU64,
     close_delay_ms: AtomicU64,
+    hang_connect: AtomicBool,
+    hang_list: AtomicBool,
+    hang_close: AtomicBool,
+    connect_drop_count: AtomicUsize,
+    list_drop_count: AtomicUsize,
+    close_drop_count: AtomicUsize,
+    force_close_count: AtomicUsize,
     connect_error: Mutex<Option<McpError>>,
     calls: Mutex<Vec<McpToolCall>>,
     tool_result: Mutex<McpToolResult>,
@@ -62,6 +69,13 @@ impl MockServer {
             connect_delay_ms: AtomicU64::new(0),
             list_delay_ms: AtomicU64::new(0),
             close_delay_ms: AtomicU64::new(0),
+            hang_connect: AtomicBool::new(false),
+            hang_list: AtomicBool::new(false),
+            hang_close: AtomicBool::new(false),
+            connect_drop_count: AtomicUsize::new(0),
+            list_drop_count: AtomicUsize::new(0),
+            close_drop_count: AtomicUsize::new(0),
+            force_close_count: AtomicUsize::new(0),
             connect_error: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             tool_result: Mutex::new(McpToolResult {
@@ -103,6 +117,39 @@ impl MockServer {
     }
 }
 
+#[derive(Clone, Copy)]
+enum MockPendingOperation {
+    Connect,
+    ListTools,
+    Close,
+}
+
+/// Records that a deliberately pending mock future was dropped by the Manager.
+///
+/// The probe is only created on the pending branch, so its counter cannot be
+/// confused with an operation that completed normally.
+struct MockPendingDropProbe {
+    server: Arc<MockServer>,
+    operation: MockPendingOperation,
+}
+
+impl MockPendingDropProbe {
+    fn new(server: Arc<MockServer>, operation: MockPendingOperation) -> Self {
+        Self { server, operation }
+    }
+}
+
+impl Drop for MockPendingDropProbe {
+    fn drop(&mut self) {
+        let counter = match self.operation {
+            MockPendingOperation::Connect => &self.server.connect_drop_count,
+            MockPendingOperation::ListTools => &self.server.list_drop_count,
+            MockPendingOperation::Close => &self.server.close_drop_count,
+        };
+        counter.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Default)]
 struct MockConnector {
     servers: Mutex<HashMap<McpServerId, Arc<MockServer>>>,
@@ -129,6 +176,11 @@ impl McpConnector for MockConnector {
                 .cloned()
                 .ok_or_else(|| McpError::spawn("owned mock server is not configured"))?;
             server.connect_count.fetch_add(1, Ordering::SeqCst);
+            if server.hang_connect.load(Ordering::SeqCst) {
+                let _drop_probe =
+                    MockPendingDropProbe::new(Arc::clone(&server), MockPendingOperation::Connect);
+                std::future::pending::<()>().await;
+            }
             let delay = server.connect_delay_ms.load(Ordering::SeqCst);
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -185,6 +237,13 @@ impl McpPeer for MockPeer {
     fn list_tools<'a>(&'a self, cursor: Option<String>) -> BoxMcpFuture<'a, McpToolPage> {
         Box::pin(async move {
             self.server.list_count.fetch_add(1, Ordering::SeqCst);
+            if self.server.hang_list.load(Ordering::SeqCst) {
+                let _drop_probe = MockPendingDropProbe::new(
+                    Arc::clone(&self.server),
+                    MockPendingOperation::ListTools,
+                );
+                std::future::pending::<()>().await;
+            }
             let delay = self.server.list_delay_ms.load(Ordering::SeqCst);
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -236,6 +295,7 @@ impl McpPeer for MockPeer {
     }
 
     fn force_close(&self) -> bool {
+        self.server.force_close_count.fetch_add(1, Ordering::SeqCst);
         if !self.closed.swap(true, Ordering::SeqCst) {
             self.server.close_count.fetch_add(1, Ordering::SeqCst);
         }
@@ -244,6 +304,13 @@ impl McpPeer for MockPeer {
 
     fn close(&self) -> BoxMcpFuture<'_, ()> {
         Box::pin(async move {
+            if self.server.hang_close.load(Ordering::SeqCst) {
+                let _drop_probe = MockPendingDropProbe::new(
+                    Arc::clone(&self.server),
+                    MockPendingOperation::Close,
+                );
+                std::future::pending::<()>().await;
+            }
             let delay = self.server.close_delay_ms.load(Ordering::SeqCst);
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
@@ -755,7 +822,7 @@ async fn concurrent_duplicate_start_is_single_flight() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_wins_a_race_with_an_inflight_start_and_closes_the_stale_peer() {
+async fn stop_wins_a_race_with_an_inflight_start_before_a_peer_is_materialized() {
     let registry = InMemoryMcpRegistry::shared();
     let connector = Arc::new(MockConnector::default());
     let sink = Arc::new(RecordingEventSink::default());
@@ -783,7 +850,11 @@ async fn stop_wins_a_race_with_an_inflight_start_and_closes_the_stale_peer() {
         .expect_err("inflight start must lose to stop");
     assert_eq!(start_error.kind, McpErrorKind::Cancelled);
     assert_eq!(stopped.state, McpServerState::Disabled);
-    assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        server.close_count.load(Ordering::SeqCst),
+        0,
+        "cancelling the connector future must avoid materializing a stale peer"
+    );
     assert_eq!(
         manager.get_status(server_id).unwrap().unwrap().state,
         McpServerState::Disabled
@@ -862,6 +933,267 @@ async fn caller_cancellation_does_not_abandon_start_refresh_or_stop_cleanup() {
     })
     .await;
     assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+}
+
+fn short_lifecycle_policy() -> McpManagerPolicy {
+    McpManagerPolicy {
+        active_call_settle_timeout: Duration::from_millis(25),
+        lifecycle_cleanup_timeout: Duration::from_millis(200),
+        peer_close_timeout: Duration::from_millis(50),
+        catalog_refresh_timeout: Duration::from_secs(1),
+        ..McpManagerPolicy::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_cancels_a_pending_connect_without_later_becoming_ready() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "pending-connect", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    server.hang_connect.store(true, Ordering::SeqCst);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, short_lifecycle_policy());
+
+    let start_manager = manager.clone();
+    let start = tokio::spawn(async move { start_manager.start(server_id).await });
+    wait_until(Duration::from_secs(1), || {
+        server.connect_count.load(Ordering::SeqCst) == 1
+    })
+    .await;
+
+    let stopped = tokio::time::timeout(Duration::from_secs(1), manager.stop(server_id))
+        .await
+        .expect("stop must cancel a pending connector future")
+        .expect("pending connect cleanup must complete");
+    let start_error = tokio::time::timeout(Duration::from_secs(1), start)
+        .await
+        .expect("cancelled start must settle")
+        .expect("join cancelled start")
+        .expect_err("a stop must win over its pending start");
+
+    assert_eq!(start_error.kind, McpErrorKind::Cancelled);
+    assert_eq!(stopped.state, McpServerState::Disabled);
+    assert_eq!(server.connect_drop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(server.close_count.load(Ordering::SeqCst), 0);
+    tokio::task::yield_now().await;
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Disabled,
+        "a dropped connector future must never publish a late Ready state"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_cancels_a_pending_manual_catalog_refresh() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "pending-refresh", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, short_lifecycle_policy());
+    manager
+        .start(server_id)
+        .await
+        .expect("start refresh fixture");
+
+    server.hang_list.store(true, Ordering::SeqCst);
+    let initial_list_count = server.list_count.load(Ordering::SeqCst);
+    let refresh_manager = manager.clone();
+    let refresh = tokio::spawn(async move { refresh_manager.refresh(server_id).await });
+    wait_until(Duration::from_secs(1), || {
+        server.list_count.load(Ordering::SeqCst) > initial_list_count
+    })
+    .await;
+
+    let stopped = tokio::time::timeout(Duration::from_secs(1), manager.stop(server_id))
+        .await
+        .expect("stop must cancel a pending Catalog refresh")
+        .expect("pending refresh cleanup must complete");
+    let refresh_error = tokio::time::timeout(Duration::from_secs(1), refresh)
+        .await
+        .expect("cancelled refresh must settle")
+        .expect("join cancelled refresh")
+        .expect_err("stop must invalidate the pending refresh");
+
+    assert_eq!(refresh_error.kind, McpErrorKind::Cancelled);
+    assert_eq!(stopped.state, McpServerState::Disabled);
+    assert_eq!(stopped.active_call_count, 0);
+    assert_eq!(server.list_drop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn catalog_refresh_has_a_total_deadline_and_preserves_the_last_snapshot_as_stale() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "refresh-deadline", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let mut policy = short_lifecycle_policy();
+    policy.catalog_refresh_timeout = Duration::from_millis(50);
+    let manager = manager(registry, connector, sink, policy);
+    let ready = manager
+        .start(server_id)
+        .await
+        .expect("start refresh fixture");
+    assert_eq!(ready.state, McpServerState::Ready);
+
+    server.hang_list.store(true, Ordering::SeqCst);
+    let started_at = Instant::now();
+    let snapshot = tokio::time::timeout(Duration::from_secs(1), manager.refresh(server_id))
+        .await
+        .expect("Catalog refresh must obey its total deadline")
+        .expect("a timed-out refresh returns the retained safe snapshot");
+
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+    assert!(matches!(
+        snapshot.completeness,
+        McpCatalogCompleteness::Stale(_)
+    ));
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Degraded
+    );
+    assert_eq!(server.list_drop_count.load(Ordering::SeqCst), 1);
+    server.hang_list.store(false, Ordering::SeqCst);
+    manager.stop(server_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_peer_close_is_bounded_fail_closed_and_retryable() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "pending-close", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, short_lifecycle_policy());
+    manager.start(server_id).await.expect("start close fixture");
+    server.hang_close.store(true, Ordering::SeqCst);
+
+    let started_at = Instant::now();
+    let error = tokio::time::timeout(Duration::from_secs(1), manager.stop(server_id))
+        .await
+        .expect("peer close must honor the Host lifecycle deadline")
+        .expect_err("an unconfirmed close must fail closed");
+    assert_eq!(error.kind, McpErrorKind::Shutdown);
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Error
+    );
+    assert!(server.force_close_count.load(Ordering::SeqCst) >= 1);
+    assert!(server.close_drop_count.load(Ordering::SeqCst) >= 2);
+
+    // A failed close must retain enough typed state for a later explicit cleanup attempt.
+    server.hang_close.store(false, Ordering::SeqCst);
+    let stopped = tokio::time::timeout(Duration::from_secs(1), manager.stop(server_id))
+        .await
+        .expect("cleanup retry must remain bounded")
+        .expect("cleanup retry must recover the retained closing peer");
+    assert_eq!(stopped.state, McpServerState::Disabled);
+    assert_eq!(stopped.active_call_count, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restart_never_connects_a_replacement_until_old_peer_cleanup_succeeds() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "restart-cleanup-gate", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, short_lifecycle_policy());
+    manager
+        .start(server_id)
+        .await
+        .expect("start restart fixture");
+    assert_eq!(server.connect_count.load(Ordering::SeqCst), 1);
+
+    server.hang_close.store(true, Ordering::SeqCst);
+    let error = tokio::time::timeout(Duration::from_secs(1), manager.restart(server_id))
+        .await
+        .expect("restart cleanup must remain bounded")
+        .expect_err("restart must fail closed when the old peer cannot settle");
+    assert_eq!(error.kind, McpErrorKind::Shutdown);
+    assert_eq!(
+        server.connect_count.load(Ordering::SeqCst),
+        1,
+        "a failed cleanup must not create a second server process"
+    );
+    assert_eq!(
+        manager.get_status(server_id).unwrap().unwrap().state,
+        McpServerState::Error
+    );
+
+    server.hang_close.store(false, Ordering::SeqCst);
+    let recovered = manager
+        .restart(server_id)
+        .await
+        .expect("an explicit retry may recover after cleanup becomes available");
+    assert_eq!(recovered.state, McpServerState::Ready);
+    assert_eq!(server.connect_count.load(Ordering::SeqCst), 2);
+    manager.stop(server_id).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_restarts_share_one_stop_and_reconnect_result() {
+    let registry = InMemoryMcpRegistry::shared();
+    let connector = Arc::new(MockConnector::default());
+    let sink = Arc::new(RecordingEventSink::default());
+    let server_id = McpServerId::new();
+    registry
+        .add(config(server_id, "restart-single-flight", true))
+        .unwrap();
+    let server = MockServer::with_tools(vec![descriptor("echo", "one")]);
+    connector.add(server_id, Arc::clone(&server));
+    let manager = manager(registry, connector, sink, McpManagerPolicy::default());
+    manager
+        .start(server_id)
+        .await
+        .expect("start restart fixture");
+    server.close_delay_ms.store(50, Ordering::SeqCst);
+
+    let first_manager = manager.clone();
+    let first = tokio::spawn(async move { first_manager.restart(server_id).await });
+    wait_until(Duration::from_secs(1), || {
+        manager
+            .get_status(server_id)
+            .ok()
+            .flatten()
+            .is_some_and(|status| status.state == McpServerState::Stopping)
+    })
+    .await;
+    let second_manager = manager.clone();
+    let second = tokio::spawn(async move { second_manager.restart(server_id).await });
+
+    assert_eq!(first.await.unwrap().unwrap().state, McpServerState::Ready);
+    assert_eq!(second.await.unwrap().unwrap().state, McpServerState::Ready);
+    assert_eq!(
+        server.connect_count.load(Ordering::SeqCst),
+        2,
+        "concurrent restart callers must share one replacement connection"
+    );
+    manager.stop(server_id).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1222,7 +1554,7 @@ async fn catalog_limits_fail_closed_and_stop_all_closes_every_active_peer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_all_waits_for_an_already_admitted_start() {
+async fn stop_all_cancels_an_already_admitted_start_before_peer_creation() {
     let registry = InMemoryMcpRegistry::shared();
     let connector = Arc::new(MockConnector::default());
     let sink = Arc::new(RecordingEventSink::default());
@@ -1246,7 +1578,8 @@ async fn stop_all_waits_for_an_already_admitted_start() {
         manager.get_status(server_id).unwrap().unwrap().state,
         McpServerState::Disabled
     );
-    assert_eq!(server.close_count.load(Ordering::SeqCst), 1);
+    assert_eq!(server.close_count.load(Ordering::SeqCst), 0);
+    assert_eq!(server.connect_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

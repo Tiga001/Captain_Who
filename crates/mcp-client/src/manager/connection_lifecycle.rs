@@ -28,6 +28,11 @@ impl McpConnectionManager {
     }
 
     async fn start_reserved(&self, server_id: McpServerId) -> Result<McpServerStatus, McpError> {
+        if self.is_draining() {
+            return Err(McpError::shutdown(
+                "MCP connection manager is stopping all servers",
+            ));
+        }
         let mut registry = self
             .inner
             .registry
@@ -74,7 +79,6 @@ impl McpConnectionManager {
                 }
                 if state.connect_inflight
                     || state.refresh_inflight
-                    || state.closing_peer.is_some()
                     || matches!(
                         state.status.state,
                         McpServerState::Starting
@@ -89,8 +93,10 @@ impl McpConnectionManager {
                     state.connect_inflight = true;
                     apply_registry_locked(&self.inner.events, &entry, &mut state, &registry);
                     state.status.last_error = None;
-                    let old_peer = state.peer.take();
-                    state.closing_peer = old_peer.clone();
+                    let old_lifecycle_cancel = state.lifecycle_cancel.take();
+                    let peers = take_cleanup_peers(&mut state);
+                    let lifecycle_cancel = CancellationToken::new();
+                    state.lifecycle_cancel = Some(lifecycle_cancel.clone());
                     let old_cancel = state.watcher_cancel.take();
                     let old_watcher = state.watcher_task.take();
                     let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
@@ -100,33 +106,70 @@ impl McpConnectionManager {
                         &mut state,
                         McpServerState::Starting,
                     );
-                    Some((epoch, old_peer, old_cancel, old_watcher, active_calls))
+                    Some((
+                        epoch,
+                        lifecycle_cancel,
+                        old_lifecycle_cancel,
+                        peers,
+                        old_cancel,
+                        old_watcher,
+                        active_calls,
+                    ))
                 }
             };
-            let Some((epoch, old_peer, old_cancel, old_watcher, active_calls)) = reservation else {
+            let Some((
+                epoch,
+                lifecycle_cancel,
+                old_lifecycle_cancel,
+                peers,
+                old_cancel,
+                old_watcher,
+                active_calls,
+            )) = reservation
+            else {
                 notified.await;
                 continue;
             };
-            let _inflight_guard = EntryInflightGuard {
+            let inflight_guard = EntryInflightGuard {
                 entry: Arc::clone(&entry),
+                kind: EntryInflightKind::Connect,
             };
 
+            if let Some(cancel) = old_lifecycle_cancel {
+                cancel.cancel();
+            }
             if let Some(cancel) = old_cancel {
                 cancel.cancel();
             }
-            cancel_active_calls(&active_calls, McpOutcomeUnknownReason::ServerRestarted);
-            let _ =
-                settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout)
-                    .await;
-            if let Some(peer) = old_peer {
-                let _ = peer.close().await;
-                clear_closing_peer(&entry, &peer);
-            }
-            if let Some(watcher) = old_watcher {
-                let _ = watcher.await;
+            let cleanup_deadline =
+                tokio::time::Instant::now() + self.inner.policy.lifecycle_cleanup_timeout;
+            if let Err(error) = self
+                .cleanup_connection_parts(
+                    &entry,
+                    peers,
+                    old_watcher,
+                    active_calls,
+                    McpOutcomeUnknownReason::ServerRestarted,
+                    cleanup_deadline,
+                )
+                .await
+            {
+                lifecycle_cancel.cancel();
+                let mut state = lock_entry(&entry)?;
+                if state.epoch == epoch {
+                    state.lifecycle_cancel.take();
+                    set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                }
+                return Err(error);
             }
 
-            let current_registry = self.inner.registry.get(server_id)?;
+            let current_registry = match self.inner.registry.get(server_id) {
+                Ok(current) => current,
+                Err(error) => {
+                    self.fail_start_if_owned(&entry, epoch, &error)?;
+                    return Err(error);
+                }
+            };
             if current_registry.as_ref().is_none_or(|current| {
                 current.revision != registry.revision
                     || current.config_digest != registry.config_digest
@@ -153,11 +196,34 @@ impl McpConnectionManager {
                 continue;
             }
 
-            let connected = self.inner.connector.connect(&registry.config).await;
+            let connect_timeout = registry.config.connect_timeout();
+            let connected = tokio::select! {
+                biased;
+                _ = lifecycle_cancel.cancelled() => {
+                    Err(McpError::cancelled("MCP server start"))
+                }
+                connected = tokio::time::timeout(
+                    connect_timeout,
+                    self.inner.connector.connect(&registry.config),
+                ) => {
+                    connected.unwrap_or_else(|_| {
+                        Err(McpError::timeout(
+                            "MCP server connection",
+                            u64::try_from(connect_timeout.as_millis()).unwrap_or(u64::MAX),
+                        ))
+                    })
+                }
+            };
             let peer = match connected {
                 Ok(peer) => peer,
                 Err(error) => {
-                    let current_registry = self.inner.registry.get(server_id)?;
+                    let current_registry = match self.inner.registry.get(server_id) {
+                        Ok(current) => current,
+                        Err(registry_error) => {
+                            self.fail_start_if_owned(&entry, epoch, &registry_error)?;
+                            return Err(registry_error);
+                        }
+                    };
                     if current_registry.as_ref().is_none_or(|current| {
                         current.revision != registry.revision
                             || current.config_digest != registry.config_digest
@@ -186,6 +252,7 @@ impl McpConnectionManager {
                     let mut state = lock_entry(&entry)?;
                     state.connect_inflight = false;
                     if state.epoch == epoch && state.status.state == McpServerState::Starting {
+                        state.lifecycle_cancel.take();
                         set_error_locked(&self.inner.events, &entry, &mut state, &error);
                     } else {
                         let status = state.status.clone();
@@ -198,10 +265,15 @@ impl McpConnectionManager {
                 let error = McpError::protocol(
                     "MCP connector returned a peer for a different server identity",
                 );
-                let _ = peer.close().await;
+                let error = self
+                    .close_uncommitted_peer(&entry, Arc::clone(&peer))
+                    .await
+                    .err()
+                    .unwrap_or(error);
                 let mut state = lock_entry(&entry)?;
                 state.connect_inflight = false;
                 if state.epoch == epoch && state.status.state == McpServerState::Starting {
+                    state.lifecycle_cancel.take();
                     set_error_locked(&self.inner.events, &entry, &mut state, &error);
                 } else {
                     let status = state.status.clone();
@@ -215,10 +287,15 @@ impl McpConnectionManager {
                 .security_limits
                 .validate_protocol_snapshot(peer.protocol_snapshot())
             {
-                let _ = peer.close().await;
+                let error = self
+                    .close_uncommitted_peer(&entry, Arc::clone(&peer))
+                    .await
+                    .err()
+                    .unwrap_or(error);
                 let mut state = lock_entry(&entry)?;
                 state.connect_inflight = false;
                 if state.epoch == epoch && state.status.state == McpServerState::Starting {
+                    state.lifecycle_cancel.take();
                     set_error_locked(&self.inner.events, &entry, &mut state, &error);
                 } else {
                     let status = state.status.clone();
@@ -234,7 +311,11 @@ impl McpConnectionManager {
                     || state.status.state != McpServerState::Starting
             };
             if stale {
-                let _ = peer.close().await;
+                let close_result = self.close_uncommitted_peer(&entry, Arc::clone(&peer)).await;
+                if let Err(error) = close_result {
+                    self.fail_start_if_owned(&entry, epoch, &error)?;
+                    return Err(error);
+                }
                 let mut state = lock_entry(&entry)?;
                 state.connect_inflight = false;
                 let status = state.status.clone();
@@ -242,13 +323,27 @@ impl McpConnectionManager {
                 return Err(McpError::cancelled("MCP server start"));
             }
 
-            let current_registry = self.inner.registry.get(server_id)?;
+            let current_registry = match self.inner.registry.get(server_id) {
+                Ok(current) => current,
+                Err(error) => {
+                    let close_error = self
+                        .close_uncommitted_peer(&entry, Arc::clone(&peer))
+                        .await
+                        .err();
+                    let error = close_error.unwrap_or(error);
+                    self.fail_start_if_owned(&entry, epoch, &error)?;
+                    return Err(error);
+                }
+            };
             if current_registry.as_ref().is_none_or(|current| {
                 current.revision != registry.revision
                     || current.config_digest != registry.config_digest
                     || !current.config.enabled
             }) {
-                let _ = peer.close().await;
+                if let Err(error) = self.close_uncommitted_peer(&entry, Arc::clone(&peer)).await {
+                    self.fail_start_if_owned(&entry, epoch, &error)?;
+                    return Err(error);
+                }
                 let owns_reservation = self.abandon_start_for_registry_change(
                     &entry,
                     epoch,
@@ -300,7 +395,11 @@ impl McpConnectionManager {
                 }
             };
             if commit_stale {
-                let _ = peer.close().await;
+                let close_result = self.close_uncommitted_peer(&entry, Arc::clone(&peer)).await;
+                if let Err(error) = close_result {
+                    self.fail_start_if_owned(&entry, epoch, &error)?;
+                    return Err(error);
+                }
                 let mut state = lock_entry(&entry)?;
                 state.connect_inflight = false;
                 let status = state.status.clone();
@@ -336,9 +435,18 @@ impl McpConnectionManager {
                 }
             }
 
-            let _ = self
-                .finish_refresh(server_id, Arc::clone(&entry), epoch, peer)
-                .await?;
+            drop(inflight_guard);
+            let _refresh_guard = EntryInflightGuard {
+                entry: Arc::clone(&entry),
+                kind: EntryInflightKind::Refresh,
+            };
+            let _ = tokio::select! {
+                biased;
+                _ = lifecycle_cancel.cancelled() => {
+                    Err(McpError::cancelled("MCP catalog refresh"))
+                }
+                result = self.finish_refresh(server_id, Arc::clone(&entry), epoch, peer) => result,
+            }?;
             return self
                 .get_status(server_id)?
                 .ok_or_else(|| McpError::config("MCP server status disappeared"));
@@ -386,14 +494,61 @@ impl McpConnectionManager {
                 _ = manager.inner.shutdown_cancel.cancelled() => {
                     Err(McpError::shutdown("MCP connection manager is shutting down"))
                 }
-                result = async {
-                    manager.stop_owned(server_id).await?;
-                    let _permit = manager.reserve_start()?;
-                    manager.start_reserved_until_shutdown(server_id).await
-                } => result,
+                result = manager.restart_owned(server_id) => result,
             }
         }))
         .await
+    }
+
+    async fn restart_owned(&self, server_id: McpServerId) -> Result<McpServerStatus, McpError> {
+        self.ensure_registry_watcher();
+        let entry = match self.get_entry(server_id)? {
+            Some(entry) => entry,
+            None => {
+                let registry = self
+                    .inner
+                    .registry
+                    .get(server_id)?
+                    .ok_or_else(|| McpError::config("MCP server is not registered"))?;
+                self.entry_for(&registry)?
+            }
+        };
+        loop {
+            let notified = entry.settled.notified();
+            let owns_restart = {
+                let mut state = lock_entry(&entry)?;
+                if state.removed {
+                    return Err(McpError::config("MCP server is being removed"));
+                }
+                if state.restart_inflight {
+                    false
+                } else {
+                    state.restart_inflight = true;
+                    true
+                }
+            };
+            if owns_restart {
+                break;
+            }
+            notified.await;
+            let state = lock_entry(&entry)?;
+            if state.restart_inflight {
+                continue;
+            }
+            return if state.status.state == McpServerState::Error {
+                Err(McpError::shutdown(
+                    "The concurrent MCP server restart did not complete successfully",
+                ))
+            } else {
+                Ok(state.status.clone())
+            };
+        }
+        let _restart_guard = EntryRestartGuard {
+            entry: Arc::clone(&entry),
+        };
+        self.stop_entry(server_id, entry, false).await?;
+        let _permit = self.reserve_start()?;
+        self.start_reserved_until_shutdown(server_id).await
     }
 
     pub async fn start_enabled(&self) -> Vec<McpBatchOperationResult> {
@@ -488,6 +643,7 @@ impl McpConnectionManager {
         entry: Arc<ManagedEntry>,
         allow_removed: bool,
     ) -> Result<McpServerStatus, McpError> {
+        let deadline = tokio::time::Instant::now() + self.inner.policy.lifecycle_cleanup_timeout;
         loop {
             let notified = entry.settled.notified();
             let reservation = {
@@ -500,6 +656,7 @@ impl McpConnectionManager {
                     && state.closing_peer.is_none()
                     && !state.connect_inflight
                     && !state.refresh_inflight
+                    && state.lifecycle_cancel.is_none()
                     && state.active_calls.is_empty()
                 {
                     return Ok(state.status.clone());
@@ -509,9 +666,9 @@ impl McpConnectionManager {
                 } else {
                     state.epoch = next_epoch(state.epoch)?;
                     let epoch = state.epoch;
-                    let peer = state.peer.take();
-                    state.closing_peer = peer.clone();
-                    let cancel = state.watcher_cancel.take();
+                    let lifecycle_cancel = state.lifecycle_cancel.take();
+                    let peers = take_cleanup_peers(&mut state);
+                    let watcher_cancel = state.watcher_cancel.take();
                     let watcher = state.watcher_task.take();
                     let active_calls = state.active_calls.values().cloned().collect::<Vec<_>>();
                     transition_locked(
@@ -520,38 +677,44 @@ impl McpConnectionManager {
                         &mut state,
                         McpServerState::Stopping,
                     );
-                    Some((epoch, peer, cancel, watcher, active_calls))
+                    Some((
+                        epoch,
+                        lifecycle_cancel,
+                        peers,
+                        watcher_cancel,
+                        watcher,
+                        active_calls,
+                    ))
                 }
             };
-            let Some((epoch, peer, cancel, watcher, active_calls)) = reservation else {
-                notified.await;
+            let Some((epoch, lifecycle_cancel, peers, watcher_cancel, watcher, active_calls)) =
+                reservation
+            else {
+                tokio::time::timeout_at(deadline, notified)
+                    .await
+                    .map_err(|_| {
+                        McpError::shutdown(
+                            "MCP concurrent stop did not settle within the Host lifecycle deadline",
+                        )
+                    })?;
                 continue;
             };
-            if let Some(cancel) = cancel {
+            if let Some(cancel) = lifecycle_cancel {
                 cancel.cancel();
             }
-            cancel_active_calls(&active_calls, McpOutcomeUnknownReason::ServerStopped);
-            let settled_before_close =
-                settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout)
-                    .await;
-            if !settled_before_close {
-                if let Some(peer) = peer.as_ref() {
-                    let _ = peer.force_close();
-                }
+            if let Some(cancel) = watcher_cancel {
+                cancel.cancel();
             }
-            let close_result = if let Some(peer) = peer.as_ref() {
-                let result = peer.close().await;
-                clear_closing_peer(&entry, peer);
-                result
-            } else {
-                Ok(())
-            };
-            let settled_after_close =
-                settle_active_calls(&active_calls, self.inner.policy.active_call_settle_timeout)
-                    .await;
-            if let Some(watcher) = watcher {
-                let _ = watcher.await;
-            }
+            let cleanup_result = self
+                .cleanup_connection_parts(
+                    &entry,
+                    peers,
+                    watcher,
+                    active_calls,
+                    McpOutcomeUnknownReason::ServerStopped,
+                    deadline,
+                )
+                .await;
             loop {
                 let settled = entry.settled.notified();
                 let inflight = {
@@ -561,37 +724,42 @@ impl McpConnectionManager {
                 if !inflight {
                     break;
                 }
-                settled.await;
+                if tokio::time::timeout_at(deadline, settled).await.is_err() {
+                    let error = McpError::shutdown(
+                        "MCP in-flight lifecycle operation did not cancel before the stop deadline",
+                    );
+                    let mut state = lock_entry(&entry)?;
+                    if state.epoch == epoch {
+                        set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                    }
+                    return Err(error);
+                }
             }
             let mut state = lock_entry(&entry)?;
             if state.epoch != epoch {
                 return Ok(state.status.clone());
             }
-            if !settled_after_close || !state.active_calls.is_empty() {
+            if let Err(error) = cleanup_result {
+                set_error_locked(&self.inner.events, &entry, &mut state, &error);
+                return Err(error);
+            }
+            if state.closing_peer.is_some() || !state.active_calls.is_empty() {
                 let error = McpError::shutdown(
-                    "MCP active-call cleanup did not complete while stopping the server",
+                    "MCP cleanup remained incomplete after the Host lifecycle deadline",
                 );
                 set_error_locked(&self.inner.events, &entry, &mut state, &error);
                 return Err(error);
             }
-            match close_result {
-                Ok(()) => {
-                    state.status.protocol = None;
-                    state.status.notification_state = McpPeerNotificationState::Unknown;
-                    state.status.last_error = None;
-                    transition_locked(
-                        &self.inner.events,
-                        &entry,
-                        &mut state,
-                        McpServerState::Disabled,
-                    );
-                    return Ok(state.status.clone());
-                }
-                Err(error) => {
-                    set_error_locked(&self.inner.events, &entry, &mut state, &error);
-                    return Err(error);
-                }
-            }
+            state.status.protocol = None;
+            state.status.notification_state = McpPeerNotificationState::Unknown;
+            state.status.last_error = None;
+            transition_locked(
+                &self.inner.events,
+                &entry,
+                &mut state,
+                McpServerState::Disabled,
+            );
+            return Ok(state.status.clone());
         }
     }
 }
