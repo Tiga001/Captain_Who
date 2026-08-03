@@ -53,3 +53,11 @@ export function mcpOperationNeedsAuthoritativeConfirmation(
 ): boolean {
   return details.code === 'cleanupIncomplete'
 }
+
+export function mcpOperationNeedsLaunchAuthorization(details: McpManagementErrorDetails): boolean {
+  return (
+    details.code === 'authorizationRequired' ||
+    details.code === 'authorizationStale' ||
+    details.recovery === 'requestLaunchAuthorization'
+  )
+}

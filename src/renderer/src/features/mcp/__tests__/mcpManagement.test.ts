@@ -1,7 +1,11 @@
 import { HostInvocationError } from '@mycopilot/host-api'
 import type { TranslationKey } from '../../../config/frontendTranslations'
 import { describe, expect, it } from 'vitest'
-import { getMcpManagementErrorDetails, shouldRefreshMcpAfterError } from '../mcpManagementErrors'
+import {
+  getMcpManagementErrorDetails,
+  mcpOperationNeedsLaunchAuthorization,
+  shouldRefreshMcpAfterError
+} from '../mcpManagementErrors'
 import { validateMcpDraft } from '../mcpDraftValidation'
 import { toMcpPrecondition } from '../mcpManagementInputs'
 import { toSafeMcpDisplayText } from '../mcpSafeDisplay'
@@ -122,5 +126,26 @@ describe('MCP Renderer structured errors', () => {
     )
     expect(details.message).toBe('')
     expect(details.message).not.toContain('fixed-canary')
+  })
+
+  it('recognizes only structured launch-authorization recovery errors', () => {
+    const details = getMcpManagementErrorDetails(
+      new HostInvocationError({
+        message: 'outer',
+        data: {
+          schemaVersion: 1,
+          type: 'mcpManagement',
+          operation: 'enable',
+          code: 'authorizationRequired',
+          recovery: 'requestLaunchAuthorization',
+          message: 'Launch authorization is required.',
+          serverId: SERVER_ID,
+          currentRegistryRevision: 9
+        }
+      })
+    )
+
+    expect(mcpOperationNeedsLaunchAuthorization(details)).toBe(true)
+    expect(mcpOperationNeedsLaunchAuthorization({ message: '' })).toBe(false)
   })
 })

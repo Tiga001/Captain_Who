@@ -277,6 +277,7 @@ describe('MCP Settings page', () => {
       toolCount: 14,
       trust: 'userApproved'
     })
+    service.loadDetails.mockResolvedValue(server)
     service.setServerEnabled.mockResolvedValue(server)
     service.hook.mockReturnValue(
       management(
@@ -298,7 +299,166 @@ describe('MCP Settings page', () => {
     await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
 
     await expect.poll(() => service.setServerEnabled.mock.calls.length).toBe(1)
+    expect(service.loadDetails).toHaveBeenCalledWith(toListItem(server))
     expect(screen.getByRole('dialog').query()).toBeNull()
+  })
+
+  it('reconfirms when a live detail check finds a structurally authorized Server stale', async () => {
+    const listed = details({
+      launchAuthorizationState: 'authorized',
+      trust: 'userApproved'
+    })
+    const stale = details({
+      launchAuthorizationState: 'stale',
+      trust: 'userApproved'
+    })
+    service.loadDetails.mockResolvedValue(stale)
+    service.setServerEnabled.mockResolvedValue(stale)
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([listed]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [listed]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
+
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+    expect(service.loadDetails).toHaveBeenCalledTimes(1)
+    expect(service.setServerEnabled).not.toHaveBeenCalled()
+    await screen.getByRole('button', { name: 'mcp.actions.enable' }).click()
+    await expect.poll(() => service.setServerEnabled.mock.calls.length).toBe(1)
+    expect(service.setServerEnabled).toHaveBeenCalledWith(stale, true)
+  })
+
+  it('returns an enable-time authorization race to confirmation without retrying', async () => {
+    const listed = details({
+      launchAuthorizationState: 'authorized',
+      trust: 'userApproved'
+    })
+    const stale = details({
+      launchAuthorizationState: 'stale',
+      trust: 'userApproved'
+    })
+    service.loadDetails.mockResolvedValueOnce(listed).mockResolvedValueOnce(stale)
+    service.setServerEnabled.mockRejectedValue(
+      new HostInvocationError({
+        message: 'safe outer error',
+        data: {
+          schemaVersion: 1,
+          type: 'mcpManagement',
+          operation: 'enable',
+          code: 'authorizationRequired',
+          recovery: 'requestLaunchAuthorization',
+          message: 'Launch authorization is required.',
+          serverId: SERVER_ID,
+          currentRegistryRevision: 2
+        }
+      })
+    )
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([listed]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [listed]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+
+    await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
+
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+    expect(service.loadDetails).toHaveBeenCalledTimes(2)
+    expect(service.setServerEnabled).toHaveBeenCalledTimes(1)
+    expect(service.authorizeLaunch).not.toHaveBeenCalled()
+  })
+
+  it('keeps confirmation open when authorization drifts again after confirmation', async () => {
+    const stale = details({
+      launchAuthorizationState: 'stale',
+      trust: 'userApproved'
+    })
+    service.loadDetails.mockResolvedValue(stale)
+    service.setServerEnabled.mockRejectedValue(
+      new HostInvocationError({
+        message: 'safe outer error',
+        data: {
+          schemaVersion: 1,
+          type: 'mcpManagement',
+          operation: 'enable',
+          code: 'authorizationStale',
+          recovery: 'requestLaunchAuthorization',
+          message: 'Launch authorization changed during confirmation.',
+          serverId: SERVER_ID,
+          currentRegistryRevision: 2
+        }
+      })
+    )
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([stale]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [stale]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+    await screen.getByRole('switch', { name: 'mcp.actions.enable' }).click()
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+
+    await screen.getByRole('button', { name: 'mcp.actions.enable' }).click()
+
+    await expect.element(screen.getByRole('dialog')).toBeVisible()
+    expect(service.setServerEnabled).toHaveBeenCalledTimes(1)
+    expect(service.loadDetails).toHaveBeenCalledTimes(1)
+    expect(service.showToast).not.toHaveBeenCalled()
+  })
+
+  it('coalesces repeated live authorization preflight clicks', async () => {
+    const server = details({
+      launchAuthorizationState: 'authorized',
+      trust: 'userApproved'
+    })
+    let resolveDetails: ((value: McpServerDetailsView) => void) | undefined
+    service.loadDetails.mockReturnValue(
+      new Promise<McpServerDetailsView>((resolve) => {
+        resolveDetails = resolve
+      })
+    )
+    service.setServerEnabled.mockResolvedValue(server)
+    service.hook.mockReturnValue(
+      management(
+        {
+          status: 'ready',
+          output: output([server]),
+          errorMessage: null,
+          isRefreshing: false
+        },
+        [server]
+      )
+    )
+    const screen = await render(<McpSettingsPage />)
+    const toggle = screen.getByRole('switch', { name: 'mcp.actions.enable' })
+
+    await toggle.click()
+    await toggle.click()
+
+    expect(service.loadDetails).toHaveBeenCalledTimes(1)
+    resolveDetails?.(server)
+    await expect.poll(() => service.setServerEnabled.mock.calls.length).toBe(1)
   })
 
   it('opens the configuration editor directly without a status or Catalog page', async () => {

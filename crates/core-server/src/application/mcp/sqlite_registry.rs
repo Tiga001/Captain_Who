@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
@@ -24,15 +25,18 @@ const REGISTRY_CHANGE_CAPACITY: usize = 128;
 pub(crate) const MCP_REGISTRY_MAX_SERVERS: usize = 1024;
 const MAX_WIRE_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub(crate) const MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION: u32 = 2;
-pub(crate) const MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION: u32 = 2;
+pub(crate) const MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION: u32 = 3;
 const SOURCE_USER_MANUAL: &str = "user_manual";
 const RECORD_STATE_ACTIVE: &str = "active";
 const RECORD_STATE_INVALID: &str = "invalid";
 const SAFE_ERROR_RECONCILED: &str = "startup_record_reconciled";
 const SAFE_ERROR_INVALID: &str = "invalid_persisted_record";
 const LAUNCH_DIGEST_DOMAIN: &[u8] = b"mycopilot-mcp-launch-spec-v1\0";
-const LAUNCH_FILE_IDENTITY_DOMAIN: &[u8] = b"mycopilot-mcp-launch-file-identity-v1\0";
+const LAUNCH_FILE_IDENTITY_DOMAIN: &[u8] = b"mycopilot-mcp-launch-file-identity-v2\0";
 const MAX_LAUNCH_CODE_INPUTS: usize = 16;
+const MAX_LAUNCH_CONTENT_HASH_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LAUNCH_CONTENT_HASH_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+const LAUNCH_IDENTITY_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
 const MAX_PATH_BYTES: usize = 4096;
@@ -175,8 +179,9 @@ pub(crate) struct McpLaunchAuthorizationRecord {
     pub(crate) authorization_format_version: u32,
     pub(crate) server_id: McpServerId,
     pub(crate) launch_spec_digest: McpLaunchSpecDigest,
-    /// Digest of the canonical executable, cwd, and every argv entry that
-    /// resolves to an existing filesystem object at authorization time.
+    /// Digest of the canonical executable, cwd, and every code-bearing argv
+    /// entry, including stable filesystem identity and complete file bytes at
+    /// authorization time.
     ///
     /// The legacy SQLite column is named `authorized_launch_spec_digest`.
     /// Format v2 deliberately stores this stronger identity there; the
@@ -1603,9 +1608,21 @@ pub(crate) fn prepare_launch_file_identity(
     let mut hasher = Sha256::new();
     hasher.update(LAUNCH_FILE_IDENTITY_DOMAIN);
     hash_identity_field(&mut hasher, launch_spec_digest.as_str().as_bytes());
-    let canonical_program =
-        hash_required_launch_path(&mut hasher, b"executable", &stdio.program, true)?;
-    let canonical_cwd = hash_required_launch_path(&mut hasher, b"cwd", &stdio.cwd, false)?;
+    let mut remaining_content_hash_bytes = MAX_LAUNCH_CONTENT_HASH_TOTAL_BYTES;
+    let canonical_program = hash_required_launch_path(
+        &mut hasher,
+        b"executable",
+        &stdio.program,
+        true,
+        &mut remaining_content_hash_bytes,
+    )?;
+    let canonical_cwd = hash_required_launch_path(
+        &mut hasher,
+        b"cwd",
+        &stdio.cwd,
+        false,
+        &mut remaining_content_hash_bytes,
+    )?;
 
     let mut code_inputs = 0_usize;
     let mut canonical_arguments = stdio.arguments.clone();
@@ -1624,8 +1641,13 @@ pub(crate) fn prepare_launch_file_identity(
         } else {
             stdio.cwd.join(code_input.path)
         };
-        let canonical =
-            hash_required_launch_path(&mut hasher, b"code-input-path", &candidate, true)?;
+        let canonical = hash_required_launch_path(
+            &mut hasher,
+            b"code-input-path",
+            &candidate,
+            true,
+            &mut remaining_content_hash_bytes,
+        )?;
         let canonical = path_text(&canonical)?;
         canonical_arguments[index] = match code_input.inline_prefix {
             Some(prefix) => format!("{prefix}{canonical}"),
@@ -1655,6 +1677,7 @@ fn hash_required_launch_path(
     role: &[u8],
     path: &Path,
     require_file: bool,
+    remaining_content_hash_bytes: &mut u64,
 ) -> Result<PathBuf, McpRegistryPersistenceError> {
     hash_identity_field(hasher, role);
     hash_identity_field(hasher, path_text(path)?.as_bytes());
@@ -1665,7 +1688,7 @@ fn hash_required_launch_path(
     if (require_file && !metadata.is_file()) || (!require_file && !metadata.is_dir()) {
         return Err(McpRegistryPersistenceError::InvalidConfig);
     }
-    hash_canonical_launch_object(hasher, &canonical, metadata)?;
+    hash_canonical_launch_object(hasher, &canonical, metadata, remaining_content_hash_bytes)?;
     Ok(canonical)
 }
 
@@ -1765,16 +1788,70 @@ fn hash_canonical_launch_object(
     hasher: &mut Sha256,
     canonical: &Path,
     metadata_before: std::fs::Metadata,
+    remaining_content_hash_bytes: &mut u64,
 ) -> Result<(), McpRegistryPersistenceError> {
     hash_identity_field(hasher, path_text(canonical)?.as_bytes());
     let before = LaunchMetadataSnapshot::from_metadata(&metadata_before)?;
-    before.hash_into(hasher);
+    let hash_contents = metadata_before.is_file()
+        && metadata_before.len() <= MAX_LAUNCH_CONTENT_HASH_FILE_BYTES
+        && metadata_before.len() <= *remaining_content_hash_bytes;
+    before.hash_into(hasher, !hash_contents);
+
+    if hash_contents {
+        *remaining_content_hash_bytes -= metadata_before.len();
+        hash_launch_file_contents(hasher, canonical, &before)?;
+    }
 
     let metadata_after =
         std::fs::metadata(canonical).map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
     if before != LaunchMetadataSnapshot::from_metadata(&metadata_after)? {
         return Err(McpRegistryPersistenceError::InvalidConfig);
     }
+    Ok(())
+}
+
+fn hash_launch_file_contents(
+    hasher: &mut Sha256,
+    canonical: &Path,
+    expected: &LaunchMetadataSnapshot,
+) -> Result<(), McpRegistryPersistenceError> {
+    let mut file =
+        std::fs::File::open(canonical).map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    let opened = file
+        .metadata()
+        .map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    if LaunchMetadataSnapshot::from_metadata(&opened)? != *expected {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    }
+
+    let mut content_hasher = Sha256::new();
+    let mut buffer = [0_u8; LAUNCH_IDENTITY_READ_BUFFER_BYTES];
+    let mut bytes_read = 0_u64;
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+        if count == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(count as u64)
+            .filter(|total| *total <= expected.len)
+            .ok_or(McpRegistryPersistenceError::InvalidConfig)?;
+        content_hasher.update(&buffer[..count]);
+    }
+    if bytes_read != expected.len {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    }
+
+    let closed_over = file
+        .metadata()
+        .map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    if LaunchMetadataSnapshot::from_metadata(&closed_over)? != *expected {
+        return Err(McpRegistryPersistenceError::InvalidConfig);
+    }
+    hash_identity_field(hasher, b"content-sha256");
+    hash_identity_field(hasher, content_hasher.finalize().as_slice());
     Ok(())
 }
 
@@ -1856,7 +1933,7 @@ impl LaunchMetadataSnapshot {
         }
     }
 
-    fn hash_into(&self, hasher: &mut Sha256) {
+    fn hash_into(&self, hasher: &mut Sha256, include_ctime: bool) {
         hasher.update([self.kind]);
         hasher.update(self.len.to_le_bytes());
         match self.modified_nanos {
@@ -1871,8 +1948,15 @@ impl LaunchMetadataSnapshot {
         {
             hasher.update(self.device.to_le_bytes());
             hasher.update(self.inode.to_le_bytes());
-            hasher.update(self.changed_seconds.to_le_bytes());
-            hasher.update(self.changed_nanos.to_le_bytes());
+            if include_ctime {
+                // Large runtime binaries keep the cheap ctime tamper signal;
+                // complete content hashing is reserved for bounded files.
+                hasher.update(self.changed_seconds.to_le_bytes());
+                hasher.update(self.changed_nanos.to_le_bytes());
+            }
+            // For content-hashed files, ctime remains part of the before/after
+            // equality check but not the persisted identity. macOS may update
+            // it for quarantine/xattr bookkeeping without changing authority.
             hasher.update(self.mode.to_le_bytes());
             hasher.update(self.owner.to_le_bytes());
             hasher.update(self.group.to_le_bytes());
@@ -3157,6 +3241,144 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn launch_identity_ignores_metadata_only_ctime_drift() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("owned-fixture-executable");
+        std::fs::write(&executable, b"stable owned executable bytes").unwrap();
+        let mut server = config(McpServerId::new(), "stable physical identity");
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.program = executable.clone();
+        stdio.cwd = directory.path().to_path_buf();
+
+        let launch_digest = compute_launch_spec_digest(&server).unwrap();
+        let first = compute_launch_file_identity_digest(&server, &launch_digest).unwrap();
+        let before = std::fs::metadata(&executable).unwrap();
+        let original_mode = before.permissions().mode();
+        let mut changed_permissions = before.permissions();
+        changed_permissions.set_mode(original_mode ^ 0o100);
+        std::fs::set_permissions(&executable, changed_permissions).unwrap();
+        let mut restored_permissions = std::fs::metadata(&executable).unwrap().permissions();
+        restored_permissions.set_mode(original_mode);
+        std::fs::set_permissions(&executable, restored_permissions).unwrap();
+        let after = std::fs::metadata(&executable).unwrap();
+        assert_ne!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec()),
+            "the fixture must exercise a ctime-only identity change"
+        );
+
+        let second = compute_launch_file_identity_digest(&server, &launch_digest).unwrap();
+        assert_eq!(
+            first, second,
+            "metadata bookkeeping must not revoke unchanged launch bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_server_survives_metadata_only_ctime_drift_across_registry_restart() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("registry.sqlite");
+        let executable = directory.path().join("owned-fixture-executable");
+        std::fs::write(&executable, b"stable owned executable bytes").unwrap();
+        let id = McpServerId::new();
+        {
+            let registry = SqliteMcpRegistry::open(&database).unwrap();
+            let mut server = config(id, "restart-stable physical identity");
+            let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+                panic!("test config must use stdio");
+            };
+            stdio.program = executable.clone();
+            stdio.cwd = directory.path().to_path_buf();
+            let added = registry.add(server).unwrap();
+            let persisted = registry.get_persisted(id).unwrap().unwrap();
+            let file_identity_digest = compute_launch_file_identity_digest(
+                &persisted.entry.config,
+                &persisted.launch_spec_digest,
+            )
+            .unwrap();
+            registry
+                .authorize_launch(
+                    &McpRegistryMutationPrecondition::from_entry(&added),
+                    &persisted.launch_spec_digest,
+                    &file_identity_digest,
+                    MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                    1,
+                )
+                .unwrap();
+            let authorized = registry.get(id).unwrap().unwrap();
+            registry
+                .set_enabled(
+                    &McpRegistryMutationPrecondition::from_entry(&authorized),
+                    true,
+                )
+                .unwrap();
+        }
+
+        let before = std::fs::metadata(&executable).unwrap();
+        let original_mode = before.permissions().mode();
+        let mut changed_permissions = before.permissions();
+        changed_permissions.set_mode(original_mode ^ 0o100);
+        std::fs::set_permissions(&executable, changed_permissions).unwrap();
+        let mut restored_permissions = std::fs::metadata(&executable).unwrap().permissions();
+        restored_permissions.set_mode(original_mode);
+        std::fs::set_permissions(&executable, restored_permissions).unwrap();
+
+        let reopened = SqliteMcpRegistry::open(&database).unwrap();
+        let recovered = reopened.get_persisted(id).unwrap().unwrap();
+        assert!(recovered.entry.config.enabled);
+        assert_eq!(recovered.entry.config.trust, McpTrustLevel::UserApproved);
+        assert!(recovered.launch_authorization.is_some());
+        assert!(launch_authorization_is_valid(&recovered));
+    }
+
+    #[test]
+    fn launch_identity_hashes_same_length_content_replacement() {
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("owned-fixture-executable");
+        std::fs::write(&executable, b"owned executable version 1").unwrap();
+        let mut server = config(McpServerId::new(), "content-bound identity");
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.program = executable.clone();
+        stdio.cwd = directory.path().to_path_buf();
+
+        let launch_digest = compute_launch_spec_digest(&server).unwrap();
+        let first = compute_launch_file_identity_digest(&server, &launch_digest).unwrap();
+        std::fs::write(&executable, b"owned executable version 2").unwrap();
+        let second = compute_launch_file_identity_digest(&server, &launch_digest).unwrap();
+
+        assert_ne!(first, second, "launch authority must remain content-bound");
+    }
+
+    #[test]
+    fn launch_identity_bounds_content_hashing_for_large_runtime_binaries() {
+        let directory = tempdir().unwrap();
+        let executable = directory.path().join("oversized-owned-fixture-executable");
+        let file = std::fs::File::create(&executable).unwrap();
+        file.set_len(MAX_LAUNCH_CONTENT_HASH_FILE_BYTES + 1)
+            .unwrap();
+        let mut server = config(McpServerId::new(), "bounded physical identity");
+        let McpTransportConfig::Stdio(stdio) = &mut server.transport else {
+            panic!("test config must use stdio");
+        };
+        stdio.program = executable;
+        stdio.cwd = directory.path().to_path_buf();
+
+        let launch_digest = compute_launch_spec_digest(&server).unwrap();
+        compute_launch_file_identity_digest(&server, &launch_digest)
+            .expect("large binaries use bounded metadata identity without reading sparse contents");
+    }
+
     #[test]
     fn explicit_inline_code_paths_are_identity_bound() {
         let directory = tempdir().unwrap();
@@ -3368,6 +3590,65 @@ mod tests {
         let reopened = SqliteMcpRegistry::open(&path).unwrap();
         let recovered = reopened.get_persisted(id).unwrap().unwrap();
         assert_eq!(recovered.entry.config.display_name, "legacy-authorization");
+        assert!(!recovered.entry.config.enabled);
+        assert_eq!(recovered.entry.config.trust, McpTrustLevel::Untrusted);
+        assert!(recovered.launch_authorization.is_none());
+        assert_eq!(
+            recovered.safe_error_code.as_deref(),
+            Some(SAFE_ERROR_RECONCILED)
+        );
+    }
+
+    #[test]
+    fn startup_requires_one_time_reauthorization_for_previous_physical_identity_policy() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let id = McpServerId::new();
+        {
+            let registry = SqliteMcpRegistry::open(&path).unwrap();
+            let added = registry
+                .add(config(id, "previous-policy-authorization"))
+                .unwrap();
+            let persisted = registry.get_persisted(id).unwrap().unwrap();
+            let file_identity_digest = compute_launch_file_identity_digest(
+                &persisted.entry.config,
+                &persisted.launch_spec_digest,
+            )
+            .unwrap();
+            registry
+                .authorize_launch(
+                    &McpRegistryMutationPrecondition::from_entry(&added),
+                    &persisted.launch_spec_digest,
+                    &file_identity_digest,
+                    MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                    1,
+                )
+                .unwrap();
+            let authorized = registry.get(id).unwrap().unwrap();
+            registry
+                .set_enabled(
+                    &McpRegistryMutationPrecondition::from_entry(&authorized),
+                    true,
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE mcp_registry_servers
+                 SET authorization_policy_version = 2
+                 WHERE server_id = ?1",
+                [id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        let recovered = reopened.get_persisted(id).unwrap().unwrap();
+        assert_eq!(
+            recovered.entry.config.display_name,
+            "previous-policy-authorization"
+        );
         assert!(!recovered.entry.config.enabled);
         assert_eq!(recovered.entry.config.trust, McpTrustLevel::Untrusted);
         assert!(recovered.launch_authorization.is_none());

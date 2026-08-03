@@ -859,9 +859,15 @@ function mergeDetailsWithFreshSummary(
   summary: McpServerListItem
 ): McpServerDetailsView {
   const detailsSummary = detailsToListItem(details)
-  return shouldUseIncomingServerSnapshot(summary, detailsSummary)
+  const merged = shouldUseIncomingServerSnapshot(summary, detailsSummary)
     ? details
     : mergeServerSummaryIntoDetails(details, summary)
+  // A one-Server detail read performs the live executable/code identity
+  // check. The list projection is intentionally structural and may still say
+  // `authorized`, so it must never overwrite a fresher `stale` result here.
+  return merged.launchAuthorizationState === details.launchAuthorizationState
+    ? merged
+    : { ...merged, launchAuthorizationState: details.launchAuthorizationState }
 }
 
 function sameServerConfigIdentity(left: McpServerListItem, right: McpServerListItem): boolean {

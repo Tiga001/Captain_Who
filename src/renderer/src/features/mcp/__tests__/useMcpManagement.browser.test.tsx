@@ -162,6 +162,9 @@ function Harness() {
       <output data-testid="detail-state">
         {loadedDetails?.state ?? 'none'}:{loadedDetails?.activeCallCount ?? 0}
       </output>
+      <output data-testid="detail-authorization">
+        {loadedDetails?.launchAuthorizationState ?? 'none'}
+      </output>
       <output data-testid="catalog">
         {catalog?.status ?? 'none'}:{catalog?.tools.length ?? 0}:
         {catalog?.catalogGeneration ?? 'none'}:{catalog?.catalogCompleteness ?? 'none'}
@@ -357,6 +360,33 @@ describe('useMcpManagement concurrency', () => {
     expect(service.onChanged.mock.calls.length).toBeGreaterThan(0)
     screen.unmount()
     expect(service.unsubscribe).toHaveBeenCalledTimes(service.onChanged.mock.calls.length)
+  })
+
+  it('preserves a live stale authorization over the structural list projection', async () => {
+    service.listServers.mockResolvedValue(
+      listOutput([
+        details(SERVER_A, {
+          enabled: false,
+          launchAuthorizationState: 'authorized',
+          state: 'disabled'
+        })
+      ])
+    )
+    service.getServer.mockResolvedValue(
+      detailsOutput(
+        details(SERVER_A, {
+          enabled: false,
+          launchAuthorizationState: 'stale',
+          state: 'disabled'
+        })
+      )
+    )
+    const screen = await render(<Harness />)
+    await expect.element(screen.getByTestId('status')).toHaveTextContent('ready')
+
+    await screen.getByRole('button', { name: 'load details', exact: true }).click()
+
+    await expect.element(screen.getByTestId('detail-authorization')).toHaveTextContent('stale')
   })
 
   it('coalesces a notification storm into one follow-up refresh', async () => {

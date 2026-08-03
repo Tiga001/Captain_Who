@@ -8,7 +8,8 @@ import { McpServerEditor } from './McpServerEditor'
 import { McpServerList, McpServerListRefreshButton } from './McpServerList'
 import {
   getMcpManagementErrorDetails,
-  mcpOperationNeedsAuthoritativeConfirmation
+  mcpOperationNeedsAuthoritativeConfirmation,
+  mcpOperationNeedsLaunchAuthorization
 } from './mcpManagementErrors'
 import type { McpServerDraft } from './mcpManagementInputs'
 import { toSafeMcpDisplayText } from './mcpSafeDisplay'
@@ -35,6 +36,7 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
   const [pendingEnableConfirmation, setPendingEnableConfirmation] =
     useState<McpServerListItem | null>(null)
   const pageTitleRef = useRef<HTMLHeadingElement | null>(null)
+  const enablePreflightRef = useRef<Set<string>>(new Set())
   const loadDetails = management.loadDetails
 
   const selectedListItem = useMemo(
@@ -123,12 +125,44 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
     [showToast, t]
   )
 
-  const requestServerEnabledChange = (server: McpServerListItem, enabled: boolean) => {
-    if (enabled && server.launchAuthorizationState !== 'authorized') {
+  const requestServerEnabledChange = async (server: McpServerListItem, enabled: boolean) => {
+    if (!enabled) {
+      await runServerOperation(() => management.setServerEnabled(server, false))
+      return
+    }
+    if (server.launchAuthorizationState !== 'authorized') {
       setPendingEnableConfirmation(server)
       return
     }
-    void runServerOperation(() => management.setServerEnabled(server, enabled))
+    if (enablePreflightRef.current.has(server.serverId)) return
+    enablePreflightRef.current.add(server.serverId)
+
+    try {
+      // List rows deliberately use a cheap structural authorization check.
+      // Resolve one live detail immediately before enable so a changed local
+      // executable or script returns to the existing user confirmation flow.
+      const current = await management.loadDetails(server)
+      if (!current) return
+      if (current.launchAuthorizationState !== 'authorized') {
+        setPendingEnableConfirmation(current)
+        return
+      }
+      await management.setServerEnabled(current, true)
+    } catch (error) {
+      const details = getMcpManagementErrorDetails(error)
+      if (mcpOperationNeedsLaunchAuthorization(details)) {
+        try {
+          const current = await management.loadDetails(server)
+          if (current) setPendingEnableConfirmation(current)
+        } catch (refreshError) {
+          showSafeError(refreshError, showToast, t)
+        }
+        return
+      }
+      showSafeError(error, showToast, t)
+    } finally {
+      enablePreflightRef.current.delete(server.serverId)
+    }
   }
 
   const confirmEnable = async () => {
@@ -138,6 +172,20 @@ export function McpSettingsPage({ onDirtyChange }: McpSettingsPageProps) {
       await management.setServerEnabled(server, true)
       setPendingEnableConfirmation(null)
     } catch (error) {
+      const details = getMcpManagementErrorDetails(error)
+      if (mcpOperationNeedsLaunchAuthorization(details)) {
+        try {
+          const current = await management.loadDetails(server)
+          if (current) {
+            setPendingEnableConfirmation(current)
+            return
+          }
+        } catch (refreshError) {
+          showSafeError(refreshError, showToast, t)
+          setPendingEnableConfirmation(null)
+          return
+        }
+      }
       showSafeError(error, showToast, t)
       setPendingEnableConfirmation(null)
     }
