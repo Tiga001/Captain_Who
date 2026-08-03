@@ -37,7 +37,7 @@ const approval = {
       catalogDigest: 'b'.repeat(64),
       catalogSchemaDigest: 'c'.repeat(64),
       schemaDigest: 'd'.repeat(64),
-      schemaNormalizerVersion: 2
+      schemaNormalizerVersion: 3
     }
   },
   call: {

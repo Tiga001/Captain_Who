@@ -20,9 +20,10 @@ use super::sqlite_registry::{
 /// re-reads the durable Registry on every attempt. A stale in-memory config,
 /// an authorization for another Server, or a changed persisted path/argv/cwd
 /// specification is rejected before the stdio connector can spawn. Format v2
-/// additionally revalidates the canonical executable and filesystem-backed
-/// code-entrypoint identities immediately before delegating to the concrete
-/// connector.
+/// additionally revalidates the executable's canonical target and
+/// filesystem-backed code-entrypoint identities immediately before delegating
+/// to the concrete connector. The logical executable path remains intact so
+/// runtime launchers such as Python virtual environments retain their meaning.
 pub(crate) struct AuthorizedMcpStdioConnector {
     registry: Arc<SqliteMcpRegistry>,
     policy_template: McpStdioPolicy,
@@ -62,8 +63,10 @@ impl AuthorizedMcpStdioConnector {
             .ok_or_else(|| authorization_error("MCP stdio launch is not authorized"))?;
 
         // The returned launch plan and compared identity digest come from one
-        // canonicalization pass. They cannot describe different symlink
-        // targets even if a path is retargeted immediately afterward.
+        // filesystem inspection. The identity binds the logical executable
+        // path and its current canonical target, while the launch plan keeps
+        // the logical path so virtual-environment launchers retain their
+        // runtime semantics. There is deliberately no await before spawn.
         let config = validate_persisted_authorization(requested, &persisted)?;
         let McpTransportConfig::Stdio(stdio) = &config.transport else {
             return Err(authorization_error(
@@ -147,7 +150,7 @@ fn validate_persisted_authorization(
         .launch_authorization
         .as_ref()
         .ok_or_else(|| authorization_error("MCP stdio launch is not authorized"))?;
-    let (file_identity_digest, canonical_config) =
+    let (file_identity_digest, launch_config) =
         prepare_launch_file_identity(&persisted.entry.config, &computed_launch_digest)
             .map_err(map_registry_validation_error)?;
     if authorization.authorization_format_version != MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION
@@ -163,7 +166,7 @@ fn validate_persisted_authorization(
         ));
     }
 
-    Ok(canonical_config)
+    Ok(launch_config)
 }
 
 fn authorization_error(message: &'static str) -> McpError {
@@ -337,6 +340,41 @@ mod tests {
         assert_eq!(
             error.dispatch_certainty,
             Some(McpDispatchCertainty::DefinitelyNotDispatched)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_executable_symlink_preserves_its_logical_launch_path() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("owned-runtime-target");
+        let link = directory.path().join("owned-venv-runtime");
+        std::fs::write(&target, b"owned virtual-environment runtime target")
+            .expect("write repository-owned runtime target");
+        symlink(&target, &link).expect("create repository-owned runtime symlink");
+        let registry =
+            Arc::new(SqliteMcpRegistry::open(directory.path().join("registry.sqlite")).unwrap());
+        let authorized = authorize_and_enable(
+            &registry,
+            config(
+                McpServerId::new(),
+                link.clone(),
+                directory.path().to_path_buf(),
+            ),
+            MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+        );
+        let connector = AuthorizedMcpStdioConnector::new(registry);
+
+        let launch = connector.prepare_authorized_launch(&authorized).unwrap();
+        let McpTransportConfig::Stdio(stdio) = &launch.config.transport else {
+            panic!("prepared launch must use stdio");
+        };
+        assert_eq!(stdio.program, link);
+        assert_eq!(
+            launch.policy.allowed_programs,
+            BTreeSet::from([stdio.program.clone()])
         );
     }
 

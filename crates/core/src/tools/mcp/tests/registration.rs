@@ -26,12 +26,15 @@ fn catalog_descriptor_registers_provider_definition_and_typed_identity() {
     assert_eq!(definition.input_schema["type"], "object");
     assert_eq!(
         definition.input_schema["required"],
-        json!(["text", "__mycopilot_call_reason"])
+        json!(["text", "call_reason"])
     );
     assert_eq!(
-        definition.input_schema["properties"]["__mycopilot_call_reason"]["type"],
+        definition.input_schema["properties"]["call_reason"]["type"],
         "string"
     );
+    assert!(definition.input_schema["properties"]
+        .get("__mycopilot_call_reason")
+        .is_none());
     assert_eq!(definition.safety, AgentToolSafety::RequiresApproval);
     assert!(definition.requires_approval);
     assert_eq!(definition.approval_mode, AgentToolApprovalMode::Always);

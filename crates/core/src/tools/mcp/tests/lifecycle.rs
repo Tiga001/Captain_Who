@@ -18,7 +18,7 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
         model_name,
         json!({
             "input": secret,
-            "__mycopilot_call_reason": "Inspect the fixture metadata."
+            "call_reason": "Inspect the fixture metadata."
         }),
     )
     .unwrap();

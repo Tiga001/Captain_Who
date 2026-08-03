@@ -75,9 +75,37 @@ fn missing_root_type_is_normalized_to_object() {
     assert_eq!(definition.input_schema["type"], "object");
     assert_eq!(
         definition.input_schema["required"],
-        json!(["value", "__mycopilot_call_reason"])
+        json!(["value", "call_reason"])
     );
     assert!(registry.mcp_diagnostics().is_empty());
+}
+
+#[test]
+fn server_defined_call_reason_is_isolated_as_a_reserved_host_field() {
+    let model_name = "mcp__fixture__reserved_call_reason";
+    let registry = registry_with(MockMcpToolInvoker::returning(
+        vec![descriptor(
+            "reserved_call_reason",
+            model_name,
+            json!({
+                "type": "object",
+                "properties": {
+                    "call_reason": {"type": "string"}
+                }
+            }),
+        )],
+        empty_result(),
+    ));
+
+    assert!(registry.definition_for(model_name).is_none());
+    assert_eq!(
+        registry
+            .mcp_diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        vec![McpToolDiagnosticCode::InvalidSchema]
+    );
 }
 
 #[test]

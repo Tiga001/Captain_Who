@@ -128,7 +128,7 @@ async fn launch_authorization_commit_rejects_file_identity_drift_and_details_sho
 
 #[cfg(unix)]
 #[tokio::test]
-async fn launch_authorization_preview_shows_the_canonical_process_plan() {
+async fn launch_authorization_preview_shows_the_actual_process_plan() {
     use std::os::unix::fs::symlink;
 
     let owned_launch = tempfile::tempdir().expect("temporary owned launch directory");
@@ -151,12 +151,7 @@ async fn launch_authorization_preview_shows_the_canonical_process_plan() {
         .service
         .prepare_launch_authorization(mutation_input(&added.server))
         .expect("prepare canonical launch preview");
-    assert_eq!(
-        preview.executable,
-        std::fs::canonicalize(executable_target)
-            .unwrap()
-            .to_string_lossy()
-    );
+    assert_eq!(preview.executable, executable_link.to_string_lossy());
     assert_eq!(
         preview.arguments,
         vec![std::fs::canonicalize(script_target)

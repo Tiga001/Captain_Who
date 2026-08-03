@@ -27,6 +27,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const MODERN_FIXTURE: &str = "--fixture-modern";
 const LEGACY_FIXTURE: &str = "--fixture-legacy";
+const PYTHON_LEGACY_FIXTURE: &str = "--fixture-python-legacy-invalid-params";
+const PYTHON_LEGACY_BAD_INITIALIZE_FIXTURE: &str = "--fixture-python-legacy-invalid-initialize";
+const NON_LEGACY_INVALID_PARAMS_FIXTURE: &str = "--fixture-non-legacy-invalid-params";
 const DYNAMIC_MODERN_FIXTURE: &str = "--fixture-dynamic-modern";
 const DYNAMIC_LEGACY_FIXTURE: &str = "--fixture-dynamic-legacy";
 const PAGED_FIXTURE: &str = "--fixture-paged";
@@ -548,6 +551,17 @@ async fn main() {
     match std::env::args().nth(1).as_deref() {
         Some(MODERN_FIXTURE) => serve_fixture(false).await,
         Some(LEGACY_FIXTURE) => serve_fixture(true).await,
+        Some(PYTHON_LEGACY_FIXTURE) => serve_python_legacy_preamble().await,
+        Some(PYTHON_LEGACY_BAD_INITIALIZE_FIXTURE) => reject_python_discover_and_initialize().await,
+        Some(NON_LEGACY_INVALID_PARAMS_FIXTURE) => {
+            let (_stdin, _stdout) = reject_discover(
+                -32602,
+                "A modern server rejected malformed discovery parameters",
+                Some(json!({"reason": "owned non-legacy fixture"})),
+            )
+            .await;
+            std::future::pending::<()>().await;
+        }
         Some(DYNAMIC_MODERN_FIXTURE) => serve_dynamic_fixture(false).await,
         Some(DYNAMIC_LEGACY_FIXTURE) => serve_dynamic_fixture(true).await,
         Some(PAGED_FIXTURE) => serve_paged_fixture(false).await,
@@ -721,7 +735,7 @@ async fn serve_fixture(legacy: bool) {
 }
 
 async fn serve_legacy_preamble() {
-    let (stdin, stdout) = legacy_transport().await;
+    let (stdin, stdout) = reject_discover(-32601, "Method not found", None).await;
     let service = FixtureServer::new()
         .serve((stdin, stdout))
         .await
@@ -729,10 +743,64 @@ async fn serve_legacy_preamble() {
     service.waiting().await.expect("wait for legacy fixture");
 }
 
+async fn serve_python_legacy_preamble() {
+    let (stdin, stdout) = reject_discover(
+        -32602,
+        "Invalid request parameters",
+        Some(Value::String(String::new())),
+    )
+    .await;
+    let service = FixtureServer::new()
+        .serve((stdin, stdout))
+        .await
+        .expect("start owned Python-legacy fixture");
+    service
+        .waiting()
+        .await
+        .expect("wait for Python-legacy fixture");
+}
+
+async fn reject_python_discover_and_initialize() {
+    let (stdin, mut stdout) = reject_discover(
+        -32602,
+        "Invalid request parameters",
+        Some(Value::String(String::new())),
+    )
+    .await;
+    let mut reader = BufReader::new(stdin);
+    let mut initialize_line = String::new();
+    reader
+        .read_line(&mut initialize_line)
+        .await
+        .expect("read compatibility initialize request");
+    let initialize: Value =
+        serde_json::from_str(&initialize_line).expect("parse compatibility initialize request");
+    assert_eq!(initialize["method"], "initialize");
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": initialize["id"],
+        "error": {
+            "code": -32602,
+            "message": "Invalid request parameters",
+            "data": ""
+        }
+    });
+    stdout
+        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+        .await
+        .expect("write initialize rejection");
+    stdout
+        .write_all(b"\n")
+        .await
+        .expect("terminate initialize rejection");
+    stdout.flush().await.expect("flush initialize rejection");
+    std::future::pending::<()>().await;
+}
+
 async fn serve_dynamic_fixture(legacy: bool) {
     let server = DynamicFixtureServer::new(!legacy);
     let service = if legacy {
-        let (stdin, stdout) = legacy_transport().await;
+        let (stdin, stdout) = reject_discover(-32601, "Method not found", None).await;
         server
             .serve((stdin, stdout))
             .await
@@ -768,7 +836,11 @@ async fn serve_large_catalog_fixture(tool_count: usize) {
         .expect("wait for large-catalog fixture");
 }
 
-async fn legacy_transport() -> (tokio::io::Stdin, tokio::io::Stdout) {
+async fn reject_discover(
+    code: i64,
+    message: &str,
+    data: Option<Value>,
+) -> (tokio::io::Stdin, tokio::io::Stdout) {
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut request_line = String::new();
     reader
@@ -781,8 +853,9 @@ async fn legacy_transport() -> (tokio::io::Stdin, tokio::io::Stdout) {
         "jsonrpc": "2.0",
         "id": request["id"],
         "error": {
-            "code": -32601,
-            "message": "Method not found"
+            "code": code,
+            "message": message,
+            "data": data
         }
     });
     let mut stdout = tokio::io::stdout();
@@ -807,6 +880,9 @@ async fn run_integration_suite() {
     manager_rejects_a_real_stdio_result_beyond_the_raw_byte_limit().await;
     progress_never_extends_the_host_deadline().await;
     legacy_initialize_fallback_and_tool_call().await;
+    python_sdk_invalid_params_discover_falls_back_once().await;
+    initialize_invalid_params_after_compatibility_fallback_is_terminal().await;
+    unrelated_invalid_params_does_not_downgrade_lifecycle().await;
     real_stdio_tool_pagination_and_repeated_cursor_protection().await;
     modern_and_legacy_dynamic_notifications_share_one_signal_api().await;
     manager_debounces_dynamic_tool_refresh().await;
@@ -1543,6 +1619,59 @@ async fn legacy_initialize_fallback_and_tool_call() {
         }]
     );
     client.close().await.expect("close legacy fixture");
+}
+
+async fn python_sdk_invalid_params_discover_falls_back_once() {
+    let client = connect_fixture(PYTHON_LEGACY_FIXTURE).await;
+    let snapshot = client.protocol_snapshot();
+    assert_eq!(snapshot.negotiated_version, "2025-11-25");
+    assert_eq!(snapshot.lifecycle, McpLifecycleKind::InitializeFallback);
+
+    let page = client
+        .list_tools(None)
+        .await
+        .expect("list tools after Python SDK compatibility fallback");
+    assert!(page.tools.iter().any(|tool| tool.name == "echo_text"));
+    let echo = call(&client, "echo_text", json!({"text": "python-legacy"}))
+        .await
+        .expect("call tool after Python SDK compatibility fallback");
+    assert_eq!(
+        echo.content,
+        vec![McpContentBlock::Text {
+            text: "python-legacy".to_string()
+        }]
+    );
+    client.close().await.expect("close Python-legacy fixture");
+}
+
+async fn unrelated_invalid_params_does_not_downgrade_lifecycle() {
+    let error = fixture_connector()
+        .connect(&fixture_config(NON_LEGACY_INVALID_PARAMS_FIXTURE))
+        .await
+        .expect_err("an unrelated INVALID_PARAMS response must not trigger legacy fallback");
+    assert!(
+        matches!(
+            error.kind,
+            McpErrorKind::Negotiation | McpErrorKind::ServerExited
+        ),
+        "unexpected safe failure kind: {:?}",
+        error.kind
+    );
+}
+
+async fn initialize_invalid_params_after_compatibility_fallback_is_terminal() {
+    let error = fixture_connector()
+        .connect(&fixture_config(PYTHON_LEGACY_BAD_INITIALIZE_FIXTURE))
+        .await
+        .expect_err("initialize INVALID_PARAMS must remain a terminal negotiation failure");
+    assert!(
+        matches!(
+            error.kind,
+            McpErrorKind::Negotiation | McpErrorKind::ServerExited
+        ),
+        "unexpected safe failure kind: {:?}",
+        error.kind
+    );
 }
 
 async fn real_stdio_tool_pagination_and_repeated_cursor_protection() {

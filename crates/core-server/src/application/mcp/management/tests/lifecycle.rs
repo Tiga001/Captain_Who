@@ -31,6 +31,41 @@ impl McpConnector for GatedRejectingConnector {
 }
 
 #[tokio::test]
+async fn manager_failures_keep_a_safe_startup_stage_message() {
+    let harness = TestHarness::new();
+    let cases = [
+        (
+            McpError::spawn("PRIVATE_SPAWN_CANARY"),
+            "The MCP server process could not be started.",
+        ),
+        (
+            McpError::negotiation("PRIVATE_NEGOTIATION_CANARY"),
+            "The MCP protocol negotiation failed.",
+        ),
+        (
+            McpError::protocol("PRIVATE_PROTOCOL_CANARY"),
+            "The MCP server returned an invalid protocol response.",
+        ),
+        (
+            McpError::server_exited(Some(37)),
+            "The MCP server process exited during the operation.",
+        ),
+    ];
+
+    for (error, expected_message) in cases {
+        let data = harness
+            .service
+            .manager_failure(McpManagementOperationDto::Start, None, error)
+            .into_data();
+        assert_eq!(data.code, McpManagementErrorCodeDto::ServerError);
+        assert_eq!(data.recovery, McpManagementRecoveryDto::Retry);
+        assert_eq!(data.message, expected_message);
+        assert!(!data.message.contains("PRIVATE_"));
+    }
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn one_server_mutation_is_exclusive_across_await_but_other_servers_continue() {
     let (entered_sender, entered_receiver) = oneshot::channel();
     let release = Arc::new(Notify::new());
@@ -162,9 +197,11 @@ async fn one_server_mutation_is_exclusive_across_await_but_other_servers_continu
         .await
         .expect("join gated start")
         .expect_err("gated connector deliberately rejects without spawning");
+    let start_error = start_error.into_data();
+    assert_eq!(start_error.code, McpManagementErrorCodeDto::ServerError);
     assert_eq!(
-        failure_code(start_error),
-        McpManagementErrorCodeDto::ServerError
+        start_error.message,
+        "The MCP server process could not be started."
     );
     harness
         .service

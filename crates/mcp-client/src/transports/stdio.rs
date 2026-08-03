@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::future::Future;
 use std::io;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
@@ -12,10 +13,12 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use rmcp::model::{
-    ClientCapabilities, ClientInfo, Implementation, ProtocolVersion, ServerCapabilities,
-    ServerNotification, SubscriptionFilter,
+    ClientCapabilities, ClientInfo, ClientRequest, ErrorCode, Implementation, JsonRpcMessage,
+    ProtocolVersion, RequestId, ServerCapabilities, ServerNotification, SubscriptionFilter,
 };
-use rmcp::{ClientLifecycleMode, ClientServiceExt};
+use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::transport::{async_rw::AsyncRwTransport, Transport};
+use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader, ReadBuf};
 use tokio::process::{Child, ChildStderr, Command};
 use tokio::sync::{oneshot, Mutex};
@@ -31,6 +34,109 @@ use crate::{
 
 const MIN_FORCE_REAP_WINDOW: Duration = Duration::from_millis(250);
 const EXITED_LEADER_TERM_GRACE: Duration = Duration::from_millis(25);
+const LEGACY_PYTHON_INVALID_PARAMS_MESSAGE: &str = "Invalid request parameters";
+
+/// Narrow wire-compatibility shim for Python SDK releases that predate
+/// `server/discover`.
+///
+/// MCP requires an older peer to reject an unknown discovery method with
+/// `METHOD_NOT_FOUND`. Python SDK 1.x instead validates the request against a
+/// closed Pydantic union and returns `INVALID_PARAMS` before dispatch. rmcp's
+/// Auto lifecycle correctly falls back only on `METHOD_NOT_FOUND`, so this
+/// adapter translates that one proven legacy fingerprint for the one exact
+/// discovery request id. It never changes initialize, tool, or post-connect
+/// responses.
+struct LegacyDiscoverCompatibilityTransport<T> {
+    inner: T,
+    state: LegacyDiscoverCompatibilityState,
+}
+
+enum LegacyDiscoverCompatibilityState {
+    AwaitingDiscover,
+    AwaitingResponse(RequestId),
+    Finished,
+}
+
+impl<T> LegacyDiscoverCompatibilityTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            state: LegacyDiscoverCompatibilityState::AwaitingDiscover,
+        }
+    }
+
+    fn observe_outbound(&mut self, message: &TxJsonRpcMessage<RoleClient>) {
+        if !matches!(
+            self.state,
+            LegacyDiscoverCompatibilityState::AwaitingDiscover
+        ) {
+            return;
+        }
+        let JsonRpcMessage::Request(request) = message else {
+            return;
+        };
+        if matches!(request.request, ClientRequest::DiscoverRequest(_)) {
+            self.state = LegacyDiscoverCompatibilityState::AwaitingResponse(request.id.clone());
+        }
+    }
+
+    fn observe_inbound(&mut self, message: &mut RxJsonRpcMessage<RoleClient>) {
+        let LegacyDiscoverCompatibilityState::AwaitingResponse(expected_id) = &self.state else {
+            return;
+        };
+        let matches_response = match message {
+            JsonRpcMessage::Response(response) => &response.id == expected_id,
+            JsonRpcMessage::Error(response) => response.id.as_ref() == Some(expected_id),
+            JsonRpcMessage::Request(_) | JsonRpcMessage::Notification(_) => false,
+        };
+        if !matches_response {
+            return;
+        }
+
+        if let JsonRpcMessage::Error(response) = message {
+            if is_legacy_python_discover_error(&response.error) {
+                response.error.code = ErrorCode::METHOD_NOT_FOUND;
+                response.error.message = "Method not found".into();
+                response.error.data = None;
+            }
+        }
+        self.state = LegacyDiscoverCompatibilityState::Finished;
+    }
+}
+
+impl<T> Transport<RoleClient> for LegacyDiscoverCompatibilityTransport<T>
+where
+    T: Transport<RoleClient> + 'static,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: TxJsonRpcMessage<RoleClient>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.observe_outbound(&item);
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+        let mut message = self.inner.receive().await?;
+        self.observe_inbound(&mut message);
+        Some(message)
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
+}
+
+fn is_legacy_python_discover_error(error: &rmcp::ErrorData) -> bool {
+    error.code == ErrorCode::INVALID_PARAMS
+        && error.message.as_ref() == LEGACY_PYTHON_INVALID_PARAMS_MESSAGE
+        && error
+            .data
+            .as_ref()
+            .is_none_or(|data| data.as_str() == Some(""))
+}
 
 struct SpawnedChildGuard {
     child: Option<Child>,
@@ -285,15 +391,16 @@ impl McpStdioConnector {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
             legacy_version: Some(ProtocolVersion::V_2025_11_25),
         };
-        let negotiation = tokio::time::timeout(
-            config.connect_timeout(),
-            client_handler.serve_with_lifecycle(
-                (
+        let transport =
+            LegacyDiscoverCompatibilityTransport::new(
+                AsyncRwTransport::<RoleClient, _, _>::new_client(
                     LineLimitedReader::new(stdout, self.policy.stdout_max_line_bytes),
                     stdin,
                 ),
-                lifecycle,
-            ),
+            );
+        let negotiation = tokio::time::timeout(
+            config.connect_timeout(),
+            client_handler.serve_with_lifecycle(transport, lifecycle),
         )
         .await;
         let service = match negotiation {

@@ -1604,12 +1604,19 @@ pub(crate) fn prepare_launch_file_identity(
     let McpTransportConfig::Stdio(stdio) = &config.transport else {
         return Err(McpRegistryPersistenceError::InvalidConfig);
     };
+    // Keep the normalized logical executable path for process creation. In
+    // particular, Python virtual environments intentionally expose `bin/python`
+    // as a symlink; replacing it with the canonical base interpreter changes
+    // Python's environment discovery and loses the venv site-packages. The
+    // identity below still binds both this logical path and its canonical
+    // target before the authorized connector reaches spawn.
+    let launch_program = stdio.program.clone();
 
     let mut hasher = Sha256::new();
     hasher.update(LAUNCH_FILE_IDENTITY_DOMAIN);
     hash_identity_field(&mut hasher, launch_spec_digest.as_str().as_bytes());
     let mut remaining_content_hash_bytes = MAX_LAUNCH_CONTENT_HASH_TOTAL_BYTES;
-    let canonical_program = hash_required_launch_path(
+    hash_required_launch_path(
         &mut hasher,
         b"executable",
         &stdio.program,
@@ -1662,14 +1669,14 @@ pub(crate) fn prepare_launch_file_identity(
         write!(output, "{byte:02x}")
             .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
     }
-    let mut canonical_config = config;
-    let McpTransportConfig::Stdio(stdio) = &mut canonical_config.transport else {
+    let mut launch_config = config;
+    let McpTransportConfig::Stdio(stdio) = &mut launch_config.transport else {
         return Err(McpRegistryPersistenceError::InvalidConfig);
     };
-    stdio.program = canonical_program;
+    stdio.program = launch_program;
     stdio.cwd = canonical_cwd;
     stdio.arguments = canonical_arguments;
-    Ok((McpLaunchSpecDigest(output), canonical_config))
+    Ok((McpLaunchSpecDigest(output), launch_config))
 }
 
 fn hash_required_launch_path(

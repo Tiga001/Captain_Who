@@ -25,7 +25,7 @@
             "catalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "catalogSchemaDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "schemaDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            "schemaNormalizerVersion": 2
+            "schemaNormalizerVersion": 3
           }
         },
         "call": {
@@ -112,7 +112,7 @@
               "catalogDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "catalogSchemaDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
               "schemaDigest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-              "schemaNormalizerVersion": 2
+              "schemaNormalizerVersion": 3
             }
           },
           "call": {

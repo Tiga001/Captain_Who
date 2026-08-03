@@ -113,6 +113,26 @@ impl McpManagementService {
                 McpManagementRecoveryDto::StopAndRetry,
                 "The MCP server did not shut down cleanly.",
             ),
+            McpErrorKind::Spawn => (
+                McpManagementErrorCodeDto::ServerError,
+                McpManagementRecoveryDto::Retry,
+                "The MCP server process could not be started.",
+            ),
+            McpErrorKind::Negotiation => (
+                McpManagementErrorCodeDto::ServerError,
+                McpManagementRecoveryDto::Retry,
+                "The MCP protocol negotiation failed.",
+            ),
+            McpErrorKind::Protocol => (
+                McpManagementErrorCodeDto::ServerError,
+                McpManagementRecoveryDto::Retry,
+                "The MCP server returned an invalid protocol response.",
+            ),
+            McpErrorKind::ServerExited => (
+                McpManagementErrorCodeDto::ServerError,
+                McpManagementRecoveryDto::Retry,
+                "The MCP server process exited during the operation.",
+            ),
             _ => (
                 McpManagementErrorCodeDto::ServerError,
                 McpManagementRecoveryDto::Retry,
