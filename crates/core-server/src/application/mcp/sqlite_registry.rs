@@ -7,10 +7,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mycopilot_mcp_client::{
-    config_digest, McpApprovalMode, McpConfigDigest, McpConfigEpoch, McpError, McpRegistry,
-    McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry, McpRegistryMutation,
-    McpRegistrySubscription, McpServerConfig, McpServerId, McpServerScope, McpStdioConfig,
-    McpTransportConfig, McpTrustLevel,
+    allocate_model_namespace, config_digest, McpApprovalMode, McpConfigDigest, McpConfigEpoch,
+    McpError, McpModelNamespace, McpRegistry, McpRegistryChange, McpRegistryChangeKind,
+    McpRegistryEntry, McpRegistryMutation, McpRegistrySubscription, McpServerConfig, McpServerId,
+    McpServerScope, McpStdioConfig, McpTransportConfig, McpTrustLevel,
 };
 use rusqlite::{
     params, types::ValueRef, Connection, OptionalExtension, Transaction, TransactionBehavior,
@@ -22,6 +22,7 @@ use tokio::sync::broadcast;
 const REGISTRY_SCHEMA_VERSION: i64 = 1;
 const REGISTRY_METADATA_SINGLETON: i64 = 1;
 const REGISTRY_CHANGE_CAPACITY: usize = 128;
+const MODEL_NAMESPACE_SCHEMA_VERSION: i64 = 1;
 pub(crate) const MCP_REGISTRY_MAX_SERVERS: usize = 1024;
 const MAX_WIRE_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub(crate) const MCP_LAUNCH_AUTHORIZATION_FORMAT_VERSION: u32 = 2;
@@ -76,7 +77,12 @@ const SELECT_COLUMNS: &str = "
     record_state,
     safe_error_code,
     created_at,
-    updated_at
+    updated_at,
+    (
+        SELECT namespace.model_namespace
+        FROM mcp_registry_model_namespaces AS namespace
+        WHERE namespace.server_id = mcp_registry_servers.server_id
+    ) AS model_namespace
 ";
 
 const REGISTRY_METADATA_COLUMNS: &[&str] = &[
@@ -116,6 +122,13 @@ const REGISTRY_SERVER_COLUMNS: &[&str] = &[
     "safe_error_code",
     "created_at",
     "updated_at",
+];
+
+const MODEL_NAMESPACE_COLUMNS: &[&str] = &[
+    "schema_version",
+    "server_id",
+    "model_namespace",
+    "created_at",
 ];
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -297,7 +310,9 @@ impl SqliteMcpRegistry {
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
         run_migrations(&mut connection)?;
+        reconcile_model_namespaces(&mut connection)?;
         reconcile_startup(&mut connection)?;
+        reconcile_model_namespaces(&mut connection)?;
         let (changes, _) = broadcast::channel(REGISTRY_CHANGE_CAPACITY);
         Ok(Self {
             connection: Mutex::new(connection),
@@ -787,6 +802,13 @@ fn run_migrations(connection: &mut Connection) -> Result<(), McpRegistryPersiste
 
             CREATE INDEX IF NOT EXISTS mcp_registry_servers_revision
             ON mcp_registry_servers(registry_revision, server_id);
+
+            CREATE TABLE IF NOT EXISTS mcp_registry_model_namespaces (
+                schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                server_id TEXT PRIMARY KEY,
+                model_namespace TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL CHECK (created_at >= 0)
+            );
             ",
         )
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
@@ -881,9 +903,172 @@ fn finish_approval_mode_constraint_migration(
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)
 }
 
+/// Repairs the additive Host-owned model namespace index without changing any
+/// Registry configuration identity, revision, or launch authorization.
+///
+/// Existing valid mappings are immutable. Missing or malformed side-table
+/// rows are rebuilt deterministically from the current persisted display name;
+/// stale rows for removed/quarantined servers are deleted. The caller runs
+/// this once before startup record decoding and once after reconciliation.
+fn reconcile_model_namespaces(
+    connection: &mut Connection,
+) -> Result<(), McpRegistryPersistenceError> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+
+    let candidates = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT server_id, display_name, created_at
+                 FROM mcp_registry_servers
+                 WHERE record_state = 'active'
+                 ORDER BY created_at, server_id",
+            )
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        let rows = statement
+            .query_map([], |row| {
+                let server_id = match row.get_ref(0)? {
+                    ValueRef::Text(value) => std::str::from_utf8(value).ok().map(str::to_string),
+                    _ => None,
+                };
+                let display_name = match row.get_ref(1)? {
+                    ValueRef::Text(value) => std::str::from_utf8(value).ok().map(str::to_string),
+                    _ => None,
+                };
+                let created_at = match row.get_ref(2)? {
+                    ValueRef::Integer(value) => Some(value),
+                    _ => None,
+                };
+                Ok(server_id.zip(display_name).zip(created_at).map(
+                    |((server_id, display_name), created_at)| (server_id, display_name, created_at),
+                ))
+            })
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        rows.into_iter().flatten().collect::<Vec<_>>()
+    };
+    let candidates = candidates
+        .into_iter()
+        .filter_map(|(stored_id, display_name, created_at)| {
+            McpServerId::from_str(&stored_id)
+                .ok()
+                .map(|server_id| (stored_id, server_id, display_name, created_at))
+        })
+        .collect::<Vec<_>>();
+    let active_ids = candidates
+        .iter()
+        .map(|(stored_id, _, _, _)| stored_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let persisted = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT rowid, schema_version, server_id, model_namespace
+                 FROM mcp_registry_model_namespaces
+                 ORDER BY rowid",
+            )
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    match row.get_ref(1)? {
+                        ValueRef::Integer(value) => Some(value),
+                        _ => None,
+                    },
+                    match row.get_ref(2)? {
+                        ValueRef::Text(value) => {
+                            std::str::from_utf8(value).ok().map(str::to_string)
+                        }
+                        _ => None,
+                    },
+                    match row.get_ref(3)? {
+                        ValueRef::Text(value) => {
+                            std::str::from_utf8(value).ok().map(str::to_string)
+                        }
+                        _ => None,
+                    },
+                ))
+            })
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        rows
+    };
+
+    let mut mapped_ids = std::collections::BTreeSet::new();
+    let mut occupied = std::collections::BTreeSet::<McpModelNamespace>::new();
+    for (rowid, schema_version, server_id, raw_namespace) in persisted {
+        let valid_mapping = schema_version
+            .filter(|version| *version == MODEL_NAMESPACE_SCHEMA_VERSION)
+            .zip(server_id)
+            .zip(raw_namespace)
+            .and_then(|((_, server_id), raw_namespace)| {
+                McpModelNamespace::from_str(&raw_namespace)
+                    .ok()
+                    .map(|namespace| (server_id, namespace))
+            })
+            .filter(|(server_id, _)| active_ids.contains(server_id))
+            .filter(|(server_id, namespace)| {
+                !mapped_ids.contains(server_id) && !occupied.contains(namespace)
+            });
+        if let Some((server_id, namespace)) = valid_mapping {
+            mapped_ids.insert(server_id);
+            occupied.insert(namespace);
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM mcp_registry_model_namespaces WHERE rowid = ?1",
+                    [rowid],
+                )
+                .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        }
+    }
+
+    for (stored_id, server_id, display_name, created_at) in candidates {
+        if mapped_ids.contains(&stored_id) {
+            continue;
+        }
+        let namespace = allocate_model_namespace(&display_name, server_id, occupied.iter())
+            .map_err(|_| McpRegistryPersistenceError::CorruptRecord)?;
+        transaction
+            .execute(
+                "INSERT INTO mcp_registry_model_namespaces (
+                     schema_version, server_id, model_namespace, created_at
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    MODEL_NAMESPACE_SCHEMA_VERSION,
+                    stored_id,
+                    namespace.as_str(),
+                    created_at.max(0),
+                ],
+            )
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        occupied.insert(namespace);
+    }
+
+    transaction
+        .commit()
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)
+}
+
 fn quarantine_incompatible_registry_schema(
     transaction: &Transaction<'_>,
 ) -> Result<(), McpRegistryPersistenceError> {
+    let namespace_columns = registry_table_columns(transaction, "mcp_registry_model_namespaces")?;
+    let namespace_shape_is_incompatible = match namespace_columns.as_deref() {
+        Some(columns) => {
+            !column_names_match(columns, MODEL_NAMESPACE_COLUMNS)
+                || !model_namespace_table_constraints_are_compatible(transaction)?
+        }
+        None => false,
+    };
+    if namespace_shape_is_incompatible {
+        quarantine_registry_table(transaction, "mcp_registry_model_namespaces")?;
+    }
+
     let metadata_columns = registry_table_columns(transaction, "mcp_registry_metadata")?;
     let metadata_shape_is_incompatible = metadata_columns
         .as_deref()
@@ -909,6 +1094,83 @@ fn quarantine_incompatible_registry_schema(
         quarantine_registry_table(transaction, "mcp_registry_servers")?;
     }
     Ok(())
+}
+
+fn model_namespace_table_constraints_are_compatible(
+    transaction: &Transaction<'_>,
+) -> Result<bool, McpRegistryPersistenceError> {
+    if transaction
+        .prepare("SELECT rowid FROM mcp_registry_model_namespaces LIMIT 0")
+        .is_err()
+    {
+        return Ok(false);
+    }
+
+    let table_info_sql = format!(
+        "PRAGMA table_info({})",
+        quote_identifier("mcp_registry_model_namespaces")
+    );
+    let primary_key_columns = {
+        let mut statement = transaction
+            .prepare(&table_info_sql)
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        let mut rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+            })
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        rows.retain(|(_, primary_key_position)| *primary_key_position > 0);
+        rows.sort_by_key(|(_, primary_key_position)| *primary_key_position);
+        rows.into_iter().map(|(name, _)| name).collect::<Vec<_>>()
+    };
+    if primary_key_columns != ["server_id"] {
+        return Ok(false);
+    }
+
+    let index_list_sql = format!(
+        "PRAGMA index_list({})",
+        quote_identifier("mcp_registry_model_namespaces")
+    );
+    let unique_indexes = {
+        let mut statement = transaction
+            .prepare(&index_list_sql)
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                    row.get::<_, i64>(4)? != 0,
+                ))
+            })
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+        rows
+    };
+    for (index_name, unique, partial) in unique_indexes {
+        if !unique || partial {
+            continue;
+        }
+        let index_info_sql = format!("PRAGMA index_info({})", quote_identifier(&index_name));
+        let columns = {
+            let mut statement = transaction
+                .prepare(&index_info_sql)
+                .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, Option<String>>(2))
+                .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+            rows
+        };
+        if columns == [Some("model_namespace".to_string())] {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn registry_metadata_version_is_compatible(
@@ -1211,6 +1473,10 @@ fn insert_record(
     config: McpServerConfig,
 ) -> Result<McpPersistedRegistryRecord, McpRegistryPersistenceError> {
     ensure_registry_capacity(transaction)?;
+    let occupied_namespaces = load_model_namespaces(transaction)?;
+    let model_namespace =
+        allocate_model_namespace(&config.display_name, config.id, occupied_namespaces.iter())
+            .map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
     let revision = next_revision(transaction)?;
     let config_epoch = McpConfigEpoch::new();
     let config_digest =
@@ -1220,6 +1486,7 @@ fn insert_record(
     let record = McpPersistedRegistryRecord {
         entry: McpRegistryEntry {
             config,
+            model_namespace,
             config_digest,
             config_epoch,
             revision,
@@ -1251,6 +1518,30 @@ fn ensure_registry_capacity(
         return Err(McpRegistryPersistenceError::CapacityExceeded);
     }
     Ok(())
+}
+
+fn load_model_namespaces(
+    transaction: &Transaction<'_>,
+) -> Result<std::collections::BTreeSet<McpModelNamespace>, McpRegistryPersistenceError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT model_namespace
+             FROM mcp_registry_model_namespaces
+             ORDER BY model_namespace",
+        )
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    let values = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    values
+        .into_iter()
+        .map(|value| {
+            McpModelNamespace::from_str(&value)
+                .map_err(|_| McpRegistryPersistenceError::CorruptRecord)
+        })
+        .collect()
 }
 
 fn update_existing(
@@ -1337,6 +1628,7 @@ fn commit_updated_record(
     let record = McpPersistedRegistryRecord {
         entry: McpRegistryEntry {
             config,
+            model_namespace: existing.entry.model_namespace.clone(),
             config_digest,
             config_epoch,
             revision,
@@ -1368,6 +1660,12 @@ fn remove_record(
     existing: McpPersistedRegistryRecord,
 ) -> Result<(McpRegistryEntry, McpRegistryChange), McpRegistryPersistenceError> {
     let revision = next_revision(transaction)?;
+    transaction
+        .execute(
+            "DELETE FROM mcp_registry_model_namespaces WHERE server_id = ?1",
+            [existing.entry.config.id.to_string()],
+        )
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
     let affected = transaction
         .execute(
             "DELETE FROM mcp_registry_servers
@@ -2027,6 +2325,19 @@ fn insert_row(
             ],
         )
         .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
+    transaction
+        .execute(
+            "INSERT INTO mcp_registry_model_namespaces (
+                 schema_version, server_id, model_namespace, created_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                MODEL_NAMESPACE_SCHEMA_VERSION,
+                record.entry.config.id.to_string(),
+                record.entry.model_namespace.as_str(),
+                record.created_at_ms,
+            ],
+        )
+        .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
     Ok(())
 }
 
@@ -2259,6 +2570,7 @@ struct RawRegistryRecord {
     safe_error_code: Option<String>,
     created_at: i64,
     updated_at: i64,
+    model_namespace: Option<String>,
 }
 
 fn raw_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRegistryRecord> {
@@ -2299,6 +2611,7 @@ fn raw_record_from_row_at(
         safe_error_code: row.get(offset + 26)?,
         created_at: row.get(offset + 27)?,
         updated_at: row.get(offset + 28)?,
+        model_namespace: row.get(offset + 29)?,
     })
 }
 
@@ -2327,6 +2640,14 @@ fn decode_record(
     }
     let config_epoch = McpConfigEpoch::from_str(&raw.config_epoch)
         .map_err(|_| McpRegistryPersistenceError::CorruptRecord)?;
+    let model_namespace = raw
+        .model_namespace
+        .as_deref()
+        .ok_or(McpRegistryPersistenceError::CorruptRecord)
+        .and_then(|value| {
+            McpModelNamespace::from_str(value)
+                .map_err(|_| McpRegistryPersistenceError::CorruptRecord)
+        })?;
     let revision = u64::try_from(raw.registry_revision)
         .ok()
         .filter(|revision| *revision > 0)
@@ -2339,6 +2660,7 @@ fn decode_record(
     let record = McpPersistedRegistryRecord {
         entry: McpRegistryEntry {
             config,
+            model_namespace,
             config_digest: persisted_digest,
             config_epoch,
             revision,
@@ -2957,6 +3279,7 @@ mod tests {
         let first = registry.add(config(id, "first")).unwrap();
         let first_epoch = first.config_epoch;
         let first_digest = first.config_digest.clone();
+        let first_namespace = first.model_namespace.clone();
         assert_eq!(first.revision, 1);
         drop(registry);
 
@@ -2964,6 +3287,7 @@ mod tests {
         let restored = reopened.get(id).unwrap().unwrap();
         assert_eq!(restored.config_epoch, first_epoch);
         assert_eq!(restored.config_digest, first_digest);
+        assert_eq!(restored.model_namespace, first_namespace);
         assert_eq!(restored.revision, 1);
         assert_eq!(reopened.current_revision().unwrap(), 1);
 
@@ -2981,11 +3305,252 @@ mod tests {
         assert_eq!(changed.revision, 2);
         assert_ne!(changed.config_epoch, first_epoch);
         assert_ne!(changed.config_digest, first_digest);
+        assert_eq!(changed.model_namespace, first_namespace);
         drop(reopened);
 
         let reopened = SqliteMcpRegistry::open(&path).unwrap();
         assert_eq!(reopened.current_revision().unwrap(), 2);
         assert_eq!(reopened.get(id).unwrap().unwrap(), changed);
+    }
+
+    #[test]
+    fn legacy_database_backfills_model_namespace_without_changing_authorization_identity() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let id = McpServerId::new();
+        let registry = SqliteMcpRegistry::open(&path).unwrap();
+        let added = registry.add(config(id, "Filesystem Test")).unwrap();
+        let persisted = registry.get_persisted(id).unwrap().unwrap();
+        let file_identity_digest = compute_launch_file_identity_digest(
+            &persisted.entry.config,
+            &persisted.launch_spec_digest,
+        )
+        .unwrap();
+        registry
+            .authorize_launch(
+                &McpRegistryMutationPrecondition::from_entry(&added),
+                &persisted.launch_spec_digest,
+                &file_identity_digest,
+                MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
+                1,
+            )
+            .unwrap();
+        let authorized = registry.get_persisted(id).unwrap().unwrap();
+        let enabled = registry
+            .set_enabled(
+                &McpRegistryMutationPrecondition::from_entry(&authorized.entry),
+                true,
+            )
+            .unwrap();
+        let before = registry.get_persisted(id).unwrap().unwrap();
+        assert_eq!(enabled.model_namespace.as_str(), "filesystem_test");
+        drop(registry);
+
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch("DROP TABLE mcp_registry_model_namespaces;")
+            .unwrap();
+        drop(legacy);
+
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        let after = reopened.get_persisted(id).unwrap().unwrap();
+        assert_eq!(after.entry.model_namespace.as_str(), "filesystem_test");
+        assert_eq!(after.entry.config_digest, before.entry.config_digest);
+        assert_eq!(after.entry.config_epoch, before.entry.config_epoch);
+        assert_eq!(after.entry.revision, before.entry.revision);
+        assert_eq!(after.launch_authorization, before.launch_authorization);
+        assert!(after.entry.config.enabled);
+        assert_eq!(reopened.current_revision().unwrap(), before.entry.revision);
+    }
+
+    #[test]
+    fn malformed_namespace_storage_class_is_repaired_without_hiding_healthy_servers() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let damaged_id = McpServerId::new();
+        let healthy_id = McpServerId::new();
+        let registry = SqliteMcpRegistry::open(&path).unwrap();
+        registry.add(config(damaged_id, "Filesystem Test")).unwrap();
+        let healthy = registry.add(config(healthy_id, "Memory Test")).unwrap();
+        drop(registry);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE mcp_registry_model_namespaces
+                 SET model_namespace = x'00ff'
+                 WHERE server_id = ?1",
+                [damaged_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        let records = reopened.list().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            reopened.get(damaged_id).unwrap().unwrap().model_namespace,
+            McpModelNamespace::from_str("filesystem_test").unwrap()
+        );
+        assert_eq!(
+            reopened.get(healthy_id).unwrap().unwrap().model_namespace,
+            healthy.model_namespace
+        );
+    }
+
+    #[test]
+    fn noncanonical_namespace_table_is_rebuilt_with_primary_and_unique_constraints() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("registry.sqlite");
+        let first_id = McpServerId::new();
+        let second_id = McpServerId::new();
+        let registry = SqliteMcpRegistry::open(&path).unwrap();
+        registry.add(config(first_id, "Filesystem Test")).unwrap();
+        registry.add(config(second_id, "Filesystem/Test")).unwrap();
+        drop(registry);
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE mcp_registry_model_namespaces;
+                 CREATE TABLE mcp_registry_model_namespaces (
+                     schema_version INTEGER,
+                     server_id TEXT,
+                     model_namespace TEXT,
+                     created_at INTEGER
+                 );",
+            )
+            .unwrap();
+        for server_id in [first_id, second_id] {
+            connection
+                .execute(
+                    "INSERT INTO mcp_registry_model_namespaces (
+                         schema_version, server_id, model_namespace, created_at
+                     ) VALUES (1, ?1, 'filesystem_test', 1)",
+                    [server_id.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let reopened = SqliteMcpRegistry::open(&path).unwrap();
+        let first = reopened.get(first_id).unwrap().unwrap();
+        let second = reopened.get(second_id).unwrap().unwrap();
+        assert_ne!(first.model_namespace, second.model_namespace);
+        assert!([
+            first.model_namespace.as_str(),
+            second.model_namespace.as_str()
+        ]
+        .contains(&"filesystem_test"));
+        drop(reopened);
+
+        let connection = Connection::open(&path).unwrap();
+        assert!(connection
+            .execute(
+                "INSERT INTO mcp_registry_model_namespaces (
+                     schema_version, server_id, model_namespace, created_at
+                 ) VALUES (1, 'duplicate-server', 'filesystem_test', 1)",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO mcp_registry_model_namespaces (
+                     schema_version, server_id, model_namespace, created_at
+                 ) VALUES (1, ?1, 'another_namespace', 1)",
+                [first_id.to_string()],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn structurally_misleading_namespace_tables_are_quarantined_and_rebuilt() {
+        let cases = [
+            (
+                "without-rowid",
+                "CREATE TABLE mcp_registry_model_namespaces (
+                     schema_version INTEGER NOT NULL,
+                     server_id TEXT PRIMARY KEY,
+                     model_namespace TEXT NOT NULL UNIQUE,
+                     created_at INTEGER NOT NULL
+                 ) WITHOUT\nROWID;",
+            ),
+            (
+                "compound-primary-key",
+                "CREATE TABLE mcp_registry_model_namespaces (
+                     schema_version INTEGER NOT NULL,
+                     server_id TEXT NOT NULL,
+                     model_namespace TEXT NOT NULL UNIQUE,
+                     created_at INTEGER NOT NULL,
+                     PRIMARY KEY (server_id, created_at)
+                 );",
+            ),
+            (
+                "partial-unique-index",
+                "CREATE TABLE mcp_registry_model_namespaces (
+                     schema_version INTEGER NOT NULL,
+                     server_id TEXT PRIMARY KEY,
+                     model_namespace TEXT NOT NULL,
+                     created_at INTEGER NOT NULL
+                 );
+                 CREATE UNIQUE INDEX misleading_namespace_unique
+                 ON mcp_registry_model_namespaces(model_namespace)
+                 WHERE created_at < 0;",
+            ),
+            (
+                "expression-unique-index",
+                "CREATE TABLE mcp_registry_model_namespaces (
+                     schema_version INTEGER NOT NULL,
+                     server_id TEXT PRIMARY KEY,
+                     model_namespace TEXT NOT NULL,
+                     created_at INTEGER NOT NULL
+                 );
+                 CREATE UNIQUE INDEX misleading_namespace_expression_unique
+                 ON mcp_registry_model_namespaces(lower(model_namespace));",
+            ),
+        ];
+
+        for (case, replacement_schema) in cases {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join(format!("{case}.sqlite"));
+            let id = McpServerId::new();
+            let registry = SqliteMcpRegistry::open(&path).unwrap();
+            registry.add(config(id, "Filesystem Test")).unwrap();
+            drop(registry);
+
+            let connection = Connection::open(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "DROP TABLE mcp_registry_model_namespaces; {replacement_schema}"
+                ))
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO mcp_registry_model_namespaces (
+                         schema_version, server_id, model_namespace, created_at
+                     ) VALUES (1, ?1, 'filesystem_test', 1)",
+                    [id.to_string()],
+                )
+                .unwrap();
+            drop(connection);
+
+            let reopened = SqliteMcpRegistry::open(&path).unwrap_or_else(|error| {
+                panic!("{case} namespace table should be rebuilt: {error:?}")
+            });
+            let restored = reopened.get(id).unwrap().unwrap();
+            assert_eq!(restored.model_namespace.as_str(), "filesystem_test");
+            drop(reopened);
+
+            let connection = Connection::open(&path).unwrap();
+            assert!(connection
+                .execute(
+                    "INSERT INTO mcp_registry_model_namespaces (
+                         schema_version, server_id, model_namespace, created_at
+                     ) VALUES (1, 'another-server', 'filesystem_test', 1)",
+                    [],
+                )
+                .is_err());
+        }
     }
 
     #[test]
@@ -3516,6 +4081,7 @@ mod tests {
             panic!("expected update");
         };
         let after_rename = registry.get_persisted(id).unwrap().unwrap();
+        assert_eq!(renamed.model_namespace, authorized.model_namespace);
         assert_eq!(
             after_rename
                 .launch_authorization

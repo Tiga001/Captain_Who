@@ -4,8 +4,8 @@ use std::fmt;
 use crate::digest::{canonical_json_bytes, catalog_digest, schema_digest, tool_name_hash};
 use crate::limits::validate_schema_value;
 use crate::{
-    McpCatalogDigest, McpConfigDigest, McpConfigEpoch, McpError, McpPeer, McpSchemaDigest,
-    McpSecurityLimits, McpServerId, McpToolDescriptor,
+    McpCatalogDigest, McpConfigDigest, McpConfigEpoch, McpError, McpModelNamespace, McpPeer,
+    McpSchemaDigest, McpSecurityLimits, McpServerId, McpToolDescriptor,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -351,9 +351,11 @@ pub(crate) async fn discover_catalog(
     previous: Option<&McpCatalogSnapshot>,
     policy: &McpCatalogPolicy,
 ) -> Result<McpCatalogSnapshot, McpError> {
+    let model_namespace = McpModelNamespace::from_normalized("fixture")?;
     discover_catalog_with_limits(
         peer,
         server_id,
+        &model_namespace,
         previous,
         policy,
         &McpSecurityLimits::default(),
@@ -364,6 +366,7 @@ pub(crate) async fn discover_catalog(
 pub(crate) async fn discover_catalog_with_limits(
     peer: &dyn McpPeer,
     server_id: McpServerId,
+    model_namespace: &McpModelNamespace,
     previous: Option<&McpCatalogSnapshot>,
     policy: &McpCatalogPolicy,
     security_limits: &McpSecurityLimits,
@@ -371,7 +374,14 @@ pub(crate) async fn discover_catalog_with_limits(
     policy.limits.validate()?;
     security_limits.validate()?;
     if !peer.protocol_snapshot().capabilities.tools {
-        return complete_snapshot(server_id, previous, Vec::new(), 0, 0, 0, policy);
+        return complete_snapshot(
+            server_id,
+            model_namespace,
+            previous,
+            Vec::new(),
+            CatalogMeasurements::new(0, 0, 0),
+            policy,
+        );
     }
     let mut cursor = None;
     let mut seen_cursors = BTreeSet::new();
@@ -384,6 +394,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if page_count >= policy.limits.max_pages {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::PageLimitExceeded,
@@ -397,6 +408,7 @@ pub(crate) async fn discover_catalog_with_limits(
             Err(_) => {
                 return incomplete_snapshot(
                     server_id,
+                    model_namespace,
                     previous,
                     descriptors,
                     McpCatalogIssue::RequestFailed,
@@ -434,6 +446,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if page_schema_bytes > policy.limits.max_schema_bytes_per_page {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::PageSchemaLimitExceeded,
@@ -444,6 +457,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if page_descriptor_bytes > policy.limits.max_descriptor_bytes_per_page {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::PageDescriptorLimitExceeded,
@@ -459,6 +473,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if proposed_tools > policy.limits.max_tools {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::ToolLimitExceeded,
@@ -472,6 +487,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if proposed_schema_bytes > policy.limits.max_total_schema_bytes {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::TotalSchemaLimitExceeded,
@@ -486,6 +502,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if proposed_descriptor_bytes > policy.limits.max_total_descriptor_bytes {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::TotalDescriptorLimitExceeded,
@@ -503,6 +520,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if next_cursor.len() > policy.limits.max_cursor_bytes {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::CursorTooLarge,
@@ -513,6 +531,7 @@ pub(crate) async fn discover_catalog_with_limits(
         if !seen_cursors.insert(next_cursor.clone()) {
             return incomplete_snapshot(
                 server_id,
+                model_namespace,
                 previous,
                 descriptors,
                 McpCatalogIssue::RepeatedCursor,
@@ -525,25 +544,23 @@ pub(crate) async fn discover_catalog_with_limits(
 
     complete_snapshot(
         server_id,
+        model_namespace,
         previous,
         descriptors,
-        page_count,
-        total_schema_bytes,
-        total_descriptor_bytes,
+        CatalogMeasurements::new(page_count, total_schema_bytes, total_descriptor_bytes),
         policy,
     )
 }
 
 fn complete_snapshot(
     server_id: McpServerId,
+    model_namespace: &McpModelNamespace,
     previous: Option<&McpCatalogSnapshot>,
     descriptors: Vec<CatalogDescriptorCandidate>,
-    page_count: usize,
-    total_schema_bytes: usize,
-    total_descriptor_bytes: usize,
+    measurements: CatalogMeasurements,
     policy: &McpCatalogPolicy,
 ) -> Result<McpCatalogSnapshot, McpError> {
-    let (tools, diagnostics) = build_tools(server_id, descriptors, policy)?;
+    let (tools, diagnostics) = build_tools(server_id, model_namespace, descriptors, policy)?;
     let digest = effective_catalog_digest(&tools)?;
     let generation = match previous {
         Some(previous) if previous.content_digest.as_ref() == Some(&digest) => previous.generation,
@@ -562,15 +579,16 @@ fn complete_snapshot(
         completeness: McpCatalogCompleteness::Complete,
         tools,
         diagnostics,
-        page_count,
-        total_schema_bytes,
-        total_descriptor_bytes,
+        page_count: measurements.page_count,
+        total_schema_bytes: measurements.total_schema_bytes,
+        total_descriptor_bytes: measurements.total_descriptor_bytes,
         content_digest: Some(digest),
     })
 }
 
 fn incomplete_snapshot(
     server_id: McpServerId,
+    model_namespace: &McpModelNamespace,
     previous: Option<&McpCatalogSnapshot>,
     descriptors: Vec<CatalogDescriptorCandidate>,
     issue: McpCatalogIssue,
@@ -602,7 +620,7 @@ fn incomplete_snapshot(
             content_digest: None,
         });
     }
-    let (tools, diagnostics) = build_tools(server_id, descriptors, policy)?;
+    let (tools, diagnostics) = build_tools(server_id, model_namespace, descriptors, policy)?;
     Ok(McpCatalogSnapshot {
         server_id,
         source_config_epoch: None,
@@ -621,6 +639,7 @@ fn incomplete_snapshot(
 
 fn build_tools(
     server_id: McpServerId,
+    model_namespace: &McpModelNamespace,
     mut descriptors: Vec<CatalogDescriptorCandidate>,
     policy: &McpCatalogPolicy,
 ) -> Result<(Vec<McpCatalogTool>, Vec<McpCatalogDiagnostic>), McpError> {
@@ -652,6 +671,13 @@ fn build_tools(
             .push(candidate);
     }
 
+    let mut normalized_stem_counts = BTreeMap::<String, usize>::new();
+    for raw_name in grouped.keys() {
+        *normalized_stem_counts
+            .entry(normalize_stem(raw_name))
+            .or_default() += 1;
+    }
+
     let mut tools = Vec::with_capacity(grouped.len());
     for (raw_name, duplicates) in grouped {
         let duplicate_count = duplicates.len();
@@ -668,7 +694,16 @@ fn build_tools(
         };
         let descriptor_valid = candidate.issues.is_empty();
         let descriptor = candidate.descriptor;
-        let model_name = build_model_name(server_id, &raw_name, policy.limits.max_model_name_bytes);
+        let normalized_stem = normalize_stem(&raw_name);
+        let normalization_collision = normalized_stem_counts
+            .get(&normalized_stem)
+            .is_some_and(|count| *count > 1);
+        let model_name = build_model_name(
+            model_namespace,
+            &raw_name,
+            policy.limits.max_model_name_bytes,
+            normalization_collision,
+        );
         let reserved = policy.reserved_model_names.contains(&model_name);
         if reserved {
             diagnostics.push(McpCatalogDiagnostic {
@@ -849,14 +884,24 @@ fn schema_bytes(descriptor: &McpToolDescriptor) -> Result<usize, McpError> {
         .ok_or_else(|| McpError::protocol("MCP schema byte count overflowed"))
 }
 
-fn build_model_name(server_id: McpServerId, raw_name: &str, max_bytes: usize) -> String {
-    let prefix = format!("mcp__{}__", server_id.as_uuid().simple());
+fn build_model_name(
+    model_namespace: &McpModelNamespace,
+    raw_name: &str,
+    max_bytes: usize,
+    force_hash: bool,
+) -> String {
+    let prefix = format!("mcp__{}__", model_namespace.as_str());
+    let stem = normalize_stem(raw_name);
+    let plain = format!("{prefix}{stem}");
+    if !force_hash && plain.len() <= max_bytes {
+        return plain;
+    }
     let suffix = format!("_{}", tool_name_hash(raw_name));
     let stem_budget = max_bytes
         .saturating_sub(prefix.len())
         .saturating_sub(suffix.len())
         .max(1);
-    let mut stem = normalize_stem(raw_name);
+    let mut stem = stem;
     stem.truncate(stem_budget);
     format!("{prefix}{stem}{suffix}")
 }
@@ -1013,15 +1058,31 @@ mod tests {
             .collect()
     }
 
+    fn namespace(value: &str) -> McpModelNamespace {
+        McpModelNamespace::from_normalized(value).unwrap()
+    }
+
     #[test]
-    fn namespace_is_stable_bounded_and_independent_of_display_name() {
-        let id = McpServerId::from_uuid(
-            uuid::Uuid::parse_str("12345678-1234-4234-8234-123456789abc").unwrap(),
+    fn friendly_model_name_is_stable_and_only_hashes_when_truncated() {
+        let namespace = namespace("filesystem_test");
+        let plain = build_model_name(&namespace, "read_text_file", 64, false);
+        assert_eq!(plain, "mcp__filesystem_test__read_text_file");
+
+        let first = build_model_name(
+            &namespace,
+            "Unicode / VERY-LONG.tool-name-that-exceeds-the-provider-budget",
+            64,
+            false,
         );
-        let first = build_model_name(id, "Unicode / VERY-LONG.tool-name", 64);
-        let second = build_model_name(id, "Unicode / VERY-LONG.tool-name", 64);
+        let second = build_model_name(
+            &namespace,
+            "Unicode / VERY-LONG.tool-name-that-exceeds-the-provider-budget",
+            64,
+            false,
+        );
         assert_eq!(first, second);
         assert!(first.len() <= 64);
+        assert_ne!(first, plain);
         assert!(first
             .bytes()
             .all(|byte| byte == b'_' || byte.is_ascii_lowercase() || byte.is_ascii_digit()));
@@ -1033,6 +1094,7 @@ mod tests {
         let policy = McpCatalogPolicy::default();
         let (tools, diagnostics) = build_tools(
             id,
+            &namespace("fixture"),
             candidates(vec![descriptor("alpha.beta"), descriptor("alpha/beta")]),
             &policy,
         )
@@ -1048,6 +1110,7 @@ mod tests {
         let id = McpServerId::new();
         let (tools, diagnostics) = build_tools(
             id,
+            &namespace("fixture"),
             candidates(vec![descriptor("same"), descriptor("same")]),
             &McpCatalogPolicy::default(),
         )

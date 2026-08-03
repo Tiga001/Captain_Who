@@ -93,8 +93,8 @@ fn tool_definition() -> AgentToolDefinition {
 
 fn mcp_tool_definition() -> AgentToolDefinition {
     AgentToolDefinition {
-        name: "mcp__fixture_7f4a2d91__add_numbers".to_string(),
-        description: "Add two fixture numbers.".to_string(),
+        name: "mcp__fixture__add_numbers".to_string(),
+        description: "MCP server: \"Fixture MCP\"\nMCP tool: \"add_numbers\"\nDescription: Add two fixture numbers.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -1122,8 +1122,8 @@ fn builds_openai_mcp_namespace_tool_payload_without_internal_catalog_fields() {
         &json!({
             "type": "function",
             "function": {
-                "name": "mcp__fixture_7f4a2d91__add_numbers",
-                "description": "Add two fixture numbers.",
+                "name": "mcp__fixture__add_numbers",
+                "description": "MCP server: \"Fixture MCP\"\nMCP tool: \"add_numbers\"\nDescription: Add two fixture numbers.",
                 "parameters": expected_schema
             }
         })
@@ -1171,8 +1171,8 @@ fn builds_anthropic_mcp_namespace_tool_payload_without_internal_catalog_fields()
     assert_eq!(
         tool,
         &json!({
-            "name": "mcp__fixture_7f4a2d91__add_numbers",
-            "description": "Add two fixture numbers.",
+            "name": "mcp__fixture__add_numbers",
+            "description": "MCP server: \"Fixture MCP\"\nMCP tool: \"add_numbers\"\nDescription: Add two fixture numbers.",
             "input_schema": expected_schema
         })
     );

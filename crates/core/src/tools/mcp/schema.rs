@@ -6,17 +6,7 @@ pub(super) fn normalize_server_display_name(
     display_name: &str,
     provenance: &AgentMcpToolProvenance,
 ) -> String {
-    let normalized = display_name
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    let normalized = truncate_utf8(normalized.trim(), MAX_MCP_SERVER_DISPLAY_NAME_BYTES);
+    let normalized = normalize_mcp_metadata_label(display_name, MAX_MCP_SERVER_DISPLAY_NAME_BYTES);
     if normalized.is_empty() {
         let suffix = provenance.server_id.get(..8).unwrap_or("unknown");
         format!("MCP server {suffix}")
@@ -123,37 +113,141 @@ pub(super) fn valid_canonical_uuid_v4(value: &str) -> bool {
     !uuid.is_nil() && uuid.get_version() == Some(uuid::Version::Random) && value == uuid.to_string()
 }
 
-pub(super) fn normalize_description(description: Option<&str>) -> String {
-    let description = description
-        .unwrap_or_default()
-        .chars()
-        .map(|character| {
-            if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    let description = description.trim();
-    if description.is_empty() {
-        truncate_utf8(
-            "External MCP tool with no server description.",
-            MAX_MCP_DESCRIPTION_BYTES,
-        )
+pub(super) fn normalize_description(
+    server_display_name: &str,
+    raw_tool_name: &str,
+    description: Option<&str>,
+) -> String {
+    let server_label = quote_mcp_metadata_label(
+        server_display_name,
+        MAX_MCP_SERVER_DISPLAY_NAME_BYTES,
+        "MCP server",
+    );
+    let tool_label = quote_mcp_metadata_label(
+        raw_tool_name,
+        MAX_MCP_DESCRIPTION_RAW_TOOL_LABEL_BYTES,
+        "tool",
+    );
+    let header = format!("MCP server: {server_label}\nMCP tool: {tool_label}\nDescription: ");
+    let description = normalize_mcp_metadata_body(description.unwrap_or_default());
+    let body = if description.is_empty() {
+        "No description was provided by the server.".to_string()
     } else {
-        let body_budget = MAX_MCP_DESCRIPTION_BYTES
-            .saturating_sub(MCP_DESCRIPTION_PREFIX.len())
-            .saturating_sub(MCP_DESCRIPTION_TRUNCATION_MARKER.len());
-        let truncated = description.len() > body_budget;
-        let mut normalized = String::with_capacity(MAX_MCP_DESCRIPTION_BYTES);
-        normalized.push_str(MCP_DESCRIPTION_PREFIX);
-        normalized.push_str(&truncate_utf8(description, body_budget));
-        if truncated {
-            normalized.push_str(MCP_DESCRIPTION_TRUNCATION_MARKER);
-        }
-        normalized
+        description
+    };
+    let available_body_bytes = MAX_MCP_DESCRIPTION_BYTES.saturating_sub(header.len());
+    let truncated = body.len() > available_body_bytes;
+    let body_budget = if truncated {
+        available_body_bytes.saturating_sub(MCP_DESCRIPTION_TRUNCATION_MARKER.len())
+    } else {
+        available_body_bytes
+    };
+    let mut normalized = String::with_capacity(MAX_MCP_DESCRIPTION_BYTES);
+    normalized.push_str(&header);
+    normalized.push_str(&truncate_utf8(&body, body_budget));
+    if truncated {
+        normalized.push_str(MCP_DESCRIPTION_TRUNCATION_MARKER);
     }
+    truncate_utf8(&normalized, MAX_MCP_DESCRIPTION_BYTES)
+}
+
+fn quote_mcp_metadata_label(value: &str, max_bytes: usize, fallback: &str) -> String {
+    let raw_value = value;
+    let (mut value, truncated) = normalize_mcp_metadata_label_with_status(raw_value, max_bytes);
+    if truncated {
+        let digest = format!("{:x}", Sha256::digest(raw_value.as_bytes()));
+        let marker = format!("… [truncated #{}]", &digest[..8]);
+        let prefix_budget = max_bytes.saturating_sub(marker.len());
+        value = format!("{}{}", truncate_utf8(&value, prefix_budget), marker);
+    }
+    serde_json::to_string(if value.is_empty() { fallback } else { &value })
+        .unwrap_or_else(|_| format!("\"{fallback}\""))
+}
+
+fn normalize_mcp_metadata_label(value: &str, max_bytes: usize) -> String {
+    normalize_mcp_metadata_label_with_status(value, max_bytes).0
+}
+
+fn normalize_mcp_metadata_label_with_status(value: &str, max_bytes: usize) -> (String, bool) {
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    let mut truncated = false;
+    for character in value.chars() {
+        if character.is_whitespace() || is_unsafe_mcp_metadata_character(character) {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+        if pending_space {
+            if normalized.len() + 1 > max_bytes {
+                truncated = true;
+                break;
+            }
+            normalized.push(' ');
+            pending_space = false;
+        }
+        if normalized.len() + character.len_utf8() > max_bytes {
+            truncated = true;
+            break;
+        }
+        normalized.push(character);
+    }
+    (normalized.trim().to_string(), truncated)
+}
+
+fn normalize_mcp_metadata_body(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len().min(MAX_MCP_DESCRIPTION_BYTES));
+    let mut previous_was_cr = false;
+    for character in value.chars() {
+        if character == '\r' {
+            normalized.push('\n');
+            previous_was_cr = true;
+        } else if character == '\n' {
+            if !previous_was_cr {
+                normalized.push('\n');
+            }
+            previous_was_cr = false;
+        } else {
+            previous_was_cr = false;
+            normalized.push(
+                if character == '\t' || is_unsafe_mcp_metadata_character(character) {
+                    ' '
+                } else {
+                    character
+                },
+            );
+        }
+        if normalized.len() > MAX_MCP_DESCRIPTION_BYTES {
+            break;
+        }
+    }
+    normalized.trim().to_string()
+}
+
+fn is_unsafe_mcp_metadata_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061c}'
+                | '\u{06dd}'
+                | '\u{070f}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{110cd}'
+                | '\u{13430}'..='\u{1345f}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
 }
 
 pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> String {

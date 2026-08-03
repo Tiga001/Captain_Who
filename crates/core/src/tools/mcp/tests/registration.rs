@@ -21,8 +21,11 @@ fn catalog_descriptor_registers_provider_definition_and_typed_identity() {
         .expect("MCP tool definition");
 
     assert_eq!(definition.name, model_name);
-    assert!(definition.description.starts_with(MCP_DESCRIPTION_PREFIX));
+    assert!(definition
+        .description
+        .starts_with("MCP server: \"Fixture MCP\"\nMCP tool: \"echo_text\""));
     assert!(definition.description.ends_with("echo_text fixture tool"));
+    assert!(!definition.description.contains("untrusted data"));
     assert_eq!(definition.input_schema["type"], "object");
     assert_eq!(
         definition.input_schema["required"],

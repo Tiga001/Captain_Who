@@ -1270,7 +1270,7 @@ async fn catalog_generation_changes_only_with_effective_content() {
             .model_name,
         first_model_name
     );
-    assert!(first_model_name.starts_with("mcp__"));
+    assert_eq!(first_model_name, "mcp__generation__alpha");
     assert!(first_model_name.len() <= 64);
     assert_eq!(
         manager.resolve_model_name(&first_model_name).unwrap(),

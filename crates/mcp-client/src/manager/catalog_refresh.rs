@@ -83,9 +83,9 @@ impl McpConnectionManager {
         epoch: u64,
         peer: Arc<dyn McpPeer>,
     ) -> Result<McpCatalogSnapshot, McpError> {
-        let previous = {
+        let (previous, model_namespace) = {
             let state = lock_entry(&entry)?;
-            if state.catalog.source_config_epoch == Some(state.status.config_epoch)
+            let previous = if state.catalog.source_config_epoch == Some(state.status.config_epoch)
                 && state.catalog.source_registry_revision == Some(state.status.registry_revision)
                 && state.catalog.source_config_digest.as_ref() == Some(&state.status.config_digest)
             {
@@ -94,7 +94,8 @@ impl McpConnectionManager {
                 let mut empty = McpCatalogSnapshot::empty(server_id);
                 empty.generation = state.catalog.generation;
                 empty
-            }
+            };
+            (previous, state.model_namespace.clone())
         };
         let catalog_refresh_timeout = self.inner.policy.catalog_refresh_timeout;
         let discovered = tokio::time::timeout(
@@ -102,6 +103,7 @@ impl McpConnectionManager {
             discover_catalog_with_limits(
                 peer.as_ref(),
                 server_id,
+                &model_namespace,
                 Some(&previous),
                 &self.inner.policy.catalog,
                 &self.inner.policy.security_limits,
@@ -118,6 +120,7 @@ impl McpConnectionManager {
         state.refresh_inflight = false;
         if state.epoch != epoch
             || state.removed
+            || state.model_namespace != model_namespace
             || state
                 .peer
                 .as_ref()

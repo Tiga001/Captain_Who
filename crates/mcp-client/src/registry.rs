@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::{
-    config_digest, McpConfigDigest, McpConfigEpoch, McpError, McpServerConfig, McpServerId,
-    McpServerScope,
+    config_digest, McpConfigDigest, McpConfigEpoch, McpError, McpModelNamespace, McpServerConfig,
+    McpServerId, McpServerScope, MCP_MODEL_NAMESPACE_MAX_BYTES,
 };
 
 const REGISTRY_CHANGE_CAPACITY: usize = 128;
@@ -16,6 +16,9 @@ const REGISTRY_CHANGE_CAPACITY: usize = 128;
 #[serde(rename_all = "camelCase")]
 pub struct McpRegistryEntry {
     pub config: McpServerConfig,
+    /// Stable Host-owned model projection namespace. This value is never
+    /// accepted from a Renderer and is preserved across configuration edits.
+    pub model_namespace: McpModelNamespace,
     pub config_digest: McpConfigDigest,
     /// Opaque, non-reusable identity for this exact configuration incarnation.
     pub config_epoch: McpConfigEpoch,
@@ -31,6 +34,7 @@ impl fmt::Debug for McpRegistryEntry {
             .field("enabled", &self.config.enabled)
             .field("scope", &self.config.scope)
             .field("trust", &self.config.trust)
+            .field("model_namespace", &self.model_namespace)
             .field("config_digest", &self.config_digest)
             .field("config_epoch", &self.config_epoch)
             .field("revision", &self.revision)
@@ -169,6 +173,92 @@ impl InMemoryMcpRegistry {
     }
 }
 
+/// Allocates the stable namespace used in model-visible MCP function names.
+///
+/// Callers must hold their Registry mutation lock/transaction while passing
+/// the complete occupied set. The plain display-name slug is preferred; a
+/// short server identity suffix is used only when two servers normalize to the
+/// same slug.
+pub fn allocate_model_namespace<'a>(
+    display_name: &str,
+    server_id: McpServerId,
+    occupied: impl IntoIterator<Item = &'a McpModelNamespace>,
+) -> Result<McpModelNamespace, McpError> {
+    let occupied = occupied
+        .into_iter()
+        .map(McpModelNamespace::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let base = normalize_model_namespace_stem(display_name);
+    if !occupied.contains(base.as_str()) {
+        return McpModelNamespace::from_normalized(base);
+    }
+
+    let compact_id = server_id.as_uuid().simple().to_string();
+    for suffix in [
+        compact_id.get(..8),
+        compact_id.get(..12),
+        compact_id.get(..16),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let candidate = namespace_with_suffix(&base, suffix);
+        if !occupied.contains(candidate.as_str()) {
+            return McpModelNamespace::from_normalized(candidate);
+        }
+    }
+    for sequence in 2_u32..=10_000 {
+        let suffix = format!("{}_{sequence}", &compact_id[..8]);
+        let candidate = namespace_with_suffix(&base, &suffix);
+        if !occupied.contains(candidate.as_str()) {
+            return McpModelNamespace::from_normalized(candidate);
+        }
+    }
+    Err(McpError::config("MCP model namespace space is exhausted"))
+}
+
+fn normalize_model_namespace_stem(display_name: &str) -> String {
+    let mut output = String::new();
+    let mut previous_separator = false;
+    for byte in display_name.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if output.len() == MCP_MODEL_NAMESPACE_MAX_BYTES {
+                break;
+            }
+            output.push(byte.to_ascii_lowercase() as char);
+            previous_separator = false;
+        } else if !previous_separator && !output.is_empty() {
+            if output.len() == MCP_MODEL_NAMESPACE_MAX_BYTES {
+                break;
+            }
+            output.push('_');
+            previous_separator = true;
+        }
+    }
+    while output.ends_with('_') {
+        output.pop();
+    }
+    if output.is_empty() {
+        "server".to_string()
+    } else {
+        output
+    }
+}
+
+fn namespace_with_suffix(base: &str, suffix: &str) -> String {
+    let base_budget = MCP_MODEL_NAMESPACE_MAX_BYTES
+        .saturating_sub(1)
+        .saturating_sub(suffix.len())
+        .max(1);
+    let mut base = base[..base.len().min(base_budget)]
+        .trim_end_matches('_')
+        .to_string();
+    if base.is_empty() {
+        base.push('s');
+    }
+    format!("{base}_{suffix}")
+}
+
 impl McpRegistry for InMemoryMcpRegistry {
     fn add(&self, config: McpServerConfig) -> Result<McpRegistryEntry, McpError> {
         let digest = config_digest(&config)?;
@@ -181,9 +271,15 @@ impl McpRegistry for InMemoryMcpRegistry {
                 "MCP registry already contains this server ID",
             ));
         }
+        let model_namespace = allocate_model_namespace(
+            &config.display_name,
+            config.id,
+            state.entries.values().map(|entry| &entry.model_namespace),
+        )?;
         let revision = Self::next_revision(&mut state)?;
         let entry = McpRegistryEntry {
             config,
+            model_namespace,
             config_digest: digest,
             config_epoch: McpConfigEpoch::new(),
             revision,
@@ -213,10 +309,23 @@ impl McpRegistry for InMemoryMcpRegistry {
                 return Ok(McpRegistryMutation::Unchanged(existing.clone()));
             }
         }
-        let existed = state.entries.contains_key(&config.id);
+        let existing_namespace = state
+            .entries
+            .get(&config.id)
+            .map(|entry| entry.model_namespace.clone());
+        let existed = existing_namespace.is_some();
+        let model_namespace = match existing_namespace {
+            Some(namespace) => namespace,
+            None => allocate_model_namespace(
+                &config.display_name,
+                config.id,
+                state.entries.values().map(|entry| &entry.model_namespace),
+            )?,
+        };
         let revision = Self::next_revision(&mut state)?;
         let entry = McpRegistryEntry {
             config,
+            model_namespace,
             config_digest: digest,
             config_epoch: McpConfigEpoch::new(),
             revision,
@@ -396,6 +505,38 @@ mod tests {
         };
         assert_eq!(unchanged.config_epoch, added.config_epoch);
         assert_eq!(unchanged.revision, added.revision);
+    }
+
+    #[test]
+    fn model_namespaces_are_friendly_unique_and_stable_across_renames() {
+        let registry = InMemoryMcpRegistry::new();
+        let first_id = McpServerId::from_uuid(
+            uuid::Uuid::parse_str("12345678-1234-4234-8234-123456789abc").unwrap(),
+        );
+        let second_id = McpServerId::from_uuid(
+            uuid::Uuid::parse_str("87654321-1234-4234-8234-123456789abc").unwrap(),
+        );
+        let first = registry.add(config(first_id, "Filesystem Test")).unwrap();
+        let second = registry.add(config(second_id, "Filesystem/Test")).unwrap();
+
+        assert_eq!(first.model_namespace.as_str(), "filesystem_test");
+        assert_eq!(second.model_namespace.as_str(), "filesystem_test_87654321");
+
+        let mut renamed = first.config.clone();
+        renamed.display_name = "A completely different label".to_string();
+        let renamed = match registry.upsert(renamed).unwrap() {
+            McpRegistryMutation::Updated(entry) => entry,
+            other => panic!("expected updated entry, got {other:?}"),
+        };
+        assert_eq!(renamed.model_namespace, first.model_namespace);
+    }
+
+    #[test]
+    fn model_namespace_falls_back_safely_for_non_ascii_display_names() {
+        let id = McpServerId::new();
+        let namespace = allocate_model_namespace("文件系统", id, std::iter::empty()).unwrap();
+        assert_eq!(namespace.as_str(), "server");
+        assert!(namespace.as_str().len() <= MCP_MODEL_NAMESPACE_MAX_BYTES);
     }
 
     #[tokio::test]

@@ -49,9 +49,13 @@ impl McpAgentTool {
                 McpToolDiagnosticCode::ApprovalRequiredUnsupported,
             ));
         }
-        let description = normalize_description(descriptor.description.as_deref());
         let server_display_name =
             normalize_server_display_name(&descriptor.server_display_name, &descriptor.provenance);
+        let description = normalize_description(
+            &server_display_name,
+            &descriptor.provenance.raw_tool_name,
+            descriptor.description.as_deref(),
+        );
         let risk = mcp_tool_risk(&descriptor.annotations);
         let definition = AgentToolDefinition {
             name: descriptor.provenance.model_tool_name.clone(),

@@ -56,15 +56,16 @@ pub use manager::{
     McpShutdownReport,
 };
 pub use registry::{
-    InMemoryMcpRegistry, McpRegistry, McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry,
-    McpRegistryMutation, McpRegistrySubscription, McpRegistrySubscriptionError,
+    allocate_model_namespace, InMemoryMcpRegistry, McpRegistry, McpRegistryChange,
+    McpRegistryChangeKind, McpRegistryEntry, McpRegistryMutation, McpRegistrySubscription,
+    McpRegistrySubscriptionError,
 };
 pub use transports::stdio::{McpStdioConnector, McpStdioPolicy};
 pub use types::{
     McpCacheScope, McpCapabilitySnapshot, McpConfigEpoch, McpConnectionState, McpContentBlock,
-    McpEmbeddedResource, McpImplementationInfo, McpLifecycleKind, McpProtocolSnapshot,
-    McpResourceLink, McpServerId, McpToolAnnotations, McpToolCall, McpToolDescriptor, McpToolPage,
-    McpToolResult,
+    McpEmbeddedResource, McpImplementationInfo, McpLifecycleKind, McpModelNamespace,
+    McpProtocolSnapshot, McpResourceLink, McpServerId, McpToolAnnotations, McpToolCall,
+    McpToolDescriptor, McpToolPage, McpToolResult, MCP_MODEL_NAMESPACE_MAX_BYTES,
 };
 
 /// Re-export the cancellation primitive as part of our stable API boundary.

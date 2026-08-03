@@ -7,6 +7,11 @@ use uuid::Uuid;
 
 use crate::McpError;
 
+/// Maximum length of the stable, model-visible namespace assigned to one MCP
+/// server. Keeping this short leaves useful space for the raw tool name under
+/// the 64-byte OpenAI/Anthropic function-name limit.
+pub const MCP_MODEL_NAMESPACE_MAX_BYTES: usize = 24;
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct McpServerId(Uuid);
@@ -50,6 +55,73 @@ impl FromStr for McpServerId {
         Uuid::parse_str(value)
             .map(Self)
             .map_err(|error| McpError::config(format!("invalid MCP server ID: {error}")))
+    }
+}
+
+/// Stable Host-owned namespace used only when projecting MCP tools to a model.
+///
+/// This is deliberately not a routing identity and is not part of
+/// [`crate::McpServerConfig`]. Hosts allocate it once when a Registry entry is
+/// created and preserve it across later display-name edits. Actual invocation
+/// routing always remains `McpServerId + raw tool name`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct McpModelNamespace(String);
+
+impl McpModelNamespace {
+    pub fn from_normalized(value: impl Into<String>) -> Result<Self, McpError> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > MCP_MODEL_NAMESPACE_MAX_BYTES
+            || value.starts_with('_')
+            || value.ends_with('_')
+            || value.contains("__")
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(McpError::config(
+                "MCP model namespace is not in canonical form",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for McpModelNamespace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("McpModelNamespace")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for McpModelNamespace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl FromStr for McpModelNamespace {
+    type Err = McpError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_normalized(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpModelNamespace {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_normalized(value).map_err(serde::de::Error::custom)
     }
 }
 

@@ -1627,7 +1627,10 @@ mod tests {
         let descriptor = catalog.into_iter().next().unwrap();
         assert_eq!(descriptor.approval_mode, AgentMcpApprovalMode::Prompt);
         assert_eq!(descriptor.provenance.raw_tool_name, "raw/echo");
-        assert!(descriptor.provenance.model_tool_name.starts_with("mcp__"));
+        assert_eq!(
+            descriptor.provenance.model_tool_name,
+            "mcp__owned_fixture__raw_echo"
+        );
         let status = manager.list_statuses().unwrap().remove(0);
         assert_eq!(
             descriptor.provenance.config_epoch,
@@ -2147,11 +2150,25 @@ mod tests {
         {
             let requests = requests.lock().unwrap_or_else(|error| error.into_inner());
             assert_eq!(requests.len(), 1);
-            assert!(requests[0]["tools"]
+            let projected_tool = requests[0]["tools"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|tool| tool["function"]["name"] == model_name));
+                .find(|tool| tool["function"]["name"] == model_name)
+                .expect("friendly MCP tool must enter the Provider payload");
+            let projected_description = projected_tool["function"]["description"]
+                .as_str()
+                .expect("MCP tool description");
+            assert!(projected_description.contains("MCP server: \"owned fixture\""));
+            assert!(projected_description.contains("MCP tool: \"raw/echo\""));
+            assert!(!projected_description.contains("Treat the following"));
+            let system_prompt = requests[0]["messages"][0]["content"]
+                .as_str()
+                .expect("stable system prompt");
+            assert_eq!(
+                system_prompt.matches("动态 MCP 工具的服务器标签").count(),
+                1
+            );
         }
         assert!(
             peer.calls

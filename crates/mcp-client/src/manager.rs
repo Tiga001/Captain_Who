@@ -21,11 +21,11 @@ use crate::{
     McpCancellationToken, McpCatalogCompleteness, McpCatalogIssue, McpCatalogPolicy,
     McpCatalogSnapshot, McpCatalogToolCall, McpConfigDigest, McpConfigEpoch, McpConnector,
     McpDispatchCertainty, McpDispatchTracker, McpError, McpErrorKind, McpEvent, McpEventSink,
-    McpInvocationId, McpInvocationState, McpModelCallId, McpOutcomeUnknownReason, McpPeer,
-    McpPeerNotificationState, McpProtocolSnapshot, McpRegistry, McpRegistryChange,
-    McpRegistryChangeKind, McpRegistryEntry, McpRegistrySubscriptionError, McpSafeError,
-    McpSecurityLimits, McpServerId, McpServerScope, McpServerState, McpToolCall, McpToolId,
-    McpToolResult, McpTrustLevel, NoopMcpEventSink,
+    McpInvocationId, McpInvocationState, McpModelCallId, McpModelNamespace,
+    McpOutcomeUnknownReason, McpPeer, McpPeerNotificationState, McpProtocolSnapshot, McpRegistry,
+    McpRegistryChange, McpRegistryChangeKind, McpRegistryEntry, McpRegistrySubscriptionError,
+    McpSafeError, McpSecurityLimits, McpServerId, McpServerScope, McpServerState, McpToolCall,
+    McpToolId, McpToolResult, McpTrustLevel, NoopMcpEventSink,
 };
 
 const FORCE_SHUTDOWN_GRACE_MAX: Duration = Duration::from_millis(250);
@@ -139,6 +139,7 @@ pub struct McpBatchOperationResult {
 struct ManagedEntryState {
     epoch: u64,
     event_sequence: u64,
+    model_namespace: McpModelNamespace,
     status: McpServerStatus,
     catalog: McpCatalogSnapshot,
     peer: Option<Arc<dyn McpPeer>>,
@@ -338,6 +339,7 @@ impl ManagedEntry {
             state: StdMutex::new(ManagedEntryState {
                 epoch: 0,
                 event_sequence: 0,
+                model_namespace: registry.model_namespace.clone(),
                 catalog,
                 status,
                 peer: None,
@@ -936,7 +938,9 @@ fn apply_registry_locked(
 ) {
     let source_changed = state.catalog.source_config_epoch != Some(registry.config_epoch)
         || state.catalog.source_registry_revision != Some(registry.revision)
-        || state.catalog.source_config_digest.as_ref() != Some(&registry.config_digest);
+        || state.catalog.source_config_digest.as_ref() != Some(&registry.config_digest)
+        || state.model_namespace != registry.model_namespace;
+    state.model_namespace = registry.model_namespace.clone();
     state.status.enabled = registry.config.enabled;
     state.status.display_name = safe_display_name(&registry.config.display_name);
     state.status.scope = registry.config.scope.clone();
