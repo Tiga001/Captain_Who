@@ -1,3 +1,4 @@
+pub(crate) mod agent_skill_installation;
 pub(crate) mod git_dispatcher;
 pub(crate) mod image_generation_dispatcher;
 pub(crate) mod mcp_runtime;

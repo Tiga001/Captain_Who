@@ -20,6 +20,7 @@ pub const APPLICATION_BUNDLED_SKILL_SOURCE_ID: &str = "bundled:application";
 pub const DOCUMENTS_LOCAL_ID: &str = "documents";
 pub const IMAGE_GENERATION_LOCAL_ID: &str = "image-generation";
 pub const PRESENTATIONS_LOCAL_ID: &str = "presentations";
+pub const SKILL_INSTALLER_LOCAL_ID: &str = "skill-installer";
 pub const SPREADSHEETS_LOCAL_ID: &str = "spreadsheets";
 
 const DOCUMENTS_PATH: &str = "documents/SKILL.md";
@@ -41,6 +42,9 @@ const DOCUMENTS_RESOURCES: &[EmbeddedSkillResource] = &[
 
 const IMAGE_GENERATION_PATH: &str = "image-generation/SKILL.md";
 const IMAGE_GENERATION_SOURCE: &str = include_str!("bundled/image-generation/SKILL.md");
+
+const SKILL_INSTALLER_PATH: &str = "skill-installer/SKILL.md";
+const SKILL_INSTALLER_SOURCE: &str = include_str!("bundled/skill-installer/SKILL.md");
 
 const PRESENTATIONS_PATH: &str = "presentations/SKILL.md";
 const PRESENTATIONS_SOURCE: &str = include_str!("bundled/presentations/SKILL.md");
@@ -106,6 +110,12 @@ const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[
         relative_path: PRESENTATIONS_PATH,
         source_text: PRESENTATIONS_SOURCE,
         resources: PRESENTATIONS_RESOURCES,
+    },
+    EmbeddedSkill {
+        local_id: SKILL_INSTALLER_LOCAL_ID,
+        relative_path: SKILL_INSTALLER_PATH,
+        source_text: SKILL_INSTALLER_SOURCE,
+        resources: &[],
     },
     EmbeddedSkill {
         local_id: SPREADSHEETS_LOCAL_ID,
@@ -495,7 +505,7 @@ mod tests {
         assert_eq!(source.activation_scope(), SkillActivationScope::Run);
         assert!(catalog.diagnostics().is_empty());
         assert!(!catalog.truncated());
-        assert_eq!(catalog.skills().len(), 4);
+        assert_eq!(catalog.skills().len(), 5);
         assert_eq!(
             catalog
                 .skills()
@@ -506,6 +516,7 @@ mod tests {
                 "bundled:application:documents",
                 "bundled:application:image-generation",
                 "bundled:application:presentations",
+                "bundled:application:skill-installer",
                 "bundled:application:spreadsheets",
             ]
         );
@@ -581,6 +592,33 @@ mod tests {
             SkillProvenance::Bundled { source_id, relative_path }
                 if source_id == source.id() && relative_path == IMAGE_GENERATION_PATH
         ));
+    }
+
+    #[test]
+    fn skill_installer_is_an_instruction_only_trusted_bundled_skill() {
+        let source = BundledSkillSource::new().unwrap();
+        let descriptor = source
+            .list()
+            .unwrap()
+            .skills()
+            .iter()
+            .find(|skill| skill.id().local_id() == SKILL_INSTALLER_LOCAL_ID)
+            .unwrap()
+            .clone();
+        let package = source.resolve(&descriptor.selection()).unwrap();
+
+        assert_eq!(
+            descriptor.id().as_str(),
+            "bundled:application:skill-installer"
+        );
+        assert_eq!(descriptor.trust(), SkillTrust::Application);
+        assert!(package.resources().is_empty());
+        assert_eq!(package.source_text(), SKILL_INSTALLER_SOURCE);
+        assert!(source.open_resource_reader(&package).unwrap().is_none());
+        assert!(package.instructions().contains("`skills_prepare_install`"));
+        assert!(package.instructions().contains("untrusted data"));
+        assert!(package.instructions().contains("Never install by calling"));
+        assert!(!package.instructions().contains("description:"));
     }
 
     #[test]

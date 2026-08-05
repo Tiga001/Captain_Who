@@ -78,16 +78,16 @@ use mycopilot_core::{
     AgentMcpResultSizeSummary, AgentMcpServerScope, AgentMcpToolInvocationOutcome,
     AgentMcpToolInvocationState, AgentModelRequestObserver, AgentPatchResult, AgentProposedAction,
     AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,
-    AgentSearchConfig, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
-    AgentSkillMaterializationResultStatus, AgentSkillScriptRequest, AgentSkillScriptResult,
-    AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
-    AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
-    ConversationModelContextItem, ConversationTraceSnapshot, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, McpApprovedToolInvocation,
-    McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker, McpToolRuntime,
-    ModelCapabilities,
+    AgentSearchConfig, AgentSkillInstallationPrepareExecutor, AgentSkillMaterializationRequest,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
+    AgentSkillScriptRequest, AgentSkillScriptResult, AgentSteerEnqueueOutcome, AgentSteerInput,
+    AgentSteerInputQueue, AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode,
+    AgentSteerRunResultStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    ContextJournalCursor, ConversationModelContextItem, ConversationTraceSnapshot,
+    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
+    McpToolRuntime, ModelCapabilities,
 };
 use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
@@ -396,6 +396,7 @@ pub struct AgentService {
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     office_engine: Arc<dyn OfficeEngine>,
     image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
+    skill_installation_prepare: Option<Arc<dyn AgentSkillInstallationPrepareExecutor>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
     mcp_tool_invoker: Option<Arc<dyn McpToolInvoker>>,
     mcp_startup_inspector: Option<Arc<dyn McpApprovalStartupInspector>>,
@@ -493,6 +494,7 @@ impl AgentService {
             context_compaction_summary_generator: None,
             office_engine,
             image_generation_execution: None,
+            skill_installation_prepare: None,
             artifact_runtime,
             mcp_tool_invoker: None,
             mcp_startup_inspector: None,
@@ -534,6 +536,17 @@ impl AgentService {
         service: Arc<ImageGenerationExecutionService>,
     ) -> Self {
         self.image_generation_execution = Some(service);
+        self
+    }
+
+    /// Installs the process-owned, read-only Skill source inspection boundary. Installation
+    /// authority and preparation identifiers remain in core-server rather than entering runtime
+    /// input or checkpoints.
+    pub(crate) fn with_skill_installation_prepare(
+        mut self,
+        service: Arc<dyn AgentSkillInstallationPrepareExecutor>,
+    ) -> Self {
+        self.skill_installation_prepare = Some(service);
         self
     }
 

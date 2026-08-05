@@ -16,13 +16,14 @@ use crate::skills::{
     activation_revision_for_identities, AgentDiscoverableSkill, AgentSkillDiscoverySnapshot,
     SkillId, SkillPackageUri, SkillResourceSession, SkillRevision, SkillSelection,
     APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, IMAGE_GENERATION_LOCAL_ID,
-    PRESENTATIONS_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
+    PRESENTATIONS_LOCAL_ID, SKILL_INSTALLER_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
 };
 use crate::tools::{
     AgentTool, AgentToolPermissionPolicy, EffectiveToolSet, ToolCapabilityId, ToolExecutionContext,
     IMAGE_GENERATION_CAPABILITY, OFFICE_DOCUMENTS_CAPABILITY, OFFICE_PRESENTATIONS_CAPABILITY,
-    OFFICE_SPREADSHEETS_CAPABILITY, SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
-    SKILL_RESOURCES_READ_CAPABILITY, SKILL_SCRIPTS_CAPABILITY,
+    OFFICE_SPREADSHEETS_CAPABILITY, SKILL_INSTALLATION_CAPABILITY,
+    SKILL_RESOURCES_MATERIALIZE_CAPABILITY, SKILL_RESOURCES_READ_CAPABILITY,
+    SKILL_SCRIPTS_CAPABILITY,
 };
 use crate::world_state::{WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId};
 use serde::{Deserialize, Serialize};
@@ -963,6 +964,10 @@ fn tool_capabilities_for_skill(record: &ActivatedSkillRecord) -> BTreeSet<ToolCa
             capabilities.insert(ToolCapabilityId::application_owned(
                 IMAGE_GENERATION_CAPABILITY,
             ));
+        } else if record.id == bundled_id(SKILL_INSTALLER_LOCAL_ID) {
+            capabilities.insert(ToolCapabilityId::application_owned(
+                SKILL_INSTALLATION_CAPABILITY,
+            ));
         }
     }
 
@@ -1376,13 +1381,24 @@ mod tests {
     use crate::skills::{
         memory_resource_session_for_test, SkillId, SkillResourceKind, SkillRevision, SkillSourceId,
     };
-    use crate::tools::{AgentToolExposure, ToolRegistry};
+    use crate::tools::{
+        AgentSkillInstallationPrepareExecutor, AgentSkillInstallationPrepareRequest,
+        AgentToolExposure, ToolRegistry,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const SECRET_INSTRUCTIONS: &str =
         "PRIVATE COMPLETE SKILL INSTRUCTIONS: always verify the generated artifact.";
 
     struct CapacityDynamicTool;
+
+    struct CapacitySkillInstallationPrepare;
+
+    impl AgentSkillInstallationPrepareExecutor for CapacitySkillInstallationPrepare {
+        fn prepare(&self, _request: AgentSkillInstallationPrepareRequest) -> AgentResult<Value> {
+            unreachable!("capacity tests never execute the projected Tool")
+        }
+    }
 
     impl AgentTool for CapacityDynamicTool {
         fn exposure(&self) -> AgentToolExposure {
@@ -1427,6 +1443,17 @@ mod tests {
     fn effective_tool_set_with_document_tool() -> EffectiveToolSet {
         let mut registry = ToolRegistry::empty();
         registry.register_test_tool(CapacityDynamicTool);
+        EffectiveToolSet::from_permitted_definitions(
+            &registry,
+            registry.definitions(),
+            &BTreeSet::new(),
+        )
+        .unwrap()
+    }
+
+    fn effective_tool_set_with_skill_installation_tool() -> EffectiveToolSet {
+        let mut registry = ToolRegistry::empty();
+        registry.register_skill_installation_prepare(Arc::new(CapacitySkillInstallationPrepare));
         EffectiveToolSet::from_permitted_definitions(
             &registry,
             registry.definitions(),
@@ -1775,6 +1802,32 @@ mod tests {
         );
         assert!(tool_capabilities_for_skill(&forged_source).is_empty());
         assert!(tool_capabilities_for_skill(&forged_id).is_empty());
+
+        let installer = ActivatedSkillRecord {
+            id: format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{SKILL_INSTALLER_LOCAL_ID}"),
+            name: "Skill Installer".to_string(),
+            revision: revision('b'),
+            source: APPLICATION_BUNDLED_SKILL_SOURCE_ID.to_string(),
+            source_bytes: 256,
+            has_resources: false,
+            resource_kinds: Vec::new(),
+            activated_by: AgentSkillActivationActor::Model,
+        };
+        let mut installed_same_name = installer.clone();
+        installed_same_name.id = "installed:user:skill-installer".to_string();
+        installed_same_name.source = "installed:user".to_string();
+        let mut bundled_lookalike = installer.clone();
+        bundled_lookalike.id =
+            format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:skill-installer-copy");
+
+        assert_eq!(
+            tool_capabilities_for_skill(&installer),
+            BTreeSet::from([ToolCapabilityId::application_owned(
+                SKILL_INSTALLATION_CAPABILITY,
+            )])
+        );
+        assert!(tool_capabilities_for_skill(&installed_same_name).is_empty());
+        assert!(tool_capabilities_for_skill(&bundled_lookalike).is_empty());
     }
 
     #[test]
@@ -2401,6 +2454,28 @@ mod tests {
         assert!(projection
             .effective_tool_set
             .contains("capacity_document_tool"));
+    }
+
+    #[test]
+    fn skill_installer_activation_capacity_charges_the_real_prepare_tool_schema() {
+        let budget = ContextTextBudget::heuristic(64 * 1024);
+        let capacity = ModelInputCapacity {
+            remaining_tokens: 64 * 1024,
+            text_budget: budget.clone(),
+            effective_tool_set: effective_tool_set_with_skill_installation_tool(),
+        };
+        let projection = capacity
+            .project_additional_tool_capabilities(&BTreeSet::from([
+                ToolCapabilityId::application_owned(SKILL_INSTALLATION_CAPABILITY),
+            ]))
+            .unwrap();
+        let definitions = projection.effective_tool_set.dynamic_definitions();
+        let schema_tokens = budget.estimate_tool_definitions(definitions);
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].name, "skills_prepare_install");
+        assert!(schema_tokens > 0);
+        assert!(projection.additional_tokens > schema_tokens);
     }
 
     #[test]

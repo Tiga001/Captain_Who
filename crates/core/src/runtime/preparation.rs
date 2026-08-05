@@ -9,6 +9,8 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
     pub(super) image_generation_execution:
         Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
+    pub(super) skill_installation_prepare:
+        Option<Arc<dyn crate::tools::AgentSkillInstallationPrepareExecutor>>,
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
@@ -36,6 +38,7 @@ pub(super) fn prepare_runtime_capabilities(
             host_actions_available,
             office_engine,
             image_generation_execution: None,
+            skill_installation_prepare: None,
             skill_activation_resolver: None,
             skill_resources: None,
             mcp_tools: None,
@@ -53,6 +56,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         host_actions_available,
         office_engine,
         image_generation_execution,
+        skill_installation_prepare,
         skill_activation_resolver,
         skill_resources,
         mcp_tools,
@@ -70,6 +74,9 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         office_engine,
         image_generation_execution,
     );
+    if let Some(executor) = skill_installation_prepare {
+        tool_registry.register_skill_installation_prepare(executor);
+    }
     let context = input.context.as_ref();
     tool_registry.register_conversation_history();
     tool_registry.register_goal_tools();

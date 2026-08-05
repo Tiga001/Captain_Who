@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
 import { openExternalUrl } from '../../../lib/externalLinks'
+import { remarkNormalizeCjkAutolinkBoundaries } from './chatMarkdownAutolinks'
 import { useImagePreview } from './ImagePreview'
 
 interface ChatMarkdownProps {
@@ -347,7 +348,7 @@ export function ChatMarkdown({ className, content }: ChatMarkdownProps) {
   return (
     <div className={markdownClassName}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
+        remarkPlugins={[remarkGfm, remarkNormalizeCjkAutolinkBoundaries, remarkMath, remarkBreaks]}
         rehypePlugins={[rehypeKatex]}
         components={{
           a: ({ children, href, ...props }) => {

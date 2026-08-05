@@ -33,6 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use adapters::agent_skill_installation::AgentSkillInstallationInspectionAdapter;
 use adapters::git_dispatcher::{GitDispatcher, GitJobPriority};
 use adapters::image_generation_dispatcher::{
     ImageGenerationConfigurationDispatcher, ImageGenerationConfigurationJobKind,

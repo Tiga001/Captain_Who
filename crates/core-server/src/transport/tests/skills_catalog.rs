@@ -48,7 +48,7 @@ fn skills_list_resolves_the_project_and_returns_camel_case_catalog() {
         "registering the read-only source must not create its store"
     );
     let empty_installed_catalog = skills_service.list().unwrap();
-    assert_eq!(empty_installed_catalog.skills().len(), 4);
+    assert_eq!(empty_installed_catalog.skills().len(), 5);
     assert!(empty_installed_catalog.diagnostics().is_empty());
     assert!(!installed_store_root.exists());
     const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b334";
@@ -81,7 +81,7 @@ fn skills_list_resolves_the_project_and_returns_camel_case_catalog() {
 
     assert_eq!(response["id"], 1);
     let skills = response["result"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 6);
+    assert_eq!(skills.len(), 7);
     assert_eq!(response["result"]["schemaVersion"], 4);
     let workspace_skill = skills
         .iter()
@@ -160,7 +160,7 @@ fn skills_list_without_a_project_returns_only_global_sources() {
 
     assert_eq!(response["result"]["schemaVersion"], 4);
     let skills = response["result"]["skills"].as_array().unwrap();
-    assert_eq!(skills.len(), 4);
+    assert_eq!(skills.len(), 5);
     assert!(skills
         .iter()
         .all(|skill| skill["source"]["kind"] == "bundled"));
@@ -190,7 +190,7 @@ fn management_enablement_is_cas_protected_and_filters_only_the_picker() {
 
     let first = list_management();
     let first_skills = first["result"]["skills"].as_array().unwrap();
-    assert_eq!(first_skills.len(), 4);
+    assert_eq!(first_skills.len(), 5);
     let skill_id = first_skills[0]["id"].as_str().unwrap().to_string();
     let first_state = first_skills[0]["stateRevision"]
         .as_str()
@@ -257,7 +257,7 @@ fn management_enablement_is_cas_protected_and_filters_only_the_picker() {
         .unwrap(),
     );
     let picker_skills = picker["result"]["skills"].as_array().unwrap();
-    assert_eq!(picker_skills.len(), 3);
+    assert_eq!(picker_skills.len(), 4);
     assert!(picker_skills.iter().all(|skill| skill["id"] != skill_id));
     let management = list_management();
     let managed_skill = management["result"]["skills"]

@@ -2430,6 +2430,10 @@ impl AgentService {
             host_services =
                 host_services.with_image_generation_execution(image_generation_execution);
         }
+        if let Some(skill_installation_prepare) = self.skill_installation_prepare.clone() {
+            host_services =
+                host_services.with_skill_installation_prepare(skill_installation_prepare);
+        }
         host_services = host_services.with_skill_activation_resolver(
             model_skill_activation_resolver(self.storage.clone(), self.skills.clone()),
         );

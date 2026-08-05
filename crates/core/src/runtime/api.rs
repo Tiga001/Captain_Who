@@ -231,6 +231,8 @@ pub struct AgentRuntimeHostServices {
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
     pub(super) image_generation_execution:
         Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
+    pub(super) skill_installation_prepare:
+        Option<Arc<dyn crate::tools::AgentSkillInstallationPrepareExecutor>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
@@ -327,6 +329,17 @@ impl AgentRuntimeHostServices {
         service: Arc<crate::image_generation::ImageGenerationExecutionService>,
     ) -> Self {
         self.image_generation_execution = Some(service);
+        self
+    }
+
+    /// Supplies the process-owned, read-only Skill installation inspection boundary. The service
+    /// owns source resolution and opaque preparation references; only its presentation-safe result
+    /// crosses into the model-facing Tool result.
+    pub fn with_skill_installation_prepare(
+        mut self,
+        service: Arc<dyn crate::tools::AgentSkillInstallationPrepareExecutor>,
+    ) -> Self {
+        self.skill_installation_prepare = Some(service);
         self
     }
 
@@ -527,6 +540,7 @@ pub fn prepare_context_window_tool_projection(
             host_actions_available,
             office_engine: host_services.office_engine.clone(),
             image_generation_execution: host_services.image_generation_execution.clone(),
+            skill_installation_prepare: host_services.skill_installation_prepare.clone(),
             skill_activation_resolver: host_services.skill_activation_resolver.clone(),
             skill_resources: host_services.skill_resources.clone(),
             mcp_tools: host_services.mcp_tools.clone(),

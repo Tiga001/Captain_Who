@@ -27,6 +27,7 @@ mod search_cursor;
 mod search_files;
 mod skills_list_resources;
 mod skills_materialize_resource;
+mod skills_prepare_install;
 mod skills_read_resource;
 mod skills_script;
 mod tool_set;
@@ -68,6 +69,11 @@ use serde_json::Value;
 use skills_list_resources::SkillsListResourcesTool;
 pub(crate) use skills_materialize_resource::validate_frozen_materialization_trace_args;
 use skills_materialize_resource::SkillsMaterializeResourceTool;
+use skills_prepare_install::SkillsPrepareInstallTool;
+pub use skills_prepare_install::{
+    AgentSkillInstallationPrepareExecutor, AgentSkillInstallationPrepareRequest,
+    AgentSkillInstallationPrepareSource,
+};
 use skills_read_resource::SkillsReadResourceTool;
 pub(crate) use skills_script::validate_frozen_skill_script_trace_args;
 use skills_script::{SkillsPreflightScriptTool, SkillsRunScriptTool};
@@ -78,8 +84,9 @@ use std::sync::Arc;
 pub(crate) use tool_set::{
     validate_tool_set_checkpoint_shape, EffectiveToolSet, ToolCapabilityId, ToolUnavailability,
     IMAGE_GENERATION_CAPABILITY, OFFICE_DOCUMENTS_CAPABILITY, OFFICE_PRESENTATIONS_CAPABILITY,
-    OFFICE_SPREADSHEETS_CAPABILITY, SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
-    SKILL_RESOURCES_READ_CAPABILITY, SKILL_SCRIPTS_CAPABILITY,
+    OFFICE_SPREADSHEETS_CAPABILITY, SKILL_INSTALLATION_CAPABILITY,
+    SKILL_RESOURCES_MATERIALIZE_CAPABILITY, SKILL_RESOURCES_READ_CAPABILITY,
+    SKILL_SCRIPTS_CAPABILITY,
 };
 use web_fetch::WebFetchTool;
 use web_search::WebSearchTool;
@@ -978,6 +985,15 @@ impl ToolRegistry {
                 self.register_boxed("core".to_string(), tool)
                     .expect("goal tool definitions must be valid");
             }
+        }
+    }
+
+    pub(crate) fn register_skill_installation_prepare(
+        &mut self,
+        executor: Arc<dyn AgentSkillInstallationPrepareExecutor>,
+    ) {
+        if !self.contains_tool("skills_prepare_install") {
+            self.register(SkillsPrepareInstallTool::new(executor));
         }
     }
 

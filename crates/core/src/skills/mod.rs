@@ -41,7 +41,7 @@ pub use agent_discovery::{
 };
 pub use bundled::{
     APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, IMAGE_GENERATION_LOCAL_ID,
-    PRESENTATIONS_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
+    PRESENTATIONS_LOCAL_ID, SKILL_INSTALLER_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
 };
 pub use github_acquisition::{
     AcquiredGitHubSkill, GitHubAcquisitionError, GitHubAcquisitionErrorCode,

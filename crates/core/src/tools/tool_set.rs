@@ -16,6 +16,7 @@ pub(crate) const IMAGE_GENERATION_CAPABILITY: &str = "image.generation";
 pub(crate) const SKILL_RESOURCES_READ_CAPABILITY: &str = "skill.resources.read";
 pub(crate) const SKILL_RESOURCES_MATERIALIZE_CAPABILITY: &str = "skill.resources.materialize";
 pub(crate) const SKILL_SCRIPTS_CAPABILITY: &str = "skill.scripts";
+pub(crate) const SKILL_INSTALLATION_CAPABILITY: &str = "skill.installation";
 
 /// Backend-owned identifier that connects an activated capability to a registered Tool.
 ///
@@ -357,6 +358,7 @@ fn application_owned_dynamic_capability(tool_name: &str) -> Option<ToolCapabilit
         "skills_list_resources" | "skills_read_resource" => SKILL_RESOURCES_READ_CAPABILITY,
         "skills_materialize_resource" => SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
         "skills_preflight_script" | "skills_run_script" => SKILL_SCRIPTS_CAPABILITY,
+        "skills_prepare_install" => SKILL_INSTALLATION_CAPABILITY,
         _ => return None,
     };
     Some(ToolCapabilityId::application_owned(capability))
@@ -434,6 +436,18 @@ mod tests {
     use crate::protocol::{AgentToolApprovalMode, AgentToolDefinition, AgentToolSafety};
     use crate::tools::{AgentTool, AgentToolPermissionPolicy, ToolExecutionContext};
     use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    struct NoopSkillInstallationPrepare;
+
+    impl crate::tools::AgentSkillInstallationPrepareExecutor for NoopSkillInstallationPrepare {
+        fn prepare(
+            &self,
+            _request: crate::tools::AgentSkillInstallationPrepareRequest,
+        ) -> AgentResult<Value> {
+            Ok(json!({ "status": "ready" }))
+        }
+    }
 
     struct TestTool {
         name: &'static str,
@@ -628,6 +642,50 @@ mod tests {
             Some(ToolUnavailability::NotRegistered)
         );
         assert_eq!(active.unavailability("b_stable"), None);
+    }
+
+    #[test]
+    fn skill_installation_tool_is_absent_until_both_host_and_capability_are_available() {
+        let mut registered = ToolRegistry::empty();
+        registered.register_skill_installation_prepare(Arc::new(NoopSkillInstallationPrepare));
+        let inactive = EffectiveToolSet::from_permitted_definitions(
+            &registered,
+            registered.definitions(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert!(!inactive.contains("skills_prepare_install"));
+        assert_eq!(
+            inactive.unavailability("skills_prepare_install"),
+            Some(ToolUnavailability::RequiresSkillActivation {
+                required_capability: ToolCapabilityId::application_owned(
+                    SKILL_INSTALLATION_CAPABILITY,
+                ),
+            })
+        );
+
+        let capability = BTreeSet::from([ToolCapabilityId::application_owned(
+            SKILL_INSTALLATION_CAPABILITY,
+        )]);
+        let active = inactive.with_additional_capabilities(&capability).unwrap();
+        assert!(active.contains("skills_prepare_install"));
+        assert_eq!(active.dynamic_definitions().len(), 1);
+        active.validate_checkpoint(&active.checkpoint()).unwrap();
+
+        let missing_host = EffectiveToolSet::from_permitted_definitions(
+            &ToolRegistry::empty(),
+            Vec::new(),
+            &capability,
+        )
+        .unwrap();
+        assert_eq!(
+            missing_host.unavailability("skills_prepare_install"),
+            Some(ToolUnavailability::RuntimeCapabilityUnavailable {
+                required_capability: ToolCapabilityId::application_owned(
+                    SKILL_INSTALLATION_CAPABILITY,
+                ),
+            })
+        );
     }
 
     #[test]

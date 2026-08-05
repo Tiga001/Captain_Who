@@ -189,6 +189,10 @@ impl AgentService {
         if let Some(execution) = self.image_generation_execution.as_ref() {
             host_services = host_services.with_image_generation_execution(Arc::clone(execution));
         }
+        if let Some(skill_installation_prepare) = self.skill_installation_prepare.as_ref() {
+            host_services = host_services
+                .with_skill_installation_prepare(Arc::clone(skill_installation_prepare));
+        }
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
         }
