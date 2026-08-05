@@ -214,6 +214,49 @@ impl ProcessOutputCaptureMetadata {
             stderr_stop_reason: stderr.stop_reason().map(str::to_string),
         }
     }
+
+    pub(crate) fn from_optional_streams(
+        stdout: Option<&CapturedProcessOutput>,
+        stderr: Option<&CapturedProcessOutput>,
+        incomplete: bool,
+    ) -> Self {
+        let mut metadata = match (stdout, stderr) {
+            (Some(stdout), Some(stderr)) => Self::from_streams(stdout, stderr),
+            _ => Self {
+                original_bytes: stdout
+                    .map_or(0, CapturedProcessOutput::original_bytes)
+                    .saturating_add(stderr.map_or(0, CapturedProcessOutput::original_bytes)),
+                captured_bytes: stdout
+                    .map_or(0, CapturedProcessOutput::captured_bytes)
+                    .saturating_add(stderr.map_or(0, CapturedProcessOutput::captured_bytes)),
+                omitted_bytes: stdout
+                    .map_or(0, CapturedProcessOutput::omitted_bytes)
+                    .saturating_add(stderr.map_or(0, CapturedProcessOutput::omitted_bytes)),
+                stdout_original_bytes: stdout.map_or(0, CapturedProcessOutput::original_bytes),
+                stdout_captured_bytes: stdout.map_or(0, CapturedProcessOutput::captured_bytes),
+                stdout_omitted_bytes: stdout.map_or(0, CapturedProcessOutput::omitted_bytes),
+                stdout_preview_truncated: stdout
+                    .is_none_or(CapturedProcessOutput::preview_truncated),
+                stdout_stop_reason: stdout
+                    .and_then(CapturedProcessOutput::stop_reason)
+                    .map(str::to_string),
+                stderr_original_bytes: stderr.map_or(0, CapturedProcessOutput::original_bytes),
+                stderr_captured_bytes: stderr.map_or(0, CapturedProcessOutput::captured_bytes),
+                stderr_omitted_bytes: stderr.map_or(0, CapturedProcessOutput::omitted_bytes),
+                stderr_preview_truncated: stderr
+                    .is_none_or(CapturedProcessOutput::preview_truncated),
+                stderr_stop_reason: stderr
+                    .and_then(CapturedProcessOutput::stop_reason)
+                    .map(str::to_string),
+                ..Self::default()
+            },
+        };
+        if incomplete {
+            metadata.truncated_at_source = true;
+            metadata.stop_reason = Some("process_output_drain_incomplete".to_string());
+        }
+        metadata
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -629,6 +672,16 @@ pub type ProcessOutputCaptureHandle = thread::JoinHandle<std::io::Result<Capture
 pub type ProcessOutputObserver =
     Arc<dyn Fn(AgentCommandOutputStream, String) + Send + Sync + 'static>;
 
+/// Internal observer for every byte drained from a process pipe.
+///
+/// Unlike [`ProcessOutputObserver`], this is not a product event callback.  A
+/// managed session uses it only to commit output into its own bounded
+/// transcript.  It continues after the Exact History safety ceiling is reached
+/// so a bounded tail still represents the newest output.  Keeping the two
+/// observers separate preserves the legacy preview contract.
+pub(crate) type ProcessOutputTranscriptObserver =
+    Arc<dyn Fn(AgentCommandOutputStream, String) + Send + Sync + 'static>;
+
 /// Drains one process pipe without allowing either memory growth or a full pipe deadlock.
 ///
 /// `budget` is shared by stdout and stderr. After the hard capture ceiling is reached the reader
@@ -642,13 +695,13 @@ pub fn spawn_process_output_capture<R>(
 where
     R: Read + Send + 'static,
 {
-    spawn_process_output_capture_with_observer(reader, budget, policy, None, None)
+    spawn_process_output_capture_with_observers(reader, budget, policy, None, None, None)
 }
 
 /// Drains one process pipe and emits only the same bounded prefix retained for the ToolResult
 /// preview. UTF-8 characters split across OS pipe reads are reassembled before notification.
 pub fn spawn_process_output_capture_with_observer<R>(
-    mut reader: R,
+    reader: R,
     budget: ProcessOutputCaptureBudget,
     policy: ProcessOutputCapturePolicy,
     stream: Option<AgentCommandOutputStream>,
@@ -657,10 +710,25 @@ pub fn spawn_process_output_capture_with_observer<R>(
 where
     R: Read + Send + 'static,
 {
+    spawn_process_output_capture_with_observers(reader, budget, policy, stream, observer, None)
+}
+
+pub(crate) fn spawn_process_output_capture_with_observers<R>(
+    mut reader: R,
+    budget: ProcessOutputCaptureBudget,
+    policy: ProcessOutputCapturePolicy,
+    stream: Option<AgentCommandOutputStream>,
+    preview_observer: Option<ProcessOutputObserver>,
+    transcript_observer: Option<ProcessOutputTranscriptObserver>,
+) -> ProcessOutputCaptureHandle
+where
+    R: Read + Send + 'static,
+{
     thread::spawn(move || {
         let mut spool = NamedTempFile::new()?;
         let mut preview = Vec::with_capacity(policy.preview_bytes());
         let mut pending_live_utf8 = Vec::new();
+        let mut pending_transcript_utf8 = Vec::new();
         let mut original_bytes = 0_u64;
         let mut captured_bytes = 0_u64;
         let mut buffer = [0_u8; 16 * 1024];
@@ -671,6 +739,15 @@ where
                 break;
             }
             original_bytes = original_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+            if let (Some(stream), Some(observer)) = (stream, transcript_observer.as_ref()) {
+                pending_transcript_utf8.extend_from_slice(&buffer[..read]);
+                emit_complete_utf8_chunks(
+                    &mut pending_transcript_utf8,
+                    stream,
+                    observer.as_ref(),
+                    false,
+                );
+            }
             let retained = budget.reserve(read);
             if retained > 0 {
                 spool.write_all(&buffer[..retained])?;
@@ -680,7 +757,7 @@ where
                 let preview_from_chunk = preview_remaining.min(retained);
                 preview.extend_from_slice(&buffer[..preview_from_chunk]);
                 if preview_from_chunk > 0 {
-                    if let (Some(stream), Some(observer)) = (stream, observer.as_ref()) {
+                    if let (Some(stream), Some(observer)) = (stream, preview_observer.as_ref()) {
                         pending_live_utf8.extend_from_slice(&buffer[..preview_from_chunk]);
                         emit_complete_utf8_chunks(
                             &mut pending_live_utf8,
@@ -692,8 +769,16 @@ where
                 }
             }
         }
-        if let (Some(stream), Some(observer)) = (stream, observer.as_ref()) {
+        if let (Some(stream), Some(observer)) = (stream, preview_observer.as_ref()) {
             emit_complete_utf8_chunks(&mut pending_live_utf8, stream, observer.as_ref(), true);
+        }
+        if let (Some(stream), Some(observer)) = (stream, transcript_observer.as_ref()) {
+            emit_complete_utf8_chunks(
+                &mut pending_transcript_utf8,
+                stream,
+                observer.as_ref(),
+                true,
+            );
         }
         spool.flush()?;
         let omitted_bytes = original_bytes.saturating_sub(captured_bytes);
@@ -829,6 +914,32 @@ mod tests {
         assert!(observed.lock().unwrap().ends_with('你'));
         assert!(!observed.lock().unwrap().contains('\u{fffd}'));
         assert!(captured.preview_truncated());
+    }
+
+    #[test]
+    fn transcript_observer_keeps_draining_after_exact_capture_limit() {
+        let policy = ProcessOutputCapturePolicy::with_limits(4, 4);
+        let budget = ProcessOutputCaptureBudget::new(policy.max_capture_bytes());
+        let observed = Arc::new(std::sync::Mutex::new(String::new()));
+        let observed_for_callback = Arc::clone(&observed);
+        let observer: ProcessOutputTranscriptObserver = Arc::new(move |stream, chunk| {
+            assert_eq!(stream, AgentCommandOutputStream::Stdout);
+            observed_for_callback.lock().unwrap().push_str(&chunk);
+        });
+        let captured = join_process_output_capture(
+            spawn_process_output_capture_with_observers(
+                Cursor::new("head-middle-tail".as_bytes().to_vec()),
+                budget,
+                policy,
+                Some(AgentCommandOutputStream::Stdout),
+                None,
+                Some(observer),
+            ),
+            "stdout",
+        )
+        .unwrap();
+        assert!(captured.truncated_at_source());
+        assert_eq!(*observed.lock().unwrap(), "head-middle-tail");
     }
 
     #[test]

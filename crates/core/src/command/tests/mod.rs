@@ -5,6 +5,7 @@ use tempfile::TempDir;
 mod execution;
 mod policy_basics;
 mod policy_complex;
+mod session_manager;
 
 fn request(command: &str, timeout_ms: Option<u64>) -> AgentCommandRequest {
     AgentCommandRequest {

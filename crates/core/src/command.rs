@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -37,9 +37,14 @@ mod lexer;
 mod managed_runtime;
 mod output_capture;
 mod policy;
+mod process_control;
 mod risk;
 mod runtime_profile;
 mod segment;
+mod session;
+mod session_manager;
+mod spawn_plan;
+mod transcript;
 mod types;
 
 use allowlist::*;
@@ -67,6 +72,11 @@ pub use output_capture::{
     ProcessOutputObserver, ProcessOutputSpool, ProcessOutputSpoolSubstitution,
 };
 pub use policy::*;
+pub(crate) use process_control::{
+    configure_command_process_group, force_terminate_command_process_group,
+    interrupt_command_process_group, terminate_command_process_group,
+    try_wait_command_process_group, ManagedCommandChild,
+};
 use risk::*;
 #[cfg(test)]
 pub(crate) use runtime_profile::runtime_profile_revision;
@@ -78,6 +88,19 @@ pub use runtime_profile::{
     COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH, COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE,
 };
 use segment::*;
+pub use session::{
+    CommandSessionError, CommandSessionId, CommandSessionPoll, CommandSessionProjection,
+    CommandSessionScopeId, CommandSessionSnapshot, CommandSessionState, CommandStartOutcome,
+    CommandTerminalResult,
+};
+pub use session_manager::{
+    CommandSessionManager, CommandSessionManagerConfig, CommandSessionStartError,
+    CommandStartOptions, CommandTerminationReport, DEFAULT_COMMAND_POLL_BYTES,
+    DEFAULT_COMMAND_TRANSCRIPT_BYTES, DEFAULT_INITIAL_YIELD_MS, MAX_INITIAL_YIELD_MS,
+    MIN_COMMAND_POLL_BYTES, MIN_INITIAL_YIELD_MS,
+};
+pub(crate) use spawn_plan::CommandSpawnPlan;
+pub use transcript::{CommandOutputBatch, CommandOutputChunk};
 pub use types::*;
 
 /// Projects an immutable command execution receipt into its canonical model-visible ToolResult.

@@ -257,103 +257,56 @@ pub(super) fn run_shell_command_with_output_observer(
             runtime: None,
         });
     }
-    let timeout_ms = request
-        .timeout_ms
-        .unwrap_or(DEFAULT_TIMEOUT_MS)
-        .clamp(1, MAX_TIMEOUT_MS);
-    let started = Instant::now();
-    let mut command = shell_command(&request.command);
-    configure_command_process_group(&mut command);
-    let mut child = command
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("TERM", "dumb")
-        .env("CI", "1")
-        .spawn()
-        .map_err(|error| format!("启动命令失败：{error}"))?;
-    let capture_policy = ProcessOutputCapturePolicy::process_default();
-    let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
-    let stdout_reader = spawn_process_output_capture_with_observer(
-        child
-            .stdout
-            .take()
-            .ok_or_else(|| "无法读取命令 stdout。".to_string())?,
-        capture_budget.clone(),
-        capture_policy,
-        Some(AgentCommandOutputStream::Stdout),
-        output_observer.clone(),
+    // The managed-session kernel treats an absent hard timeout as genuinely
+    // unbounded.  Only this legacy adapter injects the old 120 second default,
+    // then waits through a Running handoff so the current product contract does
+    // not change during round one.
+    let hard_timeout = Duration::from_millis(
+        request
+            .timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .clamp(1, MAX_TIMEOUT_MS),
     );
-    let stderr_reader = spawn_process_output_capture_with_observer(
-        child
-            .stderr
-            .take()
-            .ok_or_else(|| "无法读取命令 stderr。".to_string())?,
-        capture_budget,
-        capture_policy,
-        Some(AgentCommandOutputStream::Stderr),
-        output_observer,
+    let plan = CommandSpawnPlan::shell(
+        request.command.clone(),
+        cwd.to_path_buf(),
+        root,
+        Some(hard_timeout),
     );
-
-    let deadline = Duration::from_millis(timeout_ms);
-    let mut timed_out = false;
-    let mut cancelled = false;
-    let exit_status = loop {
-        if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
-            cancelled = true;
-            terminate_command_process_group(&mut child);
-            break child
-                .wait()
-                .map_err(|error| format!("等待已取消命令失败：{error}"))?;
-        }
-
-        match try_wait_command_process_group(&mut child)
-            .map_err(|error| format!("等待命令失败：{error}"))?
-        {
-            Some(status) => break status,
-            None if started.elapsed() >= deadline => {
-                timed_out = true;
-                terminate_command_process_group(&mut child);
-                break child
-                    .wait()
-                    .map_err(|error| format!("等待超时命令失败：{error}"))?;
-            }
-            None => thread::sleep(Duration::from_millis(50)),
-        }
+    let manager = CommandSessionManager::default();
+    let scope = CommandSessionScopeId::new(format!("legacy:{}", request.id))
+        .map_err(|error| error.to_string())?;
+    let cancellation = cancellation_token.clone();
+    let action_cancellation = action_cancel_flag.clone();
+    let cancel_probe: Arc<dyn Fn() -> bool + Send + Sync> =
+        Arc::new(move || command_cancel_requested(&cancellation, action_cancellation.as_ref()));
+    let outcome = manager
+        .start_plan(
+            scope,
+            plan,
+            CommandStartOptions::default(),
+            output_observer,
+            Some(cancel_probe),
+        )
+        .map_err(|error| error.to_string())?;
+    let session_id = match outcome {
+        CommandStartOutcome::Exited(terminal) => return Ok(terminal.execution),
+        CommandStartOutcome::Running(snapshot) => snapshot.session_id,
     };
 
-    let stdout_capture = join_process_output_capture(stdout_reader, "stdout")?;
-    let stderr_capture = join_process_output_capture(stderr_reader, "stderr")?;
-    let output_capture =
-        ProcessOutputCaptureMetadata::from_streams(&stdout_capture, &stderr_capture);
-    let stdout = stdout_capture.preview().to_string();
-    let stderr = stderr_capture.preview().to_string();
-    let stdout_truncated = stdout_capture.preview_truncated();
-    let stderr_truncated = stderr_capture.preview_truncated();
-    let stdout_spool = stdout_capture.spool();
-    let stderr_spool = stderr_capture.spool();
-
-    Ok(AgentCommandExecutionResult {
-        command: request.command.clone(),
-        cwd: relative_cwd(root, cwd),
-        exit_code: exit_status.code(),
-        stdout,
-        stderr,
-        timed_out,
-        cancelled,
-        duration_ms: started.elapsed().as_millis() as u64,
-        stdout_truncated,
-        stderr_truncated,
-        output_capture,
-        stdout_spool,
-        stderr_spool,
-        error: None,
-        policy_evaluation: None,
-        artifact_observation: None,
-        input_files: Vec::new(),
-        runtime: None,
-    })
+    loop {
+        if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
+            manager
+                .force_terminate(&session_id, Duration::from_secs(3))
+                .map_err(|error| error.to_string())?;
+        }
+        if let Some(terminal) = manager
+            .wait_terminal_result(&session_id, Duration::from_millis(50))
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(terminal.execution);
+        }
+    }
 }
 
 pub(super) fn command_cancel_requested(
@@ -400,97 +353,6 @@ pub(crate) fn join_output_reader(
         .join()
         .map_err(|_| format!("读取命令 {stream} 的线程异常退出。"))?
         .map_err(|error| format!("读取命令 {stream} 失败：{error}"))
-}
-
-/// Observes a completed process-group leader, terminates any surviving descendants, and only then
-/// reaps the leader.
-///
-/// `Child::try_wait` reaps on Unix. Calling `killpg(child.id())` afterwards can therefore race PID
-/// reuse and signal an unrelated process group under parallel load. `waitid(..., WNOWAIT)` leaves
-/// the exited leader as a zombie, which pins its PID/process-group identity until cleanup is sent
-/// and `Child::wait` performs the authoritative reap.
-#[cfg(unix)]
-pub(crate) fn try_wait_command_process_group(
-    child: &mut Child,
-) -> std::io::Result<Option<ExitStatus>> {
-    let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-    // SAFETY: `information` points to writable storage for one siginfo_t. The child PID belongs to
-    // this process, and WNOWAIT intentionally preserves its waitable state for `Child::wait`.
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            child.id() as libc::id_t,
-            information.as_mut_ptr(),
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: a successful waitid call initializes the siginfo_t. POSIX specifies si_pid == 0
-    // when WNOHANG finds no waitable child state.
-    let information = unsafe { information.assume_init() };
-    // SAFETY: si_pid is defined for SIGCHLD information returned by waitid with WEXITED.
-    if unsafe { information.si_pid() } == 0 {
-        return Ok(None);
-    }
-
-    terminate_command_process_group(child);
-    child.wait().map(Some)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn try_wait_command_process_group(
-    child: &mut Child,
-) -> std::io::Result<Option<ExitStatus>> {
-    child.try_wait()
-}
-
-#[cfg(unix)]
-pub(crate) fn configure_command_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-pub(crate) fn configure_command_process_group(_command: &mut Command) {}
-
-#[cfg(unix)]
-pub(crate) fn terminate_command_process_group(child: &mut Child) {
-    let Ok(process_group) = i32::try_from(child.id()) else {
-        let _ = child.kill();
-        return;
-    };
-    // The shell is created as the leader of a fresh process group. A negative pid targets that
-    // entire group, so timeout/cancellation cannot leave ordinary descendants running.
-    // SAFETY: `kill` does not dereference memory. The pid is derived from the live `Child` and is
-    // negated intentionally to address only the process group created for that child.
-    let killed = unsafe { libc::kill(-process_group, libc::SIGKILL) } == 0;
-    if !killed {
-        let _ = child.kill();
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn terminate_command_process_group(child: &mut Child) {
-    // Defensive fallback for internal plumbing only. The authorized public entry point fails
-    // closed on Windows until a Job Object can provide equivalent descendant cleanup.
-    let _ = child.kill();
-}
-
-#[cfg(target_os = "windows")]
-pub(super) fn shell_command(command: &str) -> Command {
-    let mut shell = Command::new("cmd.exe");
-    shell.arg("/C").arg(command);
-    shell
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(super) fn shell_command(command: &str) -> Command {
-    let mut shell = Command::new("/bin/sh");
-    // Login profiles can redefine a statically evaluated command between inspection and spawn.
-    shell.arg("-c").arg(command);
-    shell
 }
 
 pub(super) fn relative_cwd(root: Option<&Path>, cwd: &Path) -> String {
