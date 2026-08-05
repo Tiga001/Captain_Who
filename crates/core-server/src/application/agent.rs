@@ -1,3 +1,4 @@
+use crate::adapters::agent_skill_installation::AgentSkillInstallationInspectionAdapter;
 use crate::adapters::skills_adapter::{
     activate_selected_skills, model_skill_activation_resolver, prepare_enabled_skill_discovery,
 };
@@ -36,11 +37,11 @@ use mycopilot_core::office::{
     OfficeEngineErrorCode, OfficeEngineRecovery, OfficeExecutionResult,
 };
 use mycopilot_core::skills::{
-    execute_skill_python_script, SkillMaterializationDestination, SkillMaterializationError,
-    SkillMaterializationRequest, SkillMaterializationStatus, SkillPackageUri,
-    SkillResourceMaterializer, SkillResourcePath, SkillResourceSession, SkillResourceUri,
-    SkillScriptRuntimeError, SkillSelection, SkillTemplateTreeMaterializationRequest,
-    SkillsService,
+    execute_skill_python_script, SkillInstallationService, SkillInstallationWorkflow,
+    SkillMaterializationDestination, SkillMaterializationError, SkillMaterializationRequest,
+    SkillMaterializationStatus, SkillPackageUri, SkillResourceMaterializer, SkillResourcePath,
+    SkillResourceSession, SkillResourceUri, SkillScriptRuntimeError, SkillSelection,
+    SkillTemplateTreeMaterializationRequest, SkillsService,
 };
 use mycopilot_core::storage::agent_action_audit_repository::{
     AgentActionAuditExecutionClaimOutcome, AgentActionAuditFinalizationOutcome,
@@ -397,6 +398,9 @@ pub struct AgentService {
     office_engine: Arc<dyn OfficeEngine>,
     image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
     skill_installation_prepare: Option<Arc<dyn AgentSkillInstallationPrepareExecutor>>,
+    skill_installation: Option<Arc<AgentSkillInstallationInspectionAdapter>>,
+    skill_installation_service: Option<Arc<SkillInstallationService>>,
+    skill_installation_workflow: Option<Arc<SkillInstallationWorkflow>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
     mcp_tool_invoker: Option<Arc<dyn McpToolInvoker>>,
     mcp_startup_inspector: Option<Arc<dyn McpApprovalStartupInspector>>,
@@ -495,6 +499,9 @@ impl AgentService {
             office_engine,
             image_generation_execution: None,
             skill_installation_prepare: None,
+            skill_installation: None,
+            skill_installation_service: None,
+            skill_installation_workflow: None,
             artifact_runtime,
             mcp_tool_invoker: None,
             mcp_startup_inspector: None,
@@ -539,14 +546,16 @@ impl AgentService {
         self
     }
 
-    /// Installs the process-owned, read-only Skill source inspection boundary. Installation
-    /// authority and preparation identifiers remain in core-server rather than entering runtime
-    /// input or checkpoints.
-    pub(crate) fn with_skill_installation_prepare(
+    pub(crate) fn with_skill_installation(
         mut self,
-        service: Arc<dyn AgentSkillInstallationPrepareExecutor>,
+        service: Arc<AgentSkillInstallationInspectionAdapter>,
+        installation_service: Arc<SkillInstallationService>,
+        workflow: Arc<SkillInstallationWorkflow>,
     ) -> Self {
-        self.skill_installation_prepare = Some(service);
+        self.skill_installation_prepare = Some(service.clone());
+        self.skill_installation = Some(service);
+        self.skill_installation_service = Some(installation_service);
+        self.skill_installation_workflow = Some(workflow);
         self
     }
 

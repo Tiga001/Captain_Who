@@ -27,7 +27,15 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
         inputPrice: '0',
         outputPrice: '0',
         enabled: true
-      }
+      },
+      ...Array.from({ length: 6 }, (_, index) => ({
+        id: `model-${index + 2}`,
+        displayName: `Model ${index + 2}`,
+        supportsImage: index % 2 === 0,
+        inputPrice: '0',
+        outputPrice: '0',
+        enabled: true
+      }))
     ]
   })
 }))
@@ -213,6 +221,23 @@ beforeEach(() => {
     return projectId === 'project-b' ? catalog([projectBSkill, bundledDocumentsSkill]) : catalog()
   })
   submitSpy.mockReset()
+})
+
+describe('ChatComposer model picker', () => {
+  it('shows five compact rows and scrolls additional models', async () => {
+    const screen = await render(<TestComposer />)
+
+    await screen.getByRole('button', { name: 'chat.selectModel' }).click()
+
+    const menu = screen.getByRole('listbox', { name: 'chat.selectModel' }).element() as HTMLElement
+    const options = Array.from(menu.querySelectorAll<HTMLElement>('.composer-model-option'))
+
+    expect(options).toHaveLength(7)
+    expect(getComputedStyle(menu).overflowY).toBe('auto')
+    expect(menu.clientHeight).toBe(198)
+    expect(menu.scrollHeight).toBeGreaterThan(menu.clientHeight)
+    expect(options[0]?.getBoundingClientRect().height).toBeLessThanOrEqual(36)
+  })
 })
 
 describe('Skill selection invariants', () => {

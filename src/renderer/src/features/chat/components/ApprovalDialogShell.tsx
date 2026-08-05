@@ -14,6 +14,7 @@ interface ApprovalDialogShellProps {
   ariaBusy?: boolean
   code?: ReactNode
   codeMultiline?: boolean
+  details?: ReactNode
   isSubmitting: boolean
   onApprove: () => void
   onCancel?: () => void
@@ -40,6 +41,7 @@ export function ApprovalDialogShell({
   ariaBusy = false,
   code,
   codeMultiline = false,
+  details,
   isSubmitting,
   onApprove,
   onCancel,
@@ -83,6 +85,8 @@ export function ApprovalDialogShell({
           {code}
         </code>
       ) : null}
+
+      {details ? <div className="agent-approval-dialog__details">{details}</div> : null}
 
       {policyHint ? (
         <p

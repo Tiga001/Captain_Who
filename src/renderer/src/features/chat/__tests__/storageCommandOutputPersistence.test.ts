@@ -125,6 +125,99 @@ it('keeps live command output transient while persisting the final tool result',
   expect(storedRun.toolResults).toEqual(message.agentRun?.toolResults)
 })
 
+it('persists settled Skill installation activity across a conversation reload', async () => {
+  const skillInstallation = {
+    action: {
+      schemaVersion: 1,
+      id: 'skill-install-action-1',
+      installRef: `skill_install_${'a'.repeat(32)}`,
+      approvalStatus: 'approved' as const,
+      expiresAt: 1_753_844_100_000,
+      preview: {
+        name: 'example-skill',
+        description: 'Example third-party Skill.',
+        sourceSummary: {
+          kind: 'githubRepository',
+          repository: 'example/skills',
+          resolvedRevision: 'b'.repeat(40)
+        },
+        resolvedRevision: 'b'.repeat(40),
+        fileCount: 4,
+        totalBytes: 2_048,
+        resourceSummary: {
+          total: 3,
+          references: 1,
+          assets: 1,
+          scripts: 1,
+          bytes: 1_024
+        },
+        containsScripts: true,
+        warnings: [
+          {
+            code: 'containsScripts',
+            message: 'The package contains executable scripts.',
+            requiresAcknowledgement: true
+          }
+        ],
+        compatibility: 'compatibleWithWarnings',
+        operation: 'install',
+        impact: 'addManagedSkill'
+      }
+    },
+    status: 'installed' as const
+  }
+  const message: ChatMessage = {
+    id: 'assistant-skill-installation',
+    role: 'assistant',
+    content: 'The Skill is installed and available from the next run.',
+    createdAt: 1,
+    status: 'sent',
+    agentRun: {
+      runId: 'run-skill-installation',
+      status: 'completed',
+      completedAt: 10,
+      toolDefinitions: [],
+      toolCalls: [],
+      toolResults: [],
+      approvals: [],
+      skillInstallations: [skillInstallation],
+      diffs: [],
+      timeline: []
+    }
+  }
+
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+  await saveChatMessageState('conversation-skill-installation', message)
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-skill-installation',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'Skill installation',
+    messages: [
+      {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        status: message.status,
+        attachments: [],
+        agentRunJson: storedMessage.agentRunJson,
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 10,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restored = await loadConversation('conversation-skill-installation')
+  expect(restored?.messages[0].agentRun?.skillInstallations).toEqual([skillInstallation])
+})
+
 it('fails closed when a restored terminal run still contains a running MCP invocation', async () => {
   const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
   const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'

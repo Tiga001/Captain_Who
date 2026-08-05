@@ -811,13 +811,18 @@
 .composer-model-menu {
   position: absolute;
   z-index: 20;
-  right: -8px;
-  bottom: calc(100% + 10px);
+  right: -4px;
+  bottom: calc(100% + 8px);
   display: grid;
-  width: 264px;
-  max-width: min(264px, calc(100vw - 48px));
-  padding: 8px;
+  width: 248px;
+  max-width: min(248px, calc(100vw - 32px));
+  /* Five 36px rows, four 1px gaps, padding, and borders. */
+  max-height: 198px;
+  padding: 6px;
   gap: 1px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
   background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
@@ -946,9 +951,10 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 42px;
-  padding: 0 12px;
-  gap: 10px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 9px;
+  gap: 8px;
   color: var(--mc-color-text-secondary);
   text-align: left;
   background: transparent;
@@ -963,7 +969,7 @@
 .composer-model-option__name {
   overflow: hidden;
   color: var(--mc-color-text-primary);
-  font-size: var(--mc-font-size-lg);
+  font-size: var(--mc-font-size-base);
   font-weight: var(--mc-font-weight-medium);
   line-height: var(--mc-line-height-tight);
   text-overflow: ellipsis;
@@ -974,9 +980,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 42px;
-  height: 24px;
-  padding: 0 9px;
+  min-width: 36px;
+  height: 20px;
+  padding: 0 7px;
   color: var(--mc-color-text-muted);
   background: var(--mc-color-surface-neutral-subtle);
   border-radius: var(--mc-radius-pill);

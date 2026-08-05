@@ -11,6 +11,7 @@ import type {
   AgentMcpToolInvocationState,
   AgentProposedAction,
   AgentRunStatus,
+  AgentSkillInstallationRequest,
   AgentStateSnapshot,
   AgentTodoState,
   AgentToolCall,
@@ -20,6 +21,20 @@ import type {
   ActivatedSkillSummary,
   SkillSelection
 } from '@mycopilot/protocol'
+
+export type ChatSkillInstallationStatus =
+  | 'waiting_for_approval'
+  | 'installing'
+  | 'installed'
+  | 'already_installed'
+  | 'rejected'
+  | 'failed'
+  | 'uncertain'
+
+export interface ChatSkillInstallationView {
+  action: AgentSkillInstallationRequest
+  status: ChatSkillInstallationStatus
+}
 
 export interface ChatWebSearchSource {
   id: string
@@ -167,6 +182,8 @@ export interface ChatAgentRunView {
   webSearchActivities?: ChatWebSearchActivity[]
   readActivities?: ChatReadActivity[]
   approvals: AgentProposedAction[]
+  /** Presentation-safe approval history retained after settlement for the chat Timeline. */
+  skillInstallations?: ChatSkillInstallationView[]
   diffs: AgentDiffProposal[]
   fileDrafts?: AgentFileDraftSnapshot[]
   fileWritePreviews?: ChatFileWritePreview[]

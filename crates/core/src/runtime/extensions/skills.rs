@@ -1382,6 +1382,7 @@ mod tests {
         memory_resource_session_for_test, SkillId, SkillResourceKind, SkillRevision, SkillSourceId,
     };
     use crate::tools::{
+        AgentSkillInstallationCommitPreparationRequest, AgentSkillInstallationCommitPreparer,
         AgentSkillInstallationPrepareExecutor, AgentSkillInstallationPrepareRequest,
         AgentToolExposure, ToolRegistry,
     };
@@ -1393,10 +1394,27 @@ mod tests {
     struct CapacityDynamicTool;
 
     struct CapacitySkillInstallationPrepare;
+    struct CapacitySkillInstallationCommit;
 
     impl AgentSkillInstallationPrepareExecutor for CapacitySkillInstallationPrepare {
         fn prepare(&self, _request: AgentSkillInstallationPrepareRequest) -> AgentResult<Value> {
             unreachable!("capacity tests never execute the projected Tool")
+        }
+    }
+
+    impl AgentSkillInstallationCommitPreparer for CapacitySkillInstallationCommit {
+        fn prepare_commit_action(
+            &self,
+            _request: AgentSkillInstallationCommitPreparationRequest,
+        ) -> AgentResult<crate::protocol::AgentSkillInstallationRequest> {
+            unreachable!("capacity tests never execute the projected Tool")
+        }
+
+        fn invalidate_commit_action(
+            &self,
+            _action: &crate::protocol::AgentSkillInstallationRequest,
+        ) -> AgentResult<()> {
+            Ok(())
         }
     }
 
@@ -1454,6 +1472,7 @@ mod tests {
     fn effective_tool_set_with_skill_installation_tool() -> EffectiveToolSet {
         let mut registry = ToolRegistry::empty();
         registry.register_skill_installation_prepare(Arc::new(CapacitySkillInstallationPrepare));
+        registry.register_skill_installation_commit(Arc::new(CapacitySkillInstallationCommit));
         EffectiveToolSet::from_permitted_definitions(
             &registry,
             registry.definitions(),
@@ -2457,7 +2476,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_installer_activation_capacity_charges_the_real_prepare_tool_schema() {
+    fn skill_installer_activation_capacity_charges_both_installation_tool_schemas() {
         let budget = ContextTextBudget::heuristic(64 * 1024);
         let capacity = ModelInputCapacity {
             remaining_tokens: 64 * 1024,
@@ -2472,8 +2491,9 @@ mod tests {
         let definitions = projection.effective_tool_set.dynamic_definitions();
         let schema_tokens = budget.estimate_tool_definitions(definitions);
 
-        assert_eq!(definitions.len(), 1);
-        assert_eq!(definitions[0].name, "skills_prepare_install");
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(definitions[0].name, "skills_commit_install");
+        assert_eq!(definitions[1].name, "skills_prepare_install");
         assert!(schema_tokens > 0);
         assert!(projection.additional_tokens > schema_tokens);
     }

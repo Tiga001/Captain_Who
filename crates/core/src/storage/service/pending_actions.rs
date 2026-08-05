@@ -241,6 +241,7 @@ pub(super) fn is_valid_pending_successor(
         }
         AgentProposedAction::SkillScript { script } => script.id.as_str(),
         AgentProposedAction::OfficeOperation { office_operation } => office_operation.id.as_str(),
+        AgentProposedAction::SkillInstallation { installation } => installation.id.as_str(),
     };
     if candidate.tool_call_id.as_deref() != Some(action_id) {
         return false;

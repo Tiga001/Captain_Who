@@ -25,6 +25,7 @@ pub(crate) mod schema;
 mod search_code;
 mod search_cursor;
 mod search_files;
+mod skills_commit_install;
 mod skills_list_resources;
 mod skills_materialize_resource;
 mod skills_prepare_install;
@@ -66,6 +67,10 @@ use schema::validate_portable_tool_input_schema;
 use search_code::SearchCodeTool;
 use search_files::SearchFilesTool;
 use serde_json::Value;
+use skills_commit_install::SkillsCommitInstallTool;
+pub use skills_commit_install::{
+    AgentSkillInstallationCommitPreparationRequest, AgentSkillInstallationCommitPreparer,
+};
 use skills_list_resources::SkillsListResourcesTool;
 pub(crate) use skills_materialize_resource::validate_frozen_materialization_trace_args;
 use skills_materialize_resource::SkillsMaterializeResourceTool;
@@ -716,6 +721,7 @@ impl ToolRegistry {
             AgentProposedAction::Command { .. } => "run_command",
             AgentProposedAction::SkillMaterialization { .. } => "skills_materialize_resource",
             AgentProposedAction::SkillScript { .. } => "skills_run_script",
+            AgentProposedAction::SkillInstallation { .. } => "skills_commit_install",
             AgentProposedAction::OfficeOperation { office_operation } => {
                 match office_operation.prepared.request.document_kind {
                     crate::office::OfficeDocumentKind::Document => "office_document",
@@ -994,6 +1000,15 @@ impl ToolRegistry {
     ) {
         if !self.contains_tool("skills_prepare_install") {
             self.register(SkillsPrepareInstallTool::new(executor));
+        }
+    }
+
+    pub(crate) fn register_skill_installation_commit(
+        &mut self,
+        preparer: Arc<dyn AgentSkillInstallationCommitPreparer>,
+    ) {
+        if !self.contains_tool("skills_commit_install") {
+            self.register(SkillsCommitInstallTool::new(preparer));
         }
     }
 

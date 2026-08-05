@@ -33,6 +33,8 @@ export function getToolDisplayName(tool: string, t: Translate) {
     search_files: 'tool.searchFiles',
     skills_materialize_resource: 'tool.skillsMaterializeResource',
     skills_run_script: 'tool.skillsRunScript',
+    skills_prepare_install: 'tool.skillsPrepareInstall',
+    skills_commit_install: 'tool.skillsCommitInstall',
     office_document: 'tool.officeDocument',
     office_spreadsheet: 'tool.officeSpreadsheet',
     office_presentation: 'tool.officePresentation',

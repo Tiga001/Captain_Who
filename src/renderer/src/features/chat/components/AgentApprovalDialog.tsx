@@ -4,9 +4,13 @@ import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
 import { ApprovalDialogShell } from './ApprovalDialogShell'
 import { McpToolApprovalCard } from './McpToolApprovalCard'
+import { SkillInstallationApprovalCard } from './SkillInstallationApprovalCard'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
 
-type StandardAgentProposedAction = Exclude<AgentProposedAction, { type: 'mcp_tool_call' }>
+type StandardAgentProposedAction = Exclude<
+  AgentProposedAction,
+  { type: 'mcp_tool_call' | 'skill_installation' }
+>
 
 interface AgentApprovalDialogTarget {
   action: AgentProposedAction
@@ -215,6 +219,17 @@ export function AgentApprovalDialog({
         messageId={target.messageId}
         onApprove={onApprove}
         onCancel={onCancel}
+        onReject={onReject}
+      />
+    )
+  }
+
+  if (target.action.type === 'skill_installation') {
+    return (
+      <SkillInstallationApprovalCard
+        action={target.action}
+        messageId={target.messageId}
+        onApprove={onApprove}
         onReject={onReject}
       />
     )

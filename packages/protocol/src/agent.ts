@@ -107,6 +107,8 @@ export type AgentToolName =
   | 'skills_materialize_resource'
   | 'skills_preflight_script'
   | 'skills_run_script'
+  | 'skills_prepare_install'
+  | 'skills_commit_install'
   | 'office_document'
   | 'office_spreadsheet'
   | 'office_presentation'
@@ -1566,6 +1568,44 @@ export interface AgentOfficeOperationRequest {
   reason: string
 }
 
+export interface AgentSkillInstallationResourceSummary {
+  total: number
+  references: number
+  assets: number
+  scripts: number
+  bytes: number
+}
+
+export interface AgentSkillInstallationWarning {
+  code: string
+  message: string
+  requiresAcknowledgement: boolean
+}
+
+export interface AgentSkillInstallationPreview {
+  name: string
+  description: string
+  sourceSummary: unknown
+  resolvedRevision: string
+  fileCount: number
+  totalBytes: number
+  resourceSummary: AgentSkillInstallationResourceSummary
+  containsScripts: boolean
+  warnings: AgentSkillInstallationWarning[]
+  compatibility: string
+  operation: string
+  impact: string
+}
+
+export interface AgentSkillInstallationRequest {
+  schemaVersion: number
+  id: string
+  installRef: string
+  preview: AgentSkillInstallationPreview
+  approvalStatus: AgentApprovalStatus
+  expiresAt: number
+}
+
 export type AgentProposedAction =
   | { type: 'tool_call'; call: AgentToolCall }
   | { type: 'mcp_tool_call'; approval: AgentMcpToolApproval }
@@ -1575,6 +1615,7 @@ export type AgentProposedAction =
   | { type: 'skill_materialization'; materialization: AgentSkillMaterializationRequest }
   | { type: 'skill_script'; script: AgentSkillScriptRequest }
   | { type: 'office_operation'; officeOperation: AgentOfficeOperationRequest }
+  | { type: 'skill_installation'; installation: AgentSkillInstallationRequest }
 
 export type AgentEvent =
   | { type: 'started'; runId: string; toolDefinitions: AgentToolDefinition[] }

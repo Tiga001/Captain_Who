@@ -1275,6 +1275,9 @@ impl ConversationTraceRecorder {
             AgentProposedAction::OfficeOperation { office_operation } => {
                 (&office_operation.id, office_operation.approval_status)
             }
+            AgentProposedAction::SkillInstallation { installation } => {
+                (&installation.id, installation.approval_status)
+            }
             AgentProposedAction::ToolCall { call } => (&call.id, call.approval_status),
             AgentProposedAction::McpToolCall { approval } => {
                 (&approval.identity.call_id, approval.call.approval_status)

@@ -187,6 +187,8 @@ pub use protocol::{
     AgentReadPermission, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
     AgentRunToolSetCheckpoint, AgentSearchConfig, AgentSearchMode, AgentSkillActivation,
     AgentSkillDependencyCheck, AgentSkillDependencyKind, AgentSkillDependencyStatus,
+    AgentSkillInstallationPreview, AgentSkillInstallationRequest,
+    AgentSkillInstallationResourceSummary, AgentSkillInstallationWarning,
     AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
     AgentSkillMaterializationResultStatus, AgentSkillScriptInterpreter,
     AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
@@ -200,7 +202,7 @@ pub use protocol::{
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
     AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION, AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
     AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
-    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION, AGENT_SKILL_INSTALLATION_SCHEMA_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{
@@ -227,6 +229,7 @@ pub use tools::{
     mcp_tool_result_from_rejected_approval, mcp_tool_result_model_projection,
     mcp_tool_result_persistence_projection, mcp_tool_result_size_summary,
     normalize_agent_image_generation_reason, validate_mcp_approval_arguments,
+    AgentSkillInstallationCommitPreparationRequest, AgentSkillInstallationCommitPreparer,
     AgentSkillInstallationPrepareExecutor, AgentSkillInstallationPrepareRequest,
     AgentSkillInstallationPrepareSource, McpAgentToolAnnotations, McpAgentToolDescriptor,
     McpApprovedToolInvocation, McpNormalizedInputSchemaIdentity, McpOmittedContentKind,

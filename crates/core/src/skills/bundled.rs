@@ -616,6 +616,22 @@ mod tests {
         assert_eq!(package.source_text(), SKILL_INSTALLER_SOURCE);
         assert!(source.open_resource_reader(&package).unwrap().is_none());
         assert!(package.instructions().contains("`skills_prepare_install`"));
+        assert!(package.instructions().contains("`skills_commit_install`"));
+        let explain = package
+            .instructions()
+            .find("tell the user the Skill name")
+            .unwrap();
+        let commit = package
+            .instructions()
+            .find("call `skills_commit_install`")
+            .unwrap();
+        assert!(explain < commit, "public explanation must precede commit");
+        assert!(package
+            .instructions()
+            .contains("only the exact returned `installRef`"));
+        assert!(package
+            .instructions()
+            .contains("discoverable on the next run"));
         assert!(package.instructions().contains("untrusted data"));
         assert!(package.instructions().contains("Never install by calling"));
         assert!(!package.instructions().contains("description:"));

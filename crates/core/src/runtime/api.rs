@@ -233,6 +233,8 @@ pub struct AgentRuntimeHostServices {
         Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
     pub(super) skill_installation_prepare:
         Option<Arc<dyn crate::tools::AgentSkillInstallationPrepareExecutor>>,
+    pub(super) skill_installation_commit:
+        Option<Arc<dyn crate::tools::AgentSkillInstallationCommitPreparer>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
@@ -340,6 +342,14 @@ impl AgentRuntimeHostServices {
         service: Arc<dyn crate::tools::AgentSkillInstallationPrepareExecutor>,
     ) -> Self {
         self.skill_installation_prepare = Some(service);
+        self
+    }
+
+    pub fn with_skill_installation_commit(
+        mut self,
+        service: Arc<dyn crate::tools::AgentSkillInstallationCommitPreparer>,
+    ) -> Self {
+        self.skill_installation_commit = Some(service);
         self
     }
 
@@ -541,6 +551,7 @@ pub fn prepare_context_window_tool_projection(
             office_engine: host_services.office_engine.clone(),
             image_generation_execution: host_services.image_generation_execution.clone(),
             skill_installation_prepare: host_services.skill_installation_prepare.clone(),
+            skill_installation_commit: host_services.skill_installation_commit.clone(),
             skill_activation_resolver: host_services.skill_activation_resolver.clone(),
             skill_resources: host_services.skill_resources.clone(),
             mcp_tools: host_services.mcp_tools.clone(),

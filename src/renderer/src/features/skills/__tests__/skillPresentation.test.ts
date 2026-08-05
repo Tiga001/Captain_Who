@@ -28,6 +28,12 @@ const bundledCases = [
     sourceId: 'application:image-generation',
     zhName: '图片生成',
     enName: 'Image Generation'
+  },
+  {
+    id: 'bundled:application:skill-installer',
+    sourceId: 'application:skill-installer',
+    zhName: 'Skill 安装器',
+    enName: 'Skill Installer'
   }
 ] as const
 
@@ -61,6 +67,35 @@ describe('bundled Skill presentation', () => {
     expect(getSkillPresentation(input, (key) => getTranslation('zh-CN', key))).toEqual({
       description: input.description,
       name: input.name
+    })
+  })
+
+  it('localizes only the trusted bundled Skill Installer identity', () => {
+    const bundled = {
+      description: 'Backend description',
+      id: 'bundled:application:skill-installer',
+      name: 'skill-installer',
+      source: { id: 'application:skill-installer', kind: 'bundled' } as SkillSourceDescriptor
+    }
+    const installed = {
+      description: 'Third-party installer description',
+      id: 'installed:user:skill-installer',
+      name: 'skill-installer',
+      source: { id: 'installed:user', kind: 'installed' } as SkillSourceDescriptor
+    }
+
+    expect(getSkillPresentation(bundled, (key) => getTranslation('zh-CN', key))).toEqual({
+      description: '检查并安装来自 GitHub 链接或已授权本地路径的第三方 Skill。',
+      name: 'Skill 安装器'
+    })
+    expect(getSkillPresentation(bundled, (key) => getTranslation('en-US', key))).toEqual({
+      description:
+        'Inspect and install third-party Skills from GitHub links or authorized local paths.',
+      name: 'Skill Installer'
+    })
+    expect(getSkillPresentation(installed, (key) => getTranslation('zh-CN', key))).toEqual({
+      description: installed.description,
+      name: installed.name
     })
   })
 })

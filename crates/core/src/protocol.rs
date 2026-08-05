@@ -2312,6 +2312,59 @@ impl AgentSkillScriptResult {
     }
 }
 
+pub const AGENT_SKILL_INSTALLATION_SCHEMA_VERSION: u32 = 1;
+
+/// Presentation-safe preview frozen by the Host before a Skill installation enters approval.
+///
+/// Every string originating in the third-party package remains untrusted display data. Authority
+/// such as preparation IDs, destination paths and warning acknowledgements deliberately stays
+/// behind `install_ref` in the Host application service.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillInstallationPreview {
+    pub name: String,
+    pub description: String,
+    pub source_summary: serde_json::Value,
+    pub resolved_revision: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub resource_summary: AgentSkillInstallationResourceSummary,
+    pub contains_scripts: bool,
+    pub warnings: Vec<AgentSkillInstallationWarning>,
+    pub compatibility: String,
+    pub operation: String,
+    pub impact: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillInstallationResourceSummary {
+    pub total: u64,
+    pub references: u64,
+    pub assets: u64,
+    pub scripts: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillInstallationWarning {
+    pub code: String,
+    pub message: String,
+    pub requires_acknowledgement: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillInstallationRequest {
+    pub schema_version: u32,
+    pub id: String,
+    pub install_ref: String,
+    pub preview: AgentSkillInstallationPreview,
+    pub approval_status: AgentApprovalStatus,
+    pub expires_at: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(
     tag = "type",
@@ -2342,6 +2395,9 @@ pub enum AgentProposedAction {
     },
     OfficeOperation {
         office_operation: Box<AgentOfficeOperationRequest>,
+    },
+    SkillInstallation {
+        installation: Box<AgentSkillInstallationRequest>,
     },
 }
 

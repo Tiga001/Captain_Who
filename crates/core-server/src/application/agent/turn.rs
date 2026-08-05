@@ -210,6 +210,9 @@ impl AgentService {
                 host_services =
                     host_services.with_skill_installation_prepare(skill_installation_prepare);
             }
+            if let Some(skill_installation) = service.skill_installation.clone() {
+                host_services = host_services.with_skill_installation_commit(skill_installation);
+            }
             host_services = host_services.with_skill_activation_resolver(
                 model_skill_activation_resolver(service.storage.clone(), service.skills.clone()),
             );

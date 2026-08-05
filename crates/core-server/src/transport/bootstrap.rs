@@ -223,18 +223,29 @@ impl CoreServerBootstrap {
             })?;
         let skill_installation_workflow = Arc::new(skill_installation_workflow);
         let skill_source_resolution = Arc::new(skill_source_resolution);
-        let agent_skill_installation_prepare =
-            Arc::new(AgentSkillInstallationInspectionAdapter::new(
+        let agent_skill_installation_prepare = Arc::new(
+            AgentSkillInstallationInspectionAdapter::with_pending_root(
                 Arc::clone(&skill_source_resolution),
                 Arc::clone(&skill_installation_workflow),
-            ));
+                skill_installation_pending_root(&database_path),
+            )
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize pending Skill installation store: {error}"
+                ))
+            })?,
+        );
         let agent_service = AgentService::try_new_deferred_startup_reconciliation(storage.clone())
             .map_err(|error| {
                 io::Error::other(format!("failed to initialize Agent service: {error}"))
             })?
             .with_skills_service(Arc::clone(&skills_service))
             .with_image_generation_execution(Arc::clone(&image_generation_execution))
-            .with_skill_installation_prepare(agent_skill_installation_prepare);
+            .with_skill_installation(
+                agent_skill_installation_prepare,
+                Arc::clone(&skill_installation_service),
+                Arc::clone(&skill_installation_workflow),
+            );
         let skill_services = SkillServices {
             catalog: skills_service,
             installations: skill_installation_service,
@@ -518,6 +529,13 @@ pub(crate) fn skill_store_root(database_path: &std::path::Path) -> PathBuf {
         .parent()
         .map(|parent| parent.join("skills"))
         .unwrap_or_else(|| PathBuf::from("skills"))
+}
+
+pub(crate) fn skill_installation_pending_root(database_path: &std::path::Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("skill-installation-transactions"))
+        .unwrap_or_else(|| PathBuf::from("skill-installation-transactions"))
 }
 
 pub(crate) fn image_generation_artifact_store_root(database_path: &std::path::Path) -> PathBuf {

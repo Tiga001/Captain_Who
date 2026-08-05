@@ -193,6 +193,11 @@ impl AgentService {
             host_services = host_services
                 .with_skill_installation_prepare(Arc::clone(skill_installation_prepare));
         }
+        if let Some(skill_installation) = self.skill_installation.as_ref() {
+            let commit: Arc<dyn mycopilot_core::AgentSkillInstallationCommitPreparer> =
+                Arc::clone(skill_installation) as Arc<_>;
+            host_services = host_services.with_skill_installation_commit(commit);
+        }
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
         }

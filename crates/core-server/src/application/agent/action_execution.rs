@@ -1066,6 +1066,17 @@ impl AgentService {
                 file_effect_guard.mark_durably_settled();
                 Ok(tool_result)
             }
+            AgentProposedAction::SkillInstallation { installation } => {
+                let Some(service) = self.skill_installation.as_ref() else {
+                    return Err(AgentError::new(
+                        "The Skill installation Host service is unavailable.",
+                    ));
+                };
+                let conversation_id = conversation_id.as_deref().ok_or_else(|| {
+                    AgentError::new("Skill installation requires a conversation identity.")
+                })?;
+                Ok(service.commit_approved(&installation, conversation_id, &run_id))
+            }
         }
     }
 }

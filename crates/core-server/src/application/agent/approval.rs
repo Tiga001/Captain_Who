@@ -218,6 +218,18 @@ impl AgentService {
         let record = record.clone();
         drop(pending_actions);
         drop(deletion_lifecycle);
+        if let AgentProposedAction::SkillInstallation { installation } = &record.snapshot.action {
+            let conversation_id = record.snapshot.conversation_id.as_deref().ok_or_else(|| {
+                "Skill installation approval has no conversation identity.".to_string()
+            })?;
+            let service = self
+                .skill_installation
+                .as_ref()
+                .ok_or_else(|| "Skill installation Host is unavailable.".to_string())?;
+            service
+                .reject_action(installation, conversation_id, &record.snapshot.run_id)
+                .map_err(|error| error.to_string())?;
+        }
         if let Err(error) = self.finalize_cancelled_pending_action(&record, call) {
             if cancelled_file_write_outcome_is_durable_or_unknown(&self.storage, &record) {
                 return Err(format!(
@@ -791,6 +803,22 @@ impl AgentService {
         }
 
         let mut continuation_message = message.clone();
+        if decision_status == AgentApprovalDecisionStatus::Rejected {
+            if let AgentProposedAction::SkillInstallation { installation } = &record.snapshot.action
+            {
+                let conversation_id =
+                    record.snapshot.conversation_id.as_deref().ok_or_else(|| {
+                        "Skill installation approval has no conversation identity.".to_string()
+                    })?;
+                let service = self
+                    .skill_installation
+                    .as_ref()
+                    .ok_or_else(|| "Skill installation Host is unavailable.".to_string())?;
+                service
+                    .reject_action(installation, conversation_id, &record.snapshot.run_id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let execution = if decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action
         {
             let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
@@ -813,7 +841,40 @@ impl AgentService {
                 tool_result,
             }
         } else if decision_status == AgentApprovalDecisionStatus::Approved {
-            if let AgentProposedAction::SkillMaterialization { materialization } =
+            if let AgentProposedAction::SkillInstallation { installation } = &record.snapshot.action
+            {
+                let mut installation = (**installation).clone();
+                installation.approval_status = AgentApprovalStatus::Approved;
+                let conversation_id =
+                    record.snapshot.conversation_id.as_deref().ok_or_else(|| {
+                        "Skill installation approval has no conversation identity.".to_string()
+                    })?;
+                let service = self
+                    .skill_installation
+                    .as_ref()
+                    .ok_or_else(|| "Skill installation Host is unavailable.".to_string())?;
+                let tool_result = service.commit_approved(
+                    &installation,
+                    conversation_id,
+                    &record.snapshot.run_id,
+                );
+                ActionExecutionDecision {
+                    status: if tool_result.ok {
+                        "installed".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    final_pending_status: if tool_result.ok {
+                        PendingActionStatus::Completed
+                    } else {
+                        PendingActionStatus::Failed
+                    },
+                    patch_result: None,
+                    file_write_result: None,
+                    file_change: None,
+                    tool_result,
+                }
+            } else if let AgentProposedAction::SkillMaterialization { materialization } =
                 &record.snapshot.action
             {
                 let mut materialization = materialization.clone();
@@ -882,6 +943,39 @@ impl AgentService {
         let mut final_pending_status = execution.final_pending_status;
         let mut tool_result = execution.tool_result.clone();
         let mut execution_status = execution.status.clone();
+        if decision_status == AgentApprovalDecisionStatus::Approved
+            && matches!(
+                record.snapshot.action,
+                AgentProposedAction::SkillInstallation { .. }
+            )
+        {
+            let commit_may_have_succeeded = tool_result
+                .result
+                .as_ref()
+                .and_then(|value| value.get("commitMayHaveSucceeded"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if tool_result.ok || commit_may_have_succeeded {
+                if let (Some(installations), Some(workflow)) = (
+                    self.skill_installation_service.as_deref(),
+                    self.skill_installation_workflow.as_deref(),
+                ) {
+                    crate::transport::notify_skills_changed(
+                        &self.storage,
+                        &self.skills,
+                        installations,
+                        Some(workflow),
+                        Some(&notifications),
+                        if tool_result.ok {
+                            mycopilot_protocol_rs::SkillsChangedReasonDto::Installed
+                        } else {
+                            mycopilot_protocol_rs::SkillsChangedReasonDto::CatalogChanged
+                        },
+                        None,
+                    );
+                }
+            }
+        }
         let is_rejected_mcp =
             decision_status == AgentApprovalDecisionStatus::Rejected && is_mcp_action;
         let agent_input = if is_rejected_mcp {

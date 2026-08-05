@@ -4,7 +4,7 @@ import type { Translate } from '../../config/translationFormat'
 import type { TranslationKey } from '../../config/frontendTranslations'
 
 export type BundledSkillPresentationKey =
-  'documents' | 'imageGeneration' | 'presentations' | 'spreadsheets'
+  'documents' | 'imageGeneration' | 'presentations' | 'skillInstaller' | 'spreadsheets'
 
 interface SkillPresentationInput {
   description?: string
@@ -22,6 +22,7 @@ const BUNDLED_SKILL_KEY_BY_ID: Readonly<Record<string, BundledSkillPresentationK
   'bundled:application:documents': 'documents',
   'bundled:application:image-generation': 'imageGeneration',
   'bundled:application:presentations': 'presentations',
+  'bundled:application:skill-installer': 'skillInstaller',
   'bundled:application:spreadsheets': 'spreadsheets'
 }
 
@@ -29,6 +30,7 @@ const BUNDLED_SKILL_KEY_BY_SOURCE_ID: Readonly<Record<string, BundledSkillPresen
   'application:documents': 'documents',
   'application:image-generation': 'imageGeneration',
   'application:presentations': 'presentations',
+  'application:skill-installer': 'skillInstaller',
   'application:spreadsheets': 'spreadsheets'
 }
 
@@ -46,6 +48,10 @@ const BUNDLED_SKILL_TRANSLATIONS: Readonly<
   presentations: {
     description: 'skills.bundled.presentations.description',
     name: 'skills.bundled.presentations.name'
+  },
+  skillInstaller: {
+    description: 'skills.bundled.skillInstaller.description',
+    name: 'skills.bundled.skillInstaller.name'
   },
   spreadsheets: {
     description: 'skills.bundled.spreadsheets.description',

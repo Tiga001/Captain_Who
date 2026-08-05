@@ -130,6 +130,7 @@ pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::SkillMaterialization { materialization } => materialization.id.clone(),
         AgentProposedAction::SkillScript { script } => script.id.clone(),
         AgentProposedAction::OfficeOperation { office_operation } => office_operation.id.clone(),
+        AgentProposedAction::SkillInstallation { installation } => installation.id.clone(),
     }
 }
 
@@ -145,6 +146,7 @@ pub(crate) fn action_type_for_action(action: &AgentProposedAction) -> &'static s
         AgentProposedAction::SkillMaterialization { .. } => "skill_materialization",
         AgentProposedAction::SkillScript { .. } => "skill_script",
         AgentProposedAction::OfficeOperation { .. } => "office_operation",
+        AgentProposedAction::SkillInstallation { .. } => "skill_installation",
     }
 }
 
@@ -164,6 +166,7 @@ pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::OfficeOperation { office_operation } => {
             office_tool_name(office_operation.prepared.request.document_kind).to_string()
         }
+        AgentProposedAction::SkillInstallation { .. } => "skills_commit_install".to_string(),
     }
 }
 
@@ -181,6 +184,13 @@ pub(crate) fn tool_call_for_action(action: &AgentProposedAction) -> AgentToolCal
         AgentProposedAction::OfficeOperation { office_operation } => {
             office_operation_tool_call(office_operation)
         }
+        AgentProposedAction::SkillInstallation { installation } => AgentToolCall {
+            id: installation.id.clone(),
+            tool: "skills_commit_install".to_string(),
+            args: json!({ "installRef": installation.install_ref }),
+            approval_status: installation.approval_status,
+            reason: Some("Install the frozen inspected Skill package.".to_string()),
+        },
     }
 }
 

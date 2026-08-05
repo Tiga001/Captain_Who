@@ -17,7 +17,8 @@ import type {
   ChatGuidanceTimelineItem,
   ChatMcpToolInvocationView,
   ChatMessage,
-  ChatQueuedMessage
+  ChatQueuedMessage,
+  ChatSkillInstallationView
 } from '../chat/chatTypes'
 import { THINKING_PLACEHOLDER } from './constants'
 import { getAgentActionId } from './agentActionUtils'
@@ -35,7 +36,7 @@ import {
 } from '../chat/agentWebSearch'
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
 import { toSafeMcpDisplayText } from '../mcp/mcpSafeDisplay'
-import { getActionToolCall } from './actionProjection'
+import { getActionToolCall, withActionApprovalStatus } from './actionProjection'
 import {
   createRejectedToolResult,
   getApprovalsForStatus,
@@ -111,6 +112,9 @@ export function ensureAgentRun(
     toolCalls: Array.isArray(currentRun.toolCalls) ? currentRun.toolCalls : [],
     toolResults: Array.isArray(currentRun.toolResults) ? currentRun.toolResults : [],
     approvals: Array.isArray(currentRun.approvals) ? currentRun.approvals : [],
+    ...(Array.isArray(currentRun.skillInstallations)
+      ? { skillInstallations: currentRun.skillInstallations }
+      : {}),
     diffs: Array.isArray(currentRun.diffs) ? currentRun.diffs : [],
     timeline: Array.isArray(currentRun.timeline) ? currentRun.timeline : [],
     readActivities: Array.isArray(currentRun.readActivities) ? currentRun.readActivities : [],
@@ -490,6 +494,84 @@ function upsertAgentAction(actions: AgentProposedAction[], nextAction: AgentProp
 
 function removeAgentAction(actions: AgentProposedAction[], actionId: string) {
   return actions.filter((action) => getAgentActionId(action) !== actionId)
+}
+
+function upsertSkillInstallation(
+  installations: ChatSkillInstallationView[],
+  next: ChatSkillInstallationView
+) {
+  return upsertById(installations, next, (installation) => installation.action.id)
+}
+
+function mergeSkillInstallationApprovals(
+  installations: ChatSkillInstallationView[] | undefined,
+  actions: AgentProposedAction[]
+) {
+  return actions.reduce((current, action) => {
+    if (action.type !== 'skill_installation') return current
+    const existing = current.find(
+      (installation) => installation.action.id === action.installation.id
+    )
+    return upsertSkillInstallation(current, {
+      action: action.installation,
+      status: existing?.status ?? 'waiting_for_approval'
+    })
+  }, installations ?? [])
+}
+
+function applySkillInstallationDecision(
+  installations: ChatSkillInstallationView[] | undefined,
+  action: AgentProposedAction,
+  decision: 'approved' | 'rejected'
+) {
+  if (action.type !== 'skill_installation') return installations ?? []
+  const approvalStatus: AgentApprovalStatus = decision === 'approved' ? 'approved' : 'rejected'
+  const approvedAction = withActionApprovalStatus(action, approvalStatus)
+  if (approvedAction.type !== 'skill_installation') return installations ?? []
+  return upsertSkillInstallation(installations ?? [], {
+    action: approvedAction.installation,
+    status: decision === 'approved' ? 'installing' : 'rejected'
+  })
+}
+
+function applySkillInstallationExecution(
+  installations: ChatSkillInstallationView[] | undefined,
+  execution: AgentActionExecutionOutput
+) {
+  const current = installations ?? []
+  const existing = current.find((installation) => installation.action.id === execution.actionId)
+  if (!existing) return current
+  if (execution.status === 'rejected') {
+    return upsertSkillInstallation(current, { ...existing, status: 'rejected' })
+  }
+  if (!execution.toolResult) {
+    const status = execution.status === 'approved' ? 'installing' : 'failed'
+    return upsertSkillInstallation(current, { ...existing, status })
+  }
+  if (!execution.toolResult.ok) {
+    const details = execution.toolResult.result
+    const uncertain =
+      details &&
+      typeof details === 'object' &&
+      !Array.isArray(details) &&
+      ((details as Record<string, unknown>).commitMayHaveSucceeded === true ||
+        String((details as Record<string, unknown>).code ?? '')
+          .toLowerCase()
+          .includes('uncertain'))
+    return upsertSkillInstallation(current, {
+      ...existing,
+      status: uncertain ? 'uncertain' : 'failed'
+    })
+  }
+  const result = execution.toolResult.result
+  const resultStatus =
+    result && typeof result === 'object' && !Array.isArray(result)
+      ? (result as Record<string, unknown>).status
+      : undefined
+  return upsertSkillInstallation(current, {
+    ...existing,
+    status: resultStatus === 'alreadyInstalled' ? 'already_installed' : 'installed'
+  })
 }
 
 function appendTimelineItem(
@@ -1034,6 +1116,9 @@ export function applyAgentEventToChatMessage(
           ...currentRun,
           status: 'waiting_for_approval',
           approvals: upsertAgentAction(currentRun.approvals, agentEvent.action),
+          skillInstallations: mergeSkillInstallationApprovals(currentRun.skillInstallations, [
+            agentEvent.action
+          ]),
           ...mcpProjection
         }
       }
@@ -1060,6 +1145,9 @@ export function applyAgentEventToChatMessage(
           'required'
         ),
         approvals: upsertAgentAction(currentRun.approvals, agentEvent.action),
+        skillInstallations: mergeSkillInstallationApprovals(currentRun.skillInstallations, [
+          agentEvent.action
+        ]),
         timeline
       }
     }
@@ -1222,6 +1310,10 @@ export function applyAgentEventToChatMessage(
       usage: agentEvent.usage ?? currentRun.usage,
       finishReason: agentEvent.finishReason,
       approvals: getApprovalsForStatus(nextStatus, currentRun.approvals, proposedActions),
+      skillInstallations: mergeSkillInstallationApprovals(
+        currentRun.skillInstallations,
+        proposedActions
+      ),
       ...mcpProjection
     },
     nextStatus,
@@ -1276,6 +1368,10 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
       usage: output.usage ?? currentRun.usage,
       finishReason: output.finishReason,
       approvals: getApprovalsForStatus(output.status, currentRun.approvals, output.proposedActions),
+      skillInstallations: mergeSkillInstallationApprovals(
+        currentRun.skillInstallations,
+        output.proposedActions
+      ),
       ...mcpProjection
     },
     output.status,
@@ -1321,6 +1417,11 @@ export function applyAgentActionDecisionToChatMessage(
     ...currentRun,
     status: 'running',
     approvals: removeAgentAction(currentRun.approvals, actionId),
+    skillInstallations: applySkillInstallationDecision(
+      currentRun.skillInstallations,
+      action,
+      decision
+    ),
     toolCalls: updateToolCallApprovalStatus(currentRun.toolCalls, action, approvalStatus),
     toolResults: rejectedToolResult
       ? upsertById(currentRun.toolResults, rejectedToolResult, (result) => result.callId)
@@ -1374,6 +1475,7 @@ export function applyAgentActionExecutionToChatMessage(
     const nextRun = normalizeAgentRunToolActivities({
       ...currentRun,
       approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
       toolCalls: mcpCallId
         ? currentRun.toolCalls.filter((call) => call.id !== mcpCallId)
         : currentRun.toolCalls,
@@ -1400,6 +1502,7 @@ export function applyAgentActionExecutionToChatMessage(
     const nextRun = normalizeAgentRunToolActivities({
       ...currentRun,
       approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
       timeline: removeTransientToolTimelineItems(currentRun.timeline)
     })
 
@@ -1436,6 +1539,7 @@ export function applyAgentActionExecutionToChatMessage(
         : diff
     ),
     approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+    skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
     timeline: removeTransientToolTimelineItems(currentRun.timeline)
   })
 

@@ -358,7 +358,7 @@ fn application_owned_dynamic_capability(tool_name: &str) -> Option<ToolCapabilit
         "skills_list_resources" | "skills_read_resource" => SKILL_RESOURCES_READ_CAPABILITY,
         "skills_materialize_resource" => SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
         "skills_preflight_script" | "skills_run_script" => SKILL_SCRIPTS_CAPABILITY,
-        "skills_prepare_install" => SKILL_INSTALLATION_CAPABILITY,
+        "skills_prepare_install" | "skills_commit_install" => SKILL_INSTALLATION_CAPABILITY,
         _ => return None,
     };
     Some(ToolCapabilityId::application_owned(capability))
@@ -440,12 +440,30 @@ mod tests {
 
     struct NoopSkillInstallationPrepare;
 
+    struct NoopSkillInstallationCommit;
+
     impl crate::tools::AgentSkillInstallationPrepareExecutor for NoopSkillInstallationPrepare {
         fn prepare(
             &self,
             _request: crate::tools::AgentSkillInstallationPrepareRequest,
         ) -> AgentResult<Value> {
             Ok(json!({ "status": "ready" }))
+        }
+    }
+
+    impl crate::tools::AgentSkillInstallationCommitPreparer for NoopSkillInstallationCommit {
+        fn prepare_commit_action(
+            &self,
+            _request: crate::tools::AgentSkillInstallationCommitPreparationRequest,
+        ) -> AgentResult<crate::protocol::AgentSkillInstallationRequest> {
+            Err(AgentError::new("not executed in Tool set tests"))
+        }
+
+        fn invalidate_commit_action(
+            &self,
+            _action: &crate::protocol::AgentSkillInstallationRequest,
+        ) -> AgentResult<()> {
+            Ok(())
         }
     }
 
@@ -648,6 +666,7 @@ mod tests {
     fn skill_installation_tool_is_absent_until_both_host_and_capability_are_available() {
         let mut registered = ToolRegistry::empty();
         registered.register_skill_installation_prepare(Arc::new(NoopSkillInstallationPrepare));
+        registered.register_skill_installation_commit(Arc::new(NoopSkillInstallationCommit));
         let inactive = EffectiveToolSet::from_permitted_definitions(
             &registered,
             registered.definitions(),
@@ -655,6 +674,7 @@ mod tests {
         )
         .unwrap();
         assert!(!inactive.contains("skills_prepare_install"));
+        assert!(!inactive.contains("skills_commit_install"));
         assert_eq!(
             inactive.unavailability("skills_prepare_install"),
             Some(ToolUnavailability::RequiresSkillActivation {
@@ -669,7 +689,8 @@ mod tests {
         )]);
         let active = inactive.with_additional_capabilities(&capability).unwrap();
         assert!(active.contains("skills_prepare_install"));
-        assert_eq!(active.dynamic_definitions().len(), 1);
+        assert!(active.contains("skills_commit_install"));
+        assert_eq!(active.dynamic_definitions().len(), 2);
         active.validate_checkpoint(&active.checkpoint()).unwrap();
 
         let missing_host = EffectiveToolSet::from_permitted_definitions(
@@ -680,6 +701,14 @@ mod tests {
         .unwrap();
         assert_eq!(
             missing_host.unavailability("skills_prepare_install"),
+            Some(ToolUnavailability::RuntimeCapabilityUnavailable {
+                required_capability: ToolCapabilityId::application_owned(
+                    SKILL_INSTALLATION_CAPABILITY,
+                ),
+            })
+        );
+        assert_eq!(
+            missing_host.unavailability("skills_commit_install"),
             Some(ToolUnavailability::RuntimeCapabilityUnavailable {
                 required_capability: ToolCapabilityId::application_owned(
                     SKILL_INSTALLATION_CAPABILITY,

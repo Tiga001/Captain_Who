@@ -87,6 +87,16 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
     }
   }
 
+  if (action.type === 'skill_installation') {
+    return {
+      id: action.installation.id,
+      tool: 'skills_commit_install',
+      args: { installRef: action.installation.installRef },
+      approvalStatus: action.installation.approvalStatus,
+      reason: 'Install the frozen inspected Skill package.'
+    }
+  }
+
   if (action.type !== 'command') return null
 
   return {
@@ -258,6 +268,9 @@ export function withActionApprovalStatus(
   }
   if (action.type === 'office_operation') {
     return { ...action, officeOperation: { ...action.officeOperation, approvalStatus } }
+  }
+  if (action.type === 'skill_installation') {
+    return { ...action, installation: { ...action.installation, approvalStatus } }
   }
   return { ...action, diff: { ...action.diff, approvalStatus } }
 }

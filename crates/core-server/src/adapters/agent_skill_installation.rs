@@ -1,19 +1,28 @@
-use super::skill_installation_workflow_adapter::workflow_failure;
+use super::skill_installation_workflow_adapter::{commit_response, workflow_failure};
 use super::skill_source_resolution_adapter::resolution_failure;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use mycopilot_core::skills::{
-    GitHubReference, ResolvedSkillSource, SkillAcquisitionSource, SkillInstallationId,
-    SkillInstallationPreparationRequest, SkillInstallationPreview, SkillInstallationSourceLocator,
-    SkillInstallationWorkflow, SkillPreparationId, SkillSourceCandidateId, SkillSourceResolutionId,
+    GitHubReference, ResolvedSkillSource, SkillAcquisitionSource, SkillInstallationCommitRequest,
+    SkillInstallationId, SkillInstallationPreparationRequest, SkillInstallationPreview,
+    SkillInstallationSourceLocator, SkillInstallationWarningCode, SkillInstallationWorkflow,
+    SkillPreparationId, SkillPreviewRevision, SkillSourceCandidateId, SkillSourceResolutionId,
     SkillSourceResolutionService,
 };
 use mycopilot_core::{
-    AgentError, AgentResult, AgentSkillInstallationPrepareExecutor,
+    AgentApprovalStatus, AgentError, AgentResult, AgentSkillInstallationCommitPreparationRequest,
+    AgentSkillInstallationCommitPreparer, AgentSkillInstallationPrepareExecutor,
     AgentSkillInstallationPrepareRequest, AgentSkillInstallationPrepareSource,
+    AgentSkillInstallationPreview, AgentSkillInstallationRequest,
+    AgentSkillInstallationResourceSummary, AgentSkillInstallationWarning, AgentToolResult,
+    AGENT_SKILL_INSTALLATION_SCHEMA_VERSION,
 };
 use mycopilot_protocol_rs::SkillInspectionPhaseDto;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -29,6 +38,7 @@ pub(crate) struct AgentSkillInstallationInspectionAdapter {
     source_resolution: Arc<SkillSourceResolutionService>,
     workflow: Arc<SkillInstallationWorkflow>,
     refs: Mutex<InspectionRefs>,
+    pending_root: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for AgentSkillInstallationInspectionAdapter {
@@ -40,6 +50,7 @@ impl std::fmt::Debug for AgentSkillInstallationInspectionAdapter {
 }
 
 impl AgentSkillInstallationInspectionAdapter {
+    #[cfg(test)]
     pub(crate) fn new(
         source_resolution: Arc<SkillSourceResolutionService>,
         workflow: Arc<SkillInstallationWorkflow>,
@@ -48,7 +59,23 @@ impl AgentSkillInstallationInspectionAdapter {
             source_resolution,
             workflow,
             refs: Mutex::new(InspectionRefs::default()),
+            pending_root: None,
         }
+    }
+
+    pub(crate) fn with_pending_root(
+        source_resolution: Arc<SkillSourceResolutionService>,
+        workflow: Arc<SkillInstallationWorkflow>,
+        pending_root: PathBuf,
+    ) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&pending_root)?;
+        cleanup_expired_persisted_bindings(&pending_root, now_ms());
+        Ok(Self {
+            source_resolution,
+            workflow,
+            refs: Mutex::new(InspectionRefs::default()),
+            pending_root: Some(pending_root),
+        })
     }
 
     fn prepare_url(
@@ -250,22 +277,29 @@ impl AgentSkillInstallationInspectionAdapter {
         resolved_revision: String,
     ) -> AgentResult<Value> {
         let install_ref = random_ref("skill_install_");
-        let result = ready_projection(&install_ref, &preview, source_summary, resolved_revision);
+        let result = ready_projection(
+            &install_ref,
+            &preview,
+            source_summary.clone(),
+            resolved_revision.clone(),
+        );
         let mut refs = self.refs.lock().unwrap_or_else(|error| error.into_inner());
         refs.prune(now_ms());
         if refs.install_refs.len() >= MAX_INSTALL_REFS {
             return Err(capacity_error());
         }
-        refs.install_refs.insert(
-            install_ref,
-            InstallBinding {
-                _conversation_id: request.conversation_id.clone(),
-                _created_by_run_id: request.run_id.clone(),
-                _preparation_id: preview.preparation_id().clone(),
-                _preview_revision: preview.preview_revision().as_str().to_string(),
-                expires_at_unix_ms: preview.expires_at_unix_ms(),
-            },
-        );
+        let binding = InstallBinding {
+            conversation_id: request.conversation_id.clone(),
+            created_by_run_id: request.run_id.clone(),
+            preparation_id: preview.preparation_id().clone(),
+            preview_revision: preview.preview_revision().as_str().to_string(),
+            preview: approval_preview(&preview, source_summary, resolved_revision),
+            claimed_by: None,
+            committed: false,
+            expires_at_unix_ms: preview.expires_at_unix_ms(),
+        };
+        self.persist_binding(&install_ref, &binding)?;
+        refs.install_refs.insert(install_ref.clone(), binding);
         Ok(result)
     }
 
@@ -289,6 +323,365 @@ impl AgentSkillInstallationPrepareExecutor for AgentSkillInstallationInspectionA
                 display_path,
             } => self.prepare_local(&request, &directory, &display_path),
         }
+    }
+}
+
+impl AgentSkillInstallationCommitPreparer for AgentSkillInstallationInspectionAdapter {
+    fn prepare_commit_action(
+        &self,
+        request: AgentSkillInstallationCommitPreparationRequest,
+    ) -> AgentResult<AgentSkillInstallationRequest> {
+        let now = now_ms();
+        self.ensure_binding_loaded(&request.install_ref)?;
+        let mut refs = self.refs.lock().unwrap_or_else(|error| error.into_inner());
+        refs.prune(now);
+        let binding = refs
+            .install_refs
+            .get_mut(&request.install_ref)
+            .ok_or_else(|| {
+                commit_ref_error(
+                    "installRefNotFound",
+                    "The Skill installation reference is missing or expired.",
+                    "prepareAgain",
+                )
+            })?;
+        if binding.conversation_id != request.conversation_id {
+            return Err(commit_ref_error(
+                "installRefConversationMismatch",
+                "The Skill installation reference does not belong to this conversation.",
+                "prepareAgain",
+            ));
+        }
+        if binding.created_by_run_id != request.run_id {
+            return Err(commit_ref_error(
+                "installRefRunMismatch",
+                "The Skill installation reference does not belong to this run.",
+                "prepareAgain",
+            ));
+        }
+        if binding.committed {
+            return Err(commit_ref_error(
+                "alreadyCommitted",
+                "This Skill installation transaction has already completed.",
+                "startNextRun",
+            ));
+        }
+        let claim = (request.run_id.clone(), request.action_id.clone());
+        if binding
+            .claimed_by
+            .as_ref()
+            .is_some_and(|existing| existing != &claim)
+        {
+            return Err(commit_ref_error(
+                "installRefAlreadyClaimed",
+                "The Skill installation reference is already bound to another approval action.",
+                "prepareAgain",
+            ));
+        }
+        binding.claimed_by = Some(claim);
+        let action = AgentSkillInstallationRequest {
+            schema_version: AGENT_SKILL_INSTALLATION_SCHEMA_VERSION,
+            id: request.action_id,
+            install_ref: request.install_ref,
+            preview: binding.preview.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            expires_at: binding.expires_at_unix_ms,
+        };
+        self.persist_binding(&action.install_ref, binding)?;
+        Ok(action)
+    }
+
+    fn invalidate_commit_action(&self, action: &AgentSkillInstallationRequest) -> AgentResult<()> {
+        self.cancel_action(action, None, None)
+    }
+}
+
+impl AgentSkillInstallationInspectionAdapter {
+    pub(crate) fn commit_approved(
+        &self,
+        action: &AgentSkillInstallationRequest,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> AgentToolResult {
+        let binding = {
+            if let Err(error) = self.ensure_binding_loaded(&action.install_ref) {
+                return tool_result_from_agent_result(&action.id, Err(error));
+            }
+            let mut refs = self.refs.lock().unwrap_or_else(|error| error.into_inner());
+            refs.prune(now_ms());
+            refs.install_refs.get(&action.install_ref).cloned()
+        };
+        let result = (|| -> AgentResult<Value> {
+            if action.schema_version != AGENT_SKILL_INSTALLATION_SCHEMA_VERSION
+                || action.approval_status != AgentApprovalStatus::Approved
+            {
+                return Err(commit_ref_error(
+                    "invalidApprovedSnapshot",
+                    "The approved Skill installation snapshot is invalid.",
+                    "prepareAgain",
+                ));
+            }
+            let binding = binding.ok_or_else(|| {
+                commit_ref_error(
+                    "installRefNotFound",
+                    "The frozen Skill package is missing or expired.",
+                    "prepareAgain",
+                )
+            })?;
+            if binding.conversation_id != conversation_id
+                || binding.created_by_run_id != run_id
+                || binding.claimed_by.as_ref() != Some(&(run_id.to_string(), action.id.clone()))
+                || binding.preview != action.preview
+                || binding.expires_at_unix_ms != action.expires_at
+            {
+                return Err(commit_ref_error(
+                    "approvalIdentityMismatch",
+                    "The approval does not match the frozen Skill installation transaction.",
+                    "prepareAgain",
+                ));
+            }
+            let preview_revision = SkillPreviewRevision::parse(binding.preview_revision.clone())
+                .map_err(|_| invalid_host_state("The frozen preview revision is invalid."))?;
+            let mut commit = SkillInstallationCommitRequest::new(
+                binding.preparation_id.clone(),
+                preview_revision,
+            );
+            for warning in &binding.preview.warnings {
+                if !warning.requires_acknowledgement {
+                    continue;
+                }
+                match warning.code.as_str() {
+                    "containsScripts" => {
+                        commit = commit.acknowledge(SkillInstallationWarningCode::ContainsScripts)
+                    }
+                    "resourcesNotExposed" => {
+                        commit =
+                            commit.acknowledge(SkillInstallationWarningCode::ResourcesNotExposed)
+                    }
+                    _ => {
+                        return Err(commit_ref_error(
+                            "unknownRequiredWarning",
+                            "The frozen preview contains an unsupported required warning.",
+                            "prepareAgain",
+                        ))
+                    }
+                }
+            }
+            let committed = self.workflow.commit(&commit).map_err(|error| {
+                let failure = workflow_failure(SkillInspectionPhaseDto::Commit, &error);
+                agent_commit_failure(failure, false)
+            })?;
+            let response = commit_response(&committed)
+                .map_err(|failure| agent_commit_failure(failure, true))?;
+            let audit_value = serde_json::to_value(response)
+                .map_err(|_| invalid_host_state("The Skill commit result could not be encoded."))?;
+            let outcome = audit_value
+                .get("outcome")
+                .and_then(Value::as_str)
+                .unwrap_or("installed");
+            let status = if matches!(outcome, "alreadyInstalled" | "alreadyCurrent") {
+                "alreadyInstalled"
+            } else {
+                "installed"
+            };
+            let mut refs = self.refs.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(current) = refs.install_refs.get_mut(&action.install_ref) {
+                current.committed = true;
+            }
+            // Keep the frozen transaction until its natural expiry. If the process exits after
+            // the Managed Skill Store commit but before the action result is durably settled,
+            // startup recovery can replay this exact snapshot and receive AlreadyInstalled
+            // instead of reacquiring mutable source bytes.
+            // Authority-bearing workflow IDs remain in the shared installation service's audit
+            // records. The Agent receives only the semantic outcome needed for its next reply.
+            Ok(json!({
+                "status": status,
+                "outcome": outcome,
+                "name": binding.preview.name,
+                "availableFrom": "nextRun"
+            }))
+        })();
+        tool_result_from_agent_result(&action.id, result)
+    }
+
+    pub(crate) fn reject_action(
+        &self,
+        action: &AgentSkillInstallationRequest,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> AgentResult<()> {
+        self.cancel_action(action, Some(conversation_id), Some(run_id))
+    }
+
+    fn cancel_action(
+        &self,
+        action: &AgentSkillInstallationRequest,
+        conversation_id: Option<&str>,
+        run_id: Option<&str>,
+    ) -> AgentResult<()> {
+        let binding = {
+            let mut refs = self.refs.lock().unwrap_or_else(|error| error.into_inner());
+            refs.prune(now_ms());
+            let binding = refs.install_refs.get(&action.install_ref).cloned();
+            if let Some(binding) = binding.as_ref() {
+                if conversation_id.is_some_and(|value| value != binding.conversation_id)
+                    || run_id.is_some_and(|value| {
+                        binding
+                            .claimed_by
+                            .as_ref()
+                            .is_some_and(|claim| claim.0 != value)
+                    })
+                {
+                    return Err(commit_ref_error(
+                        "approvalIdentityMismatch",
+                        "The rejected approval does not match this installation transaction.",
+                        "prepareAgain",
+                    ));
+                }
+            }
+            refs.install_refs.remove(&action.install_ref);
+            binding
+        };
+        if let Some(binding) = binding {
+            let _ = self.workflow.cancel(&binding.preparation_id);
+        }
+        self.remove_persisted_binding(&action.install_ref);
+        Ok(())
+    }
+
+    fn ensure_binding_loaded(&self, install_ref: &str) -> AgentResult<()> {
+        if self
+            .refs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .install_refs
+            .contains_key(install_ref)
+        {
+            return Ok(());
+        }
+        let Some(path) = self.binding_path(install_ref) else {
+            return Ok(());
+        };
+        let bytes = std::fs::read(&path).map_err(|_| {
+            commit_ref_error(
+                "installRefNotFound",
+                "The Skill installation reference is missing or expired.",
+                "prepareAgain",
+            )
+        })?;
+        let document: PersistedInstallBinding = serde_json::from_slice(&bytes).map_err(|_| {
+            commit_ref_error(
+                "installSnapshotInvalid",
+                "The persisted Skill installation snapshot is invalid.",
+                "prepareAgain",
+            )
+        })?;
+        if document.schema_version != 1 || document.install_ref != install_ref {
+            return Err(commit_ref_error(
+                "installSnapshotInvalid",
+                "The persisted Skill installation snapshot identity is invalid.",
+                "prepareAgain",
+            ));
+        }
+        if document.expires_at_unix_ms <= now_ms() {
+            let _ = std::fs::remove_file(&path);
+            return Err(commit_ref_error(
+                "installRefNotFound",
+                "The Skill installation reference is missing or expired.",
+                "prepareAgain",
+            ));
+        }
+        let frozen = mycopilot_core::skills::SkillInstallationFrozenPreparation::from_bytes(
+            BASE64.decode(document.frozen_preparation).map_err(|_| {
+                commit_ref_error(
+                    "installSnapshotInvalid",
+                    "The persisted Skill package snapshot is invalid.",
+                    "prepareAgain",
+                )
+            })?,
+        )
+        .map_err(|message| commit_ref_error("installSnapshotInvalid", &message, "prepareAgain"))?;
+        let restored = self
+            .workflow
+            .restore_frozen_preparation(&frozen)
+            .map_err(|message| {
+                commit_ref_error("installSnapshotUnavailable", &message, "prepareAgain")
+            })?;
+        if restored.preview_revision().as_str() != document.preview_revision {
+            return Err(commit_ref_error(
+                "previewRevisionMismatch",
+                "The persisted Skill preview changed and must be inspected again.",
+                "prepareAgain",
+            ));
+        }
+        let binding = InstallBinding {
+            conversation_id: document.conversation_id,
+            created_by_run_id: document.created_by_run_id,
+            preparation_id: restored.preparation_id().clone(),
+            preview_revision: document.preview_revision,
+            preview: document.preview,
+            claimed_by: document.claimed_by,
+            committed: document.committed,
+            expires_at_unix_ms: document.expires_at_unix_ms,
+        };
+        self.refs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .install_refs
+            .insert(install_ref.to_string(), binding);
+        Ok(())
+    }
+
+    fn persist_binding(&self, install_ref: &str, binding: &InstallBinding) -> AgentResult<()> {
+        let Some(path) = self.binding_path(install_ref) else {
+            return Ok(());
+        };
+        let frozen = self
+            .workflow
+            .export_frozen_preparation(&binding.preparation_id)
+            .map_err(|message| {
+                commit_ref_error("installSnapshotUnavailable", &message, "prepareAgain")
+            })?;
+        let document = PersistedInstallBinding {
+            schema_version: 1,
+            install_ref: install_ref.to_string(),
+            conversation_id: binding.conversation_id.clone(),
+            created_by_run_id: binding.created_by_run_id.clone(),
+            preview_revision: binding.preview_revision.clone(),
+            preview: binding.preview.clone(),
+            claimed_by: binding.claimed_by.clone(),
+            committed: binding.committed,
+            expires_at_unix_ms: binding.expires_at_unix_ms,
+            frozen_preparation: BASE64.encode(frozen.as_bytes()),
+        };
+        let bytes = serde_json::to_vec(&document).map_err(|_| {
+            invalid_host_state("The frozen installation transaction could not be encoded.")
+        })?;
+        let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+        std::fs::write(&temporary, bytes).map_err(|_| {
+            invalid_host_state("The frozen installation transaction could not be persisted.")
+        })?;
+        std::fs::rename(&temporary, &path).map_err(|_| {
+            let _ = std::fs::remove_file(&temporary);
+            invalid_host_state("The frozen installation transaction could not be published.")
+        })?;
+        Ok(())
+    }
+
+    fn remove_persisted_binding(&self, install_ref: &str) {
+        if let Some(path) = self.binding_path(install_ref) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn binding_path(&self, install_ref: &str) -> Option<PathBuf> {
+        valid_install_ref_for_store(install_ref)
+            .then(|| {
+                self.pending_root
+                    .as_ref()
+                    .map(|root| root.join(format!("{install_ref}.json")))
+            })
+            .flatten()
     }
 }
 
@@ -321,11 +714,29 @@ struct CandidateBinding {
 
 #[derive(Clone)]
 struct InstallBinding {
-    _conversation_id: String,
-    _created_by_run_id: String,
-    _preparation_id: SkillPreparationId,
-    _preview_revision: String,
+    conversation_id: String,
+    created_by_run_id: String,
+    preparation_id: SkillPreparationId,
+    preview_revision: String,
+    preview: AgentSkillInstallationPreview,
+    claimed_by: Option<(String, String)>,
+    committed: bool,
     expires_at_unix_ms: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedInstallBinding {
+    schema_version: u32,
+    install_ref: String,
+    conversation_id: String,
+    created_by_run_id: String,
+    preview_revision: String,
+    preview: AgentSkillInstallationPreview,
+    claimed_by: Option<(String, String)>,
+    committed: bool,
+    expires_at_unix_ms: u64,
+    frozen_preparation: String,
 }
 
 fn candidate_projection(
@@ -414,6 +825,117 @@ fn ready_projection(
     })
 }
 
+fn approval_preview(
+    preview: &SkillInstallationPreview,
+    source_summary: Value,
+    resolved_revision: String,
+) -> AgentSkillInstallationPreview {
+    let resources = preview.package().resources();
+    let warnings = preview
+        .warnings()
+        .iter()
+        .map(|warning| AgentSkillInstallationWarning {
+            code: warning.code().stable_name().to_string(),
+            message: warning.message().to_string(),
+            requires_acknowledgement: warning.acknowledgement_required(),
+        })
+        .collect::<Vec<_>>();
+    AgentSkillInstallationPreview {
+        name: preview.package().name().to_string(),
+        description: preview.package().description().to_string(),
+        source_summary,
+        resolved_revision,
+        file_count: u64::try_from(resources.resource_count())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+        total_bytes: preview.package().package_bytes(),
+        resource_summary: AgentSkillInstallationResourceSummary {
+            total: u64::try_from(resources.resource_count()).unwrap_or(u64::MAX),
+            references: u64::try_from(resources.reference_count()).unwrap_or(u64::MAX),
+            assets: u64::try_from(resources.asset_count()).unwrap_or(u64::MAX),
+            scripts: u64::try_from(resources.script_count()).unwrap_or(u64::MAX),
+            bytes: resources.resource_bytes(),
+        },
+        contains_scripts: resources.script_count() > 0,
+        compatibility: if warnings.is_empty() {
+            "compatible".to_string()
+        } else {
+            "compatibleWithWarnings".to_string()
+        },
+        warnings,
+        operation: match preview.operation() {
+            mycopilot_core::skills::SkillInstallationOperation::Install => "install",
+            mycopilot_core::skills::SkillInstallationOperation::Update => "update",
+            _ => "unknown",
+        }
+        .to_string(),
+        impact: if preview.operation()
+            == mycopilot_core::skills::SkillInstallationOperation::Install
+        {
+            "addManagedSkill"
+        } else {
+            "updateManagedSkill"
+        }
+        .to_string(),
+    }
+}
+
+fn tool_result_from_agent_result(call_id: &str, result: AgentResult<Value>) -> AgentToolResult {
+    match result {
+        Ok(value) => AgentToolResult {
+            exact_archive_file: None,
+            call_id: call_id.to_string(),
+            tool: "skills_commit_install".to_string(),
+            ok: true,
+            result: Some(value),
+            error: None,
+        },
+        Err(error) => AgentToolResult {
+            exact_archive_file: None,
+            call_id: call_id.to_string(),
+            tool: "skills_commit_install".to_string(),
+            ok: false,
+            result: error.details().cloned(),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn commit_ref_error(code: &str, message: &str, recovery: &str) -> AgentError {
+    AgentError::structured(
+        format!("skill.installation.{code}"),
+        message,
+        json!({
+            "type": "skillInstallation",
+            "code": code,
+            "recovery": recovery
+        }),
+    )
+}
+
+fn agent_commit_failure(
+    failure: super::skill_installation_workflow_adapter::SkillInspectionFailure,
+    committed_before_projection_failure: bool,
+) -> AgentError {
+    let message = failure.to_string();
+    let uncertain = committed_before_projection_failure || failure.commit_may_have_succeeded();
+    let code = if uncertain {
+        "commitResultUncertain"
+    } else {
+        "commitFailed"
+    };
+    AgentError::structured(
+        format!("skill.installation.{code}"),
+        message,
+        json!({
+            "type": "skillInstallation",
+            "code": code,
+            "recovery": if uncertain { "refreshCatalogNextRun" } else { "prepareAgain" },
+            "commitMayHaveSucceeded": uncertain
+        }),
+    )
+}
+
 fn invalid_resolution(error: mycopilot_core::skills::SkillSourceResolutionError) -> Value {
     let data = resolution_failure(error).into_data();
     invalid_from_serializable(&*data)
@@ -450,6 +972,43 @@ fn source_digest(source: &str) -> String {
 
 fn random_ref(prefix: &str) -> String {
     format!("{prefix}{}", Uuid::new_v4().simple())
+}
+
+fn valid_install_ref_for_store(value: &str) -> bool {
+    value.strip_prefix("skill_install_").is_some_and(|suffix| {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
+}
+
+fn cleanup_expired_persisted_bindings(root: &std::path::Path, now: u64) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|value| value.to_str()) != Some("json")
+            || !valid_install_ref_for_store(stem)
+        {
+            continue;
+        }
+        let expired_or_invalid = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<PersistedInstallBinding>(&bytes).ok())
+            .is_none_or(|document| {
+                document.schema_version != 1
+                    || document.install_ref != stem
+                    || document.expires_at_unix_ms <= now
+            });
+        if expired_or_invalid {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -592,6 +1151,50 @@ mod tests {
         AgentSkillInstallationInspectionAdapter::new(Arc::new(resolution), Arc::new(workflow))
     }
 
+    fn persistent_local_adapter(
+        store: &std::path::Path,
+        pending: &std::path::Path,
+    ) -> AgentSkillInstallationInspectionAdapter {
+        let workflow = Arc::new(SkillInstallationWorkflow::new(
+            SkillInstallationService::new(store).unwrap(),
+        ));
+        let resolution = Arc::new(SkillSourceResolutionService::with_session_store(
+            workflow.session_store(),
+        ));
+        AgentSkillInstallationInspectionAdapter::with_pending_root(
+            resolution,
+            workflow,
+            pending.to_path_buf(),
+        )
+        .unwrap()
+    }
+
+    fn prepare_local_action(
+        adapter: &AgentSkillInstallationInspectionAdapter,
+        source: &std::path::Path,
+        action_id: &str,
+    ) -> AgentSkillInstallationRequest {
+        let prepared = adapter
+            .prepare(AgentSkillInstallationPrepareRequest {
+                conversation_id: "conversation-1".to_string(),
+                run_id: "run-1".to_string(),
+                source: AgentSkillInstallationPrepareSource::LocalDirectory {
+                    directory: source.to_path_buf(),
+                    display_path: "fixture-skill".to_string(),
+                },
+                candidate_ref: None,
+            })
+            .unwrap();
+        adapter
+            .prepare_commit_action(AgentSkillInstallationCommitPreparationRequest {
+                conversation_id: "conversation-1".to_string(),
+                run_id: "run-1".to_string(),
+                action_id: action_id.to_string(),
+                install_ref: prepared["installRef"].as_str().unwrap().to_string(),
+            })
+            .unwrap()
+    }
+
     #[test]
     fn local_prepare_returns_only_public_metadata_and_retains_private_install_binding() {
         let fixture = tempdir().unwrap();
@@ -631,10 +1234,10 @@ mod tests {
         assert!(result.get("previewRevision").is_none());
         let install_ref = result["installRef"].as_str().unwrap();
         let binding = adapter.install_binding(install_ref).unwrap();
-        assert_eq!(binding._conversation_id, "conversation-1");
-        assert_eq!(binding._created_by_run_id, "run-1");
-        assert!(!binding._preparation_id.as_str().is_empty());
-        assert!(!binding._preview_revision.is_empty());
+        assert_eq!(binding.conversation_id, "conversation-1");
+        assert_eq!(binding.created_by_run_id, "run-1");
+        assert!(!binding.preparation_id.as_str().is_empty());
+        assert!(!binding.preview_revision.is_empty());
         assert!(binding.expires_at_unix_ms > now_ms());
         assert!(!source.join("receipt.json").exists());
         let inventory = SkillInstallationService::new(store)
@@ -767,5 +1370,179 @@ mod tests {
             .unwrap();
         assert_eq!(invalid_local["status"], "invalid");
         assert!(invalid_local.get("preparationId").is_none());
+    }
+
+    #[test]
+    fn approved_commit_uses_the_frozen_snapshot_and_returns_only_agent_semantics() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let pending = fixture.path().join("pending");
+        let source = fixture.path().join("source");
+        std::fs::create_dir_all(source.join("scripts")).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: approved-skill\ndescription: Approval fixture.\n---\n\n# Fixture\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("scripts/run.py"), "print('fixture')\n").unwrap();
+        let adapter = persistent_local_adapter(&store, &pending);
+        let mut action = prepare_local_action(&adapter, &source, "action-1");
+
+        assert!(action.preview.contains_scripts);
+        assert!(action
+            .preview
+            .warnings
+            .iter()
+            .any(|warning| warning.requires_acknowledgement));
+        assert!(SkillInstallationService::new(&store)
+            .unwrap()
+            .list_installed_skills()
+            .unwrap()
+            .records()
+            .is_empty());
+
+        action.approval_status = AgentApprovalStatus::Approved;
+        let result = adapter.commit_approved(&action, "conversation-1", "run-1");
+        assert!(result.ok, "{result:?}");
+        let value = result.result.unwrap();
+        assert_eq!(value["status"], "installed");
+        assert_eq!(value["availableFrom"], "nextRun");
+        for private in [
+            "preparationId",
+            "installationId",
+            "previewRevision",
+            "packageRevision",
+        ] {
+            assert!(value.get(private).is_none(), "leaked {private}");
+        }
+        assert_eq!(
+            SkillInstallationService::new(&store)
+                .unwrap()
+                .list_installed_skills()
+                .unwrap()
+                .records()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_approval_survives_restart_and_replay_is_idempotent() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let pending = fixture.path().join("pending");
+        let source = fixture.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: restart-skill\ndescription: Restart fixture.\n---\n\n# Fixture\n",
+        )
+        .unwrap();
+
+        let first = persistent_local_adapter(&store, &pending);
+        let mut action = prepare_local_action(&first, &source, "action-restart");
+        action.approval_status = AgentApprovalStatus::Approved;
+        drop(first);
+
+        let after_restart = persistent_local_adapter(&store, &pending);
+        let installed = after_restart.commit_approved(&action, "conversation-1", "run-1");
+        assert!(installed.ok, "{installed:?}");
+        drop(after_restart);
+
+        let after_uncertain_ack = persistent_local_adapter(&store, &pending);
+        let replayed = after_uncertain_ack.commit_approved(&action, "conversation-1", "run-1");
+        assert!(replayed.ok, "{replayed:?}");
+        assert_eq!(replayed.result.unwrap()["status"], "alreadyInstalled");
+        assert_eq!(
+            SkillInstallationService::new(&store)
+                .unwrap()
+                .list_installed_skills()
+                .unwrap()
+                .records()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejection_cancels_the_frozen_transaction_without_mutating_the_store() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let pending = fixture.path().join("pending");
+        let source = fixture.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: rejected-skill\ndescription: Rejection fixture.\n---\n\n# Fixture\n",
+        )
+        .unwrap();
+        let adapter = persistent_local_adapter(&store, &pending);
+        let action = prepare_local_action(&adapter, &source, "action-reject");
+
+        adapter
+            .reject_action(&action, "conversation-1", "run-1")
+            .unwrap();
+        assert!(SkillInstallationService::new(&store)
+            .unwrap()
+            .list_installed_skills()
+            .unwrap()
+            .records()
+            .is_empty());
+        assert!(!pending
+            .join(format!("{}.json", action.install_ref))
+            .exists());
+    }
+
+    #[test]
+    fn claim_and_approved_preview_identity_are_immutable() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let pending = fixture.path().join("pending");
+        let source = fixture.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: immutable-skill\ndescription: Immutable fixture.\n---\n\n# Fixture\n",
+        )
+        .unwrap();
+        let adapter = persistent_local_adapter(&store, &pending);
+        let action = prepare_local_action(&adapter, &source, "action-original");
+
+        let cross_run_claim =
+            adapter.prepare_commit_action(AgentSkillInstallationCommitPreparationRequest {
+                conversation_id: "conversation-1".to_string(),
+                run_id: "run-2".to_string(),
+                action_id: "action-cross-run".to_string(),
+                install_ref: action.install_ref.clone(),
+            });
+        assert_eq!(
+            cross_run_claim.unwrap_err().code(),
+            Some("skill.installation.installRefRunMismatch")
+        );
+
+        let second_claim =
+            adapter.prepare_commit_action(AgentSkillInstallationCommitPreparationRequest {
+                conversation_id: "conversation-1".to_string(),
+                run_id: "run-1".to_string(),
+                action_id: "action-replacement".to_string(),
+                install_ref: action.install_ref.clone(),
+            });
+        assert_eq!(
+            second_claim.unwrap_err().code(),
+            Some("skill.installation.installRefAlreadyClaimed")
+        );
+
+        let mut tampered = action.clone();
+        tampered.approval_status = AgentApprovalStatus::Approved;
+        tampered.preview.name = "different-skill".to_string();
+        let result = adapter.commit_approved(&tampered, "conversation-1", "run-1");
+        assert!(!result.ok);
+        assert_eq!(result.result.unwrap()["code"], "approvalIdentityMismatch");
+        assert!(SkillInstallationService::new(&store)
+            .unwrap()
+            .list_installed_skills()
+            .unwrap()
+            .records()
+            .is_empty());
     }
 }

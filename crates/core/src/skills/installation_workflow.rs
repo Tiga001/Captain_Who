@@ -44,6 +44,7 @@ use uuid::Uuid;
 mod acquisition;
 mod commit;
 mod config;
+mod durable_snapshot;
 mod error;
 mod preparation;
 mod preview;
@@ -51,6 +52,7 @@ mod workflow;
 
 pub use acquisition::*;
 pub use config::*;
+pub use durable_snapshot::*;
 pub use error::*;
 pub use preview::*;
 pub use workflow::*;

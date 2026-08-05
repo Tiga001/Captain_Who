@@ -21,6 +21,7 @@ import { WorkspaceMapToolActivity } from './WorkspaceMapToolActivity'
 import { OfficeToolActivity } from './OfficeToolActivity'
 import { ImageGenerationToolActivity } from './ImageGenerationToolActivity'
 import { SkillScriptToolActivity } from './SkillToolActivity'
+import { SkillInstallationToolActivity } from './SkillInstallationToolActivity'
 import { McpToolActivity } from './McpToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -163,6 +164,17 @@ export function AgentToolActivity({
     return (
       <ConversationHistoryToolActivity
         items={[{ call, result, settledStatus: cancelled ? 'cancelled' : settledStatus }]}
+      />
+    )
+  }
+
+  if (call.tool === 'skills_prepare_install' || call.tool === 'skills_commit_install') {
+    return (
+      <SkillInstallationToolActivity
+        call={call}
+        result={result}
+        run={run}
+        settledStatus={settledStatus}
       />
     )
   }

@@ -305,6 +305,9 @@ pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentP
         AgentProposedAction::OfficeOperation { office_operation } => {
             office_operation.approval_status = AgentApprovalStatus::Approved;
         }
+        AgentProposedAction::SkillInstallation { installation } => {
+            installation.approval_status = AgentApprovalStatus::Approved;
+        }
     }
     action
 }
