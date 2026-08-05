@@ -29,26 +29,15 @@ import type {
   ChatComposerDraft,
   ChatConversation,
   ChatGuidanceTimelineItem,
-  ChatPermissionMode,
-  ChatMessage,
   ChatMessageUiState,
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
+import { cancelAgentRun, steerAgentRun } from '../features/agent/agentClient'
 import {
-  cancelAgentRun,
-  listPendingAgentActions,
-  onAgentEvent,
-  startConversationTurn,
-  steerAgentRun
-} from '../features/agent/agentClient'
-import { resolveChatPermissions } from '../features/chat/chatPermissions'
-import {
-  planSkillActivationRecovery,
   reconcileSkillActivationSelections,
   type SkillActivationRecoveryPlan
 } from '../features/skills/skillActivationRecovery'
-import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
 import { mergeSkillSelections } from '../features/skills/skillSelection'
 import {
   defaultUiPreferences,
@@ -61,16 +50,13 @@ import {
   upsertChatMessages
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
-import { DEFAULT_AGENT_MAX_TOKENS, THINKING_PLACEHOLDER } from '../features/agentRun/constants'
+import { THINKING_PLACEHOLDER } from '../features/agentRun/constants'
 import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import type { ActiveRunBinding } from './appTypes'
 import {
   applyAgentEventToChatMessage,
   applyOptimisticGuidanceToChatMessage,
-  ensureAgentRun,
-  removeGuidanceFromChatMessage,
-  settleAgentRunToolActivities,
-  shouldTouchConversationForAgentEvent
+  ensureAgentRun
 } from '../features/agentRun/agentEventReducer'
 import {
   createAssistantMessage,
@@ -78,7 +64,6 @@ import {
   createConversationTitle,
   createId,
   createUserMessage,
-  mergeConversationMessageFromBackend,
   synchronizeComposerDraftForScope
 } from './chatMessageFactory'
 import {
@@ -100,46 +85,12 @@ import {
   getPermissionModeAvailability,
   MainPanelToolbar,
   MaximizedSidebarControls,
-  STREAM_DELTA_FLUSH_MS,
-  STREAM_DELTA_MAX_BUFFER_CHARS,
   SUPPORTS_NATIVE_FONT_SMOOTHING
 } from './AppShellSupport'
 import type { PendingMessageDelta } from './AppShellSupport'
 import { useAgentActionDecisionHandlers } from '../features/agentRun/useAgentActionDecisionHandlers'
 import { useContextWindowSnapshots } from '../features/agentRun/useContextWindowSnapshots'
-
-const STOP_RECONCILIATION_DELAYS_MS = [400, 1500, 4000] as const
-const STOP_RECONCILIATION_READ_TIMEOUT_MS = 1500
-const MAX_RETIRED_AGENT_RUN_IDS = 1024
-const MAX_BUFFERED_AGENT_RUNS = 128
-const MAX_BUFFERED_AGENT_EVENTS_PER_RUN = 128
-const MAX_UNCONFIRMED_STOPPED_RUNS = 128
-
-function isSameRunBinding(
-  current: ActiveRunBinding | undefined,
-  expected: ActiveRunBinding
-): current is ActiveRunBinding {
-  return (
-    current?.conversationId === expected.conversationId &&
-    current.pendingMessageId === expected.pendingMessageId
-  )
-}
-
-function loadConversationForStopReconciliation(
-  conversationId: string
-): Promise<ChatConversation | null> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = (conversation: ChatConversation | null) => {
-      if (settled) return
-      settled = true
-      window.clearTimeout(timeoutId)
-      resolve(conversation)
-    }
-    const timeoutId = window.setTimeout(() => finish(null), STOP_RECONCILIATION_READ_TIMEOUT_MS)
-    void loadConversation(conversationId).then(finish, () => finish(null))
-  })
-}
+import { useAgentRunLifecycle } from './useAgentRunLifecycle'
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -689,796 +640,49 @@ export function AppShell() {
     [setSkillCatalogRefreshTokens]
   )
 
-  const clearPendingMessageDelta = useCallback((runId: string) => {
-    const pendingDelta = pendingMessageDeltasRef.current.get(runId)
-    if (!pendingDelta) return
-
-    window.clearTimeout(pendingDelta.timerId)
-    pendingMessageDeltasRef.current.delete(runId)
-  }, [])
-
-  const cleanupRunBinding = useCallback(
-    (runId: string) => {
-      const reconciliationTimer = stopReconciliationTimersRef.current.get(runId)
-      if (reconciliationTimer !== undefined) {
-        window.clearTimeout(reconciliationTimer)
-        stopReconciliationTimersRef.current.delete(runId)
-      }
-      activeRunBindingsRef.current.delete(runId)
-      bufferedAgentEventsRef.current.delete(runId)
-      locallyUnconfirmedStoppedRunIdsRef.current.delete(runId)
-      retiredAgentRunIdsRef.current.add(runId)
-      if (retiredAgentRunIdsRef.current.size > MAX_RETIRED_AGENT_RUN_IDS) {
-        const oldestRunId = retiredAgentRunIdsRef.current.values().next().value
-        if (oldestRunId) retiredAgentRunIdsRef.current.delete(oldestRunId)
-      }
-      clearPendingMessageDelta(runId)
+  const {
+    cleanupRunBinding,
+    removeQueuedMessageByClientId,
+    requestAssistantResponse,
+    restoreRejectedGuidance,
+    scheduleStoppedRunReconciliation,
+    updateAssistantMessage
+  } = useAgentRunLifecycle({
+    contextWindowIndicatorEnabled,
+    conversationState: {
+      activeConversationIdRef,
+      conversations,
+      conversationsRef,
+      setActiveConversationId,
+      setConversations: setConversationsWithRef
     },
-    [clearPendingMessageDelta]
-  )
-
-  const cancelBackendAgentRun = useCallback((runId: string) => {
-    void cancelAgentRun(runId).catch((error) => {
-      console.error('Failed to cancel agent run', error)
-    })
-  }, [])
-
-  const updateAssistantMessage = useCallback(
-    (
-      conversationId: string,
-      messageId: string,
-      updater: (message: ChatMessage) => ChatMessage,
-      options: { persist?: boolean; touchConversation?: boolean } = {}
-    ) => {
-      let messageToSave: ChatMessage | null = null
-      let conversationMetaToSave: ChatConversation | null = null
-      const timestamp = Date.now()
-
-      const nextConversations = conversationsRef.current.map((conversation) => {
-        if (conversation.id !== conversationId) return conversation
-
-        const nextConversation = {
-          ...conversation,
-          messages: conversation.messages.map((message) => {
-            if (message.id !== messageId) return message
-            messageToSave = updater(message)
-            return messageToSave
-          }),
-          updatedAt: options.touchConversation ? timestamp : conversation.updatedAt
-        }
-
-        conversationMetaToSave = nextConversation
-        return nextConversation
-      })
-
-      setConversationsWithRef(nextConversations)
-
-      if (messageToSave && options.persist !== false) {
-        enqueueChatMessageStateSave(conversationId, messageToSave)
-      }
-      if (options.touchConversation && conversationMetaToSave) {
-        void saveConversationMeta(conversationMetaToSave)
-      }
+    draftState: {
+      draftsRef,
+      mutateDraft
     },
-    [enqueueChatMessageStateSave, setConversationsWithRef]
-  )
-
-  const removeQueuedMessageByClientId = useCallback(
-    (conversationId: string, clientMessageId: string) => {
-      mutateDraft(conversationId, (draft) => ({
-        ...draft,
-        queuedMessages: draft.queuedMessages.filter(
-          (message) => message.clientMessageId !== clientMessageId
-        )
-      }))
+    enqueueChatMessageStateSave,
+    recordContextWindowSnapshot,
+    reconcileFailedSkillActivation,
+    refs: {
+      activeRunBindings: activeRunBindingsRef,
+      autoSubmitQueuedMessage: autoSubmitQueuedMessageRef,
+      bufferedAgentEvents: bufferedAgentEventsRef,
+      cancelledPendingMessageIds: cancelledPendingMessageIdsRef,
+      cancelledRunIds: cancelledRunIdsRef,
+      locallyUnconfirmedStoppedRunIds: locallyUnconfirmedStoppedRunIdsRef,
+      pendingActionsHydrated: pendingActionsHydratedRef,
+      pendingGuidancePayloads: pendingGuidancePayloadsRef,
+      pendingMessageDeltas: pendingMessageDeltasRef,
+      retiredAgentRunIds: retiredAgentRunIdsRef,
+      stopReconciliationTimers: stopReconciliationTimersRef,
+      stopRequestedPendingMessageIds: stopRequestedPendingMessageIdsRef,
+      stopRequestedRunIds: stopRequestedRunIdsRef
     },
-    [mutateDraft]
-  )
-
-  const restoreRejectedGuidance = useCallback(
-    (
-      conversationId: string,
-      assistantMessageId: string,
-      clientMessageId: string,
-      errorMessage: string,
-      fallback?: {
-        content: string
-        attachments: Array<{ id: string }>
-        createdAt: number
-      }
-    ) => {
-      const pending = pendingGuidancePayloadsRef.current.get(clientMessageId)
-      pendingGuidancePayloadsRef.current.delete(clientMessageId)
-      const alreadyRestored = draftsRef.current[conversationId]?.queuedMessages.find(
-        (message) => message.clientMessageId === clientMessageId
-      )
-
-      const restore = (message: ChatQueuedMessage, preferredIndex: number) => {
-        mutateDraft(conversationId, (draft) => {
-          const withoutMessage = draft.queuedMessages.filter(
-            (candidate) => candidate.clientMessageId !== clientMessageId
-          )
-          const insertAt = Math.min(Math.max(0, preferredIndex), withoutMessage.length)
-          withoutMessage.splice(insertAt, 0, {
-            ...message,
-            status: 'error',
-            error: errorMessage
-          })
-          return {
-            ...draft,
-            queuedMessages: withoutMessage
-          }
-        })
-      }
-
-      updateAssistantMessage(
-        conversationId,
-        assistantMessageId,
-        (message) => removeGuidanceFromChatMessage(message, clientMessageId),
-        { touchConversation: true }
-      )
-
-      if (!pending && alreadyRestored) {
-        restore(
-          alreadyRestored,
-          draftsRef.current[conversationId].queuedMessages.indexOf(alreadyRestored)
-        )
-        return
-      }
-      if (pending) {
-        restore(pending.message, pending.index)
-        return
-      }
-      if (!fallback) return
-
-      void loadInputAttachments(fallback.attachments.map((attachment) => attachment.id))
-        .then((attachments) => {
-          const draft = draftsRef.current[conversationId] ?? createComposerDraft()
-          restore(
-            {
-              id: `queued-message-${fallback.createdAt}-${Math.random().toString(36).slice(2, 8)}`,
-              clientMessageId,
-              content: fallback.content,
-              attachments,
-              modelId: draft.modelId,
-              permissionMode: draft.permissionMode,
-              projectId: draft.projectId,
-              skills: [],
-              status: 'error',
-              error: errorMessage,
-              createdAt: fallback.createdAt
-            },
-            draft.queuedMessages.length
-          )
-        })
-        .catch((error) => {
-          console.error('Failed to restore rejected guidance attachments', error)
-          const draft = draftsRef.current[conversationId] ?? createComposerDraft()
-          restore(
-            {
-              id: `queued-message-${fallback.createdAt}-${Math.random().toString(36).slice(2, 8)}`,
-              clientMessageId,
-              content: fallback.content,
-              attachments: [],
-              modelId: draft.modelId,
-              permissionMode: draft.permissionMode,
-              projectId: draft.projectId,
-              skills: [],
-              status: 'error',
-              error: errorMessage,
-              createdAt: fallback.createdAt
-            },
-            draft.queuedMessages.length
-          )
-        })
-    },
-    [mutateDraft, updateAssistantMessage]
-  )
-
-  const flushPendingMessageDelta = useCallback(
-    (runId: string) => {
-      const pendingDelta = pendingMessageDeltasRef.current.get(runId)
-      if (!pendingDelta) return
-
-      window.clearTimeout(pendingDelta.timerId)
-      pendingMessageDeltasRef.current.delete(runId)
-      updateAssistantMessage(
-        pendingDelta.conversationId,
-        pendingDelta.messageId,
-        (message) =>
-          applyAgentEventToChatMessage(message, {
-            type: 'message_delta',
-            runId,
-            streamId: pendingDelta.streamId,
-            delta: pendingDelta.delta
-          }),
-        { touchConversation: false }
-      )
-    },
-    [updateAssistantMessage]
-  )
-
-  const bufferMessageDelta = useCallback(
-    (
-      conversationId: string,
-      messageId: string,
-      agentEvent: AgentEvent & { type: 'message_delta' }
-    ) => {
-      const pendingDelta = pendingMessageDeltasRef.current.get(agentEvent.runId)
-
-      if (pendingDelta) {
-        pendingDelta.conversationId = conversationId
-        pendingDelta.messageId = messageId
-        pendingDelta.delta += agentEvent.delta
-
-        if (
-          pendingDelta.delta.includes('\n') ||
-          pendingDelta.delta.length >= STREAM_DELTA_MAX_BUFFER_CHARS
-        ) {
-          flushPendingMessageDelta(agentEvent.runId)
-        }
-        return
-      }
-
-      const timerId = window.setTimeout(() => {
-        flushPendingMessageDelta(agentEvent.runId)
-      }, STREAM_DELTA_FLUSH_MS)
-      pendingMessageDeltasRef.current.set(agentEvent.runId, {
-        conversationId,
-        delta: agentEvent.delta,
-        messageId,
-        streamId: agentEvent.streamId,
-        timerId
-      })
-    },
-    [flushPendingMessageDelta]
-  )
-
-  useEffect(() => {
-    const newlyHydratedConversationIds = conversations
-      .filter(
-        (conversation) =>
-          conversation.messagesLoaded !== false &&
-          !pendingActionsHydratedRef.current.has(conversation.id)
-      )
-      .map((conversation) => conversation.id)
-    if (newlyHydratedConversationIds.length === 0) return
-
-    for (const conversationId of newlyHydratedConversationIds) {
-      pendingActionsHydratedRef.current.add(conversationId)
-    }
-    const newlyHydratedConversationIdSet = new Set(newlyHydratedConversationIds)
-
-    void listPendingAgentActions()
-      .then((pendingActions) => {
-        for (const pendingAction of pendingActions) {
-          if (!pendingAction.conversationId || !pendingAction.assistantMessageId) continue
-          const conversationExists = conversationsRef.current.some(
-            (conversation) => conversation.id === pendingAction.conversationId
-          )
-          if (!conversationExists) continue
-
-          activeRunBindingsRef.current.set(pendingAction.runId, {
-            conversationId: pendingAction.conversationId,
-            pendingMessageId: pendingAction.assistantMessageId
-          })
-          if (!newlyHydratedConversationIdSet.has(pendingAction.conversationId)) continue
-          updateAssistantMessage(
-            pendingAction.conversationId,
-            pendingAction.assistantMessageId,
-            (message) =>
-              applyAgentEventToChatMessage(message, {
-                type: 'approval_required',
-                runId: pendingAction.runId,
-                action: pendingAction.action
-              }),
-            { touchConversation: false }
-          )
-        }
-      })
-      .catch((error) => {
-        for (const conversationId of newlyHydratedConversationIds) {
-          pendingActionsHydratedRef.current.delete(conversationId)
-        }
-        console.error('Failed to hydrate pending agent actions', error)
-      })
-  }, [conversations, updateAssistantMessage])
-
-  const handleBoundAgentEvent = useCallback(
-    (conversationId: string, assistantMessageId: string, agentEvent: AgentEvent) => {
-      if (agentEvent.runId && cancelledRunIdsRef.current.has(agentEvent.runId)) return
-      if (cancelledPendingMessageIdsRef.current.has(assistantMessageId)) return
-
-      if (agentEvent.type === 'message_delta') {
-        bufferMessageDelta(conversationId, assistantMessageId, agentEvent)
-        return
-      }
-
-      if (agentEvent.type === 'tool_input_progress') return
-
-      if (
-        agentEvent.type === 'file_write_preview_updated' ||
-        agentEvent.type === 'file_write_preview_cleared'
-      ) {
-        updateAssistantMessage(
-          conversationId,
-          assistantMessageId,
-          (message) => applyAgentEventToChatMessage(message, agentEvent),
-          { persist: false, touchConversation: false }
-        )
-        return
-      }
-
-      if (agentEvent.runId) {
-        flushPendingMessageDelta(agentEvent.runId)
-      }
-
-      if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {
-        removeQueuedMessageByClientId(conversationId, agentEvent.clientMessageId)
-        if (agentEvent.type === 'guidance_applied') {
-          pendingGuidancePayloadsRef.current.delete(agentEvent.clientMessageId)
-        }
-      }
-
-      if (agentEvent.type === 'guidance_rejected') {
-        restoreRejectedGuidance(
-          conversationId,
-          assistantMessageId,
-          agentEvent.clientMessageId,
-          agentEvent.message || t('chat.guidanceFailed'),
-          {
-            content: agentEvent.content,
-            attachments: [],
-            createdAt: agentEvent.createdAt
-          }
-        )
-        window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
-        return
-      }
-
-      updateAssistantMessage(
-        conversationId,
-        assistantMessageId,
-        (message) => {
-          const shouldAcceptAuthoritativeTerminal =
-            agentEvent.type === 'done' &&
-            locallyUnconfirmedStoppedRunIdsRef.current.has(agentEvent.runId)
-          const messageForEvent =
-            shouldAcceptAuthoritativeTerminal && message.agentRun
-              ? {
-                  ...message,
-                  status: 'pending' as const,
-                  agentRun: {
-                    ...message.agentRun,
-                    status: 'running' as const
-                  }
-                }
-              : message
-          return applyAgentEventToChatMessage(messageForEvent, agentEvent)
-        },
-        { touchConversation: shouldTouchConversationForAgentEvent(agentEvent) }
-      )
-
-      if (agentEvent.type === 'done') {
-        stopRequestedRunIdsRef.current.delete(agentEvent.runId)
-        if (agentEvent.success && agentEvent.status !== 'waiting_for_approval') {
-          const completedAt = Date.now()
-          let conversationToSave: ChatConversation | null = null
-          const nextConversations = conversationsRef.current.map((conversation) => {
-            if (
-              conversation.id !== conversationId ||
-              activeConversationIdRef.current === conversationId
-            ) {
-              return conversation
-            }
-
-            conversationToSave = {
-              ...conversation,
-              unreadAt: completedAt
-            }
-            return conversationToSave
-          })
-
-          if (conversationToSave) {
-            setConversationsWithRef(nextConversations)
-            void saveConversationMeta(conversationToSave)
-          }
-        }
-
-        if (agentEvent.status !== 'waiting_for_approval') {
-          cleanupRunBinding(agentEvent.runId)
-        }
-        if (agentEvent.status === 'completed' || agentEvent.status === 'cancelled') {
-          window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
-        }
-      }
-
-      if (agentEvent.type === 'error' && !agentEvent.recoverable && agentEvent.runId) {
-        stopRequestedRunIdsRef.current.delete(agentEvent.runId)
-        cleanupRunBinding(agentEvent.runId)
-      }
-    },
-    [
-      bufferMessageDelta,
-      cleanupRunBinding,
-      flushPendingMessageDelta,
-      removeQueuedMessageByClientId,
-      restoreRejectedGuidance,
-      setConversationsWithRef,
-      t,
-      updateAssistantMessage
-    ]
-  )
-
-  const markStoppedRunStatusUnknown = useCallback(
-    (runId: string, binding: ActiveRunBinding) => {
-      if (!isSameRunBinding(activeRunBindingsRef.current.get(runId), binding)) return
-
-      const settledAt = Date.now()
-      const safeError = t('chat.stopStatusUnknown')
-      locallyUnconfirmedStoppedRunIdsRef.current.add(runId)
-      if (locallyUnconfirmedStoppedRunIdsRef.current.size > MAX_UNCONFIRMED_STOPPED_RUNS) {
-        const oldestRunId = locallyUnconfirmedStoppedRunIdsRef.current.values().next().value
-        if (oldestRunId && oldestRunId !== runId) cleanupRunBinding(oldestRunId)
-      }
-      stopRequestedRunIdsRef.current.delete(runId)
-      updateAssistantMessage(
-        binding.conversationId,
-        binding.pendingMessageId,
-        (message) => {
-          const run = ensureAgentRun(message.agentRun, runId)
-          return {
-            ...message,
-            status: 'error',
-            agentRun: {
-              ...settleAgentRunToolActivities(
-                {
-                  ...run,
-                  completedAt: settledAt,
-                  error: safeError
-                },
-                'failed',
-                settledAt
-              ),
-              completedAt: settledAt,
-              error: safeError
-            }
-          }
-        },
-        {
-          // This is a Renderer-only fail-safe when authoritative storage cannot be reached. Never
-          // overwrite the backend record with a guessed terminal state.
-          persist: false,
-          touchConversation: false
-        }
-      )
-      showToast(safeError)
-    },
-    [cleanupRunBinding, showToast, t, updateAssistantMessage]
-  )
-
-  const scheduleStoppedRunReconciliation = useCallback(
-    (runId: string, binding: ActiveRunBinding) => {
-      const scheduleAttempt = (attempt: number) => {
-        const existingTimer = stopReconciliationTimersRef.current.get(runId)
-        if (existingTimer !== undefined) window.clearTimeout(existingTimer)
-
-        const timerId = window.setTimeout(() => {
-          stopReconciliationTimersRef.current.delete(runId)
-          const currentBinding = activeRunBindingsRef.current.get(runId)
-          if (!isSameRunBinding(currentBinding, binding)) return
-
-          void loadConversationForStopReconciliation(binding.conversationId)
-            .then((storedConversation) => {
-              // A terminal event may have cleaned up this binding while storage was loading. Never
-              // let that older snapshot overwrite the newer authoritative event.
-              if (!isSameRunBinding(activeRunBindingsRef.current.get(runId), binding)) return
-
-              const storedMessage = storedConversation?.messages.find(
-                (message) => message.id === binding.pendingMessageId
-              )
-              const storedStatus = storedMessage?.agentRun?.status
-              const isTerminal =
-                storedStatus === 'completed' ||
-                storedStatus === 'failed' ||
-                storedStatus === 'cancelled'
-              if (storedMessage?.agentRun?.runId === runId && isTerminal) {
-                setConversationsWithRef((currentConversations) =>
-                  currentConversations.map((conversation) =>
-                    conversation.id !== binding.conversationId
-                      ? conversation
-                      : {
-                          ...conversation,
-                          messages: conversation.messages.map((message) =>
-                            message.id !== binding.pendingMessageId
-                              ? message
-                              : {
-                                  ...storedMessage,
-                                  uiState: message.uiState ?? storedMessage.uiState
-                                }
-                          )
-                        }
-                  )
-                )
-                stopRequestedRunIdsRef.current.delete(runId)
-                cleanupRunBinding(runId)
-                return
-              }
-
-              if (attempt + 1 < STOP_RECONCILIATION_DELAYS_MS.length) {
-                scheduleAttempt(attempt + 1)
-                return
-              }
-              markStoppedRunStatusUnknown(runId, binding)
-            })
-            .catch(() => {
-              if (!isSameRunBinding(activeRunBindingsRef.current.get(runId), binding)) return
-              if (attempt + 1 < STOP_RECONCILIATION_DELAYS_MS.length) {
-                scheduleAttempt(attempt + 1)
-                return
-              }
-              markStoppedRunStatusUnknown(runId, binding)
-            })
-        }, STOP_RECONCILIATION_DELAYS_MS[attempt])
-        stopReconciliationTimersRef.current.set(runId, timerId)
-      }
-
-      scheduleAttempt(0)
-    },
-    [cleanupRunBinding, markStoppedRunStatusUnknown, setConversationsWithRef]
-  )
-
-  useEffect(() => {
-    return onAgentEvent((agentEvent) => {
-      if (agentEvent.type === 'context_window_updated') {
-        const conversationId = agentEvent.conversationId
-        if (conversationId) recordContextWindowSnapshot(conversationId, agentEvent.snapshot)
-        return
-      }
-
-      const runId = agentEvent.runId
-      if (!runId) return
-      if (cancelledRunIdsRef.current.has(runId)) return
-      if (retiredAgentRunIdsRef.current.has(runId)) return
-
-      const binding = activeRunBindingsRef.current.get(runId)
-      if (!binding) {
-        const bufferedEvents = bufferedAgentEventsRef.current.get(runId) ?? []
-        if (
-          bufferedEvents.length === 0 &&
-          bufferedAgentEventsRef.current.size >= MAX_BUFFERED_AGENT_RUNS
-        ) {
-          const oldestRunId = bufferedAgentEventsRef.current.keys().next().value
-          if (oldestRunId) bufferedAgentEventsRef.current.delete(oldestRunId)
-        }
-        bufferedAgentEventsRef.current.set(
-          runId,
-          [...bufferedEvents, agentEvent].slice(-MAX_BUFFERED_AGENT_EVENTS_PER_RUN)
-        )
-        return
-      }
-
-      handleBoundAgentEvent(binding.conversationId, binding.pendingMessageId, agentEvent)
-    })
-  }, [handleBoundAgentEvent, recordContextWindowSnapshot])
-
-  useEffect(() => {
-    const pendingMessageDeltas = pendingMessageDeltasRef.current
-    return () => {
-      for (const pendingDelta of pendingMessageDeltas.values()) {
-        window.clearTimeout(pendingDelta.timerId)
-      }
-      pendingMessageDeltas.clear()
-    }
-  }, [])
-
-  useEffect(() => {
-    const reconciliationTimers = stopReconciliationTimersRef.current
-    const activeRunBindings = activeRunBindingsRef.current
-    return () => {
-      for (const timerId of reconciliationTimers.values()) {
-        window.clearTimeout(timerId)
-      }
-      reconciliationTimers.clear()
-      activeRunBindings.clear()
-    }
-  }, [])
-
-  const requestAssistantResponse = useCallback(
-    async (
-      conversationId: string,
-      userMessageId: string,
-      assistantMessageId: string,
-      content: string,
-      modelId: string,
-      projectId: string | null,
-      permissionMode: ChatPermissionMode,
-      attachments: ChatSubmitOptions['attachments'],
-      skills: readonly SkillSelection[],
-      title?: string
-    ) => {
-      updateAssistantMessage(conversationId, assistantMessageId, (message) => ({
-        ...message,
-        agentRun: ensureAgentRun(message.agentRun, null, 'starting')
-      }))
-
-      try {
-        const startOutput = await startConversationTurn({
-          assistantMessageId,
-          attachments,
-          content,
-          contextWindowIndicatorEnabled,
-          conversationId,
-          maxTokens: DEFAULT_AGENT_MAX_TOKENS,
-          modelId,
-          permissions: resolveChatPermissions(permissionMode, uiPreferences.customPermissions),
-          projectId,
-          skills: skills.length > 0 ? [...skills] : undefined,
-          title,
-          userMessageId
-        })
-
-        if (cancelledPendingMessageIdsRef.current.has(assistantMessageId)) {
-          cancelledPendingMessageIdsRef.current.delete(assistantMessageId)
-          cancelledRunIdsRef.current.add(startOutput.runId)
-          cancelBackendAgentRun(startOutput.runId)
-          bufferedAgentEventsRef.current.delete(startOutput.runId)
-          return
-        }
-
-        const stopWasRequested =
-          stopRequestedPendingMessageIdsRef.current.delete(assistantMessageId)
-
-        const resolvedConversationId = startOutput.conversationId
-        const resolvedAssistantMessageId = startOutput.assistantMessageId
-        let resolvedAssistantMessage: ChatMessage | null = null
-
-        const nextConversations = conversationsRef.current.map((conversation) =>
-          conversation.id === conversationId
-            ? {
-                ...conversation,
-                id: resolvedConversationId,
-                messages: conversation.messages.map((message) => {
-                  if (message.id === userMessageId) {
-                    return mergeConversationMessageFromBackend(message, startOutput.userMessage)
-                  }
-
-                  if (message.id === assistantMessageId) {
-                    const mergedMessage = mergeConversationMessageFromBackend(
-                      message,
-                      startOutput.assistantMessage
-                    )
-                    resolvedAssistantMessage = {
-                      ...mergedMessage,
-                      content: mergedMessage.content || message.content || THINKING_PLACEHOLDER,
-                      status: 'pending' as const,
-                      agentRun: {
-                        ...ensureAgentRun(mergedMessage.agentRun, startOutput.runId, 'running'),
-                        activatedSkills: mergeActivatedSkillSummaries(
-                          [],
-                          startOutput.activatedSkills
-                        ),
-                        skillActivationRevision: startOutput.skillActivationRevision,
-                        explicitSkillSelections: [...skills]
-                      }
-                    }
-                    return resolvedAssistantMessage
-                  }
-
-                  return message
-                })
-              }
-            : conversation
-        )
-        setConversationsWithRef(nextConversations)
-        if (resolvedAssistantMessage) {
-          enqueueChatMessageStateSave(resolvedConversationId, resolvedAssistantMessage)
-        }
-
-        if (resolvedConversationId !== conversationId) {
-          setActiveConversationId((currentActiveConversationId) =>
-            currentActiveConversationId === conversationId
-              ? resolvedConversationId
-              : currentActiveConversationId
-          )
-          if (activeConversationIdRef.current === conversationId) {
-            activeConversationIdRef.current = resolvedConversationId
-          }
-        }
-
-        retiredAgentRunIdsRef.current.delete(startOutput.runId)
-        locallyUnconfirmedStoppedRunIdsRef.current.delete(startOutput.runId)
-        activeRunBindingsRef.current.set(startOutput.runId, {
-          conversationId: resolvedConversationId,
-          pendingMessageId: resolvedAssistantMessageId
-        })
-
-        const bufferedEvents = bufferedAgentEventsRef.current.get(startOutput.runId) ?? []
-        bufferedAgentEventsRef.current.delete(startOutput.runId)
-        bufferedEvents.forEach((agentEvent) => {
-          handleBoundAgentEvent(resolvedConversationId, resolvedAssistantMessageId, agentEvent)
-        })
-
-        if (stopWasRequested && activeRunBindingsRef.current.has(startOutput.runId)) {
-          stopRequestedRunIdsRef.current.add(startOutput.runId)
-          const binding = activeRunBindingsRef.current.get(startOutput.runId)
-          if (binding) scheduleStoppedRunReconciliation(startOutput.runId, binding)
-          void cancelAgentRun(startOutput.runId).catch(() => {
-            console.error('Failed to cancel agent run')
-          })
-        }
-      } catch (error) {
-        if (cancelledPendingMessageIdsRef.current.has(assistantMessageId)) {
-          cancelledPendingMessageIdsRef.current.delete(assistantMessageId)
-          return
-        }
-        if (stopRequestedPendingMessageIdsRef.current.delete(assistantMessageId)) {
-          const stoppedAt = Date.now()
-          updateAssistantMessage(
-            conversationId,
-            assistantMessageId,
-            (currentMessage) => ({
-              ...currentMessage,
-              content:
-                currentMessage.content && currentMessage.content !== THINKING_PLACEHOLDER
-                  ? currentMessage.content
-                  : '',
-              status: 'sent',
-              agentRun: settleAgentRunToolActivities(
-                {
-                  ...ensureAgentRun(currentMessage.agentRun, null, 'cancelled'),
-                  completedAt: stoppedAt,
-                  todo: undefined
-                },
-                'cancelled',
-                stoppedAt
-              )
-            }),
-            { touchConversation: true }
-          )
-          return
-        }
-
-        const message = error instanceof Error ? error.message : String(error)
-        const recovery = planSkillActivationRecovery(error, skills)
-        reconcileFailedSkillActivation(conversationId, recovery, {
-          modelId,
-          permissionMode,
-          projectId
-        })
-        if (recovery.refreshCatalog) {
-          requestSkillCatalogRefresh(conversationId)
-        }
-        updateAssistantMessage(
-          conversationId,
-          assistantMessageId,
-          (currentMessage) => ({
-            ...currentMessage,
-            content: message,
-            status: 'error',
-            agentRun: {
-              ...ensureAgentRun(currentMessage.agentRun, null, 'failed'),
-              error: message
-            }
-          }),
-          { touchConversation: true }
-        )
-      }
-    },
-    [
-      cancelBackendAgentRun,
-      contextWindowIndicatorEnabled,
-      enqueueChatMessageStateSave,
-      handleBoundAgentEvent,
-      reconcileFailedSkillActivation,
-      requestSkillCatalogRefresh,
-      scheduleStoppedRunReconciliation,
-      setConversationsWithRef,
-      uiPreferences.customPermissions,
-      updateAssistantMessage
-    ]
-  )
-
+    requestSkillCatalogRefresh,
+    showToast,
+    t,
+    uiPreferences
+  })
   const submitMessageToConversation = useCallback(
     (
       targetConversationId: string | null,
