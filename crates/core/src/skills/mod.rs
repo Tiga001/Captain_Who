@@ -5,6 +5,7 @@ mod digest;
 mod discovery;
 mod github_acquisition;
 mod github_source_resolution;
+mod github_transport_cache;
 mod installation_service;
 mod installation_session;
 mod installation_workflow;
@@ -45,12 +46,13 @@ pub use bundled::{
 };
 pub use github_acquisition::{
     AcquiredGitHubSkill, GitHubAcquisitionError, GitHubAcquisitionErrorCode,
-    GitHubAcquisitionSummary, GitHubAcquisitionTransport, GitHubArchiveRequest, GitHubCommit,
-    GitHubNamedReference, GitHubReference, GitHubRepository, GitHubResolveRequest,
+    GitHubAcquisitionSummary, GitHubAcquisitionTransport, GitHubArchive, GitHubArchiveRequest,
+    GitHubCommit, GitHubNamedReference, GitHubReference, GitHubRepository, GitHubResolveRequest,
     GitHubSkillAcquirer, GitHubSkillLocation, GitHubSubdirectory, GitHubTransportError,
     GitHubWorkflowAcquisitionAdapter, ReqwestGitHubTransport, GITHUB_SKILL_ORIGIN_PROVIDER,
 };
 pub use github_source_resolution::GitHubInstallationSourceResolver;
+pub use github_transport_cache::SharedGitHubTransport;
 pub use installation_service::{
     InstalledSkillInventory, InstalledSkillRecord, InstalledSkillRecordIssue,
     LocalSkillInstallRequest, LocalSkillUpdateExactRequest, LocalSkillUpdateRequest,

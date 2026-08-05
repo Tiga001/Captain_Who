@@ -1403,6 +1403,7 @@ pub struct SkillSourceResolutionError {
     recovery: SkillSourceResolutionRecovery,
     message: String,
     provider: Option<SkillSourceResolverId>,
+    retry_after_ms: Option<u64>,
 }
 
 impl SkillSourceResolutionError {
@@ -1418,6 +1419,7 @@ impl SkillSourceResolutionError {
             recovery,
             message: message.into(),
             provider: None,
+            retry_after_ms: None,
         }
     }
 
@@ -1470,6 +1472,15 @@ impl SkillSourceResolutionError {
         self.provider.as_ref()
     }
 
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        self.retry_after_ms
+    }
+
+    pub fn with_retry_after(mut self, retry_after: std::time::Duration) -> Self {
+        self.retry_after_ms = u64::try_from(retry_after.as_millis()).ok();
+        self
+    }
+
     fn bind_provider(mut self, provider: SkillSourceResolverId) -> Self {
         self.provider = Some(provider);
         self
@@ -1484,6 +1495,7 @@ impl fmt::Debug for SkillSourceResolutionError {
             .field("code", &self.code)
             .field("recovery", &self.recovery)
             .field("provider", &self.provider)
+            .field("retry_after_ms", &self.retry_after_ms)
             .field("message", &"[redacted]")
             .finish()
     }

@@ -938,7 +938,11 @@ fn agent_commit_failure(
 
 fn invalid_resolution(error: mycopilot_core::skills::SkillSourceResolutionError) -> Value {
     let data = resolution_failure(error).into_data();
-    invalid_from_serializable(&*data)
+    let mut result = invalid_from_serializable(&*data);
+    if let (Some(retry_after_ms), Some(output)) = (data.retry_after_ms, result.as_object_mut()) {
+        output.insert("retryAfterMs".to_string(), json!(retry_after_ms));
+    }
+    result
 }
 
 fn invalid_workflow(error: &mycopilot_core::skills::SkillInstallationWorkflowError) -> Value {
@@ -1370,6 +1374,24 @@ mod tests {
             .unwrap();
         assert_eq!(invalid_local["status"], "invalid");
         assert!(invalid_local.get("preparationId").is_none());
+    }
+
+    #[test]
+    fn model_safe_rate_limit_results_keep_only_the_actionable_retry_hint() {
+        let result = invalid_resolution(
+            SkillSourceResolutionError::resolve(
+                SkillSourceResolutionErrorCode::RateLimited,
+                SkillSourceResolutionRecovery::RetryLater,
+                "provider body must not cross the boundary",
+            )
+            .with_retry_after(std::time::Duration::from_secs(19)),
+        );
+
+        assert_eq!(result["status"], "invalid");
+        assert_eq!(result["error"]["code"], "rateLimited");
+        assert_eq!(result["retryAfterMs"], 19_000);
+        assert_eq!(result["recovery"], "retryLater");
+        assert!(!result.to_string().contains("provider body"));
     }
 
     #[test]

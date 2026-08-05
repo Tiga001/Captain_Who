@@ -1042,7 +1042,7 @@ export const zhCNTranslations = {
   'agent.skillInstallation.unknownSource': '未知来源',
   'agent.skillInstallation.unnamed': '未命名 Skill',
   'agent.skillInstallation.noDescription': '未提供描述。',
-  'agent.skillInstallation.inspecting': '正在检查 Skill',
+  'agent.skillInstallation.inspecting': '正在检查来源、下载并验证 Skill',
   'agent.skillInstallation.identified': '已识别 Skill',
   'agent.skillInstallation.selectionRequired': '发现多个 Skill',
   'agent.skillInstallation.inspected': '已检查 Skill 来源',

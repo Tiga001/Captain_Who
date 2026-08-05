@@ -1,10 +1,10 @@
 use super::*;
 use crate::adapters::skills_test_support::write_installed_skill;
 use mycopilot_core::skills::{
-    GitHubAcquisitionTransport, GitHubArchiveRequest, GitHubResolveRequest, GitHubSkillAcquirer,
-    GitHubTransportError, GitHubWorkflowAcquisitionAdapter, PreparedSkillPackage,
-    SkillInstallationAuthority, SkillInstallationId, SkillInstallationProvenance,
-    SkillInstallationRefresh, SkillPackageOrigin,
+    GitHubAcquisitionTransport, GitHubArchive, GitHubArchiveRequest, GitHubResolveRequest,
+    GitHubSkillAcquirer, GitHubTransportError, GitHubWorkflowAcquisitionAdapter,
+    PreparedSkillPackage, SkillInstallationAuthority, SkillInstallationId,
+    SkillInstallationProvenance, SkillInstallationRefresh, SkillPackageOrigin,
 };
 use std::sync::Arc;
 
@@ -254,7 +254,7 @@ impl GitHubAcquisitionTransport for NeverGitHubTransport {
     fn download_archive(
         &self,
         _request: &GitHubArchiveRequest,
-    ) -> Result<Vec<u8>, GitHubTransportError> {
+    ) -> Result<GitHubArchive, GitHubTransportError> {
         Err(GitHubTransportError::Unavailable)
     }
 }

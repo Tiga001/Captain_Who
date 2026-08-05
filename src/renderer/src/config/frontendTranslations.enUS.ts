@@ -1087,7 +1087,7 @@ export const enUSTranslations = {
   'agent.skillInstallation.unknownSource': 'Unknown source',
   'agent.skillInstallation.unnamed': 'Unnamed Skill',
   'agent.skillInstallation.noDescription': 'No description provided.',
-  'agent.skillInstallation.inspecting': 'Inspecting Skill',
+  'agent.skillInstallation.inspecting': 'Inspecting source, downloading, and validating Skill',
   'agent.skillInstallation.identified': 'Identified Skill',
   'agent.skillInstallation.selectionRequired': 'Found multiple Skills',
   'agent.skillInstallation.inspected': 'Inspected Skill source',

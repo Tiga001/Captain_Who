@@ -100,6 +100,7 @@ describe('image generation activity UI', () => {
     const screen = await render(<ImageGenerationToolActivity call={call()} resolver={resolver} />)
 
     await expect.element(screen.getByText('agent.imageGeneration.generate.running')).toBeVisible()
+    expect(screen.container.querySelector('.agent-activity__icon svg')).toHaveClass('lucide-images')
     expect(
       screen.container
         .querySelector('.image-generation-activity__preview')
@@ -133,6 +134,7 @@ describe('image generation activity UI', () => {
       />
     )
 
+    expect(screen.container.querySelector('.agent-activity__icon svg')).toHaveClass('lucide-images')
     await expect.poll(() => screen.container.querySelector('img')).not.toBeNull()
     expect(
       screen.container

@@ -1,10 +1,11 @@
 //! Public GitHub acquisition for immutable Skill package snapshots.
 //!
 //! This adapter intentionally accepts structured GitHub coordinates instead
-//! of arbitrary URLs. It resolves every requested ref through GitHub's public
-//! API, downloads a ZIP for the resulting full commit SHA from codeload, and
-//! keeps extraction entirely in memory. The only output that crosses the
-//! installation boundary is a fully validated [`PreparedSkillPackage`].
+//! of arbitrary URLs. Immutable SHAs bypass ref lookup; moving refs use a
+//! bounded `git ls-remote` lookup with GitHub's public API only as fallback.
+//! The resulting full SHA is downloaded from codeload into a private bounded
+//! spool. Only a fully validated [`PreparedSkillPackage`] crosses the
+//! installation boundary.
 
 use super::acquisition_provenance::{
     SkillInstallationAuthority, SkillInstallationProvenance, SkillInstallationProvenanceView,
@@ -22,15 +23,22 @@ use super::prepared::{PreparedSkillPackage, SkillPackagePreparationError};
 use super::prepared_acquisition::PreparedSkillAcquisition;
 use super::workspace::{MAX_SKILL_FILE_BYTES, SKILL_FILE_NAME};
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{ACCEPT, CONTENT_LENGTH};
+use reqwest::header::{HeaderMap, ACCEPT, CONTENT_LENGTH, RETRY_AFTER};
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::io::{Cursor, Read};
-use std::sync::Arc;
-use std::time::Duration;
+use std::fs::File;
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tempfile::NamedTempFile;
 use zip::{CompressionMethod, ZipArchive};
 
 pub const GITHUB_SKILL_ORIGIN_PROVIDER: &str = "github";
@@ -41,8 +49,10 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_API_BODY_BYTES: usize = 256 * 1024;
 const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const GITHUB_RESOLUTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const GITHUB_RESOLUTION_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
+const GITHUB_LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(20);
+const GITHUB_RATE_LIMIT_FALLBACK: Duration = Duration::from_secs(60);
+const GITHUB_HTTP_ATTEMPTS: usize = 2;
+const GITHUB_RETRY_BACKOFF: Duration = Duration::from_millis(150);
 pub(super) const MAX_GITHUB_ZIP_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAX_GITHUB_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_GITHUB_ARCHIVE_PATH_BYTES: usize = 4 * 1024;
@@ -247,7 +257,7 @@ impl GitHubSkillLocation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GitHubResolveRequest {
     repository: GitHubRepository,
     reference: GitHubReference,
@@ -271,7 +281,7 @@ impl GitHubResolveRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GitHubArchiveRequest {
     repository: GitHubRepository,
     commit: GitHubCommit,
@@ -304,14 +314,115 @@ pub trait GitHubAcquisitionTransport: Send + Sync {
     fn download_archive(
         &self,
         request: &GitHubArchiveRequest,
-    ) -> Result<Vec<u8>, GitHubTransportError>;
+    ) -> Result<GitHubArchive, GitHubTransportError>;
 }
 
-/// Network transport restricted to GitHub's fixed public API and codeload
-/// hosts. Redirects and credentials are deliberately unsupported.
+/// An immutable private spool containing one bounded GitHub repository ZIP.
+///
+/// The temporary path never crosses the Core boundary. Clones share the same
+/// read-only file and deletion happens automatically after the final owner is
+/// dropped. Cache hits verify the captured length and digest before reuse; ZIP
+/// readers only reopen this private immutable spool, avoiding one full hash
+/// pass for every candidate discovered in a multi-Skill repository.
+#[derive(Clone)]
+pub struct GitHubArchive {
+    inner: Arc<GitHubArchiveInner>,
+}
+
+struct GitHubArchiveInner {
+    file: NamedTempFile,
+    len: usize,
+    digest: [u8; 32],
+}
+
+impl fmt::Debug for GitHubArchive {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GitHubArchive")
+            .field("bytes", &self.inner.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GitHubArchive {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, GitHubTransportError> {
+        if bytes.len() > MAX_GITHUB_ZIP_BYTES {
+            return Err(GitHubTransportError::ResponseTooLarge);
+        }
+        let mut file = NamedTempFile::new().map_err(|_| GitHubTransportError::Unavailable)?;
+        file.write_all(bytes)
+            .and_then(|_| file.as_file_mut().flush())
+            .map_err(|_| GitHubTransportError::Unavailable)?;
+        Ok(Self::from_spool(
+            file,
+            bytes.len(),
+            Sha256::digest(bytes).into(),
+        ))
+    }
+
+    fn from_spool(file: NamedTempFile, len: usize, digest: [u8; 32]) -> Self {
+        Self {
+            inner: Arc::new(GitHubArchiveInner { file, len, digest }),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.len == 0
+    }
+
+    pub(crate) fn reader(&self) -> Result<File, GitHubTransportError> {
+        let mut reader = self
+            .inner
+            .file
+            .reopen()
+            .map_err(|_| GitHubTransportError::InvalidResponse)?;
+        let metadata = reader
+            .metadata()
+            .map_err(|_| GitHubTransportError::InvalidResponse)?;
+        if metadata.len() != self.inner.len as u64 {
+            return Err(GitHubTransportError::InvalidResponse);
+        }
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| GitHubTransportError::InvalidResponse)?;
+        Ok(reader)
+    }
+
+    pub(crate) fn verify_integrity(&self) -> Result<(), GitHubTransportError> {
+        let mut reader = self.reader()?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut actual = 0usize;
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|_| GitHubTransportError::InvalidResponse)?;
+            if read == 0 {
+                break;
+            }
+            actual = actual
+                .checked_add(read)
+                .ok_or(GitHubTransportError::InvalidResponse)?;
+            hasher.update(&buffer[..read]);
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
+        if actual != self.inner.len || digest != self.inner.digest {
+            return Err(GitHubTransportError::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+/// Network transport restricted to public GitHub HTTPS endpoints and a fixed
+/// non-interactive `git ls-remote` invocation. Redirects, credentials and
+/// model-controlled commands are deliberately unsupported.
 pub struct ReqwestGitHubTransport {
     client: Client,
-    archive_timeout: Duration,
+    api_rate_limit_until: Mutex<Option<Instant>>,
 }
 
 impl fmt::Debug for ReqwestGitHubTransport {
@@ -324,33 +435,16 @@ impl fmt::Debug for ReqwestGitHubTransport {
 
 impl ReqwestGitHubTransport {
     pub fn new() -> Result<Self, GitHubTransportError> {
-        Self::with_timeouts(GITHUB_REQUEST_TIMEOUT, GITHUB_REQUEST_TIMEOUT)
-    }
-
-    /// Builds the bounded transport used by human-facing URL resolution. Ambiguous GitHub URLs
-    /// may require several ref probes, so this profile uses shorter per-request deadlines than
-    /// the immutable acquisition transaction.
-    pub fn new_for_source_resolution() -> Result<Self, GitHubTransportError> {
-        Self::with_timeouts(
-            GITHUB_RESOLUTION_REQUEST_TIMEOUT,
-            GITHUB_RESOLUTION_ARCHIVE_TIMEOUT,
-        )
-    }
-
-    fn with_timeouts(
-        request_timeout: Duration,
-        archive_timeout: Duration,
-    ) -> Result<Self, GitHubTransportError> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(GITHUB_CONNECT_TIMEOUT)
-            .timeout(request_timeout)
+            .timeout(GITHUB_REQUEST_TIMEOUT)
             .user_agent(GITHUB_USER_AGENT)
             .build()
             .map_err(|_| GitHubTransportError::Unavailable)?;
         Ok(Self {
             client,
-            archive_timeout,
+            api_rate_limit_until: Mutex::new(None),
         })
     }
 
@@ -367,19 +461,70 @@ impl ReqwestGitHubTransport {
     }
 
     fn get_bounded_json(&self, url: Url) -> Result<Vec<u8>, GitHubTransportError> {
-        let response = self
-            .client
-            .get(url)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .send()
-            .map_err(|_| GitHubTransportError::Unavailable)?;
-        read_success_response(response, GITHUB_API_BODY_BYTES, true)
+        self.check_api_rate_limit()?;
+        for attempt in 0..GITHUB_HTTP_ATTEMPTS {
+            let result = self
+                .client
+                .get(url.clone())
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+                .send()
+                .map_err(map_reqwest_error)
+                .and_then(|response| read_success_response(response, GITHUB_API_BODY_BYTES, true));
+            if let Err(GitHubTransportError::RateLimited { retry_after, .. }) = &result {
+                self.remember_api_rate_limit(*retry_after);
+            }
+            if attempt + 1 < GITHUB_HTTP_ATTEMPTS
+                && result.as_ref().is_err_and(retryable_transport_error)
+            {
+                thread::sleep(GITHUB_RETRY_BACKOFF);
+                continue;
+            }
+            return result;
+        }
+        Err(GitHubTransportError::Unavailable)
     }
-}
 
-impl GitHubAcquisitionTransport for ReqwestGitHubTransport {
-    fn resolve_commit(
+    fn check_api_rate_limit(&self) -> Result<(), GitHubTransportError> {
+        let mut state = self
+            .api_rate_limit_until
+            .lock()
+            .map_err(|_| GitHubTransportError::Unavailable)?;
+        let Some(until) = *state else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if until <= now {
+            *state = None;
+            return Ok(());
+        }
+        Err(GitHubTransportError::RateLimited {
+            retry_after: Some(until.duration_since(now)),
+            secondary: false,
+        })
+    }
+
+    fn remember_api_rate_limit(&self, retry_after: Option<Duration>) {
+        let duration = retry_after.unwrap_or(GITHUB_RATE_LIMIT_FALLBACK);
+        if let Ok(mut state) = self.api_rate_limit_until.lock() {
+            *state = Instant::now().checked_add(duration);
+        }
+    }
+
+    fn resolve_with_fallback(
+        &self,
+        request: &GitHubResolveRequest,
+    ) -> Result<GitHubCommit, GitHubTransportError> {
+        if let GitHubReference::Commit(commit) = request.reference() {
+            return Ok(commit.clone());
+        }
+        match resolve_with_git_ls_remote(request) {
+            Ok(commit) => Ok(commit),
+            Err(_) => self.resolve_with_api(request),
+        }
+    }
+
+    fn resolve_with_api(
         &self,
         request: &GitHubResolveRequest,
     ) -> Result<GitHubCommit, GitHubTransportError> {
@@ -396,49 +541,82 @@ impl GitHubAcquisitionTransport for ReqwestGitHubTransport {
             GitHubReference::Named(reference) => {
                 self.resolve_ref(request.repository(), reference.as_str())
             }
-            GitHubReference::Commit(commit) => {
-                self.resolve_ref(request.repository(), commit.as_str())
-            }
+            GitHubReference::Commit(commit) => Ok(commit.clone()),
         }
+    }
+}
+
+impl GitHubAcquisitionTransport for ReqwestGitHubTransport {
+    fn resolve_commit(
+        &self,
+        request: &GitHubResolveRequest,
+    ) -> Result<GitHubCommit, GitHubTransportError> {
+        self.resolve_with_fallback(request)
     }
 
     fn download_archive(
         &self,
         request: &GitHubArchiveRequest,
-    ) -> Result<Vec<u8>, GitHubTransportError> {
+    ) -> Result<GitHubArchive, GitHubTransportError> {
         let url = github_codeload_url(request.repository(), request.commit())?;
-        let response = self
-            .client
-            .get(url)
-            .timeout(self.archive_timeout)
-            .header(ACCEPT, "application/zip")
-            .send()
-            .map_err(|_| GitHubTransportError::Unavailable)?;
-        read_success_response(response, MAX_GITHUB_ZIP_BYTES, false)
+        for attempt in 0..GITHUB_HTTP_ATTEMPTS {
+            let result = self
+                .client
+                .get(url.clone())
+                .timeout(GITHUB_REQUEST_TIMEOUT)
+                .header(ACCEPT, "application/zip")
+                .send()
+                .map_err(map_reqwest_error)
+                .and_then(spool_archive_response);
+            if attempt + 1 < GITHUB_HTTP_ATTEMPTS
+                && result.as_ref().is_err_and(retryable_transport_error)
+            {
+                thread::sleep(GITHUB_RETRY_BACKOFF);
+                continue;
+            }
+            return result;
+        }
+        Err(GitHubTransportError::Unavailable)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GitHubTransportError {
     NotFound,
-    RateLimited,
+    RateLimited {
+        retry_after: Option<Duration>,
+        secondary: bool,
+    },
     Rejected,
     ResponseTooLarge,
     InvalidResponse,
+    Timeout,
+    NetworkUnavailable,
     Unavailable,
+}
+
+impl GitHubTransportError {
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for GitHubTransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self {
             Self::NotFound => "The public GitHub repository or reference was not found.",
-            Self::RateLimited => "GitHub temporarily rate-limited this public request.",
+            Self::RateLimited { .. } => "GitHub temporarily rate-limited this public request.",
             Self::Rejected => "GitHub rejected this public request.",
             Self::ResponseTooLarge => {
                 "GitHub returned a response larger than the acquisition limit."
             }
             Self::InvalidResponse => "GitHub returned an invalid acquisition response.",
+            Self::Timeout => "The GitHub request timed out.",
+            Self::NetworkUnavailable => "GitHub could not be reached over the network.",
             Self::Unavailable => "GitHub acquisition is temporarily unavailable.",
         };
         reason.fmt(formatter)
@@ -460,11 +638,6 @@ impl fmt::Debug for GitHubSkillAcquirer {
 }
 
 impl GitHubSkillAcquirer {
-    pub fn new() -> Result<Self, GitHubAcquisitionError> {
-        let transport = ReqwestGitHubTransport::new().map_err(map_transport_error)?;
-        Ok(Self::with_transport(Arc::new(transport)))
-    }
-
     pub fn with_transport(transport: Arc<dyn GitHubAcquisitionTransport>) -> Self {
         Self { transport }
     }
@@ -473,21 +646,16 @@ impl GitHubSkillAcquirer {
         &self,
         location: GitHubSkillLocation,
     ) -> Result<AcquiredGitHubSkill, GitHubAcquisitionError> {
-        let resolve_request =
-            GitHubResolveRequest::new(location.repository.clone(), location.reference.clone());
-        let commit = self
-            .transport
-            .resolve_commit(&resolve_request)
-            .map_err(map_transport_error)?;
-        if matches!(
-            &location.reference,
-            GitHubReference::Commit(expected) if expected != &commit
-        ) {
-            return Err(acquisition_error(
-                GitHubAcquisitionErrorCode::ResolvedCommitMismatch,
-                "GitHub returned a different commit than the immutable acquisition request.",
-            ));
-        }
+        let commit = match &location.reference {
+            GitHubReference::Commit(commit) => commit.clone(),
+            reference => self
+                .transport
+                .resolve_commit(&GitHubResolveRequest::new(
+                    location.repository.clone(),
+                    reference.clone(),
+                ))
+                .map_err(map_transport_error)?,
+        };
         let archive_request =
             GitHubArchiveRequest::new(location.repository.clone(), commit.clone());
         let archive = self
@@ -500,7 +668,7 @@ impl GitHubSkillAcquirer {
                 "The GitHub archive exceeds the compressed acquisition limit.",
             ));
         }
-        let files = extract_selected_skill(&archive, location.subdirectory())?;
+        let files = extract_selected_skill_archive(&archive, location.subdirectory())?;
         let summary = GitHubAcquisitionSummary::from_location(&location, commit.clone());
         let origin = summary.origin()?;
         let package = PreparedSkillPackage::from_files(files, origin).map_err(map_package_error)?;
@@ -528,10 +696,6 @@ impl fmt::Debug for GitHubWorkflowAcquisitionAdapter {
 impl GitHubWorkflowAcquisitionAdapter {
     pub fn new(acquirer: Arc<GitHubSkillAcquirer>) -> Self {
         Self { acquirer }
-    }
-
-    pub fn public_github() -> Result<Self, GitHubAcquisitionError> {
-        Ok(Self::new(Arc::new(GitHubSkillAcquirer::new()?)))
     }
 
     /// Encodes a validated location into the workflow's generic provider
@@ -1019,7 +1183,6 @@ pub enum GitHubAcquisitionErrorCode {
     InvalidRepository,
     InvalidReference,
     InvalidCommit,
-    ResolvedCommitMismatch,
     InvalidSubdirectory,
     InvalidWorkflowRequest,
     NotFound,
@@ -1090,9 +1253,8 @@ fn read_success_response(
     max_bytes: usize,
     json_response: bool,
 ) -> Result<Vec<u8>, GitHubTransportError> {
-    let status = response.status();
-    if !status.is_success() {
-        return Err(map_status(status));
+    if !response.status().is_success() {
+        return Err(map_response_status(&response));
     }
     if let Some(length) = response
         .headers()
@@ -1123,21 +1285,258 @@ fn read_success_response(
         .by_ref()
         .take(max_bytes.saturating_add(1) as u64)
         .read_to_end(&mut body)
-        .map_err(|_| GitHubTransportError::Unavailable)?;
+        .map_err(map_io_transport_error)?;
     if body.len() > max_bytes {
         return Err(GitHubTransportError::ResponseTooLarge);
     }
     Ok(body)
 }
 
-fn map_status(status: StatusCode) -> GitHubTransportError {
+fn spool_archive_response(mut response: Response) -> Result<GitHubArchive, GitHubTransportError> {
+    if !response.status().is_success() {
+        return Err(map_response_status(&response));
+    }
+    let expected_length = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if expected_length.is_some_and(|length| length > MAX_GITHUB_ZIP_BYTES as u64) {
+        return Err(GitHubTransportError::ResponseTooLarge);
+    }
+
+    spool_archive_reader(&mut response, expected_length)
+}
+
+fn spool_archive_reader(
+    reader: &mut dyn Read,
+    expected_length: Option<u64>,
+) -> Result<GitHubArchive, GitHubTransportError> {
+    if expected_length.is_some_and(|length| length > MAX_GITHUB_ZIP_BYTES as u64) {
+        return Err(GitHubTransportError::ResponseTooLarge);
+    }
+    let mut file = NamedTempFile::new().map_err(|_| GitHubTransportError::Unavailable)?;
+    let mut hasher = Sha256::new();
+    let mut total = 0usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(map_io_transport_error)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read)
+            .ok_or(GitHubTransportError::ResponseTooLarge)?;
+        if total > MAX_GITHUB_ZIP_BYTES {
+            return Err(GitHubTransportError::ResponseTooLarge);
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|_| GitHubTransportError::Unavailable)?;
+        hasher.update(&buffer[..read]);
+    }
+    if expected_length.is_some_and(|length| length != total as u64) {
+        return Err(GitHubTransportError::InvalidResponse);
+    }
+    file.as_file_mut()
+        .flush()
+        .map_err(|_| GitHubTransportError::Unavailable)?;
+    let digest: [u8; 32] = hasher.finalize().into();
+    Ok(GitHubArchive::from_spool(file, total, digest))
+}
+
+fn map_response_status(response: &Response) -> GitHubTransportError {
+    map_status_and_headers(response.status(), response.headers())
+}
+
+fn map_status_and_headers(status: StatusCode, headers: &HeaderMap) -> GitHubTransportError {
     match status {
         StatusCode::NOT_FOUND => GitHubTransportError::NotFound,
-        StatusCode::TOO_MANY_REQUESTS => GitHubTransportError::RateLimited,
-        StatusCode::FORBIDDEN => GitHubTransportError::RateLimited,
+        StatusCode::TOO_MANY_REQUESTS => GitHubTransportError::RateLimited {
+            retry_after: retry_after_from_headers(headers).or(Some(GITHUB_RATE_LIMIT_FALLBACK)),
+            secondary: headers.contains_key(RETRY_AFTER),
+        },
+        StatusCode::FORBIDDEN if is_rate_limit_response(headers) => {
+            GitHubTransportError::RateLimited {
+                retry_after: retry_after_from_headers(headers).or(Some(GITHUB_RATE_LIMIT_FALLBACK)),
+                secondary: headers.contains_key(RETRY_AFTER),
+            }
+        }
         status if status.is_server_error() => GitHubTransportError::Unavailable,
         _ => GitHubTransportError::Rejected,
     }
+}
+
+fn is_rate_limit_response(headers: &HeaderMap) -> bool {
+    headers.contains_key(RETRY_AFTER)
+        || headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            == Some("0")
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    if let Some(seconds) = headers
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    {
+        return Some(Duration::from_secs(seconds.clamp(1, 24 * 60 * 60)));
+    }
+    let reset = headers
+        .get("x-ratelimit-reset")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(Duration::from_secs(
+        reset.saturating_sub(now).clamp(1, 24 * 60 * 60),
+    ))
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> GitHubTransportError {
+    if error.is_timeout() {
+        GitHubTransportError::Timeout
+    } else if error.is_connect() {
+        GitHubTransportError::NetworkUnavailable
+    } else {
+        GitHubTransportError::Unavailable
+    }
+}
+
+fn map_io_transport_error(error: std::io::Error) -> GitHubTransportError {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        GitHubTransportError::Timeout
+    } else {
+        GitHubTransportError::NetworkUnavailable
+    }
+}
+
+fn retryable_transport_error(error: &GitHubTransportError) -> bool {
+    matches!(
+        error,
+        GitHubTransportError::Timeout
+            | GitHubTransportError::NetworkUnavailable
+            | GitHubTransportError::Unavailable
+    )
+}
+
+fn resolve_with_git_ls_remote(
+    request: &GitHubResolveRequest,
+) -> Result<GitHubCommit, GitHubTransportError> {
+    if let GitHubReference::Commit(commit) = request.reference() {
+        return Ok(commit.clone());
+    }
+    let repository_url = format!(
+        "https://github.com/{}/{}.git",
+        request.repository().owner(),
+        request.repository().name()
+    );
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg("credential.helper=")
+        .arg("-c")
+        .arg("core.askPass=")
+        .arg("ls-remote")
+        .arg("--symref")
+        .arg("--exit-code")
+        .arg(&repository_url);
+    match request.reference() {
+        GitHubReference::DefaultBranch => {
+            command.arg("HEAD");
+        }
+        GitHubReference::Named(reference) => {
+            command
+                .arg(format!("refs/heads/{}", reference.as_str()))
+                .arg(format!("refs/tags/{}", reference.as_str()))
+                .arg(format!("refs/tags/{}^{{}}", reference.as_str()));
+        }
+        GitHubReference::Commit(_) => unreachable!("commit references return before spawning git"),
+    }
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| GitHubTransportError::Unavailable)?;
+    let deadline = Instant::now()
+        .checked_add(GITHUB_LS_REMOTE_TIMEOUT)
+        .ok_or(GitHubTransportError::Unavailable)?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitHubTransportError::Timeout);
+            }
+            Err(_) => return Err(GitHubTransportError::Unavailable),
+        }
+    };
+    if !status.success() {
+        return Err(GitHubTransportError::NotFound);
+    }
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or(GitHubTransportError::InvalidResponse)?;
+    let mut bytes = Vec::new();
+    stdout
+        .by_ref()
+        .take(GITHUB_API_BODY_BYTES.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| GitHubTransportError::InvalidResponse)?;
+    if bytes.len() > GITHUB_API_BODY_BYTES {
+        return Err(GitHubTransportError::InvalidResponse);
+    }
+    parse_ls_remote_output(request.reference(), &bytes)
+}
+
+fn parse_ls_remote_output(
+    reference: &GitHubReference,
+    output: &[u8],
+) -> Result<GitHubCommit, GitHubTransportError> {
+    let output = std::str::from_utf8(output).map_err(|_| GitHubTransportError::InvalidResponse)?;
+    let mut refs = BTreeMap::<&str, &str>::new();
+    for line in output.lines() {
+        if line.starts_with("ref: ") {
+            continue;
+        }
+        let Some((sha, name)) = line.split_once('\t') else {
+            return Err(GitHubTransportError::InvalidResponse);
+        };
+        refs.insert(name, sha);
+    }
+    let sha = match reference {
+        GitHubReference::DefaultBranch => refs.get("HEAD").copied(),
+        GitHubReference::Named(reference) => {
+            let branch = format!("refs/heads/{}", reference.as_str());
+            let peeled_tag = format!("refs/tags/{}^{{}}", reference.as_str());
+            let tag = format!("refs/tags/{}", reference.as_str());
+            refs.get(branch.as_str())
+                .or_else(|| refs.get(peeled_tag.as_str()))
+                .or_else(|| refs.get(tag.as_str()))
+                .copied()
+        }
+        GitHubReference::Commit(commit) => return Ok(commit.clone()),
+    }
+    .ok_or(GitHubTransportError::NotFound)?;
+    GitHubCommit::parse(sha).map_err(|_| GitHubTransportError::InvalidResponse)
 }
 
 fn github_api_repository_url(repository: &GitHubRepository) -> Result<Url, GitHubTransportError> {
@@ -1212,11 +1611,26 @@ impl ArchiveEntryScope {
     }
 }
 
+#[cfg(test)]
 pub(super) fn extract_selected_skill(
     archive_bytes: &[u8],
     subdirectory: &GitHubSubdirectory,
 ) -> Result<Vec<(String, Vec<u8>)>, GitHubAcquisitionError> {
-    let reader = Cursor::new(archive_bytes);
+    extract_selected_skill_reader(Cursor::new(archive_bytes), subdirectory)
+}
+
+pub(super) fn extract_selected_skill_archive(
+    archive: &GitHubArchive,
+    subdirectory: &GitHubSubdirectory,
+) -> Result<Vec<(String, Vec<u8>)>, GitHubAcquisitionError> {
+    let reader = archive.reader().map_err(|_| invalid_archive())?;
+    extract_selected_skill_reader(reader, subdirectory)
+}
+
+fn extract_selected_skill_reader<R: Read + Seek>(
+    reader: R,
+    subdirectory: &GitHubSubdirectory,
+) -> Result<Vec<(String, Vec<u8>)>, GitHubAcquisitionError> {
     let mut archive = ZipArchive::new(reader).map_err(|_| invalid_archive())?;
     if archive.is_empty() || archive.len() > MAX_GITHUB_ARCHIVE_ENTRIES {
         return Err(acquisition_error(
@@ -1701,7 +2115,7 @@ fn map_transport_error(error: GitHubTransportError) -> GitHubAcquisitionError {
             GitHubAcquisitionErrorCode::NotFound,
             "The public GitHub repository, reference, or archive was not found.",
         ),
-        GitHubTransportError::RateLimited => (
+        GitHubTransportError::RateLimited { .. } => (
             GitHubAcquisitionErrorCode::RateLimited,
             "GitHub temporarily rate-limited this public acquisition.",
         ),
@@ -1717,7 +2131,9 @@ fn map_transport_error(error: GitHubTransportError) -> GitHubAcquisitionError {
             GitHubAcquisitionErrorCode::Unavailable,
             "GitHub returned an invalid acquisition response.",
         ),
-        GitHubTransportError::Unavailable => (
+        GitHubTransportError::Timeout
+        | GitHubTransportError::NetworkUnavailable
+        | GitHubTransportError::Unavailable => (
             GitHubAcquisitionErrorCode::Unavailable,
             "GitHub acquisition is temporarily unavailable.",
         ),
@@ -1761,7 +2177,6 @@ fn map_acquisition_to_workflow_error(
         }
         GitHubAcquisitionErrorCode::TransportRejected
         | GitHubAcquisitionErrorCode::Unavailable
-        | GitHubAcquisitionErrorCode::ResolvedCommitMismatch
         | GitHubAcquisitionErrorCode::InvalidOrigin => {
             SkillAcquisitionAdapterError::unavailable(reason)
         }
@@ -1878,13 +2293,13 @@ mod tests {
         fn download_archive(
             &self,
             request: &GitHubArchiveRequest,
-        ) -> Result<Vec<u8>, GitHubTransportError> {
+        ) -> Result<GitHubArchive, GitHubTransportError> {
             self.state
                 .lock()
                 .unwrap()
                 .archive_requests
                 .push(request.clone());
-            Ok(self.archive.clone())
+            GitHubArchive::from_bytes(&self.archive)
         }
     }
 
@@ -1930,13 +2345,14 @@ mod tests {
         fn download_archive(
             &self,
             _request: &GitHubArchiveRequest,
-        ) -> Result<Vec<u8>, GitHubTransportError> {
+        ) -> Result<GitHubArchive, GitHubTransportError> {
             let mut state = self.state.lock().unwrap();
             state.archive_count += 1;
-            state
+            let bytes = state
                 .pending_archive
                 .take()
-                .ok_or(GitHubTransportError::Unavailable)
+                .ok_or(GitHubTransportError::Unavailable)?;
+            GitHubArchive::from_bytes(&bytes)
         }
     }
 
@@ -2077,7 +2493,7 @@ mod tests {
     }
 
     #[test]
-    fn immutable_commit_requests_reject_a_transport_mismatch_before_download() {
+    fn immutable_commit_requests_skip_ref_resolution_and_download_the_exact_sha() {
         let transport = Arc::new(FakeTransport::new(write_zip(
             &[("repo-root/SKILL.md", SKILL)],
             CompressionMethod::Stored,
@@ -2089,13 +2505,13 @@ mod tests {
             GitHubSubdirectory::root(),
         );
 
-        let error = acquirer.acquire(location).unwrap_err();
+        let acquired = acquirer.acquire(location).unwrap();
 
-        assert_eq!(
-            error.code(),
-            GitHubAcquisitionErrorCode::ResolvedCommitMismatch
-        );
-        assert!(transport.state.lock().unwrap().archive_requests.is_empty());
+        assert_eq!(acquired.summary().resolved_commit().as_str(), OTHER_COMMIT);
+        let state = transport.state.lock().unwrap();
+        assert!(state.resolve_requests.is_empty());
+        assert_eq!(state.archive_requests.len(), 1);
+        assert_eq!(state.archive_requests[0].commit().as_str(), OTHER_COMMIT);
     }
 
     #[test]
@@ -2178,6 +2594,98 @@ mod tests {
             codeload.as_str(),
             format!("https://codeload.github.com/owner/repo/zip/{COMMIT}")
         );
+    }
+
+    #[test]
+    fn ls_remote_parser_supports_default_branch_branch_and_annotated_tag() {
+        let default = parse_ls_remote_output(
+            &GitHubReference::DefaultBranch,
+            format!("ref: refs/heads/main\tHEAD\n{COMMIT}\tHEAD\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(default.as_str(), COMMIT);
+
+        let branch = parse_ls_remote_output(
+            &GitHubReference::named("feature/a").unwrap(),
+            format!("{COMMIT}\trefs/heads/feature/a\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(branch.as_str(), COMMIT);
+
+        let tag = parse_ls_remote_output(
+            &GitHubReference::named("v1").unwrap(),
+            format!("{OTHER_COMMIT}\trefs/tags/v1\n{COMMIT}\trefs/tags/v1^{{}}\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(tag.as_str(), COMMIT);
+    }
+
+    #[test]
+    fn archive_spool_detects_interrupted_and_length_mismatched_downloads() {
+        struct InterruptedReader {
+            delivered: bool,
+        }
+
+        impl Read for InterruptedReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.delivered {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "fixture interruption",
+                    ));
+                }
+                self.delivered = true;
+                buffer[..4].copy_from_slice(b"data");
+                Ok(4)
+            }
+        }
+
+        assert_eq!(
+            spool_archive_reader(&mut InterruptedReader { delivered: false }, None).unwrap_err(),
+            GitHubTransportError::NetworkUnavailable
+        );
+        assert_eq!(
+            spool_archive_reader(&mut Cursor::new(b"short"), Some(99)).unwrap_err(),
+            GitHubTransportError::InvalidResponse
+        );
+        let archive = spool_archive_reader(&mut Cursor::new(b"complete"), Some(8)).unwrap();
+        assert_eq!(archive.len(), 8);
+        assert!(archive.verify_integrity().is_ok());
+    }
+
+    #[test]
+    fn github_rate_limit_statuses_preserve_bounded_retry_hints() {
+        let mut primary_headers = HeaderMap::new();
+        primary_headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        let primary = map_status_and_headers(StatusCode::FORBIDDEN, &primary_headers);
+        assert!(matches!(
+            primary,
+            GitHubTransportError::RateLimited {
+                retry_after: Some(duration),
+                secondary: false,
+            } if duration == GITHUB_RATE_LIMIT_FALLBACK
+        ));
+
+        let mut secondary_headers = HeaderMap::new();
+        secondary_headers.insert(RETRY_AFTER, "7".parse().unwrap());
+        let secondary = map_status_and_headers(StatusCode::TOO_MANY_REQUESTS, &secondary_headers);
+        assert!(!retryable_transport_error(&secondary));
+        assert!(matches!(
+            secondary,
+            GitHubTransportError::RateLimited {
+                retry_after: Some(duration),
+                secondary: true,
+            } if duration == Duration::from_secs(7)
+        ));
+
+        assert_eq!(
+            map_status_and_headers(StatusCode::FORBIDDEN, &HeaderMap::new()),
+            GitHubTransportError::Rejected
+        );
+        assert!(retryable_transport_error(&GitHubTransportError::Timeout));
+        assert!(!retryable_transport_error(
+            &GitHubTransportError::InvalidResponse
+        ));
     }
 
     #[test]

@@ -31,6 +31,7 @@ impl SkillSourceResolutionFailure {
         recovery: SkillSourceResolutionRecoveryDto,
         message: impl Into<String>,
         provider: Option<SkillSourceResolutionProviderDto>,
+        retry_after_ms: Option<u64>,
     ) -> Self {
         Self {
             data: Box::new(SkillSourceResolutionErrorData {
@@ -40,7 +41,7 @@ impl SkillSourceResolutionFailure {
                 recovery,
                 message: message.into(),
                 provider,
-                retry_after_ms: None,
+                retry_after_ms,
             }),
         }
     }
@@ -321,7 +322,14 @@ pub(crate) fn resolution_failure(
     // Resolver errors are untrusted provider output. Preserve only typed fields at the Host
     // boundary and derive the user-facing message from our stable error taxonomy. A future
     // resolver may otherwise leak credentials, private URLs, paths, or upstream response bodies.
-    SkillSourceResolutionFailure::new(phase, code, recovery, message, provider)
+    SkillSourceResolutionFailure::new(
+        phase,
+        code,
+        recovery,
+        message,
+        provider,
+        error.retry_after_ms(),
+    )
 }
 
 pub(crate) fn resolution_dispatch_failure(
@@ -333,6 +341,7 @@ pub(crate) fn resolution_dispatch_failure(
         SkillSourceResolutionRecoveryDto::RetryLater,
         "Skill source resolution is temporarily unavailable.",
         None,
+        None,
     )
 }
 
@@ -343,6 +352,7 @@ fn internal_mapping_failure() -> SkillSourceResolutionFailure {
         SkillSourceResolutionRecoveryDto::RetryLater,
         "The resolved Skill source could not be encoded safely.",
         None,
+        None,
     )
 }
 
@@ -352,6 +362,7 @@ fn invalid_resolution_id_failure() -> SkillSourceResolutionFailure {
         SkillSourceResolutionErrorCodeDto::InvalidLocator,
         SkillSourceResolutionRecoveryDto::StartNewResolution,
         "The Skill source resolution ID is invalid.",
+        None,
         None,
     )
 }
@@ -603,11 +614,14 @@ mod tests {
     #[test]
     fn resolver_messages_never_cross_the_host_boundary() {
         let secret = "https://provider.example/private?token=do-not-expose";
-        let data = resolution_failure(SkillSourceResolutionError::resolve(
-            SkillSourceResolutionErrorCode::RateLimited,
-            SkillSourceResolutionRecovery::RetryLater,
-            format!("upstream rejected {secret}"),
-        ))
+        let data = resolution_failure(
+            SkillSourceResolutionError::resolve(
+                SkillSourceResolutionErrorCode::RateLimited,
+                SkillSourceResolutionRecovery::RetryLater,
+                format!("upstream rejected {secret}"),
+            )
+            .with_retry_after(std::time::Duration::from_secs(23)),
+        )
         .into_data();
 
         assert_eq!(data.code, SkillSourceResolutionErrorCodeDto::RateLimited);
@@ -617,6 +631,7 @@ mod tests {
         );
         assert!(!data.message.contains(secret));
         assert!(!format!("{data:?}").contains(secret));
+        assert_eq!(data.retry_after_ms, Some(23_000));
 
         let dispatch_data = resolution_dispatch_failure(secret).into_data();
         assert_eq!(

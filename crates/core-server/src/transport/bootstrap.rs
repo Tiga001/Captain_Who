@@ -186,14 +186,16 @@ impl CoreServerBootstrap {
                 ))
             })?,
         );
-        let github_acquisition_transport: Arc<dyn GitHubAcquisitionTransport> =
-            Arc::new(ReqwestGitHubTransport::new().map_err(|error| {
-                io::Error::other(format!(
-                    "failed to initialize public GitHub Skill transport: {error}"
-                ))
-            })?);
+        let github_transport: Arc<dyn GitHubAcquisitionTransport> =
+            Arc::new(SharedGitHubTransport::new(Arc::new(
+                ReqwestGitHubTransport::new().map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to initialize public GitHub Skill transport: {error}"
+                    ))
+                })?,
+            )));
         let github_acquisition = GitHubWorkflowAcquisitionAdapter::new(Arc::new(
-            GitHubSkillAcquirer::with_transport(github_acquisition_transport),
+            GitHubSkillAcquirer::with_transport(Arc::clone(&github_transport)),
         ));
         skill_installation_workflow
             .register_adapter(Arc::new(github_acquisition))
@@ -205,17 +207,10 @@ impl CoreServerBootstrap {
         let mut skill_source_resolution = SkillSourceResolutionService::with_session_store(
             skill_installation_workflow.session_store(),
         );
-        let github_resolution_transport: Arc<dyn GitHubAcquisitionTransport> = Arc::new(
-            ReqwestGitHubTransport::new_for_source_resolution().map_err(|error| {
-                io::Error::other(format!(
-                    "failed to initialize GitHub Skill source resolution transport: {error}"
-                ))
-            })?,
-        );
         skill_source_resolution
-            .register_resolver(Arc::new(GitHubInstallationSourceResolver::new(
-                github_resolution_transport,
-            )))
+            .register_resolver(Arc::new(GitHubInstallationSourceResolver::new(Arc::clone(
+                &github_transport,
+            ))))
             .map_err(|error| {
                 io::Error::other(format!(
                     "failed to register GitHub Skill source resolver: {error}"

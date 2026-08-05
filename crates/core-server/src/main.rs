@@ -75,11 +75,11 @@ use mycopilot_core::image_generation::{
 use mycopilot_core::skills::{
     GitHubAcquisitionTransport, GitHubInstallationSourceResolver, GitHubSkillAcquirer,
     GitHubWorkflowAcquisitionAdapter, LocalSkillInstallRequest, LocalSkillUpdateRequest,
-    ReqwestGitHubTransport, SkillId, SkillInstallationId, SkillInstallationMutation,
-    SkillInstallationOperation, SkillInstallationRevision, SkillInstallationService,
-    SkillInstallationServiceError, SkillInstallationWorkflow, SkillRevision,
-    SkillSourceResolutionService, SkillUninstallExactRequest, SkillUninstallRequest, SkillsService,
-    SKILL_INSTALLATION_REVISION_PREFIX,
+    ReqwestGitHubTransport, SharedGitHubTransport, SkillId, SkillInstallationId,
+    SkillInstallationMutation, SkillInstallationOperation, SkillInstallationRevision,
+    SkillInstallationService, SkillInstallationServiceError, SkillInstallationWorkflow,
+    SkillRevision, SkillSourceResolutionService, SkillUninstallExactRequest, SkillUninstallRequest,
+    SkillsService, SKILL_INSTALLATION_REVISION_PREFIX,
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,

@@ -5,10 +5,11 @@
 //! installation workflow, and the result exposes only immutable commit coordinates.
 
 use super::github_acquisition::{
-    extract_selected_skill, validate_archive_entry_path, GitHubAcquisitionError,
+    extract_selected_skill_archive, validate_archive_entry_path, GitHubAcquisitionError,
     GitHubAcquisitionErrorCode, GitHubAcquisitionSummary, GitHubAcquisitionTransport,
-    GitHubArchiveRequest, GitHubCommit, GitHubReference, GitHubRepository, GitHubResolveRequest,
-    GitHubSubdirectory, GitHubTransportError, MAX_GITHUB_ARCHIVE_ENTRIES, MAX_GITHUB_ZIP_BYTES,
+    GitHubArchive, GitHubArchiveRequest, GitHubCommit, GitHubReference, GitHubRepository,
+    GitHubResolveRequest, GitHubSubdirectory, GitHubTransportError, MAX_GITHUB_ARCHIVE_ENTRIES,
+    MAX_GITHUB_ZIP_BYTES,
 };
 use super::prepared::PreparedSkillPackage;
 use super::prepared_acquisition::PreparedSkillAcquisition;
@@ -22,12 +23,16 @@ use super::workspace::SKILL_FILE_NAME;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Cursor;
 use std::sync::Arc;
 use zip::ZipArchive;
 
 const GITHUB_RESOLVER_ID: &str = "github";
-const GITHUB_HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "www.github.com"];
+const GITHUB_HOSTS: &[&str] = &[
+    "codeload.github.com",
+    "github.com",
+    "raw.githubusercontent.com",
+    "www.github.com",
+];
 const MAX_GITHUB_URL_COMPONENTS: usize = 64;
 const MAX_GITHUB_REF_INTERPRETATIONS: usize = 8;
 const MAX_DISCOVERED_SKILLS: usize = 64;
@@ -86,9 +91,9 @@ impl GitHubInstallationSourceResolver {
                     candidates,
                 )
             }
-            GitHubUrlTarget::Tree { tail } | GitHubUrlTarget::SkillFile { tail } => {
-                self.resolve_ref_and_scope(parsed, &tail)
-            }
+            GitHubUrlTarget::Tree { tail }
+            | GitHubUrlTarget::SkillFile { tail }
+            | GitHubUrlTarget::Archive { tail } => self.resolve_ref_and_scope(parsed, &tail),
         }
     }
 
@@ -125,8 +130,11 @@ impl GitHubInstallationSourceResolver {
                     let transport = Arc::clone(&self.transport);
                     let repository = parsed.repository.clone();
                     scope.spawn(move || {
-                        let result = transport
-                            .resolve_commit(&GitHubResolveRequest::new(repository, reference));
+                        let result = match reference {
+                            GitHubReference::Commit(commit) => Ok(commit),
+                            reference => transport
+                                .resolve_commit(&GitHubResolveRequest::new(repository, reference)),
+                        };
                         (interpretation, result)
                     })
                 })
@@ -138,7 +146,7 @@ impl GitHubInstallationSourceResolver {
         })?;
         let mut resolved = Vec::new();
         let mut reference_was_found = false;
-        let mut archives = BTreeMap::<String, Vec<u8>>::new();
+        let mut archives = BTreeMap::<String, GitHubArchive>::new();
         let mut downloaded_archive_bytes = 0_usize;
         let mut first_candidate_error = None;
         let mut preparation_budget = ResolutionPreparationBudget::default();
@@ -263,7 +271,7 @@ impl GitHubInstallationSourceResolver {
         &self,
         repository: &GitHubRepository,
         commit: &GitHubCommit,
-    ) -> Result<Vec<u8>, SkillSourceResolutionError> {
+    ) -> Result<GitHubArchive, SkillSourceResolutionError> {
         let archive = self
             .transport
             .download_archive(&GitHubArchiveRequest::new(
@@ -321,6 +329,7 @@ enum GitHubUrlTarget {
     Repository,
     Tree { tail: Vec<String> },
     SkillFile { tail: Vec<String> },
+    Archive { tail: Vec<String> },
 }
 
 impl ParsedGitHubUrl {
@@ -352,6 +361,7 @@ impl ParsedGitHubUrl {
         let (owner, repository, target) = match host {
             "github.com" | "www.github.com" => parse_github_page_components(components)?,
             "raw.githubusercontent.com" => parse_raw_components(components)?,
+            "codeload.github.com" => parse_codeload_components(components)?,
             _ => {
                 return Err(SkillSourceResolutionError::parse(
                     SkillSourceResolutionErrorCode::UnsupportedHost,
@@ -384,7 +394,11 @@ impl ParsedGitHubUrl {
             path.push(self.repository.name());
             match (&self.target, reference, scope) {
                 (GitHubUrlTarget::Repository, _, _) => {}
-                (GitHubUrlTarget::Tree { .. }, Some(reference), Some(scope)) => {
+                (
+                    GitHubUrlTarget::Tree { .. } | GitHubUrlTarget::Archive { .. },
+                    Some(reference),
+                    Some(scope),
+                ) => {
                     path.push("tree");
                     for component in reference.split('/') {
                         path.push(component);
@@ -444,6 +458,9 @@ fn parse_github_page_components(
                 "A GitHub file URL must point to an exact-case SKILL.md file.",
             ));
         }
+        "archive" => GitHubUrlTarget::Archive {
+            tail: parse_archive_reference_components(&tail, true)?,
+        },
         _ => {
             return Err(invalid_url_shape(
                 "Paste a GitHub repository, Skill directory, or SKILL.md URL.",
@@ -451,6 +468,55 @@ fn parse_github_page_components(
         }
     };
     Ok((owner, repository, target))
+}
+
+fn parse_codeload_components(
+    components: Vec<String>,
+) -> Result<(String, String, GitHubUrlTarget), SkillSourceResolutionError> {
+    if components.len() < 4 || components[2] != "zip" {
+        return Err(invalid_url_shape(
+            "The codeload URL must identify a GitHub ZIP archive.",
+        ));
+    }
+    let tail = parse_archive_reference_components(&components[3..], false)?;
+    Ok((
+        components[0].clone(),
+        components[1].clone(),
+        GitHubUrlTarget::Archive { tail },
+    ))
+}
+
+fn parse_archive_reference_components(
+    components: &[String],
+    require_zip_suffix: bool,
+) -> Result<Vec<String>, SkillSourceResolutionError> {
+    let mut reference = components.to_vec();
+    let last = reference
+        .last_mut()
+        .ok_or_else(|| invalid_url_shape("The GitHub archive URL does not contain a ref."))?;
+    if let Some(stripped) = last.strip_suffix(".zip") {
+        if stripped.is_empty() {
+            return Err(invalid_url_shape(
+                "The GitHub archive URL does not contain a valid ref.",
+            ));
+        }
+        *last = stripped.to_string();
+    } else if require_zip_suffix {
+        return Err(invalid_url_shape(
+            "The GitHub archive URL must end in .zip.",
+        ));
+    }
+    if reference.starts_with(&["refs".to_string(), "heads".to_string()])
+        || reference.starts_with(&["refs".to_string(), "tags".to_string()])
+    {
+        reference.drain(..2);
+    }
+    if reference.is_empty() {
+        return Err(invalid_url_shape(
+            "The GitHub archive URL does not contain a valid ref.",
+        ));
+    }
+    Ok(reference)
 }
 
 fn parse_raw_components(
@@ -549,6 +615,9 @@ fn reference_interpretations(
     tail: &[String],
     direct_skill: bool,
 ) -> Result<Vec<ReferenceInterpretation>, SkillSourceResolutionError> {
+    if tail.first().is_some_and(|component| is_full_sha(component)) {
+        return build_interpretation(tail, 1, direct_skill).map(|value| vec![value]);
+    }
     if tail.is_empty() {
         return Err(invalid_url_shape(
             "The GitHub URL does not contain a branch, tag, or commit.",
@@ -563,9 +632,6 @@ fn reference_interpretations(
         return Err(invalid_url_shape(
             "The GitHub URL does not contain a valid Skill directory path.",
         ));
-    }
-    if is_full_sha(&tail[0]) {
-        return build_interpretation(tail, 1, direct_skill).map(|value| vec![value]);
     }
     // Ref names may contain slashes, so try a bounded number of left-to-right splits. Limit the
     // number of network lookups, not the directory depth: a normal `main/a/very/deep/path` URL
@@ -644,10 +710,11 @@ struct ArchiveDiscovery {
 }
 
 fn discover_archive_skills(
-    archive_bytes: &[u8],
+    archive: &GitHubArchive,
     scope: &GitHubSubdirectory,
 ) -> Result<ArchiveDiscovery, SkillSourceResolutionError> {
-    let mut archive = ZipArchive::new(Cursor::new(archive_bytes)).map_err(|_| unsafe_archive())?;
+    let reader = archive.reader().map_err(|_| unsafe_archive())?;
+    let mut archive = ZipArchive::new(reader).map_err(|_| unsafe_archive())?;
     if archive.is_empty() || archive.len() > MAX_GITHUB_ARCHIVE_ENTRIES {
         return Err(repository_too_large());
     }
@@ -733,7 +800,7 @@ fn is_same_or_descendant(candidate: &str, parent: &str) -> bool {
 }
 
 fn prepare_candidates(
-    archive: &[u8],
+    archive: &GitHubArchive,
     repository: &GitHubRepository,
     commit: &GitHubCommit,
     tracking_reference: &GitHubReference,
@@ -799,10 +866,11 @@ fn prepare_candidates(
 }
 
 fn declared_candidate_cost(
-    archive_bytes: &[u8],
+    archive: &GitHubArchive,
     subdirectory: &GitHubSubdirectory,
 ) -> Result<(u64, u64), SkillSourceResolutionError> {
-    let mut archive = ZipArchive::new(Cursor::new(archive_bytes)).map_err(|_| unsafe_archive())?;
+    let reader = archive.reader().map_err(|_| unsafe_archive())?;
+    let mut archive = ZipArchive::new(reader).map_err(|_| unsafe_archive())?;
     let mut files = 0_u64;
     let mut bytes = 0_u64;
     for index in 0..archive.len() {
@@ -820,13 +888,13 @@ fn declared_candidate_cost(
 }
 
 fn prepare_candidate(
-    archive: &[u8],
+    archive: &GitHubArchive,
     repository: &GitHubRepository,
     tracking_reference: &GitHubReference,
     commit: &GitHubCommit,
     subdirectory: &GitHubSubdirectory,
 ) -> Result<PreparedSkillSourceResolutionCandidate, SkillSourceResolutionError> {
-    let files = extract_selected_skill(archive, subdirectory).map_err(map_archive_error)?;
+    let files = extract_selected_skill_archive(archive, subdirectory).map_err(map_archive_error)?;
     let summary = GitHubAcquisitionSummary::for_resolved_pin(
         repository,
         tracking_reference,
@@ -921,11 +989,13 @@ fn resolution_from_candidates(
 
 fn map_repository_transport_error(error: GitHubTransportError) -> SkillSourceResolutionError {
     match error {
-        GitHubTransportError::NotFound => SkillSourceResolutionError::resolve(
-            SkillSourceResolutionErrorCode::RepositoryNotFound,
-            SkillSourceResolutionRecovery::FixLocator,
-            "The public GitHub repository was not found.",
-        ),
+        GitHubTransportError::NotFound | GitHubTransportError::Rejected => {
+            SkillSourceResolutionError::resolve(
+                SkillSourceResolutionErrorCode::RepositoryNotFound,
+                SkillSourceResolutionRecovery::FixLocator,
+                "The GitHub repository was not found or is not publicly accessible.",
+            )
+        }
         other => map_reference_transport_error(other),
     }
 }
@@ -937,14 +1007,22 @@ fn map_reference_transport_error(error: GitHubTransportError) -> SkillSourceReso
             SkillSourceResolutionRecovery::FixLocator,
             "The GitHub branch, tag, or commit was not found.",
         ),
-        GitHubTransportError::RateLimited => SkillSourceResolutionError::resolve(
-            SkillSourceResolutionErrorCode::RateLimited,
-            SkillSourceResolutionRecovery::RetryLater,
-            "GitHub temporarily rate-limited this request.",
-        ),
+        GitHubTransportError::RateLimited { retry_after, .. } => {
+            let error = SkillSourceResolutionError::resolve(
+                SkillSourceResolutionErrorCode::RateLimited,
+                SkillSourceResolutionRecovery::RetryLater,
+                "GitHub temporarily rate-limited this request.",
+            );
+            match retry_after {
+                Some(duration) => error.with_retry_after(duration),
+                None => error,
+            }
+        }
         GitHubTransportError::ResponseTooLarge => repository_too_large(),
         GitHubTransportError::Rejected
         | GitHubTransportError::InvalidResponse
+        | GitHubTransportError::Timeout
+        | GitHubTransportError::NetworkUnavailable
         | GitHubTransportError::Unavailable => SkillSourceResolutionError::resolve(
             SkillSourceResolutionErrorCode::NetworkUnavailable,
             SkillSourceResolutionRecovery::RetryLater,
@@ -956,12 +1034,32 @@ fn map_reference_transport_error(error: GitHubTransportError) -> SkillSourceReso
 fn map_archive_transport_error(error: GitHubTransportError) -> SkillSourceResolutionError {
     match error {
         GitHubTransportError::ResponseTooLarge => repository_too_large(),
-        GitHubTransportError::NotFound => SkillSourceResolutionError::resolve(
-            SkillSourceResolutionErrorCode::RepositoryNotFound,
-            SkillSourceResolutionRecovery::FixLocator,
-            "The resolved GitHub repository snapshot was not found.",
+        GitHubTransportError::NotFound | GitHubTransportError::Rejected => {
+            SkillSourceResolutionError::discover(
+                SkillSourceResolutionErrorCode::RepositoryNotFound,
+                SkillSourceResolutionRecovery::FixLocator,
+                "The resolved GitHub snapshot was not found or is not publicly accessible.",
+            )
+        }
+        GitHubTransportError::RateLimited { retry_after, .. } => {
+            let error = SkillSourceResolutionError::discover(
+                SkillSourceResolutionErrorCode::RateLimited,
+                SkillSourceResolutionRecovery::RetryLater,
+                "GitHub temporarily rate-limited the archive download.",
+            );
+            match retry_after {
+                Some(duration) => error.with_retry_after(duration),
+                None => error,
+            }
+        }
+        GitHubTransportError::InvalidResponse
+        | GitHubTransportError::Timeout
+        | GitHubTransportError::NetworkUnavailable
+        | GitHubTransportError::Unavailable => SkillSourceResolutionError::discover(
+            SkillSourceResolutionErrorCode::NetworkUnavailable,
+            SkillSourceResolutionRecovery::RetryLater,
+            "The immutable GitHub archive could not be downloaded.",
         ),
-        other => map_reference_transport_error(other),
     }
 }
 
@@ -1022,6 +1120,7 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Write};
     use std::sync::Mutex;
+    use std::time::Duration;
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 
@@ -1065,11 +1164,12 @@ mod tests {
         fn download_archive(
             &self,
             request: &GitHubArchiveRequest,
-        ) -> Result<Vec<u8>, GitHubTransportError> {
-            self.archives
+        ) -> Result<GitHubArchive, GitHubTransportError> {
+            let bytes = self
+                .archives
                 .get(request.commit().as_str())
-                .cloned()
-                .ok_or(GitHubTransportError::NotFound)
+                .ok_or(GitHubTransportError::NotFound)?;
+            GitHubArchive::from_bytes(bytes)
         }
     }
 
@@ -1179,6 +1279,7 @@ mod tests {
             ("root/invalid/SKILL.md", b"not a valid skill"),
             ("root/invalid/README.md", b"still charged"),
         ]);
+        let archive = GitHubArchive::from_bytes(&archive).unwrap();
         let subdirectory = GitHubSubdirectory::parse("invalid").unwrap();
         let (files, bytes) = declared_candidate_cost(&archive, &subdirectory).unwrap();
         let mut budget = ResolutionPreparationBudget::default();
@@ -1199,6 +1300,11 @@ mod tests {
             "https://github.com/example/skills/tree/main/skills/alpha",
             "https://github.com/example/skills/blob/main/skills/alpha/SKILL.md?plain=1#L1",
             "https://raw.githubusercontent.com/example/skills/main/skills/alpha/SKILL.md",
+            "https://github.com/example/skills/archive/refs/heads/main.zip?download=1#ignored",
+            concat!(
+                "https://codeload.github.com/example/skills/zip/",
+                "0123456789abcdef0123456789abcdef01234567"
+            ),
         ];
         for url in urls {
             let resolver = resolver(transport(
@@ -1244,18 +1350,23 @@ mod tests {
     }
 
     #[test]
-    fn immutable_permalink_rejects_a_transport_commit_mismatch() {
+    fn immutable_permalink_uses_the_sha_without_resolving_it_again() {
         let mut fake = transport(COMMIT_A, &[("root/skills/alpha/SKILL.md", SKILL_A)]);
-        fake.refs.insert(COMMIT_B.to_string(), COMMIT_A.to_string());
-        let resolver = resolver(fake);
+        fake.archives.insert(
+            COMMIT_B.to_string(),
+            write_zip(&[("root/skills/alpha/SKILL.md", SKILL_A)]),
+        );
+        let fake = Arc::new(fake);
+        let resolver = GitHubInstallationSourceResolver::new(fake.clone());
 
-        let error = resolve(
+        let result = resolve(
             &resolver,
             &format!("https://github.com/example/skills/tree/{COMMIT_B}/skills/alpha"),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.code(), SkillSourceResolutionErrorCode::Unavailable);
+        assert_eq!(result.resolved_revision(), COMMIT_B);
+        assert!(fake.resolved_refs.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -1360,6 +1471,53 @@ mod tests {
                 "{url}",
             );
         }
+    }
+
+    #[test]
+    fn rate_limit_errors_preserve_retry_after_and_failure_stage() {
+        let retry_after = Duration::from_secs(17);
+        let resolve_error = map_reference_transport_error(GitHubTransportError::RateLimited {
+            retry_after: Some(retry_after),
+            secondary: true,
+        });
+        assert_eq!(
+            resolve_error.phase(),
+            super::super::source_resolution::SkillSourceResolutionPhase::Resolve
+        );
+        assert_eq!(resolve_error.retry_after_ms(), Some(17_000));
+
+        let archive_error = map_archive_transport_error(GitHubTransportError::RateLimited {
+            retry_after: Some(retry_after),
+            secondary: false,
+        });
+        assert_eq!(
+            archive_error.phase(),
+            super::super::source_resolution::SkillSourceResolutionPhase::Discover
+        );
+        assert_eq!(archive_error.retry_after_ms(), Some(17_000));
+    }
+
+    #[test]
+    fn inaccessible_repositories_are_not_reported_as_network_failures() {
+        let repository_error = map_repository_transport_error(GitHubTransportError::Rejected);
+        assert_eq!(
+            repository_error.code(),
+            SkillSourceResolutionErrorCode::RepositoryNotFound
+        );
+        assert_eq!(
+            repository_error.recovery(),
+            SkillSourceResolutionRecovery::FixLocator
+        );
+
+        let archive_error = map_archive_transport_error(GitHubTransportError::Rejected);
+        assert_eq!(
+            archive_error.code(),
+            SkillSourceResolutionErrorCode::RepositoryNotFound
+        );
+        assert_eq!(
+            archive_error.phase(),
+            super::super::source_resolution::SkillSourceResolutionPhase::Discover
+        );
     }
 
     fn write_zip(files: &[(&str, &[u8])]) -> Vec<u8> {

@@ -18,6 +18,7 @@ const translations: Record<string, string> = {
   'agent.skillInstallation.unknownSource': '未知来源',
   'agent.skillInstallation.unnamed': '未命名 Skill',
   'agent.skillInstallation.noDescription': '未提供描述。',
+  'agent.skillInstallation.inspecting': '正在检查来源、下载并验证 Skill',
   'agent.skillInstallation.identified': '已识别 Skill',
   'agent.skillInstallation.installed': '已安装 Skill',
   'agent.approval.dialog.rejectPlaceholder': '拒绝原因'
@@ -59,6 +60,31 @@ const action: Extract<AgentProposedAction, { type: 'skill_installation' }> = {
 }
 
 describe('SkillInstallationApprovalCard', () => {
+  it('shows the complete trusted backend inspection stage while prepare is pending', async () => {
+    const screen = await render(
+      <SkillInstallationToolActivity
+        call={{
+          id: 'prepare-pending',
+          tool: 'skills_prepare_install',
+          args: { source: 'https://github.com/example/social' },
+          approvalStatus: 'not_required'
+        }}
+        run={{
+          runId: 'run-1',
+          status: 'running',
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: []
+        }}
+      />
+    )
+
+    await expect.element(screen.getByText('正在检查来源、下载并验证 Skill')).toBeVisible()
+  })
+
   it('renders the frozen chat-specific preview and submits only the typed action', async () => {
     const onApprove = vi.fn()
     const screen = await render(

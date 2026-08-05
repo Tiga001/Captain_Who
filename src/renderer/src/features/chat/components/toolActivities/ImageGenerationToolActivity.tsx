@@ -1,12 +1,5 @@
 // Renderer image-generation activity: presents one safe, callId-stable card for every Tool call.
-import {
-  CircleHelp,
-  CircleSlash2,
-  ImageOff,
-  Images,
-  LoaderCircle,
-  type LucideIcon
-} from 'lucide-react'
+import { CircleHelp, CircleSlash2, ImageOff, Images, type LucideIcon } from 'lucide-react'
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
@@ -66,7 +59,7 @@ const LABEL_KEY: Readonly<
 }
 
 const STATUS_ICON: Readonly<Record<ImageGenerationActivityStatus, LucideIcon>> = {
-  running: LoaderCircle,
+  running: Images,
   completed: Images,
   failed: ImageOff,
   cancelled: CircleSlash2,
