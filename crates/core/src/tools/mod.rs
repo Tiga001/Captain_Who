@@ -2,6 +2,7 @@ mod apply_patch;
 mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
 mod attachments;
+mod command_session;
 mod context;
 mod conversation_history;
 mod document_text;
@@ -45,6 +46,7 @@ use crate::protocol::{
 };
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
+use command_session::CommandSessionTool;
 use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
 use goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
@@ -529,6 +531,7 @@ impl ToolRegistry {
         registry.register(ApplyPatchTool);
         registry.register(WriteFileTool);
         registry.register(RunCommandTool);
+        registry.register(CommandSessionTool);
         registry.register(SkillsListResourcesTool);
         registry.register(SkillsReadResourceTool);
         registry.register(SkillsMaterializeResourceTool);

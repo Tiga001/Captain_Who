@@ -775,8 +775,9 @@ export function applyAgentEventToChatMessage(
   const currentRun = ensureAgentRun(message.agentRun, runId)
 
   // A durable terminal Run is a tombstone. Late buffered notifications must not resurrect it as
-  // pending/running or append post-terminal model/tool activity.
-  if (isCompletedAgentRunStatus(currentRun.status)) {
+  // pending/running or append post-terminal model/tool activity. A handed-off command is an
+  // independent process lifecycle, so its output may still refresh only the call-scoped preview.
+  if (isCompletedAgentRunStatus(currentRun.status) && agentEvent.type !== 'command_output') {
     if (agentEvent.type !== 'done') return message
     const doneStatus = agentEvent.status ?? (agentEvent.success ? 'completed' : 'failed')
     if (doneStatus !== currentRun.status) return message
@@ -1189,16 +1190,25 @@ export function applyAgentEventToChatMessage(
 
     return {
       ...message,
-      status: 'pending',
       agentRun: {
         ...currentRun,
-        status: 'running',
         commandOutputPreviews: {
           ...(currentRun.commandOutputPreviews ?? {}),
           [agentEvent.callId]: nextPreview
         }
       }
     }
+  }
+
+  // Managed command lifecycle is delivered end-to-end in round 2, but its durable Timeline
+  // projection is intentionally deferred to round 3. Explicitly ignore the new state-only events
+  // here so they cannot fall through to the terminal Agent `done` projection.
+  if (
+    agentEvent.type === 'command_started' ||
+    agentEvent.type === 'command_exited' ||
+    agentEvent.type === 'command_interrupted'
+  ) {
+    return message
   }
 
   if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {

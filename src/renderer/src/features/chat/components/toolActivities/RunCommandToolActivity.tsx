@@ -6,7 +6,7 @@ import { formatTranslation } from '../../../../config/translationFormat'
 import type { ChatCommandOutputPreview } from '../../chatTypes'
 import { copyTextToClipboard } from '../chatMessageItemUtils'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
-import { getToolCallLabel, type SettledToolStatus } from './toolActivityUtils'
+import { getToolCallLabel, getToolDisplayName, type SettledToolStatus } from './toolActivityUtils'
 
 interface RunCommandToolActivityProps {
   cancelled?: boolean
@@ -55,6 +55,28 @@ function getRejectedMessage(result: AgentToolResult | undefined) {
   return typeof message === 'string' ? message.trim() : ''
 }
 
+function getRunningCommandReceipt(result: AgentToolResult | undefined) {
+  const resultValue = getObjectValue(result?.result)
+  if (
+    result?.ok !== true ||
+    resultValue?.status !== 'running' ||
+    typeof resultValue.sessionId !== 'string' ||
+    !resultValue.sessionId.trim()
+  ) {
+    return null
+  }
+
+  const latestSequence = resultValue.latestSequence
+  return {
+    sessionId: resultValue.sessionId.trim(),
+    output: typeof resultValue.output === 'string' ? resultValue.output : '',
+    latestSequence:
+      typeof latestSequence === 'number' && Number.isSafeInteger(latestSequence)
+        ? Math.max(0, latestSequence)
+        : 0
+  }
+}
+
 function getCommandResult(result: AgentToolResult | undefined) {
   const resultValue = getObjectValue(result?.result)
   if (resultValue?.status === 'rejected') return null
@@ -79,8 +101,13 @@ function getCommandOutput(commandResult: ReturnType<typeof getCommandResult>) {
     .join('\n\n')
 }
 
-function getLiveCommandOutput(preview: ChatCommandOutputPreview | undefined) {
-  return preview?.chunks.map((chunk) => chunk.output).join('') ?? ''
+function getLiveCommandOutput(preview: ChatCommandOutputPreview | undefined, afterSequence = 0) {
+  return (
+    preview?.chunks
+      .filter((chunk) => chunk.sequence > afterSequence)
+      .map((chunk) => chunk.output)
+      .join('') ?? ''
+  )
 }
 
 function getCommandStatus(
@@ -97,6 +124,7 @@ function getRunCommandStatus(item: RunCommandToolActivityGroupItem): RunCommandS
   if (item.cancelled && !item.result) return 'cancelled'
   if (isRejectedResult(item.result)) return 'rejected'
   if (item.result?.ok === false) return 'failed'
+  if (getRunningCommandReceipt(item.result)) return 'running'
   if (item.result) return 'completed'
   if (item.settledStatus) return item.settledStatus
   return 'running'
@@ -162,15 +190,17 @@ export function RunCommandToolActivity({
   const details = getRunCommandDetails(call)
   const rejected = isRejectedResult(result)
   const rejectedMessage = getRejectedMessage(result)
+  const runningReceipt = getRunningCommandReceipt(result)
   const commandResult = getCommandResult(result)
   const command = commandResult?.command || details.command
   const commandOutput = getCommandOutput(commandResult)
-  const liveCommandOutput = getLiveCommandOutput(liveOutput)
-  const copyableOutput = commandOutput || liveCommandOutput
+  const liveCommandOutput = getLiveCommandOutput(liveOutput, runningReceipt?.latestSequence)
+  const runningCommandOutput = `${runningReceipt?.output ?? ''}${liveCommandOutput}`
+  const copyableOutput = commandOutput || runningCommandOutput
   const commandFailed = result?.ok === false
   const status = getRunCommandStatus({ cancelled, call, result, settledStatus })
   const hasDetails = Boolean(
-    command || rejectedMessage || result?.error || commandResult || liveCommandOutput
+    command || rejectedMessage || result?.error || commandResult || runningCommandOutput
   )
   const isPending = status === 'running'
   const [copied, setCopied] = useState(false)
@@ -182,10 +212,10 @@ export function RunCommandToolActivity({
     return () => window.clearTimeout(timerId)
   }, [copied])
   useLayoutEffect(() => {
-    if (!isPending || !liveCommandOutput || !keepLiveOutputPinnedRef.current) return
+    if (!isPending || !runningCommandOutput || !keepLiveOutputPinnedRef.current) return
     const output = outputRef.current
     if (output) output.scrollTop = output.scrollHeight
-  }, [isPending, liveCommandOutput])
+  }, [isPending, runningCommandOutput])
   const iconBadge = (() => {
     if (rejected) {
       return (
@@ -209,6 +239,11 @@ export function RunCommandToolActivity({
   })()
   const statusLabel = (() => {
     if (rejected) return t('agent.command.rejected')
+    if (runningReceipt) {
+      return formatTranslation(t, 'agent.tool.running', {
+        tool: getToolDisplayName(call.tool, t)
+      })
+    }
     if (commandResult) {
       return t(result?.ok === false ? 'agent.command.failed' : 'agent.command.completed')
     }
@@ -230,7 +265,7 @@ export function RunCommandToolActivity({
     >
       {hasDetails && (
         <div className="agent-activity__details run-command-activity__details">
-          {commandResult || liveCommandOutput || isPending ? (
+          {commandResult || runningCommandOutput || isPending ? (
             <div className="run-command-shell" role="group" aria-label={t('agent.command.shell')}>
               <div className="run-command-shell__title">{t('agent.command.shell')}</div>
               {command && <pre className="run-command-shell__command">$ {command}</pre>}

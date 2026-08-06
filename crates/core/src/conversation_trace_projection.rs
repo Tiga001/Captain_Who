@@ -175,6 +175,7 @@ pub(crate) fn project_tool_result(
         "write_file" => project_write_file_result(observation),
         "apply_patch" => project_apply_patch_result(operation, observation),
         "run_command" => project_run_command_result(observation),
+        "command_session" => project_command_session_result(observation),
         "conversation_history" => project_conversation_history_result(observation),
         "skills_read_resource" => project_skill_resource_result(observation),
         tool if is_read_tool(tool) => project_read_result(observation),
@@ -728,9 +729,13 @@ fn project_run_command_result(value: &Value) -> (Value, bool) {
     let Some(input) = value.as_object() else {
         return project_generic_value(value);
     };
+    if input.get("status").and_then(Value::as_str) == Some("running") {
+        return project_running_command_result(input);
+    }
     let mut output = Map::new();
     let mut truncated = false;
     for (key, limit) in [
+        ("status", DurableTraceProjectionLimits::TITLE_CHARS),
         ("command", DurableTraceProjectionLimits::COMMAND_CHARS),
         ("cwd", DurableTraceProjectionLimits::PATH_CHARS),
         (
@@ -791,6 +796,123 @@ fn project_run_command_result(value: &Value) -> (Value, bool) {
             truncated |= value_truncated;
         }
     }
+    (Value::Object(output), truncated)
+}
+
+fn project_running_command_result(input: &Map<String, Value>) -> (Value, bool) {
+    let mut output = Map::new();
+    let mut truncated = false;
+    for (key, limit) in [
+        ("status", DurableTraceProjectionLimits::TITLE_CHARS),
+        ("sessionId", DurableTraceProjectionLimits::TITLE_CHARS),
+        (
+            "startedAt",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "latestSequence",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+    ] {
+        copy_bounded_field(input, &mut output, key, limit, &mut truncated);
+    }
+
+    let source_output_truncated = input
+        .get("outputTruncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut output_projection_truncated = false;
+    if let Some(value) = input.get("output").and_then(Value::as_str) {
+        let (value, value_truncated) = sanitize_and_bound_text(
+            value,
+            DurableTraceProjectionLimits::COMMAND_OUTPUT_TAIL_CHARS,
+            true,
+        );
+        output.insert("output".into(), Value::String(value));
+        output_projection_truncated = value_truncated;
+        truncated |= value_truncated;
+    }
+    if input.contains_key("outputTruncated") || output_projection_truncated {
+        output.insert(
+            "outputTruncated".into(),
+            Value::Bool(source_output_truncated || output_projection_truncated),
+        );
+    }
+
+    (Value::Object(output), truncated)
+}
+
+fn project_command_session_result(value: &Value) -> (Value, bool) {
+    let Some(input) = value.as_object() else {
+        // A valid command_session result is always an object. Never fall back to the generic
+        // projection here: malformed provider data could otherwise persist command output as an
+        // opaque string or array.
+        return (Value::Object(Map::new()), !value.is_null());
+    };
+
+    let mut output = Map::new();
+    let mut truncated = false;
+    for (key, limit) in [
+        ("sessionId", DurableTraceProjectionLimits::TITLE_CHARS),
+        ("status", DurableTraceProjectionLimits::TITLE_CHARS),
+        (
+            "exitCode",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "latestSequence",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "outputTruncated",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+    ] {
+        copy_bounded_field(input, &mut output, key, limit, &mut truncated);
+    }
+
+    if let Some(read) = input.get("read") {
+        if let Some(read) = read.as_object() {
+            let mut projected_read = Map::new();
+            for (key, limit) in [
+                (
+                    "requestedAfterSequence",
+                    DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+                ),
+                (
+                    "firstSequence",
+                    DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+                ),
+                (
+                    "throughSequence",
+                    DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+                ),
+                (
+                    "truncatedBefore",
+                    DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+                ),
+                (
+                    "outputBytes",
+                    DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+                ),
+                ("outputHash", DurableTraceProjectionLimits::TITLE_CHARS),
+            ] {
+                copy_bounded_field(read, &mut projected_read, key, limit, &mut truncated);
+            }
+            output.insert("read".into(), Value::Object(projected_read));
+        } else {
+            truncated = true;
+        }
+    }
+
+    // Poll output is delivered to the current model turn, while terminal settlement archives the
+    // Session transcript exactly once. Durable conversation Trace intentionally retains only the
+    // delivery receipt above so repeated polls cannot duplicate the body linearly.
+    truncated |= input
+        .get("output")
+        .and_then(Value::as_str)
+        .is_some_and(|output| !output.is_empty());
+
     (Value::Object(output), truncated)
 }
 
@@ -1309,6 +1431,7 @@ mod tests {
     #[test]
     fn command_output_uses_a_bounded_tail() {
         let result = json!({
+            "status": "exited",
             "command": "cargo test",
             "cwd": ".",
             "exitCode": 1,
@@ -1319,6 +1442,7 @@ mod tests {
         });
         let (projected, truncated) = project_run_command_result(&result);
         assert!(truncated);
+        assert_eq!(projected["status"], "exited");
         assert!(!projected["stdoutTail"]
             .as_str()
             .unwrap()
@@ -1328,6 +1452,62 @@ mod tests {
             .unwrap()
             .starts_with(EARLIER_OUTPUT_OMITTED_PREFIX));
         assert_eq!(projected["stderrTail"], "important failure at the end");
+    }
+
+    #[test]
+    fn running_command_receipt_keeps_session_continuity_with_bounded_output() {
+        let result = json!({
+            "status": "running",
+            "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+            "output": format!(
+                "old-marker{}important-tail",
+                "x".repeat(DurableTraceProjectionLimits::COMMAND_OUTPUT_TAIL_CHARS + 50)
+            ),
+            "startedAt": 1_725_000_000_000_i64,
+            "latestSequence": 42,
+            "outputTruncated": false,
+            "hostPrivateField": "must not survive",
+        });
+
+        let (projected, truncated) = project_run_command_result(&result);
+
+        assert!(truncated);
+        assert_eq!(projected["status"], "running");
+        assert_eq!(
+            projected["sessionId"],
+            "cmd_0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(projected["startedAt"], 1_725_000_000_000_i64);
+        assert_eq!(projected["latestSequence"], 42);
+        assert_eq!(projected["outputTruncated"], true);
+        assert!(!projected["output"].as_str().unwrap().contains("old-marker"));
+        assert!(projected["output"]
+            .as_str()
+            .unwrap()
+            .starts_with(EARLIER_OUTPUT_OMITTED_PREFIX));
+        assert!(projected["output"]
+            .as_str()
+            .unwrap()
+            .ends_with("important-tail"));
+        assert!(projected.get("hostPrivateField").is_none());
+    }
+
+    #[test]
+    fn running_command_receipt_preserves_source_capture_truncation() {
+        let result = json!({
+            "status": "running",
+            "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+            "output": "initial output",
+            "startedAt": 1_725_000_000_000_i64,
+            "latestSequence": 7,
+            "outputTruncated": true,
+        });
+
+        let (projected, truncated) = project_run_command_result(&result);
+
+        assert!(!truncated);
+        assert_eq!(projected["output"], "initial output");
+        assert_eq!(projected["outputTruncated"], true);
     }
 
     #[test]

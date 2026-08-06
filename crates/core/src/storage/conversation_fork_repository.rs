@@ -310,11 +310,16 @@ pub(crate) fn build_fork_plan(
     let mut archives = Vec::new();
     for trace in &traces {
         for item in &trace.trace.items {
-            let crate::ConversationTurnTraceItem::ToolResult {
-                call_id, archive, ..
-            } = item
-            else {
-                continue;
+            let (call_id, archive) = match item {
+                crate::ConversationTurnTraceItem::ToolResult {
+                    call_id, archive, ..
+                }
+                | crate::ConversationTurnTraceItem::CommandSessionLifecycle {
+                    call_id,
+                    archive,
+                    ..
+                } => (call_id, archive),
+                _ => continue,
             };
             let Some(source_archive_ref) = archive.archive_ref.as_deref() else {
                 continue;

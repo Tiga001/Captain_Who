@@ -32,7 +32,10 @@ function outputEvent(
   return {
     type: 'command_output',
     runId: 'run-command-output',
+    conversationId: 'conversation-command-output',
+    assistantMessageId: 'assistant-command-output',
     callId: 'command-call',
+    sessionId: 'cmd_1234567890abcdef1234567890abcdef',
     sequence,
     stream,
     output
@@ -85,5 +88,41 @@ describe('command output runtime projection', () => {
       runId: 'another-run'
     }
     expect(applyAgentEventToChatMessage(message(), foreignEvent)).toEqual(message())
+  })
+
+  it('updates only the call preview after the assistant message and run are complete', () => {
+    const completed: ChatMessage = {
+      ...message(),
+      content: 'The command was handed off.',
+      status: 'sent',
+      agentRun: {
+        ...message().agentRun!,
+        status: 'completed',
+        startedAt: 1,
+        completedAt: 42,
+        fileDrafts: [],
+        fileWritePreviews: [],
+        messageStreamCheckpoints: {},
+        readActivities: []
+      }
+    }
+
+    const next = applyAgentEventToChatMessage(
+      completed,
+      outputEvent(1, 'stdout', 'background output\n')
+    )
+
+    expect(next).toEqual({
+      ...completed,
+      agentRun: {
+        ...completed.agentRun!,
+        commandOutputPreviews: {
+          'command-call': {
+            callId: 'command-call',
+            chunks: [{ sequence: 1, stream: 'stdout', output: 'background output\n' }]
+          }
+        }
+      }
+    })
   })
 })

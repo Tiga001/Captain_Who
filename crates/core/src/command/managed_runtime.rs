@@ -11,6 +11,272 @@ use crate::artifact_runtime::{
 use crate::AgentCommandRuntimeResolvedPackage;
 use std::ffi::{OsStr, OsString};
 
+pub(crate) enum ManagedCommandSessionPreparation {
+    Immediate(Box<AgentCommandExecutionResult>),
+    Ready {
+        plan: CommandSpawnPlan,
+        completion_hook: super::session::CommandSessionCompletionHook,
+    },
+}
+
+/// Freezes a managed-runtime launch into the same process-session kernel used by ordinary shell
+/// commands. Runtime paths, the private input directory, integrity verification and artifact
+/// observation all remain host-owned and live until terminal settlement.
+pub(crate) fn prepare_managed_command_session(
+    workspace_root: Option<&Path>,
+    request: &AgentCommandRequest,
+    permissions: AgentPermissions,
+    authorization_source: CommandAuthorizationSource,
+    cancellation_token: AgentCancellationToken,
+    artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
+    file_inputs: Option<&AgentFileInputExecutionContext>,
+) -> Result<ManagedCommandSessionPreparation, CommandExecutionError> {
+    let root = workspace_root
+        .map(canonicalize_workspace_root)
+        .transpose()?;
+    let cwd = resolve_command_cwd(root.as_deref(), request.cwd.as_deref(), permissions.write)?;
+    enforce_command_policy(
+        &request.command,
+        permissions,
+        authorization_source,
+        root.as_deref(),
+        Some(&cwd),
+    )?;
+    if let Some(builder) = infer_managed_artifact_builder_command(&request.command)
+        .map_err(CommandExecutionError::from)?
+    {
+        validate_managed_artifact_builder_output_scope(
+            root.as_deref(),
+            &cwd,
+            &builder.output_paths,
+            permissions.write,
+        )
+        .map_err(CommandExecutionError::from)?;
+    }
+
+    let observer = CommandArtifactObserver::prepare(
+        root.as_deref(),
+        &cwd,
+        request.observe.as_ref(),
+        permissions,
+    );
+    let before = observer.as_ref().map(|observer| {
+        observer.capture(
+            AgentCommandArtifactObservationPhase::Before,
+            Some(&cancellation_token),
+        )
+    });
+    let immediate = |mut result: AgentCommandExecutionResult| {
+        if let Some((observer, before)) = observer.as_ref().zip(before.as_ref()) {
+            let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
+            result.artifact_observation = Some(observer.finish(before.clone(), after));
+        }
+        ManagedCommandSessionPreparation::Immediate(Box::new(result))
+    };
+
+    let binding = match (&request.runtime_binding, &request.runtime) {
+        (Some(binding), None) => binding,
+        (None, Some(legacy)) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                runtime_resolution_error(
+                    legacy,
+                    super::COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE,
+                    "reprepare",
+                    "该命令使用旧版模型提供的精确依赖请求，缺少审批前冻结的运行时身份；请重新准备命令。",
+                ),
+                0,
+            )))
+        }
+        (Some(binding), Some(_)) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                binding_resolution_error(
+                    binding,
+                    ERROR_INVALID_REQUEST,
+                    "reprepare",
+                    "命令同时包含旧版 runtime request 和新版 runtime binding，已拒绝执行。",
+                ),
+                0,
+            )))
+        }
+        (None, None) => {
+            return Err(CommandExecutionError::from(
+                "ordinary command passed to managed runtime preparation".to_string(),
+            ))
+        }
+    };
+
+    if let Err(error) = super::validate_command_runtime_binding(binding) {
+        return Ok(immediate(runtime_failure_result(
+            root.as_deref(),
+            &cwd,
+            request,
+            binding_resolution_error(binding, error.code(), error.recovery(), error.message()),
+            0,
+        )));
+    }
+    if cancellation_token.is_cancelled() {
+        return Ok(immediate(runtime_cancelled_result(
+            root.as_deref(),
+            &cwd,
+            request,
+            unresolved_binding_resolution(binding),
+        )));
+    }
+    let parsed = match parse_managed_artifact_command(&request.command, binding.kind) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                binding_resolution_error(
+                    binding,
+                    ERROR_INVALID_COMMAND,
+                    ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                    &message,
+                ),
+                0,
+            )))
+        }
+    };
+    if let Err(message) =
+        validate_saved_script(&cwd, root.as_deref(), permissions.read, &parsed.script)
+    {
+        return Ok(immediate(runtime_failure_result(
+            root.as_deref(),
+            &cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                ERROR_INVALID_COMMAND,
+                ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                &message,
+            ),
+            0,
+        )));
+    }
+    let Some(provider) = artifact_runtime else {
+        return Ok(immediate(runtime_failure_result(
+            root.as_deref(),
+            &cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                ERROR_UNAVAILABLE,
+                ArtifactRuntimeRecovery::InstallComponent.stable_name(),
+                "Managed Artifact Runtime 尚未安装或未由 host 配置。",
+            ),
+            0,
+        )));
+    };
+    let prepared_runtime = match super::prepare_command_runtime_profile(
+        provider.as_ref(),
+        binding.profile,
+        binding.kind,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                binding_resolution_error(binding, error.code(), error.recovery(), error.message()),
+                0,
+            )))
+        }
+    };
+    if prepared_runtime.binding != **binding {
+        return Ok(immediate(runtime_failure_result(
+            root.as_deref(),
+            &cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                super::COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH,
+                "reprepare",
+                "Managed Artifact Runtime 在审批后发生变化；命令未启动，请重新准备并审批。",
+            ),
+            0,
+        )));
+    }
+
+    let resolution = ready_binding_resolution(binding, &prepared_runtime.invocation);
+    let empty_input_context = AgentFileInputExecutionContext::default();
+    let prepared_inputs = match materialize_agent_file_inputs(
+        root.as_deref(),
+        permissions,
+        file_inputs.unwrap_or(&empty_input_context),
+        &request.inputs,
+        Some(&cancellation_token),
+    ) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                binding_resolution_error(binding, error.code(), error.recovery(), error.message()),
+                0,
+            )))
+        }
+    };
+    let input_evidence = prepared_inputs
+        .as_ref()
+        .map(|inputs| inputs.evidence().to_vec())
+        .unwrap_or_default();
+    let mut arguments = prepared_runtime.invocation.arguments_prefix().to_vec();
+    arguments.extend(parsed.process_arguments.iter().map(OsString::from));
+    let environment = managed_environment(&prepared_runtime.invocation, prepared_inputs.as_ref());
+    let hard_timeout = request
+        .timeout_ms
+        .map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)));
+    let launch = CommandDirectLaunchPlan::isolated(
+        prepared_runtime.invocation.executable().to_path_buf(),
+        arguments,
+        environment,
+    );
+    let plan = CommandSpawnPlan::direct(
+        request.command.clone(),
+        cwd,
+        root.as_deref(),
+        hard_timeout,
+        launch,
+    );
+    let completion_hook: super::session::CommandSessionCompletionHook = Box::new(move |result| {
+        result.runtime = Some(resolution.clone());
+        result.input_files = input_evidence;
+        if let Err(error) = provider.verify_integrity() {
+            let code = format!("artifactRuntime.{}", error.code().stable_name());
+            let runtime = with_resolution_error(
+                result
+                    .runtime
+                    .take()
+                    .expect("managed session completion has runtime evidence"),
+                &code,
+                error.recovery().stable_name(),
+                provider_error_message(error.code()),
+            );
+            result.error = runtime.message.clone();
+            result.runtime = Some(runtime);
+        }
+        if let Some((observer, before)) = observer.zip(before) {
+            let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
+            result.artifact_observation = Some(observer.finish(before, after));
+        }
+        drop(prepared_inputs);
+    });
+    Ok(ManagedCommandSessionPreparation::Ready {
+        plan,
+        completion_hook,
+    })
+}
+
 const MAX_RUNTIME_PACKAGES: usize = 32;
 const MAX_PACKAGE_NAME_BYTES: usize = 128;
 const MAX_PACKAGE_VERSION_BYTES: usize = 64;
@@ -1171,6 +1437,45 @@ fn configure_managed_environment(
     if let Some(prepared_inputs) = prepared_inputs {
         command.env(AGENT_FILE_INPUT_ROOT_ENV, prepared_inputs.root());
     }
+}
+
+fn managed_environment(
+    invocation: &ArtifactRuntimeInvocation,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
+) -> Vec<(OsString, OsString)> {
+    let mut environment = Vec::new();
+    for key in [
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "HOME",
+        "USERPROFILE",
+        "SYSTEMROOT",
+        "WINDIR",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            environment.push((OsString::from(key), value));
+        }
+    }
+    environment.extend(
+        invocation
+            .environment()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    environment.push((OsString::from("TERM"), OsString::from("dumb")));
+    environment.push((OsString::from("CI"), OsString::from("1")));
+    if let Some(prepared_inputs) = prepared_inputs {
+        environment.push((
+            OsString::from(AGENT_FILE_INPUT_ROOT_ENV),
+            prepared_inputs.root().as_os_str().to_os_string(),
+        ));
+    }
+    environment
 }
 
 #[cfg(test)]

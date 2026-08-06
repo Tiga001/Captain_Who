@@ -8,6 +8,8 @@ export const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
 export const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
 export const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
 export const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
+export const AGENT_COMMAND_SESSIONS_LIST_METHOD = 'agent.commandSessions.list'
+export const AGENT_COMMAND_SESSIONS_GET_METHOD = 'agent.commandSessions.get'
 export const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
 export const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
 export const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
@@ -306,6 +308,8 @@ export type ConversationTurnTraceTerminalStatus = 'completed' | 'failed' | 'canc
 export type ConversationTraceToolResultStatus =
   'succeeded' | 'failed' | 'rejected' | 'conflict' | 'cancelled'
 
+export type ConversationCommandSessionLifecyclePhase = 'started' | 'terminal'
+
 export interface ConversationTraceAttachment {
   id: string
   kind: AgentInputAttachmentKind
@@ -353,6 +357,26 @@ export type ConversationTurnTraceItem =
       error?: string
       truncated: boolean
     }
+  | {
+      type: 'command_session_lifecycle'
+      sequence: number
+      phase: ConversationCommandSessionLifecyclePhase
+      sessionId: string
+      callId: string
+      status: AgentCommandSessionStatus
+      exitCode?: number
+      latestSequence: number
+      outputTruncated: boolean
+      archiveRef?: string
+      contentHash?: string
+      archivedBytes?: number
+      archivedCompletely?: boolean
+      truncatedAtSource?: boolean
+      modelProjectionTruncated?: boolean
+      historyProjectionTruncated?: boolean
+      archiveProjectionTruncated?: boolean
+      createdAt: number
+    }
 
 export interface ConversationTurnTrace {
   schemaVersion: number
@@ -389,6 +413,68 @@ export type AgentFileWriteResultStatus =
   'applied' | 'failed' | 'conflict' | 'rejected' | 'already_applied'
 
 export type AgentCommandOutputStream = 'stdout' | 'stderr'
+
+export const AGENT_COMMAND_SESSION_SCHEMA_VERSION = 1
+
+/** Process Session state is independent from Agent Run and approval state. */
+export type AgentCommandSessionStatus =
+  'starting' | 'running' | 'exited' | 'interrupted' | 'timed_out' | 'failed' | 'outcome_unknown'
+
+/** Bounded Renderer-safe projection; it never contains process handles, environment or output. */
+export interface AgentCommandSessionSnapshot {
+  schemaVersion: typeof AGENT_COMMAND_SESSION_SCHEMA_VERSION
+  sessionId: string
+  conversationId: string
+  assistantMessageId: string
+  originRunId: string
+  callId: string
+  projectId?: string
+  command: string
+  cwd: string
+  commandDigest: string
+  status: AgentCommandSessionStatus
+  startedAt: number
+  endedAt?: number
+  exitCode?: number
+  latestSequence: number
+  outputTruncated: boolean
+  archiveRef?: string
+}
+
+export interface AgentCommandSessionOutputChunk {
+  sequence: number
+  stream: AgentCommandOutputStream
+  output: string
+}
+
+export interface AgentCommandSessionTranscript {
+  requestedAfterSequence: number
+  firstAvailableSequence?: number
+  latestSequence: number
+  truncatedBefore: boolean
+  outputCaptureTruncated: boolean
+  chunks: AgentCommandSessionOutputChunk[]
+}
+
+export interface AgentCommandSessionListInput {
+  conversationId: string
+}
+
+export interface AgentCommandSessionListOutput {
+  sessions: AgentCommandSessionSnapshot[]
+}
+
+export interface AgentCommandSessionGetInput {
+  conversationId: string
+  sessionId: string
+  afterSequence?: number
+  maxBytes?: number
+}
+
+export interface AgentCommandSessionGetOutput {
+  session: AgentCommandSessionSnapshot
+  transcript: AgentCommandSessionTranscript
+}
 
 export type AgentCommandRiskLevel =
   'read_only' | 'writes_workspace' | 'network' | 'destructive' | 'unknown'
@@ -1723,12 +1809,55 @@ export type AgentEvent =
   | { type: 'approval_required'; runId: string; action: AgentProposedAction }
   | { type: 'diff'; runId: string; diff: AgentDiffProposal }
   | {
+      type: 'command_started'
+      runId: string
+      conversationId: string
+      assistantMessageId: string
+      projectId?: string
+      callId: string
+      sessionId: string
+      startedAt: number
+    }
+  | {
       type: 'command_output'
       runId: string
+      conversationId: string
+      assistantMessageId: string
+      projectId?: string
       callId: string
+      sessionId: string
       sequence: number
       stream: AgentCommandOutputStream
       output: string
+    }
+  | {
+      type: 'command_exited'
+      runId: string
+      conversationId: string
+      assistantMessageId: string
+      projectId?: string
+      callId: string
+      sessionId: string
+      status: Extract<
+        AgentCommandSessionStatus,
+        'exited' | 'timed_out' | 'failed' | 'outcome_unknown'
+      >
+      exitCode?: number
+      endedAt: number
+      latestSequence: number
+      outputTruncated: boolean
+    }
+  | {
+      type: 'command_interrupted'
+      runId: string
+      conversationId: string
+      assistantMessageId: string
+      projectId?: string
+      callId: string
+      sessionId: string
+      endedAt: number
+      latestSequence: number
+      outputTruncated: boolean
     }
   | {
       type: 'error'

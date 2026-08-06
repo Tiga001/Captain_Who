@@ -3,15 +3,21 @@
 use super::output_capture::{
     spawn_process_output_capture_with_observers, ProcessOutputTranscriptObserver,
 };
-use super::session::{run_session_watcher, CaptureReceiver, ManagedCommandSession, ProcessControl};
+use super::session::{
+    run_session_watcher, CaptureReceiver, CommandSessionCompletionHook,
+    CommandSessionLifecycleObserver, ManagedCommandSession, ProcessControl,
+};
 use super::{
     canonicalize_workspace_root, enforce_command_policy, force_terminate_command_process_group,
-    resolve_command_cwd, AgentCommandRequest, AgentPermissions, CommandAuthorizationSource,
-    CommandExecutionError, CommandSessionError, CommandSessionId, CommandSessionPoll,
-    CommandSessionProjection, CommandSessionScopeId, CommandSessionSnapshot, CommandSpawnPlan,
-    CommandStartOutcome, CommandTerminalResult, ManagedCommandChild, ProcessOutputCaptureBudget,
+    resolve_command_cwd, AgentCommandArtifactObservationPhase, AgentCommandRequest,
+    AgentPermissions, CommandArtifactObserver, CommandAuthorizationSource, CommandExecutionError,
+    CommandSessionError, CommandSessionId, CommandSessionPoll, CommandSessionProjection,
+    CommandSessionScopeId, CommandSessionSnapshot, CommandSpawnPlan, CommandStartOutcome,
+    CommandTerminalResult, ManagedCommandChild, ProcessOutputCaptureBudget,
     ProcessOutputCaptureHandle, ProcessOutputCapturePolicy, ProcessOutputObserver, MAX_TIMEOUT_MS,
 };
+use crate::artifact_runtime::ArtifactRuntimeProvider;
+use crate::file_input::AgentFileInputExecutionContext;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -201,7 +207,101 @@ impl CommandSessionManager {
             options,
             output_observer,
             None,
+            None,
         )
+    }
+
+    /// Starts an ordinary authorized command while exposing lifecycle events
+    /// from the authoritative session state machine to the process host.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_authorized_command_with_lifecycle_observer(
+        &self,
+        scope_id: CommandSessionScopeId,
+        workspace_root: Option<&Path>,
+        request: &AgentCommandRequest,
+        permissions: AgentPermissions,
+        authorization_source: CommandAuthorizationSource,
+        options: CommandStartOptions,
+        lifecycle_observer: CommandSessionLifecycleObserver,
+    ) -> Result<CommandStartOutcome, CommandSessionStartError> {
+        self.start_authorized_command_with_cancel_probe(
+            scope_id,
+            workspace_root,
+            request,
+            permissions,
+            authorization_source,
+            options,
+            None,
+            Some(lifecycle_observer),
+            None,
+        )
+    }
+
+    /// Unified host entry for ordinary shell commands and frozen managed-runtime commands.
+    /// Cancellation is consulted only until the caller accepts a Running handoff; afterwards the
+    /// process session has an independent lifecycle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_authorized_command_with_runtime_and_lifecycle(
+        &self,
+        scope_id: CommandSessionScopeId,
+        workspace_root: Option<&Path>,
+        request: &AgentCommandRequest,
+        permissions: AgentPermissions,
+        authorization_source: CommandAuthorizationSource,
+        options: CommandStartOptions,
+        artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
+        file_inputs: Option<&AgentFileInputExecutionContext>,
+        lifecycle_observer: CommandSessionLifecycleObserver,
+        cancellation_token: crate::AgentCancellationToken,
+        cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Result<CommandStartOutcome, CommandSessionStartError> {
+        if request.runtime.is_none() && request.runtime_binding.is_none() {
+            if !request.inputs.is_empty() {
+                return Err(CommandExecutionError::from(
+                    "run_command.inputs requires a frozen managed runtime binding".to_string(),
+                )
+                .into());
+            }
+            return self.start_authorized_command_with_cancel_probe(
+                scope_id,
+                workspace_root,
+                request,
+                permissions,
+                authorization_source,
+                options,
+                None,
+                Some(lifecycle_observer),
+                cancel_probe,
+            );
+        }
+
+        match super::managed_runtime::prepare_managed_command_session(
+            workspace_root,
+            request,
+            permissions,
+            authorization_source,
+            cancellation_token,
+            artifact_runtime,
+            file_inputs,
+        )? {
+            super::managed_runtime::ManagedCommandSessionPreparation::Immediate(execution) => {
+                Ok(immediate_terminal_outcome(scope_id, *execution))
+            }
+            super::managed_runtime::ManagedCommandSessionPreparation::Ready {
+                plan,
+                completion_hook,
+            } => self
+                .start_plan_with_observers(
+                    scope_id,
+                    plan,
+                    options,
+                    None,
+                    Some(lifecycle_observer),
+                    cancel_probe,
+                    Some(completion_hook),
+                )
+                .map_err(Into::into),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -214,6 +314,7 @@ impl CommandSessionManager {
         authorization_source: CommandAuthorizationSource,
         options: CommandStartOptions,
         output_observer: Option<ProcessOutputObserver>,
+        lifecycle_observer: Option<CommandSessionLifecycleObserver>,
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Result<CommandStartOutcome, CommandSessionStartError> {
         if request.runtime.is_some()
@@ -237,13 +338,41 @@ impl CommandSessionManager {
             root.as_deref(),
             Some(&cwd),
         )?;
+        // Artifact observation is a terminal-session concern, not an Agent Run concern. Capture
+        // the before image before spawn and move the lease into the process watcher so a handed-
+        // off command can still produce its bounded after image after the originating run ends.
+        let artifact_observer = CommandArtifactObserver::prepare(
+            root.as_deref(),
+            &cwd,
+            request.observe.as_ref(),
+            permissions,
+        );
+        let artifact_before = artifact_observer
+            .as_ref()
+            .map(|observer| observer.capture(AgentCommandArtifactObservationPhase::Before, None));
+        let completion_hook: Option<CommandSessionCompletionHook> = artifact_observer
+            .zip(artifact_before)
+            .map(|(observer, before)| {
+                Box::new(move |result: &mut super::AgentCommandExecutionResult| {
+                    let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
+                    result.artifact_observation = Some(observer.finish(before, after));
+                }) as CommandSessionCompletionHook
+            });
         let hard_timeout = request
             .timeout_ms
             .map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)));
         let plan =
             CommandSpawnPlan::shell(request.command.clone(), cwd, root.as_deref(), hard_timeout);
-        self.start_plan(scope_id, plan, options, output_observer, cancel_probe)
-            .map_err(Into::into)
+        self.start_plan_with_observers(
+            scope_id,
+            plan,
+            options,
+            output_observer,
+            lifecycle_observer,
+            cancel_probe,
+            completion_hook,
+        )
+        .map_err(Into::into)
     }
 
     pub(super) fn start_plan(
@@ -253,6 +382,28 @@ impl CommandSessionManager {
         options: CommandStartOptions,
         output_observer: Option<ProcessOutputObserver>,
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Result<CommandStartOutcome, CommandSessionError> {
+        self.start_plan_with_observers(
+            scope_id,
+            plan,
+            options,
+            output_observer,
+            None,
+            cancel_probe,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_plan_with_observers(
+        &self,
+        scope_id: CommandSessionScopeId,
+        plan: CommandSpawnPlan,
+        options: CommandStartOptions,
+        output_observer: Option<ProcessOutputObserver>,
+        lifecycle_observer: Option<CommandSessionLifecycleObserver>,
+        cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        completion_hook: Option<CommandSessionCompletionHook>,
     ) -> Result<CommandStartOutcome, CommandSessionError> {
         if !self.inner.accepting_starts.load(Ordering::Acquire) {
             return Err(CommandSessionError::ManagerShuttingDown);
@@ -271,6 +422,7 @@ impl CommandSessionManager {
             started_at,
             self.inner.config.transcript_bytes,
             output_observer,
+            lifecycle_observer,
         );
         self.reserve(session.clone())?;
 
@@ -309,6 +461,10 @@ impl CommandSessionManager {
             mark_terminal(&self.inner, &session_id);
             return Err(CommandSessionError::SpawnFailed(message));
         };
+
+        // The process is now live and both output pipes are owned by the host. Publish the
+        // authoritative started boundary before reader threads can emit sequence 1.
+        session.mark_running();
 
         let capture_policy = ProcessOutputCapturePolicy::process_default();
         let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
@@ -362,6 +518,7 @@ impl CommandSessionManager {
                     hard_timeout,
                     interrupt_grace,
                     drain_grace,
+                    completion_hook,
                     on_terminal,
                 );
             });
@@ -371,13 +528,19 @@ impl CommandSessionManager {
                 // Dropping the never-started closure drops ManagedCommandChild,
                 // which kills the complete group and performs a best-effort reap.
                 let message = format!("启动命令 watcher 失败：{error}");
-                session.fail_before_running(message.clone());
+                session.fail_before_running(message);
                 mark_terminal(&self.inner, &session_id);
-                return Err(CommandSessionError::SpawnFailed(message));
+                // `mark_running` already published the authoritative Started boundary. Return the
+                // paired terminal outcome so the Host can settle that durable Session instead of
+                // leaving a phantom Running row until restart reconciliation.
+                return Ok(CommandStartOutcome::Exited(Box::new(
+                    session
+                        .terminal_result()
+                        .expect("watcher startup failure commits a terminal result"),
+                )));
             }
         };
         session.attach_watcher(watcher);
-        session.mark_running();
 
         let yield_duration = options.normalized_yield();
         let yield_deadline = Instant::now() + yield_duration;
@@ -573,6 +736,43 @@ impl CommandSessionManager {
             .map(|entry| entry.session.clone())
             .ok_or(CommandSessionError::NotFound)
     }
+}
+
+fn immediate_terminal_outcome(
+    scope_id: CommandSessionScopeId,
+    execution: super::AgentCommandExecutionResult,
+) -> CommandStartOutcome {
+    let timestamp = super::session::unix_time_millis();
+    let state = if execution.cancelled {
+        super::CommandSessionState::Interrupted
+    } else if execution.timed_out {
+        super::CommandSessionState::TimedOut
+    } else if execution.error.is_some() {
+        super::CommandSessionState::Failed
+    } else {
+        super::CommandSessionState::Exited {
+            exit_code: execution.exit_code,
+        }
+    };
+    let snapshot = CommandSessionSnapshot {
+        session_id: CommandSessionId::new(),
+        scope_id,
+        state,
+        started_at: timestamp,
+        ended_at: Some(timestamp),
+        exit_code: execution.exit_code,
+        latest_output_sequence: 0,
+        output_truncated: execution.output_capture.truncated_at_source,
+        projection: CommandSessionProjection {
+            command: execution.command.clone(),
+            cwd: execution.cwd.clone(),
+        },
+        error: execution.error.clone(),
+    };
+    CommandStartOutcome::Exited(Box::new(CommandTerminalResult {
+        snapshot,
+        execution,
+    }))
 }
 
 impl Drop for CommandSessionManager {

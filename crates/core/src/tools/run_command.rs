@@ -29,8 +29,8 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+const LEGACY_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
 pub(super) struct RunCommandTool;
 
@@ -46,13 +46,18 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
+            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. A long-lived command returns status=running with a sessionId: GUI apps and servers usually need no further wait, while builds and tests should be polled with command_session until terminal; background exit never wakes the model. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "A single-line, non-interactive shell command without literal newline or null characters. Side effects and every compound shell segment are evaluated by the host policy." },
                     "cwd": { "type": "string", "description": "Working directory. May be workspace-relative, absolute, or @home/@desktop/@documents/@downloads when permissions allow. Required when no workspace exists." },
-                    "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS },
+                    "timeoutMs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_TIMEOUT_MS,
+                        "description": "Optional hard process lifetime. Omit it for no hard deadline; this is independent from the Host's short initial wait before returning a running Session."
+                    },
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
@@ -173,7 +178,19 @@ fn project_command_result_value(value: &Value) -> Option<Value> {
 
 fn project_command_execution(value: &Value) -> Option<Value> {
     let mut output = Map::new();
-    for field in ["exitCode", "stdout", "stderr", "error"] {
+    for field in [
+        "status",
+        "sessionId",
+        "startedAt",
+        "latestSequence",
+        "durationMs",
+        "output",
+        "outputTruncated",
+        "exitCode",
+        "stdout",
+        "stderr",
+        "error",
+    ] {
         super::model_projection::insert_field(&mut output, value, field);
     }
     for field in [
@@ -385,11 +402,9 @@ fn command_request_from_call(
         id: call.id.clone(),
         command: command.clone(),
         cwd,
-        timeout_ms: Some(
-            args.timeout_ms
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .clamp(1, MAX_TIMEOUT_MS),
-        ),
+        timeout_ms: args
+            .timeout_ms
+            .map(|timeout| timeout.clamp(1, MAX_TIMEOUT_MS)),
         approval_status: AgentApprovalStatus::Required,
         risk_level: Some(classify_command_risk(&command)),
         reason,
@@ -927,11 +942,14 @@ pub(crate) fn validate_frozen_command_trace_args(
         .map_err(|_| "run_command frozen ToolCall command is invalid".to_string())?;
     let cwd = normalize_trace_cwd(args.cwd)
         .map_err(|_| "run_command frozen ToolCall cwd is invalid".to_string())?;
-    let timeout_ms = Some(
-        args.timeout_ms
-            .unwrap_or(DEFAULT_TIMEOUT_MS)
-            .clamp(1, MAX_TIMEOUT_MS),
-    );
+    let timeout_ms = args
+        .timeout_ms
+        .map(|timeout| timeout.clamp(1, MAX_TIMEOUT_MS));
+    // Older pending actions materialized an omitted timeout as a two-minute hard deadline. Keep
+    // validating that already-frozen authority during restart/approval recovery without applying
+    // the legacy default to any newly prepared command.
+    let timeout_matches = timeout_ms == frozen.timeout_ms
+        || (timeout_ms.is_none() && frozen.timeout_ms == Some(LEGACY_DEFAULT_TIMEOUT_MS));
     let reason_was_present = args.reason.is_some();
     let reason = args
         .reason
@@ -995,7 +1013,7 @@ pub(crate) fn validate_frozen_command_trace_args(
 
     if command != frozen.command
         || cwd != frozen.cwd
-        || timeout_ms != frozen.timeout_ms
+        || !timeout_matches
         || expected_observe != frozen.observe
         || inputs != frozen_inputs
         || !runtime_matches
@@ -1465,6 +1483,37 @@ mod tests {
         assert!(request.observe.is_none());
         assert!(request.runtime.is_none());
         assert!(request.runtime_binding.is_none());
+    }
+
+    #[test]
+    fn omitted_timeout_means_no_hard_process_deadline() {
+        let call = AgentToolCall {
+            id: "tool-without-timeout".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({ "command": "pwd" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("temp".to_string()),
+                root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        }));
+
+        let request = command_request_from_call(&context, &call).unwrap();
+
+        assert_eq!(request.timeout_ms, None);
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
+
+        let mut legacy_frozen = request;
+        legacy_frozen.timeout_ms = Some(LEGACY_DEFAULT_TIMEOUT_MS);
+        validate_frozen_command_trace_args(&legacy_frozen, &call.args).unwrap();
     }
 
     #[test]
@@ -2104,5 +2153,36 @@ mod tests {
         assert!(result.get("stderrPreviewTruncated").is_none());
         assert!(result.get("stdoutOriginalBytes").is_none());
         assert!(result.get("stderrOriginalBytes").is_none());
+    }
+
+    #[test]
+    fn model_projection_keeps_the_complete_running_session_receipt() {
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "command-running".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "status": "running",
+                "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+                "output": "server listening on port 3000",
+                "startedAt": 1_725_000_000_000_i64,
+                "latestSequence": 3,
+                "outputTruncated": false,
+                "hostPrivateField": "must not reach the model",
+            })),
+            error: None,
+        };
+
+        let projected = run_command_model_projection(&raw);
+        let result = projected.result.unwrap();
+
+        assert_eq!(result["status"], "running");
+        assert_eq!(result["sessionId"], "cmd_0123456789abcdef0123456789abcdef");
+        assert_eq!(result["output"], "server listening on port 3000");
+        assert_eq!(result["startedAt"], 1_725_000_000_000_i64);
+        assert_eq!(result["latestSequence"], 3);
+        assert_eq!(result["outputTruncated"], false);
+        assert!(result.get("hostPrivateField").is_none());
     }
 }

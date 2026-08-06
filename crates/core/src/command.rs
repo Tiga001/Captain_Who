@@ -89,7 +89,8 @@ pub use runtime_profile::{
 };
 use segment::*;
 pub use session::{
-    CommandSessionError, CommandSessionId, CommandSessionPoll, CommandSessionProjection,
+    CommandSessionError, CommandSessionId, CommandSessionLifecycleEvent,
+    CommandSessionLifecycleObserver, CommandSessionPoll, CommandSessionProjection,
     CommandSessionScopeId, CommandSessionSnapshot, CommandSessionState, CommandStartOutcome,
     CommandTerminalResult,
 };
@@ -99,7 +100,7 @@ pub use session_manager::{
     DEFAULT_COMMAND_TRANSCRIPT_BYTES, DEFAULT_INITIAL_YIELD_MS, MAX_INITIAL_YIELD_MS,
     MIN_COMMAND_POLL_BYTES, MIN_INITIAL_YIELD_MS,
 };
-pub(crate) use spawn_plan::CommandSpawnPlan;
+pub(crate) use spawn_plan::{CommandDirectLaunchPlan, CommandSpawnPlan};
 pub use transcript::{CommandOutputBatch, CommandOutputChunk};
 pub use types::*;
 
@@ -122,7 +123,7 @@ pub fn command_tool_result(
         call_id: call_id.to_string(),
         tool: "run_command".to_string(),
         ok,
-        result: Some(serde_json::json!(command_result)),
+        result: Some(command_terminal_result_value(command_result)),
         error: if ok {
             None
         } else {
@@ -147,6 +148,20 @@ pub fn command_tool_result(
         }
     }
     tool_result
+}
+
+fn command_terminal_result_value(
+    command_result: &AgentCommandExecutionResult,
+) -> serde_json::Value {
+    let mut value = serde_json::to_value(command_result)
+        .expect("AgentCommandExecutionResult must remain serializable");
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            serde_json::Value::String("exited".to_string()),
+        );
+    }
+    value
 }
 
 #[cfg(all(test, not(windows)))]

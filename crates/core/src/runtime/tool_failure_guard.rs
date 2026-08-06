@@ -81,7 +81,8 @@ impl ToolFailureGuard {
                     }
                 }
                 ConversationTurnTraceItem::AssistantNarration { .. }
-                | ConversationTurnTraceItem::UserGuidance { .. } => {}
+                | ConversationTurnTraceItem::UserGuidance { .. }
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
         }
 

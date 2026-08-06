@@ -748,6 +748,7 @@ mod tests {
             ("apply_patch", AgentToolExposure::Stable),
             ("attachments_list", AgentToolExposure::Stable),
             ("attachments_list_project", AgentToolExposure::Stable),
+            ("command_session", AgentToolExposure::Stable),
             ("git_diff", AgentToolExposure::Stable),
             ("read_file", AgentToolExposure::Stable),
             ("read_image", AgentToolExposure::Stable),

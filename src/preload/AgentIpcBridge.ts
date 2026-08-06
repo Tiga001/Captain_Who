@@ -10,6 +10,9 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.startConversationTurn, input),
     getContextWindowSnapshot: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.getContextWindowSnapshot, input),
+    listCommandSessions: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.listCommandSessions, input),
+    getCommandSession: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getCommandSession, input),
     steerRun: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.steerRun, input),
     cancelRun: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.cancelRun, input),
     listPendingActions: () => ipcRenderer.invoke(HOST_CHANNELS.agent.listPendingActions),

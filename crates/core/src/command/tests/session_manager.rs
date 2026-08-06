@@ -1,5 +1,6 @@
 use super::*;
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Barrier};
 
 fn test_config() -> CommandSessionManagerConfig {
     CommandSessionManagerConfig {
@@ -220,6 +221,134 @@ fn output_has_one_monotonic_sequence_and_preserves_utf8() {
         .chunks
         .iter()
         .all(|chunk| std::str::from_utf8(chunk.text.as_bytes()).is_ok()));
+}
+
+#[test]
+fn lifecycle_events_are_serialized_from_started_through_terminal() {
+    let workspace = TestWorkspace::new();
+    let mut config = test_config();
+    config.transcript_bytes = 256 * 1024;
+    let manager = CommandSessionManager::new(config).unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let callbacks_in_flight = Arc::new(AtomicUsize::new(0));
+    let callbacks_overlapped = Arc::new(AtomicBool::new(false));
+    let observer: CommandSessionLifecycleObserver = {
+        let callbacks_in_flight = Arc::clone(&callbacks_in_flight);
+        let callbacks_overlapped = Arc::clone(&callbacks_overlapped);
+        Arc::new(move |event| {
+            if callbacks_in_flight.fetch_add(1, Ordering::SeqCst) != 0 {
+                callbacks_overlapped.store(true, Ordering::SeqCst);
+            }
+            // Widen the race window: stdout and stderr are drained by independent threads.
+            thread::sleep(Duration::from_millis(1));
+            let _ = sender.send(event);
+            callbacks_in_flight.fetch_sub(1, Ordering::SeqCst);
+        })
+    };
+    let outcome = manager
+        .start_plan_with_observers(
+            CommandSessionScopeId::new("lifecycle-order").unwrap(),
+            CommandSpawnPlan::shell(
+                "(awk 'BEGIN { for (i = 0; i < 10000; i++) print \"stdout\" }') & \
+                 (awk 'BEGIN { for (i = 0; i < 10000; i++) print \"stderr\" }' >&2) & wait"
+                    .to_string(),
+                workspace.path.clone(),
+                Some(&workspace.path),
+                None,
+            ),
+            CommandStartOptions {
+                initial_yield: Duration::from_millis(10),
+            },
+            None,
+            Some(observer),
+            None,
+            None,
+        )
+        .unwrap();
+    let session_id = match outcome {
+        CommandStartOutcome::Running(snapshot) => snapshot.session_id,
+        CommandStartOutcome::Exited(terminal) => terminal.snapshot.session_id,
+    };
+
+    let mut events = Vec::new();
+    loop {
+        let event = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("lifecycle observer must deliver a terminal event");
+        let terminal = matches!(event, CommandSessionLifecycleEvent::Terminal(_));
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    wait_terminal(&manager, &session_id);
+
+    assert!(matches!(
+        events.first(),
+        Some(CommandSessionLifecycleEvent::Started(snapshot))
+            if snapshot.session_id == session_id
+                && snapshot.state == CommandSessionState::Running
+                && snapshot.latest_output_sequence == 0
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(CommandSessionLifecycleEvent::Terminal(terminal))
+            if terminal.snapshot.session_id == session_id
+                && terminal.snapshot.state == CommandSessionState::Exited { exit_code: Some(0) }
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, CommandSessionLifecycleEvent::Started(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, CommandSessionLifecycleEvent::Terminal(_)))
+            .count(),
+        1
+    );
+
+    let output = events
+        .iter()
+        .filter_map(|event| match event {
+            CommandSessionLifecycleEvent::Output {
+                session_id: output_session_id,
+                chunk,
+                latest_sequence,
+                ..
+            } => Some((output_session_id, chunk, latest_sequence)),
+            CommandSessionLifecycleEvent::Started(_)
+            | CommandSessionLifecycleEvent::Terminal(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!output.is_empty());
+    assert!(output.iter().all(|(output_session_id, chunk, latest)| {
+        *output_session_id == &session_id && **latest == chunk.sequence
+    }));
+    assert!(output
+        .windows(2)
+        .all(|pair| pair[0].1.sequence < pair[1].1.sequence));
+    assert!(output
+        .iter()
+        .any(|(_, chunk, _)| chunk.stream == AgentCommandOutputStream::Stdout));
+    assert!(output
+        .iter()
+        .any(|(_, chunk, _)| chunk.stream == AgentCommandOutputStream::Stderr));
+
+    let final_sequence = output.last().unwrap().1.sequence;
+    let CommandSessionLifecycleEvent::Terminal(terminal) = events.last().unwrap() else {
+        unreachable!("terminal event asserted above")
+    };
+    assert_eq!(terminal.snapshot.latest_output_sequence, final_sequence);
+    assert!(terminal.execution.stdout.contains("stdout"));
+    assert!(terminal.execution.stderr.contains("stderr"));
+    assert!(
+        !callbacks_overlapped.load(Ordering::SeqCst),
+        "lifecycle callbacks must never overlap across stdout, stderr, and watcher threads"
+    );
 }
 
 #[test]

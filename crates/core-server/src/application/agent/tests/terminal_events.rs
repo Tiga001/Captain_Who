@@ -90,14 +90,36 @@ fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources()
 fn automatic_command_streams_bounded_output_with_stable_call_identity() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let conversation_id = "conversation-live-command";
+    let assistant_message_id = "assistant-live-command";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Live command events".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
     let service = AgentService::new(storage);
     let mut input = command_test_input(fixture.path());
-    input
-        .context
-        .as_mut()
-        .expect("command test context")
-        .permissions
-        .command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+    let context = input.context.as_mut().expect("command test context");
+    context.conversation_id = Some(conversation_id.to_string());
+    context.permissions.command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
     let run_id = "run-live-command";
     let call_id = "live-command";
     let command = command_request(
@@ -108,8 +130,14 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
 
     let result = service
         .execute_auto_approved_action(
-            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None)
-                .with_notifications(notifications),
+            AutoApprovedActionContext::new(
+                input,
+                run_id.to_string(),
+                Some(conversation_id.to_string()),
+                Some(assistant_message_id.to_string()),
+                None,
+            )
+            .with_notifications(notifications),
             AgentProposedAction::Command { command },
             AgentCancellationToken::new(),
         )
@@ -117,10 +145,17 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
 
     assert!(result.ok);
     let mut events = Vec::new();
-    while let Ok(notification) = receiver.try_recv() {
-        if notification["params"]["type"] == "command_output" {
-            events.push(notification["params"].clone());
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        while let Ok(notification) = receiver.try_recv() {
+            if notification["params"]["type"] == "command_output" {
+                events.push(notification["params"].clone());
+            }
         }
+        if !events.is_empty() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
     assert!(!events.is_empty());
     assert!(events.iter().all(|event| event["runId"] == run_id));
@@ -134,6 +169,270 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
         .collect::<String>();
     assert!(output.contains("stdout-live"));
     assert!(output.contains("stderr-live"));
+}
+
+#[test]
+fn automatic_running_command_is_aborted_when_handoff_audit_is_definitely_uncommitted() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let conversation_id = "conversation-running-audit-failure";
+    let assistant_message_id = "assistant-running-audit-failure";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Running command audit failure".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let mut service = AgentService::new(Arc::clone(&storage));
+    service.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        Duration::from_millis(20),
+    );
+    let mut input = command_test_input(fixture.path());
+    let context = input.context.as_mut().expect("command test context");
+    context.conversation_id = Some(conversation_id.to_string());
+    context.permissions.command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+    let run_id = "run-running-audit-failure";
+    let call_id = "command-running-audit-failure";
+    let mut command = command_request(call_id, "sleep 2");
+    command.timeout_ms = Some(5_000);
+    inject_auto_action_audit_failure(run_id, call_id, "completed");
+
+    let result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                input,
+                run_id.to_string(),
+                Some(conversation_id.to_string()),
+                Some(assistant_message_id.to_string()),
+                None,
+            ),
+            AgentProposedAction::Command { command },
+            AgentCancellationToken::new(),
+        )
+        .unwrap();
+
+    assert!(!result.ok);
+    assert!(result
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("running receipt was not durable")));
+    let sessions = service
+        .command_sessions
+        .list(AgentCommandSessionListInput {
+            conversation_id: conversation_id.to_string(),
+        })
+        .unwrap();
+    assert_eq!(sessions.sessions.len(), 1);
+    assert!(sessions.sessions[0].status.is_terminal());
+    assert_ne!(
+        sessions.sessions[0].status,
+        AgentCommandSessionStatus::Running
+    );
+}
+
+#[test]
+fn automatic_running_command_reconciles_post_commit_audit_and_outlives_run_cancel() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let conversation_id = "conversation-running-post-commit";
+    let assistant_message_id = "assistant-running-post-commit";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Running command post-commit".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let mut service = AgentService::new(Arc::clone(&storage));
+    service.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        Duration::from_millis(20),
+    );
+    let mut input = command_test_input(fixture.path());
+    let context = input.context.as_mut().expect("command test context");
+    context.conversation_id = Some(conversation_id.to_string());
+    context.permissions.command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+    let run_id = "run-running-post-commit";
+    let call_id = "command-running-post-commit";
+    let mut command = command_request(call_id, "sleep 2");
+    command.timeout_ms = Some(5_000);
+    let cancellation = AgentCancellationToken::new();
+    service.register_cancellation(run_id, cancellation.clone());
+    inject_auto_action_audit_post_commit_failure(run_id, call_id, "completed");
+
+    let result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                input,
+                run_id.to_string(),
+                Some(conversation_id.to_string()),
+                Some(assistant_message_id.to_string()),
+                None,
+            ),
+            AgentProposedAction::Command { command },
+            cancellation.clone(),
+        )
+        .unwrap();
+
+    assert!(result.ok);
+    assert_eq!(result.result.as_ref().unwrap()["status"], "running");
+    assert!(service.cancel_run(run_id));
+    assert!(cancellation.is_cancelled());
+    let sessions = service
+        .command_sessions
+        .list(AgentCommandSessionListInput {
+            conversation_id: conversation_id.to_string(),
+        })
+        .unwrap();
+    assert_eq!(sessions.sessions.len(), 1);
+    assert_eq!(
+        sessions.sessions[0].status,
+        AgentCommandSessionStatus::Running,
+        "run cancellation after the durable handoff must not terminate the process Session"
+    );
+
+    service
+        .command_sessions
+        .terminate_conversation(conversation_id);
+    service.unregister_cancellation_if_current(run_id, &cancellation);
+}
+
+#[test]
+fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let conversation_id = "conversation-action-scoped-session-cancel";
+    let assistant_message_id = "assistant-action-scoped-session-cancel";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Action-scoped Session cancellation".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let registry = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        Duration::from_millis(20),
+    );
+    let mut first = command_request("command-action-scoped-first", "sleep 2");
+    first.approval_status = AgentApprovalStatus::Approved;
+    let mut second = command_request("command-action-scoped-second", "sleep 2");
+    second.approval_status = AgentApprovalStatus::Approved;
+    let start = |command: &AgentCommandRequest| {
+        registry
+            .start(StartAgentCommandSession {
+                owner: CommandSessionOwner {
+                    conversation_id: conversation_id.to_string(),
+                    assistant_message_id: assistant_message_id.to_string(),
+                    origin_run_id: "run-action-scoped-session-cancel".to_string(),
+                    call_id: command.id.clone(),
+                    project_id: None,
+                },
+                workspace_root: Some(fixture.path()),
+                command,
+                permissions: AgentPermissions {
+                    command_safety: mycopilot_core::AgentCommandSafetyPolicy::FullAccess,
+                    ..AgentPermissions::default()
+                },
+                authorization_source: CommandAuthorizationSource::Automatic,
+                approval_provenance: serde_json::json!({"source": "test"}),
+                artifact_runtime: None,
+                file_inputs: None,
+                notifications: None,
+                cancellation_token: AgentCancellationToken::new(),
+                cancel_probe: None,
+            })
+            .unwrap()
+    };
+    let first_session_id = match start(&first) {
+        AgentCommandSessionLaunch::Running { snapshot, .. } => snapshot.session_id,
+        AgentCommandSessionLaunch::Exited(_) => panic!("first command must still be running"),
+    };
+    let second_session_id = match start(&second) {
+        AgentCommandSessionLaunch::Running { snapshot, .. } => snapshot.session_id,
+        AgentCommandSessionLaunch::Exited(_) => panic!("second command must still be running"),
+    };
+
+    assert_eq!(
+        registry.cancel_pre_handoff_for_action(
+            "run-action-scoped-session-cancel",
+            "command-action-scoped-first",
+        ),
+        1
+    );
+    registry.abort_before_handoff(&first_session_id).unwrap();
+    let sessions = registry
+        .list(AgentCommandSessionListInput {
+            conversation_id: conversation_id.to_string(),
+        })
+        .unwrap();
+    let first_snapshot = sessions
+        .sessions
+        .iter()
+        .find(|session| session.session_id == first_session_id)
+        .unwrap();
+    let second_snapshot = sessions
+        .sessions
+        .iter()
+        .find(|session| session.session_id == second_session_id)
+        .unwrap();
+    assert!(first_snapshot.status.is_terminal());
+    assert_eq!(second_snapshot.status, AgentCommandSessionStatus::Running);
+
+    registry.abort_before_handoff(&second_session_id).unwrap();
 }
 
 #[test]

@@ -5,6 +5,8 @@
     "steerRun": "agent.steerRun",
     "startConversationTurn": "agent.startConversationTurn",
     "getContextWindowSnapshot": "agent.getContextWindowSnapshot",
+    "listCommandSessions": "agent.commandSessions.list",
+    "getCommandSession": "agent.commandSessions.get",
     "listPendingActions": "agent.listPendingActions",
     "approveAction": "agent.approveAction",
     "rejectAction": "agent.rejectAction",
@@ -46,6 +48,54 @@
           "content": "MyCopilot Next"
         }
       }
+    },
+    "commandStarted": {
+      "type": "command_started",
+      "runId": "run-contract-v1",
+      "conversationId": "conversation-contract-v1",
+      "assistantMessageId": "assistant-contract-v1",
+      "projectId": "project-contract-v1",
+      "callId": "call-command-contract-v1",
+      "sessionId": "cmd_1234567890abcdef1234567890abcdef",
+      "startedAt": 10
+    },
+    "commandOutput": {
+      "type": "command_output",
+      "runId": "run-contract-v1",
+      "conversationId": "conversation-contract-v1",
+      "assistantMessageId": "assistant-contract-v1",
+      "projectId": "project-contract-v1",
+      "callId": "call-command-contract-v1",
+      "sessionId": "cmd_1234567890abcdef1234567890abcdef",
+      "sequence": 1,
+      "stream": "stdout",
+      "output": "ready\n"
+    },
+    "commandExited": {
+      "type": "command_exited",
+      "runId": "run-contract-v1",
+      "conversationId": "conversation-contract-v1",
+      "assistantMessageId": "assistant-contract-v1",
+      "projectId": "project-contract-v1",
+      "callId": "call-command-contract-v1",
+      "sessionId": "cmd_1234567890abcdef1234567890abcdef",
+      "status": "exited",
+      "exitCode": 0,
+      "endedAt": 20,
+      "latestSequence": 1,
+      "outputTruncated": false
+    },
+    "commandInterrupted": {
+      "type": "command_interrupted",
+      "runId": "run-contract-v1",
+      "conversationId": "conversation-contract-v1",
+      "assistantMessageId": "assistant-contract-v1",
+      "projectId": "project-contract-v1",
+      "callId": "call-command-contract-v1",
+      "sessionId": "cmd_1234567890abcdef1234567890abcdef",
+      "endedAt": 21,
+      "latestSequence": 1,
+      "outputTruncated": false
     },
     "done": {
       "type": "done",

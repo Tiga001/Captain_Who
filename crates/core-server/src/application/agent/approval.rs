@@ -158,7 +158,22 @@ impl AgentService {
         if is_cancellable_process
             && (record.snapshot.status == PendingActionStatus::Approved || is_mcp_dispatching)
         {
-            let cancelled = self.process_runs.cancel(&record.storage_id);
+            // Freeze the identity, then release approval/deletion locks before touching a process
+            // Session. Session termination performs a bounded wait and must never hold the
+            // pending-action or destructive-lifecycle mutexes while doing so.
+            let record = record.clone();
+            drop(pending_actions);
+            drop(deletion_lifecycle);
+
+            // A command which has already returned Running is no longer represented by the
+            // legacy process guard. Arbitrate it through the same Session-state fence used by
+            // `commit_handoff`; whichever transition wins is authoritative. The legacy flag
+            // remains necessary for the approved-to-spawn gap and for non-command processes.
+            let cancelled_sessions = self
+                .command_sessions
+                .cancel_pre_handoff_for_action(&record.snapshot.run_id, &record.snapshot.action_id);
+            let cancelled_process = self.process_runs.cancel(&record.storage_id);
+            let cancelled = cancelled_sessions > 0 || cancelled_process;
             if cancelled {
                 if let Some(token) = self
                     .cancellations
@@ -169,7 +184,7 @@ impl AgentService {
                     token.cancel();
                 }
                 self.record_action_audit(
-                    record,
+                    &record,
                     Some("cancelled"),
                     "cancellation_requested",
                     None,

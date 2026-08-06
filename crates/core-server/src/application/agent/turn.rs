@@ -195,6 +195,7 @@ impl AgentService {
                 });
             let mut host_services = AgentRuntimeHostServices::new()
                 .with_host_actions(host_executor, service.storage.clone())
+                .with_command_session_executor(Arc::new(service.command_sessions.clone()))
                 .with_office_engine(service.office_engine.clone())
                 .with_trace_observer(trace_observer)
                 .with_model_request_observer(model_request_observer)

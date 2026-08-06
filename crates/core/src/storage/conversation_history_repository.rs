@@ -793,6 +793,114 @@ mod tests {
     }
 
     #[test]
+    fn command_session_lifecycle_is_searchable_without_transcript_duplication() {
+        let connection = setup();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                    id, conversation_id, role, content, status, agent_run_json,
+                    ui_state_json, created_at, position
+                 ) VALUES (
+                    'assistant-command', 'conversation-1', 'assistant', 'started command',
+                    'sent', NULL, NULL, 4000, 2
+                 )",
+                [],
+            )
+            .unwrap();
+        let session_id = "cmd_0123456789abcdef0123456789abcdef";
+        let trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-command".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-command".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "command-call".to_string(),
+                    tool: "run_command".to_string(),
+                    provenance: None,
+                    operation: json!({ "command": "server" }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::CommandSessionLifecycle {
+                    sequence: 1,
+                    phase: crate::ConversationCommandSessionLifecyclePhase::Started,
+                    session_id: session_id.to_string(),
+                    call_id: "command-call".to_string(),
+                    status: crate::AgentCommandSessionStatus::Running,
+                    exit_code: None,
+                    latest_sequence: 0,
+                    output_truncated: false,
+                    archive: Default::default(),
+                    created_at: 4_001,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 2,
+                    call_id: "command-call".to_string(),
+                    tool: "run_command".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({ "status": "running", "sessionId": session_id }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    error: None,
+                    truncated: false,
+                    archive: Default::default(),
+                },
+                ConversationTurnTraceItem::CommandSessionLifecycle {
+                    sequence: 3,
+                    phase: crate::ConversationCommandSessionLifecyclePhase::Terminal,
+                    session_id: session_id.to_string(),
+                    call_id: "command-call".to_string(),
+                    status: crate::AgentCommandSessionStatus::Exited,
+                    exit_code: Some(0),
+                    latest_sequence: 8,
+                    output_truncated: false,
+                    archive: Default::default(),
+                    created_at: 5_000,
+                },
+            ],
+        };
+        conversation_trace_repository::commit_trace_in_connection(
+            &connection,
+            &trace,
+            4_000,
+            5_000,
+        )
+        .unwrap();
+
+        let hits = search_records(
+            &connection,
+            "conversation-1",
+            session_id,
+            &ConversationHistorySearchFilter {
+                include_trace_items: true,
+                ..Default::default()
+            },
+            10,
+        )
+        .unwrap();
+        let lifecycle_hits = hits
+            .iter()
+            .filter(|hit| hit.item_kind.as_deref() == Some("command_session_lifecycle"))
+            .collect::<Vec<_>>();
+        assert_eq!(lifecycle_hits.len(), 2);
+
+        let terminal = lifecycle_hits
+            .iter()
+            .find(|hit| hit.status.as_deref() == Some("exited"))
+            .unwrap();
+        let opened = read_record(&connection, "conversation-1", &terminal.reference)
+            .unwrap()
+            .unwrap();
+        assert!(opened.serialized_json.contains(session_id));
+        assert!(!opened.serialized_json.contains("transcript"));
+    }
+
+    #[test]
     fn search_exclusions_are_applied_before_the_result_limit() {
         let connection = setup();
         let exclude_tool = ConversationHistorySearchFilter {

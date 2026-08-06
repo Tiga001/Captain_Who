@@ -21,6 +21,8 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
             "getContextWindowSnapshot",
             AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
         ),
+        ("listCommandSessions", AGENT_COMMAND_SESSIONS_LIST_METHOD),
+        ("getCommandSession", AGENT_COMMAND_SESSIONS_GET_METHOD),
         ("listPendingActions", AGENT_LIST_PENDING_ACTIONS_METHOD),
         ("approveAction", AGENT_APPROVE_ACTION_METHOD),
         ("rejectAction", AGENT_REJECT_ACTION_METHOD),

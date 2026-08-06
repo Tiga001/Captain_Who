@@ -715,7 +715,7 @@ fn list_journal_entries(
                 let trace =
                     conversation_trace_repository::get_trace_for_message(connection, &message_id)?;
                 if let Some(trace) = &trace {
-                    for item in &trace.items {
+                    for item in trace.items.iter().filter(|item| item.is_model_visible()) {
                         entries.push(ContextCompactionSourceItem::TraceItem {
                             cursor: ContextJournalCursor::trace_item(&message_id, item.sequence()),
                             run_id: trace.run_id.clone(),

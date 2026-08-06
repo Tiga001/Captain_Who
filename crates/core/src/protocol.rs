@@ -1520,6 +1520,123 @@ pub enum AgentCommandOutputStream {
     Stderr,
 }
 
+/// Renderer-safe lifecycle state for a Host-owned command Session.
+///
+/// This is intentionally separate from [`AgentRunStatus`] and approval state. A command Session
+/// may remain `running` after the Agent Run which created it has completed.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandSessionStatus {
+    Starting,
+    Running,
+    Exited,
+    Interrupted,
+    TimedOut,
+    Failed,
+    OutcomeUnknown,
+}
+
+impl AgentCommandSessionStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Exited | Self::Interrupted | Self::TimedOut | Self::Failed | Self::OutcomeUnknown
+        )
+    }
+}
+
+/// Terminal outcomes carried by `command_exited`; an explicit user/Host interruption uses the
+/// separate `command_interrupted` event and therefore cannot be mislabeled here.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandExitStatus {
+    Exited,
+    TimedOut,
+    Failed,
+    OutcomeUnknown,
+}
+
+/// Complete bounded Host projection of one managed command Session.
+///
+/// Approval payloads, raw permission records, process identifiers, environment variables and
+/// unbounded output are deliberately excluded from this cross-process DTO.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionSnapshot {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub origin_run_id: String,
+    pub call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub command: String,
+    pub cwd: String,
+    pub command_digest: String,
+    pub status: AgentCommandSessionStatus,
+    pub started_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub latest_sequence: u64,
+    pub output_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionOutputChunk {
+    pub sequence: u64,
+    pub stream: AgentCommandOutputStream,
+    pub output: String,
+}
+
+/// Non-destructive, cursor-addressed transcript projection for Host reload recovery.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionTranscript {
+    pub requested_after_sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_available_sequence: Option<u64>,
+    pub latest_sequence: u64,
+    pub truncated_before: bool,
+    pub output_capture_truncated: bool,
+    pub chunks: Vec<AgentCommandSessionOutputChunk>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionListInput {
+    pub conversation_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionListOutput {
+    pub sessions: Vec<AgentCommandSessionSnapshot>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionGetInput {
+    pub conversation_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub after_sequence: Option<u64>,
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AgentCommandSessionGetOutput {
+    pub session: AgentCommandSessionSnapshot,
+    pub transcript: AgentCommandSessionTranscript,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentCommandRiskLevel {
@@ -2572,12 +2689,54 @@ pub enum AgentEvent {
         run_id: String,
         diff: AgentDiffProposal,
     },
+    CommandStarted {
+        run_id: String,
+        conversation_id: String,
+        assistant_message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        call_id: String,
+        session_id: String,
+        started_at: u64,
+    },
     CommandOutput {
         run_id: String,
+        conversation_id: String,
+        assistant_message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
         call_id: String,
+        session_id: String,
         sequence: u64,
         stream: AgentCommandOutputStream,
         output: String,
+    },
+    CommandExited {
+        run_id: String,
+        conversation_id: String,
+        assistant_message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        call_id: String,
+        session_id: String,
+        status: AgentCommandExitStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        ended_at: u64,
+        latest_sequence: u64,
+        output_truncated: bool,
+    },
+    CommandInterrupted {
+        run_id: String,
+        conversation_id: String,
+        assistant_message_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        call_id: String,
+        session_id: String,
+        ended_at: u64,
+        latest_sequence: u64,
+        output_truncated: bool,
     },
     Error {
         run_id: Option<String>,
@@ -2785,6 +2944,50 @@ mod tests {
                 error: None,
             },
         };
+        let command_started = AgentEvent::CommandStarted {
+            run_id: "run-contract-v1".to_string(),
+            conversation_id: "conversation-contract-v1".to_string(),
+            assistant_message_id: "assistant-contract-v1".to_string(),
+            project_id: Some("project-contract-v1".to_string()),
+            call_id: "call-command-contract-v1".to_string(),
+            session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
+            started_at: 10,
+        };
+        let command_output = AgentEvent::CommandOutput {
+            run_id: "run-contract-v1".to_string(),
+            conversation_id: "conversation-contract-v1".to_string(),
+            assistant_message_id: "assistant-contract-v1".to_string(),
+            project_id: Some("project-contract-v1".to_string()),
+            call_id: "call-command-contract-v1".to_string(),
+            session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
+            sequence: 1,
+            stream: AgentCommandOutputStream::Stdout,
+            output: "ready\n".to_string(),
+        };
+        let command_exited = AgentEvent::CommandExited {
+            run_id: "run-contract-v1".to_string(),
+            conversation_id: "conversation-contract-v1".to_string(),
+            assistant_message_id: "assistant-contract-v1".to_string(),
+            project_id: Some("project-contract-v1".to_string()),
+            call_id: "call-command-contract-v1".to_string(),
+            session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
+            status: AgentCommandExitStatus::Exited,
+            exit_code: Some(0),
+            ended_at: 20,
+            latest_sequence: 1,
+            output_truncated: false,
+        };
+        let command_interrupted = AgentEvent::CommandInterrupted {
+            run_id: "run-contract-v1".to_string(),
+            conversation_id: "conversation-contract-v1".to_string(),
+            assistant_message_id: "assistant-contract-v1".to_string(),
+            project_id: Some("project-contract-v1".to_string()),
+            call_id: "call-command-contract-v1".to_string(),
+            session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
+            ended_at: 21,
+            latest_sequence: 1,
+            output_truncated: false,
+        };
         let done = AgentEvent::Done {
             run_id: "run-contract-v1".to_string(),
             success: true,
@@ -2804,7 +3007,70 @@ mod tests {
             serde_json::to_value(tool_result).unwrap(),
             events["toolResult"]
         );
+        assert_eq!(
+            serde_json::to_value(command_started).unwrap(),
+            events["commandStarted"]
+        );
+        assert_eq!(
+            serde_json::to_value(command_output).unwrap(),
+            events["commandOutput"]
+        );
+        assert_eq!(
+            serde_json::to_value(command_exited).unwrap(),
+            events["commandExited"]
+        );
+        assert_eq!(
+            serde_json::to_value(command_interrupted).unwrap(),
+            events["commandInterrupted"]
+        );
         assert_eq!(serde_json::to_value(done).unwrap(), events["done"]);
+    }
+
+    #[test]
+    fn managed_command_session_projection_is_camel_case_and_process_safe() {
+        let snapshot = AgentCommandSessionSnapshot {
+            schema_version: 1,
+            session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            origin_run_id: "run-1".to_string(),
+            call_id: "call-1".to_string(),
+            project_id: Some("project-1".to_string()),
+            command: "python3 app.py".to_string(),
+            cwd: "/workspace".to_string(),
+            command_digest: format!("sha256:{}", "a".repeat(64)),
+            status: AgentCommandSessionStatus::Running,
+            started_at: 10,
+            ended_at: None,
+            exit_code: None,
+            latest_sequence: 2,
+            output_truncated: false,
+            archive_ref: None,
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["sessionId"], snapshot.session_id);
+        assert_eq!(value["originRunId"], "run-1");
+        assert_eq!(value["status"], "running");
+        for forbidden in ["pid", "environment", "approvalPayload", "processHandle"] {
+            assert!(value.get(forbidden).is_none(), "leaked {forbidden}");
+        }
+
+        let started = serde_json::to_value(AgentEvent::CommandStarted {
+            run_id: "run-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            project_id: Some("project-1".to_string()),
+            call_id: "call-1".to_string(),
+            session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
+            started_at: 10,
+        })
+        .unwrap();
+        assert_eq!(started["type"], "command_started");
+        assert_eq!(started["conversationId"], "conversation-1");
+        assert_eq!(started["assistantMessageId"], "assistant-1");
+        assert_eq!(started["projectId"], "project-1");
+        assert_eq!(started["sessionId"], snapshot.session_id);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use mycopilot_core::command::CommandSessionManager;
 use mycopilot_core::skills::{
     LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillInstallationId,
     SkillInstallationOutcome, SkillInstallationService, SkillUninstallRequest,
@@ -8,24 +9,27 @@ use mycopilot_core::storage::models::{
     ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
 };
 use mycopilot_core::{
-    AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentFileWriteMode,
-    AgentFileWriteProposal, AgentPermissions, AgentSkillActivation,
-    AgentSkillMaterializationRequest, AgentUsageSummaryRange, AgentWorkspaceContext,
-    AgentWritePermission, ContextCompactionGeneration, ContextCompactionPrefix,
-    ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextJournalCursor, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentCommandSessionListInput,
+    AgentCommandSessionStatus, AgentFileWriteMode, AgentFileWriteProposal, AgentPermissions,
+    AgentSkillActivation, AgentSkillMaterializationRequest, AgentUsageSummaryRange,
+    AgentWorkspaceContext, AgentWritePermission, ContextCompactionGeneration,
+    ContextCompactionPrefix, ContextCompactionSourceItem, ContextCompactionSummary,
+    ContextCompactionSummaryDraft, ContextJournalCursor, ConversationTraceToolResultStatus,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
 
 mod cancellation;
+mod command_sessions;
 mod context_history;
 mod context_runtime;
 mod file_write_permissions;
 mod image_generation;
+mod managed_command_loop;
 mod mcp_approval_expiry;
 mod mcp_approval_lifecycle;
 mod office;

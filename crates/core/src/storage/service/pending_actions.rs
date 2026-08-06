@@ -2224,11 +2224,22 @@ fn validate_manual_file_effect_settlement_request(
     if completed_at < audit.created_at || committed_at != completed_at {
         return Err("manual file-effect settlement timestamps are inconsistent".to_string());
     }
+    let tool_result_json = audit
+        .tool_result_json
+        .as_deref()
+        .ok_or_else(|| "manual file-effect terminal audit lacks tool_result_json".to_string())?;
+    let tool_result = serde_json::from_str::<AgentToolResult>(tool_result_json)
+        .map_err(|error| format!("manual file-effect ToolResult is invalid: {error}"))?;
+    let command_handoff = is_command
+        && audit.command_result_json.is_none()
+        && target_status == "completed"
+        && validate_manual_command_handoff_projection(&tool_result).is_ok();
     let command_result = match (is_command, audit.command_result_json.as_deref()) {
         (true, Some(command_result_json)) => Some(
             serde_json::from_str::<AgentCommandExecutionResult>(command_result_json)
                 .map_err(|error| format!("manual command result is invalid: {error}"))?,
         ),
+        (true, None) if command_handoff => None,
         (true, None) => {
             return Err("manual command terminal audit lacks command_result_json".to_string());
         }
@@ -2240,14 +2251,10 @@ fn validate_manual_file_effect_settlement_request(
             );
         }
     };
-    let tool_result_json = audit
-        .tool_result_json
-        .as_deref()
-        .ok_or_else(|| "manual file-effect terminal audit lacks tool_result_json".to_string())?;
-    let tool_result = serde_json::from_str::<AgentToolResult>(tool_result_json)
-        .map_err(|error| format!("manual file-effect ToolResult is invalid: {error}"))?;
     if let Some(command_result) = command_result.as_ref() {
         validate_manual_command_result_projection(command_result, &tool_result, target_status)?;
+    } else if command_handoff {
+        validate_manual_command_handoff_projection(&tool_result)?;
     }
     if is_mcp_action {
         let validated_rejection = validate_durable_mcp_tool_result(&tool_result, target_status)?;
@@ -2296,6 +2303,60 @@ fn validate_manual_file_effect_settlement_request(
     Ok(())
 }
 
+fn validate_manual_command_handoff_projection(tool_result: &AgentToolResult) -> Result<(), String> {
+    if tool_result.tool != "run_command"
+        || !tool_result.ok
+        || tool_result.error.is_some()
+        || tool_result.exact_archive_file.is_some()
+    {
+        return Err("manual command handoff ToolResult has an invalid envelope".to_string());
+    }
+    let result = tool_result
+        .result
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "manual command handoff ToolResult lacks an object result".to_string())?;
+    const KEYS: [&str; 6] = [
+        "status",
+        "sessionId",
+        "output",
+        "startedAt",
+        "latestSequence",
+        "outputTruncated",
+    ];
+    let session_id = result
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let session_hex = session_id.strip_prefix("cmd_");
+    if result.len() != KEYS.len()
+        || KEYS.iter().any(|key| !result.contains_key(*key))
+        || result.get("status").and_then(serde_json::Value::as_str) != Some("running")
+        || session_hex.is_none_or(|value| {
+            value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || result
+            .get("output")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        || result
+            .get("startedAt")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+        || result
+            .get("latestSequence")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+        || result
+            .get("outputTruncated")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+    {
+        return Err("manual command handoff ToolResult is invalid".to_string());
+    }
+    Ok(())
+}
+
 fn validate_manual_command_result_projection(
     command_result: &AgentCommandExecutionResult,
     tool_result: &AgentToolResult,
@@ -2306,7 +2367,11 @@ fn validate_manual_command_result_projection(
         .result
         .as_ref()
         .expect("canonical command ToolResult always contains execution evidence");
-    if tool_result.result.as_ref() == Some(execution) {
+    let legacy_execution = serde_json::to_value(command_result)
+        .map_err(|error| format!("cannot serialize legacy command execution: {error}"))?;
+    if tool_result.result.as_ref() == Some(execution)
+        || tool_result.result.as_ref() == Some(&legacy_execution)
+    {
         if tool_result.ok != canonical.ok || tool_result.error != canonical.error {
             return Err(
                 "manual command ToolResult terminal outcome differs from its execution evidence"
@@ -2366,7 +2431,10 @@ fn validate_manual_command_result_projection(
             .get("auditError")
             .and_then(serde_json::Value::as_str)
             .is_none()
-        || wrapper.get("execution") != Some(execution)
+        || !matches!(
+            wrapper.get("execution"),
+            Some(value) if value == execution || value == &legacy_execution
+        )
         || target_status != "failed"
         || tool_result.ok
         || tool_result.error.as_deref()

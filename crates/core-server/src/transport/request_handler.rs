@@ -30,6 +30,12 @@ pub(crate) fn handle_request(
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
+        AGENT_COMMAND_SESSIONS_LIST_METHOD => {
+            handle_agent_list_command_sessions(agent_service, request.id, request.params)
+        }
+        AGENT_COMMAND_SESSIONS_GET_METHOD => {
+            handle_agent_get_command_session(agent_service, request.id, request.params)
+        }
         AGENT_CANCEL_RUN_METHOD => {
             handle_agent_cancel_run(agent_service, request.id, request.params)
         }

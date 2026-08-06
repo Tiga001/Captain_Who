@@ -170,7 +170,20 @@ impl ContextCompactionSourceItem {
     pub fn is_safe_boundary(&self) -> bool {
         match self {
             Self::Message { .. } => true,
-            Self::TraceItem { item, .. } => item.is_safe_compaction_boundary(),
+            Self::TraceItem { item, .. } => {
+                item.is_model_visible() && item.is_safe_compaction_boundary()
+            }
+        }
+    }
+
+    /// Whether this durable audit record may be supplied to the compaction model.
+    ///
+    /// Host-owned lifecycle records deliberately stay outside every model input. The model can
+    /// observe command progress only through the explicit `command_session` Tool result.
+    pub(crate) fn is_model_visible(&self) -> bool {
+        match self {
+            Self::Message { .. } => true,
+            Self::TraceItem { item, .. } => item.is_model_visible(),
         }
     }
 

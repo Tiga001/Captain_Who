@@ -639,7 +639,8 @@ fn project_guidance_timeline(
                         }));
                     }
                 }
-                ConversationTurnTraceItem::ToolResult { .. } => {}
+                ConversationTurnTraceItem::ToolResult { .. }
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
         }
     }

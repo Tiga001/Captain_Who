@@ -492,6 +492,14 @@ impl ContinuitySelector {
             ContextCompactionSourceItem::TraceItem { cursor, item, .. } => {
                 if matches!(
                     &**item,
+                    ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                ) {
+                    // Session lifecycle remains available in durable Trace/Exact History but is
+                    // operational audit metadata, not semantic continuity evidence.
+                    return;
+                }
+                if matches!(
+                    &**item,
                     ConversationTurnTraceItem::ToolCall { tool, .. }
                         | ConversationTurnTraceItem::ToolResult { tool, .. }
                         if is_continuity_excluded_tool(tool)
@@ -560,6 +568,7 @@ impl ContinuitySelector {
                         }
                         push_bounded(&mut self.recent, reference, MAX_RECENT_REFS);
                     }
+                    ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
                 }
             }
         }
@@ -877,6 +886,38 @@ mod tests {
         assert!(!rendered.contains("file-499.txt"));
         assert!(rendered.len() < 6_000);
         assert!(estimated_tokens(&rendered) <= CONTEXT_CONTINUITY_TARGET_TOKENS);
+    }
+
+    #[test]
+    fn command_session_lifecycle_does_not_enter_continuity() {
+        let cursor = ContextJournalCursor::trace_item("assistant-1", 3);
+        let lifecycle = ContextCompactionSourceItem::TraceItem {
+            cursor: cursor.clone(),
+            run_id: "run-1".to_string(),
+            created_at: 2_000,
+            item: Box::new(ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 3,
+                phase: crate::ConversationCommandSessionLifecyclePhase::Terminal,
+                session_id: "cmd_0123456789abcdef0123456789abcdef".to_string(),
+                call_id: "command-call".to_string(),
+                status: crate::AgentCommandSessionStatus::Exited,
+                exit_code: Some(0),
+                latest_sequence: 7,
+                output_truncated: false,
+                archive: Default::default(),
+                created_at: 2_000,
+            }),
+        };
+        // Lifecycle sidecars are filtered before a real compaction prefix is built and therefore
+        // cannot legally be its boundary. Exercise the selector directly so this regression
+        // verifies the intended property without constructing an impossible prefix.
+        let mut selector = ContinuitySelector::default();
+        selector.observe(&lifecycle);
+        let snapshot = selector.finish(cursor);
+        snapshot.validate().unwrap();
+
+        assert_eq!(snapshot.all_refs().count(), 0);
+        assert!(snapshot.archived_counts.is_empty());
     }
 
     #[test]

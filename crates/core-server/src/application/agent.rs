@@ -22,9 +22,10 @@ use std::time::{Duration, Instant};
 use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider};
 use mycopilot_core::command::{
     run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer,
-    AgentCommandExecutionResult, CommandAuthorizationSource, CommandExecutionError,
-    CommandRunGuard, CommandRunState, ProcessOutputObserver,
+    AgentCommandExecutionResult, CommandAuthorizationSource, CommandRunGuard, CommandRunState,
 };
+#[cfg(test)]
+use mycopilot_core::command::{CommandExecutionError, ProcessOutputObserver};
 use mycopilot_core::file_input::AgentFileInputExecutionContext;
 use mycopilot_core::file_write::{
     file_draft_snapshot, file_write_action_approval_status, file_write_approval_route,
@@ -96,6 +97,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 mod action_execution;
 mod approval;
+mod command_sessions;
 mod completion;
 mod context_compaction;
 mod context_window;
@@ -107,6 +109,10 @@ mod turn;
 mod usage;
 
 use action_execution::*;
+use command_sessions::{
+    AgentCommandHandoffOutcome, AgentCommandSessionLaunch, AgentCommandSessionRegistry,
+    CommandSessionOwner, StartAgentCommandSession,
+};
 use completion::*;
 use pending_action_store::*;
 use persisted_resume_input::*;
@@ -406,6 +412,7 @@ pub struct AgentService {
     mcp_startup_inspector: Option<Arc<dyn McpApprovalStartupInspector>>,
     mcp_approval_clock: McpApprovalClock,
     process_runs: CommandRunState,
+    command_sessions: AgentCommandSessionRegistry,
     deletion_lifecycle: Arc<Mutex<DeletionLifecycleState>>,
     file_effects: Arc<FileEffectTracker>,
 }
@@ -428,6 +435,12 @@ impl AgentService {
         storage: Arc<StorageService>,
         reconcile_orphaned_traces: bool,
     ) -> Result<Self, String> {
+        // Process handles are intentionally not recoverable across Host restarts. Reconcile the
+        // operational projection before generic orphaned-run handling so no stale row is ever
+        // advertised as controllable by this process.
+        let unresolved_command_sessions = storage
+            .reconcile_agent_command_sessions_on_startup(now_ms())
+            .map_err(|error| format!("failed to reconcile command sessions: {error}"))?;
         // The Host must validate its versioned, secret-free resume projection before Core's
         // generic interrupted-action reconciler parses any persisted input. This includes
         // approved/executing rows, which the reconciler will otherwise make terminal and hide
@@ -468,6 +481,21 @@ impl AgentService {
                 &effect.action_id,
             );
         }
+        // A crash can lose the OS process handle after a Running receipt was committed. The
+        // Session becomes outcome_unknown, but its command may still be modifying files outside
+        // this Host. Preserve the deletion fence until a future explicit reconciliation flow can
+        // acknowledge that uncertainty; never infer safety merely from losing process control.
+        for session in unresolved_command_sessions {
+            file_effects.restore_unsettled(
+                session.snapshot.project_id.as_deref(),
+                Some(&session.snapshot.conversation_id),
+                &session.snapshot.origin_run_id,
+                &pending_action_storage_id(
+                    &session.snapshot.origin_run_id,
+                    &session.snapshot.call_id,
+                ),
+            );
+        }
         let startup_recoverable_mcp_approvals = pending_actions
             .iter()
             .filter(|(_, record)| {
@@ -481,6 +509,7 @@ impl AgentService {
             })
             .map(|(storage_id, _)| storage_id.clone())
             .collect::<HashSet<_>>();
+        let command_sessions = AgentCommandSessionRegistry::new(Arc::clone(&storage));
         let service = Self {
             storage,
             skills: Arc::new(SkillsService::new()),
@@ -507,6 +536,7 @@ impl AgentService {
             mcp_startup_inspector: None,
             mcp_approval_clock: Arc::new(now_ms),
             process_runs: CommandRunState::default(),
+            command_sessions,
             deletion_lifecycle: Arc::new(Mutex::new(DeletionLifecycleState::default())),
             file_effects,
         };

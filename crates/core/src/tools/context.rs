@@ -90,6 +90,7 @@ pub struct ToolExecutionContext {
     skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
+    command_session_executor: Option<Arc<dyn crate::runtime::AgentCommandSessionExecutor>>,
     goal_runtime_state_reader: Option<Arc<dyn GoalRuntimeStateReader>>,
 }
 
@@ -121,6 +122,7 @@ impl ToolExecutionContext {
             text_output_budget: ContextTextBudget::heuristic_default(),
             skill_resources: None,
             command_runtime_profile_resolver: None,
+            command_session_executor: None,
             goal_runtime_state_reader: None,
         }
     }
@@ -177,6 +179,14 @@ impl ToolExecutionContext {
         resolver: Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     ) -> Self {
         self.command_runtime_profile_resolver = resolver;
+        self
+    }
+
+    pub(crate) fn with_command_session_executor(
+        mut self,
+        executor: Option<Arc<dyn crate::runtime::AgentCommandSessionExecutor>>,
+    ) -> Self {
+        self.command_session_executor = executor;
         self
     }
 
@@ -385,6 +395,22 @@ impl ToolExecutionContext {
                     }),
                 )
             })
+    }
+
+    pub(super) fn command_session_executor(
+        &self,
+    ) -> AgentResult<&Arc<dyn crate::runtime::AgentCommandSessionExecutor>> {
+        self.command_session_executor.as_ref().ok_or_else(|| {
+            AgentError::structured(
+                "agent.command_session_unavailable",
+                "当前 Host 未提供命令 Session 控制能力。",
+                serde_json::json!({
+                    "type": "command_session",
+                    "code": "commandSessionUnavailable",
+                    "recovery": "startNewRun"
+                }),
+            )
+        })
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {

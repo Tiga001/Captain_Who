@@ -502,6 +502,11 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         .approve_action("run-cancel-before-spawn", &command.id, notifications)
         .unwrap();
     assert_eq!(approved.status, "approved");
+    assert_eq!(
+        approved.agent_output.status,
+        AgentRunStatus::Running,
+        "approval must end waiting_for_approval before the command process finishes"
+    );
     assert!(service
         .cancel_action("run-cancel-before-spawn", &command.id)
         .unwrap());

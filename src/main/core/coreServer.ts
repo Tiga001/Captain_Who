@@ -5,6 +5,10 @@ import type {
   AgentActionIdRequest,
   AgentCancelRunRequest,
   AgentCancelRunResponse,
+  AgentCommandSessionGetInput,
+  AgentCommandSessionGetOutput,
+  AgentCommandSessionListInput,
+  AgentCommandSessionListOutput,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentContextWindowSnapshotInput,
@@ -104,6 +108,8 @@ import {
   AGENT_CANCEL_ACTION_METHOD,
   AGENT_CANCEL_RUN_METHOD,
   AGENT_CLEAR_USAGE_RECORDS_METHOD,
+  AGENT_COMMAND_SESSIONS_GET_METHOD,
+  AGENT_COMMAND_SESSIONS_LIST_METHOD,
   AGENT_EVENT_NOTIFICATION_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
   AGENT_GET_FILE_WRITE_DIFF_METHOD,
@@ -114,6 +120,10 @@ import {
   AGENT_START_CONVERSATION_TURN_METHOD,
   AGENT_STEER_RUN_METHOD,
   parseAgentActionExecutionOutputForHost,
+  parseAgentCommandSessionGetInput,
+  parseAgentCommandSessionGetOutput,
+  parseAgentCommandSessionListInput,
+  parseAgentCommandSessionListOutput,
   parseAgentEventForHost,
   parsePendingAgentActionSnapshotsForHost,
   parseSkillInstallationCommitOutput,
@@ -649,6 +659,20 @@ export class CoreServer {
       AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
       input
     )
+  }
+
+  listCommandSessions(input: AgentCommandSessionListInput): Promise<AgentCommandSessionListOutput> {
+    const request = parseAgentCommandSessionListInput(input)
+    return this.rpc
+      .request<unknown, AgentCommandSessionListInput>(AGENT_COMMAND_SESSIONS_LIST_METHOD, request)
+      .then(parseAgentCommandSessionListOutput)
+  }
+
+  getCommandSession(input: AgentCommandSessionGetInput): Promise<AgentCommandSessionGetOutput> {
+    const request = parseAgentCommandSessionGetInput(input)
+    return this.rpc
+      .request<unknown, AgentCommandSessionGetInput>(AGENT_COMMAND_SESSIONS_GET_METHOD, request)
+      .then(parseAgentCommandSessionGetOutput)
   }
 
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse> {

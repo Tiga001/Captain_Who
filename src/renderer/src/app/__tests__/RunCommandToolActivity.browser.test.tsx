@@ -21,7 +21,9 @@ const translations: Record<string, string> = {
   'agent.command.runningStatus': '运行中',
   'agent.command.waitingForOutput': '等待命令输出…',
   'agent.command.copyOutput': '复制命令输出',
-  'agent.command.outputCopied': '命令输出已复制'
+  'agent.command.outputCopied': '命令输出已复制',
+  'agent.tool.running': '正在{tool}',
+  'tool.runCommand': '运行命令'
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -118,6 +120,57 @@ describe('RunCommandToolActivity', () => {
 
     expect(screen.container.querySelector('.run-command-shell__output')?.textContent).toBe(
       '等待命令输出…'
+    )
+    expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
+      '运行中'
+    )
+  })
+
+  it('renders a running receipt as started instead of completed and keeps later output', async () => {
+    const call: AgentToolCall = {
+      approvalStatus: 'approved',
+      args: { command: 'python3 app.py', reason: '启动应用' },
+      id: 'managed-command',
+      tool: 'run_command'
+    }
+    const result: AgentToolResult = {
+      callId: call.id,
+      ok: true,
+      result: {
+        status: 'running',
+        sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+        output: 'booting\n',
+        startedAt: 10,
+        latestSequence: 2,
+        outputTruncated: false
+      },
+      tool: 'run_command'
+    }
+    const screen = await render(
+      <RunCommandToolActivity
+        call={call}
+        liveOutput={{
+          callId: call.id,
+          chunks: [
+            { sequence: 2, stream: 'stdout', output: 'booting\n' },
+            { sequence: 3, stream: 'stdout', output: 'ready\n' }
+          ]
+        }}
+        result={result}
+        settledStatus="completed"
+      />
+    )
+
+    expect(screen.container.querySelector('summary')?.textContent).toContain(
+      '正在运行命令 启动应用'
+    )
+    expect(screen.container.querySelector('summary')?.textContent).not.toContain('已运行命令')
+    expect(screen.container.querySelector('.run-command-shell__output')?.textContent).toBe(
+      'booting\nready\n'
+    )
+    expect(screen.container.querySelector('.run-command-shell__status')).toHaveAttribute(
+      'data-status',
+      'running'
     )
     expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
       '运行中'

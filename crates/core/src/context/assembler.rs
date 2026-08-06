@@ -586,11 +586,12 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
 mod tests {
     use super::*;
     use crate::conversation_trace::{
-        ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-        ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        ConversationTraceRecorder, ConversationTraceToolResultStatus, ConversationTurnTrace,
+        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use crate::llm::{model_response_tool_call_id, LlmMessagePlacement};
-    use crate::protocol::AgentApprovalStatus;
+    use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};
     use crate::world_state::{
         WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
     };
@@ -1416,6 +1417,89 @@ mod tests {
         let persisted = compaction_summary();
         assert!(persisted.continuity.is_v2());
         assert!(!persisted.continuity.archived_counts.is_empty());
+    }
+
+    #[test]
+    fn compacted_uncovered_tail_recovers_running_command_receipt_from_durable_trace() {
+        let call_id = model_response_tool_call_id("run-command", 0, 0, "provider-command-call");
+        let call = AgentToolCall {
+            id: call_id.clone(),
+            tool: "run_command".to_string(),
+            args: json!({ "command": "python3 server.py" }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&call);
+        recorder.record_tool_result(
+            &call,
+            &AgentToolResult {
+                exact_archive_file: None,
+                call_id,
+                tool: "run_command".to_string(),
+                ok: true,
+                result: Some(json!({
+                    "status": "running",
+                    "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+                    "output": "server listening on port 3000",
+                    "startedAt": 1_725_000_000_000_i64,
+                    "latestSequence": 3,
+                    "outputTruncated": false,
+                })),
+                error: None,
+            },
+        );
+        let trace = recorder.finish(
+            "run-command",
+            "conversation-1",
+            "assistant-command",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        let historical_assistant = AgentChatMessage {
+            message_id: Some("assistant-command".to_string()),
+            role: "assistant".to_string(),
+            content: "The server is running in a managed Session.".to_string(),
+            created_at: None,
+            conversation_turn_trace: Some(trace),
+            // Simulates reload after only the bounded durable Trace remains available for this
+            // uncovered post-compaction tail.
+            conversation_model_context_items: Vec::new(),
+        };
+
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: Some(compaction_summary()),
+            world_state_records: Vec::new(),
+            goal: None,
+            initial_run_world_state: None,
+            messages: vec![
+                message("user", "start the server"),
+                historical_assistant,
+                message("user", "check whether it is still healthy"),
+            ],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        frame.validate_complete_tool_protocol().unwrap();
+        let tool_result = frame
+            .to_messages()
+            .into_iter()
+            .find(|message| message.role == LlmMessageRole::Tool)
+            .expect("the durable run_command result must be reconstructed after reload");
+        let observation: serde_json::Value = serde_json::from_str(&tool_result.content).unwrap();
+        assert_eq!(observation["status"], "running");
+        assert_eq!(
+            observation["sessionId"],
+            "cmd_0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(observation["output"], "server listening on port 3000");
+        assert_eq!(observation["startedAt"], 1_725_000_000_000_i64);
+        assert_eq!(observation["latestSequence"], 3);
+        assert_eq!(observation["outputTruncated"], false);
     }
 
     #[test]

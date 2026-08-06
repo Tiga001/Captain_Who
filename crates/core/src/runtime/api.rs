@@ -191,6 +191,68 @@ pub type AgentHostActionExecutor = Arc<
         + Sync
         + 'static,
 >;
+
+/// Default amount of time one model-requested command Session poll may wait for new output.
+pub const AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS: u64 = 1_000;
+/// Hard upper bound for model-requested Session polling or interruption settlement.
+pub const AGENT_COMMAND_SESSION_MAX_WAIT_MS: u64 = 30_000;
+/// Maximum incremental command output admitted by one model Tool call.
+///
+/// Keeping this below the central Tool-result budget is important: the Host advances the model's
+/// Session cursor when it returns this output, so a later generic projection must never silently
+/// discard bytes which the model can no longer poll again.
+pub const AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCommandSessionAction {
+    Poll,
+    Interrupt,
+}
+
+/// Trusted invocation passed to the Host-owned command Session registry.
+///
+/// Conversation, run and Tool-call identities are injected by the runtime. They are deliberately
+/// absent from the model-authored schema and must be used by the Host for ownership checks and
+/// audit attribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCommandSessionExecutionRequest {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub call_id: String,
+    pub session_id: String,
+    pub action: AgentCommandSessionAction,
+    pub wait_ms: u64,
+    pub max_output_bytes: usize,
+}
+
+/// Incremental output returned from the Host's one authoritative model-read cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCommandSessionExecutionOutput {
+    pub session_id: String,
+    pub status: crate::protocol::AgentCommandSessionStatus,
+    pub output: String,
+    pub exit_code: Option<i32>,
+    pub requested_after_sequence: u64,
+    pub first_output_sequence: Option<u64>,
+    pub last_output_sequence: Option<u64>,
+    pub latest_sequence: u64,
+    pub truncated_before: bool,
+    pub output_truncated: bool,
+}
+
+/// Narrow Host capability used by the model-facing `command_session` Tool.
+///
+/// The implementation owns process handles, durable ownership, transcript cursors and
+/// conversation isolation. It must serialize interactions for the same Session while permitting
+/// unrelated Sessions to progress independently. Core supplies only a validated request and
+/// receives a bounded, presentation-safe projection.
+pub trait AgentCommandSessionExecutor: Send + Sync {
+    fn execute_command_session(
+        &self,
+        request: AgentCommandSessionExecutionRequest,
+    ) -> AgentResult<AgentCommandSessionExecutionOutput>;
+}
+
 pub type AgentSkillActivationResolver = Arc<
     dyn Fn(&crate::skills::SkillSelection) -> AgentResult<AgentResolvedSkillActivation>
         + Send
@@ -238,6 +300,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
+    pub(super) command_session_executor: Option<Arc<dyn AgentCommandSessionExecutor>>,
     pub(super) steer_input: Option<AgentSteerInputQueue>,
 }
 
@@ -360,6 +423,15 @@ impl AgentRuntimeHostServices {
         resolver: Arc<dyn crate::command::CommandRuntimeProfileResolver>,
     ) -> Self {
         self.command_runtime_profile_resolver = Some(resolver);
+        self
+    }
+
+    /// Supplies the Host-owned, conversation-isolated command Session control boundary.
+    pub fn with_command_session_executor(
+        mut self,
+        executor: Arc<dyn AgentCommandSessionExecutor>,
+    ) -> Self {
+        self.command_session_executor = Some(executor);
         self
     }
 

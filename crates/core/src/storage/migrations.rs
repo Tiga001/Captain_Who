@@ -156,6 +156,364 @@ fn ensure_conversation_goal_schema(connection: &Connection) -> rusqlite::Result<
     )
 }
 
+fn ensure_agent_command_session_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS agent_command_sessions (
+            session_id TEXT PRIMARY KEY CHECK (
+                length(session_id) = 36
+                AND substr(session_id, 1, 4) = 'cmd_'
+                AND substr(session_id, 5) NOT GLOB '*[^0-9A-Fa-f]*'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            origin_run_id TEXT NOT NULL CHECK (
+                length(CAST(origin_run_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            call_id TEXT NOT NULL CHECK (
+                length(CAST(call_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            project_id TEXT,
+            command_projection TEXT NOT NULL CHECK (
+                length(CAST(command_projection AS BLOB)) BETWEEN 1 AND 8192
+            ),
+            cwd_projection TEXT NOT NULL CHECK (
+                length(CAST(cwd_projection AS BLOB)) BETWEEN 1 AND 8192
+            ),
+            command_digest TEXT NOT NULL CHECK (
+                length(command_digest) = 71
+                AND substr(command_digest, 1, 7) = 'sha256:'
+                AND substr(command_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            authorization_source TEXT NOT NULL CHECK (
+                authorization_source IN ('automatic', 'explicit_user')
+            ),
+            approval_provenance_json TEXT NOT NULL CHECK (
+                json_valid(approval_provenance_json)
+                AND length(CAST(approval_provenance_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            permission_provenance_json TEXT NOT NULL CHECK (
+                json_valid(permission_provenance_json)
+                AND length(CAST(permission_provenance_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'starting', 'running', 'exited', 'interrupted',
+                    'timed_out', 'failed', 'outcome_unknown'
+                )
+            ),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            ended_at INTEGER CHECK (ended_at IS NULL OR ended_at >= started_at),
+            exit_code INTEGER,
+            latest_sequence INTEGER NOT NULL DEFAULT 0 CHECK (latest_sequence >= 0),
+            model_read_sequence INTEGER NOT NULL DEFAULT 0 CHECK (
+                model_read_sequence >= 0 AND model_read_sequence <= latest_sequence
+            ),
+            transcript_truncated INTEGER NOT NULL DEFAULT 0 CHECK (
+                transcript_truncated IN (0, 1)
+            ),
+            output_capture_truncated INTEGER NOT NULL DEFAULT 0 CHECK (
+                output_capture_truncated IN (0, 1)
+            ),
+            archive_ref TEXT,
+            terminal_reason TEXT CHECK (
+                terminal_reason IS NULL
+                OR length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 8192
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            settled_at INTEGER CHECK (
+                settled_at IS NULL OR settled_at >= created_at
+            ),
+            UNIQUE (conversation_id, assistant_message_id, call_id),
+            CHECK (
+                (
+                    status IN ('starting', 'running')
+                    AND ended_at IS NULL
+                    AND exit_code IS NULL
+                    AND settled_at IS NULL
+                ) OR (
+                    status NOT IN ('starting', 'running')
+                    AND ended_at IS NOT NULL
+                    AND settled_at IS NOT NULL
+                )
+            ),
+            CHECK (status = 'exited' OR exit_code IS NULL),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (archive_ref)
+                REFERENCES conversation_history_blobs(archive_ref) ON DELETE SET NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_command_session_output_chunks (
+            session_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence > 0),
+            stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+            output TEXT NOT NULL CHECK (
+                length(CAST(output AS BLOB)) BETWEEN 1 AND 65536
+            ),
+            output_bytes INTEGER NOT NULL CHECK (
+                output_bytes = length(CAST(output AS BLOB))
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (session_id, sequence),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_command_session_model_read_receipts (
+            receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (
+                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            call_id TEXT NOT NULL CHECK (
+                length(CAST(call_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            action TEXT NOT NULL CHECK (action IN ('poll', 'interrupt')),
+            max_output_bytes INTEGER NOT NULL CHECK (max_output_bytes > 0),
+            requested_after_sequence INTEGER NOT NULL CHECK (
+                requested_after_sequence >= 0
+            ),
+            first_output_sequence INTEGER CHECK (
+                first_output_sequence IS NULL OR first_output_sequence > 0
+            ),
+            last_output_sequence INTEGER CHECK (
+                last_output_sequence IS NULL OR last_output_sequence > 0
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'starting', 'running', 'exited', 'interrupted',
+                    'timed_out', 'failed', 'outcome_unknown'
+                )
+            ),
+            exit_code INTEGER,
+            latest_sequence INTEGER NOT NULL CHECK (latest_sequence >= 0),
+            truncated_before INTEGER NOT NULL CHECK (truncated_before IN (0, 1)),
+            output_truncated INTEGER NOT NULL CHECK (output_truncated IN (0, 1)),
+            output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
+            output_hash TEXT NOT NULL CHECK (
+                length(output_hash) = 64
+                AND output_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            UNIQUE (conversation_id, session_id, run_id, call_id),
+            CHECK (
+                (first_output_sequence IS NULL AND last_output_sequence IS NULL)
+                OR (
+                    first_output_sequence IS NOT NULL
+                    AND last_output_sequence IS NOT NULL
+                    AND first_output_sequence > requested_after_sequence
+                    AND first_output_sequence <= last_output_sequence
+                    AND last_output_sequence <= latest_sequence
+                )
+            ),
+            CHECK (status = 'exited' OR exit_code IS NULL),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_command_session_lifecycle_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            phase TEXT NOT NULL CHECK (phase IN ('started', 'terminal')),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            event_json TEXT NOT NULL CHECK (
+                json_valid(event_json)
+                AND length(CAST(event_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            archive_ref TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0),
+            trace_sequence INTEGER CHECK (trace_sequence IS NULL OR trace_sequence >= 0),
+            materialized_at INTEGER CHECK (
+                materialized_at IS NULL OR materialized_at >= recorded_at
+            ),
+            UNIQUE (session_id, phase),
+            CHECK (
+                (trace_sequence IS NULL AND materialized_at IS NULL)
+                OR (trace_sequence IS NOT NULL AND materialized_at IS NOT NULL)
+            ),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id)
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id)
+                REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (archive_ref)
+                REFERENCES conversation_history_blobs(archive_ref) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS agent_command_sessions_conversation_state
+            ON agent_command_sessions(conversation_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS agent_command_sessions_project_state
+            ON agent_command_sessions(project_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS agent_command_sessions_origin_run
+            ON agent_command_sessions(origin_run_id, started_at);
+        CREATE INDEX IF NOT EXISTS agent_command_session_model_receipts_retention
+            ON agent_command_session_model_read_receipts(session_id, receipt_id DESC);
+        CREATE INDEX IF NOT EXISTS agent_command_session_lifecycle_pending
+            ON agent_command_session_lifecycle_events(
+                assistant_message_id, trace_sequence, created_at, event_id
+            );
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_message_insert
+        BEFORE INSERT ON agent_command_sessions
+        WHEN NOT EXISTS (
+            SELECT 1 FROM messages
+            WHERE id = NEW.assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session message must be an assistant message in the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_project_insert
+        BEFORE INSERT ON agent_command_sessions
+        WHEN NEW.project_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversations
+              WHERE id = NEW.conversation_id AND project_id = NEW.project_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session project must match its conversation project'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_agent_command_session_identity_update
+        BEFORE UPDATE OF
+            session_id, schema_version, conversation_id, assistant_message_id,
+            origin_run_id, call_id, project_id, command_projection, cwd_projection,
+            command_digest, authorization_source, approval_provenance_json,
+            permission_provenance_json, started_at
+        ON agent_command_sessions
+        BEGIN
+            SELECT RAISE(ABORT, 'command session identity and provenance are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_archive_insert
+        BEFORE INSERT ON agent_command_sessions
+        WHEN NEW.archive_ref IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_history_blobs
+              WHERE archive_ref = NEW.archive_ref
+                AND conversation_id = NEW.conversation_id
+                AND assistant_message_id = NEW.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session archive must belong to its conversation and assistant message'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_archive_update
+        BEFORE UPDATE OF archive_ref ON agent_command_sessions
+        WHEN NEW.archive_ref IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_history_blobs
+              WHERE archive_ref = NEW.archive_ref
+                AND conversation_id = NEW.conversation_id
+                AND assistant_message_id = NEW.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session archive must belong to its conversation and assistant message'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_output_active
+        BEFORE INSERT ON agent_command_session_output_chunks
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_command_sessions
+            WHERE session_id = NEW.session_id
+              AND status IN ('starting', 'running')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session output cannot append after settlement');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_model_receipt_owner
+        BEFORE INSERT ON agent_command_session_model_read_receipts
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_command_sessions
+            WHERE session_id = NEW.session_id
+              AND conversation_id = NEW.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session model receipt owner is invalid');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_agent_command_session_model_receipt_update
+        BEFORE UPDATE ON agent_command_session_model_read_receipts
+        BEGIN
+            SELECT RAISE(ABORT, 'command session model read receipts are immutable');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_lifecycle_owner
+        BEFORE INSERT ON agent_command_session_lifecycle_events
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_command_sessions
+            WHERE session_id = NEW.session_id
+              AND conversation_id = NEW.conversation_id
+              AND assistant_message_id = NEW.assistant_message_id
+              AND call_id = NEW.call_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session lifecycle owner is invalid');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_lifecycle_archive
+        BEFORE INSERT ON agent_command_session_lifecycle_events
+        WHEN NEW.archive_ref IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_history_blobs
+              WHERE archive_ref = NEW.archive_ref
+                AND conversation_id = NEW.conversation_id
+                AND assistant_message_id = NEW.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session lifecycle archive owner is invalid');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_agent_command_session_lifecycle_rewrite
+        BEFORE UPDATE OF
+            session_id, phase, conversation_id, assistant_message_id,
+            call_id, event_json, archive_ref, created_at, recorded_at
+        ON agent_command_session_lifecycle_events
+        BEGIN
+            SELECT RAISE(ABORT, 'command session lifecycle events are append-only');
+        END;
+        ",
+    )
+}
+
+fn ensure_command_session_lifecycle_identity_index(
+    connection: &Connection,
+) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS conversation_trace_command_session_lifecycle_identity
+         ON conversation_turn_trace_items (
+             assistant_message_id,
+             json_extract(item_json, '$.sessionId'),
+             json_extract(item_json, '$.phase')
+         )
+         WHERE item_kind = 'command_session_lifecycle';",
+    )
+}
+
 fn ensure_conversation_history_fts_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "
@@ -932,7 +1290,10 @@ fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite
         CREATE TABLE conversation_turn_trace_items (
             assistant_message_id TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
-            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'user_guidance', 'tool_call', 'tool_result')),
+            item_kind TEXT NOT NULL CHECK (item_kind IN (
+                'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
+                'command_session_lifecycle'
+            )),
             item_json TEXT NOT NULL,
             PRIMARY KEY (assistant_message_id, sequence),
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
@@ -973,7 +1334,9 @@ fn upgrade_conversation_trace_v3_schema(connection: &Connection) -> rusqlite::Re
         [],
         |row| row.get::<_, String>(0),
     )?;
-    if !item_table_sql.contains("'user_guidance'") {
+    if !item_table_sql.contains("'user_guidance'")
+        || !item_table_sql.contains("'command_session_lifecycle'")
+    {
         connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
         let migration = connection.execute_batch(
             "
@@ -984,7 +1347,8 @@ fn upgrade_conversation_trace_v3_schema(connection: &Connection) -> rusqlite::Re
                 assistant_message_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL CHECK (sequence >= 0),
                 item_kind TEXT NOT NULL CHECK (item_kind IN (
-                    'assistant_narration', 'user_guidance', 'tool_call', 'tool_result'
+                    'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
+                    'command_session_lifecycle'
                 )),
                 item_json TEXT NOT NULL,
                 PRIMARY KEY (assistant_message_id, sequence),
@@ -1008,8 +1372,8 @@ fn upgrade_conversation_trace_v3_schema(connection: &Connection) -> rusqlite::Re
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     }
 
-    // Version 3 only adds a trace item kind. Existing v2 JSON remains canonical and must be
-    // upgraded before the incompatible-version cleanup below runs.
+    // Version 3 remains additive: old JSON is canonical while newer builds may persist additional
+    // audit-only item kinds. Upgrade the table constraint before incompatible-version cleanup.
     connection.execute(
         "UPDATE conversation_turn_traces
          SET schema_version = ?1
@@ -1996,7 +2360,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS conversation_turn_trace_items (
             assistant_message_id TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
-            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'user_guidance', 'tool_call', 'tool_result')),
+            item_kind TEXT NOT NULL CHECK (item_kind IN (
+                'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
+                'command_session_lifecycle'
+            )),
             item_json TEXT NOT NULL,
             PRIMARY KEY (assistant_message_id, sequence),
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
@@ -2608,6 +2975,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     upgrade_conversation_trace_commit_schema(connection)?;
     upgrade_conversation_trace_v3_schema(connection)?;
+    ensure_command_session_lifecycle_identity_index(connection)?;
     connection.execute(
         "DELETE FROM conversation_turn_traces WHERE schema_version != ?1",
         [CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
@@ -2720,6 +3088,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     upgrade_canonical_model_identity_schema(connection)?;
     upgrade_usage_consistency_schema(connection)?;
     ensure_conversation_goal_schema(connection)?;
+    ensure_agent_command_session_schema(connection)?;
     ensure_conversation_history_fts_schema(connection)?;
 
     Ok(())
@@ -3793,6 +4162,7 @@ mod tests {
             )
             .unwrap();
         assert!(item_table_sql.contains("'user_guidance'"));
+        assert!(item_table_sql.contains("'command_session_lifecycle'"));
     }
 
     #[test]

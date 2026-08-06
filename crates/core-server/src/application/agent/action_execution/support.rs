@@ -260,6 +260,17 @@ pub(super) enum CommandAuditReconciliation {
     Terminal(AgentToolResult),
 }
 
+/// Compares the complete protocol-visible ToolResult while deliberately ignoring the backend-only
+/// exact-archive spool handle. A commit-unknown handoff may only be adopted when durable storage
+/// contains the exact running receipt the caller attempted to publish.
+pub(super) fn agent_tool_results_match(left: &AgentToolResult, right: &AgentToolResult) -> bool {
+    left.call_id == right.call_id
+        && left.tool == right.tool
+        && left.ok == right.ok
+        && left.result == right.result
+        && left.error == right.error
+}
+
 pub(super) fn office_execution_claim_error(
     existing_status: &str,
     identity_conflict: bool,

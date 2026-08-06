@@ -1,10 +1,11 @@
 use super::*;
 use crate::storage::{migrations, world_state_repository};
 use crate::{
-    AgentApprovalStatus, ConversationTraceToolResultStatus, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, WorldStateDiff,
-    WorldStateLifetime, WorldStateRecord, WorldStateSectionEnvelope, WorldStateSectionId,
-    WorldStateSnapshot, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    AgentApprovalStatus, AgentCommandSessionStatus, ConversationCommandSessionLifecycle,
+    ConversationCommandSessionLifecyclePhase, ConversationTraceToolResultStatus,
+    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    WorldStateDiff, WorldStateLifetime, WorldStateRecord, WorldStateSectionEnvelope,
+    WorldStateSectionId, WorldStateSnapshot, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 
 fn setup() -> Connection {
@@ -512,6 +513,134 @@ fn compacts_complete_history_then_advances_inside_current_run() {
         )
         .unwrap();
     assert_eq!(raw_count, 4);
+}
+
+#[test]
+fn command_session_lifecycle_stays_in_audit_but_out_of_the_compaction_journal() {
+    let connection = setup();
+    connection
+        .execute(
+            "INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json,
+                ui_state_json, created_at, position
+             ) VALUES (
+                'assistant-command', 'conversation-1', 'assistant',
+                'The managed command was handed off.', 'sent', NULL, NULL, 5, 5
+             )",
+            [],
+        )
+        .unwrap();
+    let session_id = "cmd_0123456789abcdef0123456789abcdef";
+    let call_id = "command-call";
+    let mut trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-command".to_string(),
+        conversation_id: "conversation-1".to_string(),
+        assistant_message_id: "assistant-command".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call_id.to_string(),
+                tool: "run_command".to_string(),
+                provenance: None,
+                operation: json!({ "command": "long-running-command" }),
+                approval_status: AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 1,
+                phase: ConversationCommandSessionLifecyclePhase::Started,
+                session_id: session_id.to_string(),
+                call_id: call_id.to_string(),
+                status: AgentCommandSessionStatus::Running,
+                exit_code: None,
+                latest_sequence: 0,
+                output_truncated: false,
+                archive: Default::default(),
+                created_at: 5,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 2,
+                call_id: call_id.to_string(),
+                tool: "run_command".to_string(),
+                status: ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: json!({
+                    "status": "running",
+                    "sessionId": session_id,
+                }),
+                approval_status: AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+        ],
+    };
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 5, 6).unwrap();
+
+    let cursor = ContextJournalCursor::message("assistant-command");
+    let before_terminal = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_turn_trace_items
+                 WHERE assistant_message_id = 'assistant-command'
+                   AND item_kind = 'command_session_lifecycle'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        1,
+        "the started lifecycle event must remain durable audit"
+    );
+    assert!(before_terminal.source_items.iter().all(|item| {
+        !matches!(
+            item,
+            ContextCompactionSourceItem::TraceItem { item, .. }
+                if matches!(&**item, ConversationTurnTraceItem::CommandSessionLifecycle { .. })
+        )
+    }));
+
+    trace
+        .append_command_session_lifecycle(ConversationCommandSessionLifecycle {
+            phase: ConversationCommandSessionLifecyclePhase::Terminal,
+            session_id: session_id.to_string(),
+            call_id: call_id.to_string(),
+            status: AgentCommandSessionStatus::Exited,
+            exit_code: Some(0),
+            latest_sequence: 7,
+            output_truncated: false,
+            archive: Default::default(),
+            created_at: 7,
+        })
+        .unwrap();
+    conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 5, 7).unwrap();
+
+    let after_terminal = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_turn_trace_items
+                 WHERE assistant_message_id = 'assistant-command'
+                   AND item_kind = 'command_session_lifecycle'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        2,
+        "the terminal lifecycle event must remain durable audit"
+    );
+    assert_eq!(after_terminal.source_items, before_terminal.source_items);
+    assert_eq!(
+        after_terminal.source_revision,
+        before_terminal.source_revision
+    );
+    let source_json = serde_json::to_string(&after_terminal.source_items).unwrap();
+    assert!(!source_json.contains("command_session_lifecycle"));
+    assert!(!source_json.contains("\"phase\":\"terminal\""));
 }
 
 #[test]

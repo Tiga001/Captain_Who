@@ -3,7 +3,9 @@ use super::*;
 mod execution_context;
 mod file_authorization;
 
-pub(super) use execution_context::{command_output_observer, AutoApprovedActionContext};
+#[cfg(test)]
+pub(super) use execution_context::command_output_observer;
+pub(super) use execution_context::AutoApprovedActionContext;
 pub(super) use file_authorization::authorize_structured_file_write;
 
 mod runners;
@@ -552,10 +554,214 @@ impl AgentService {
                     Arc::clone(&self.storage),
                 );
                 file_effect_guard.mark_effects_started();
-                let output_observer = notifications.as_ref().map(|notifications| {
-                    command_output_observer(&run_id, &command.id, notifications)
-                });
-                let command_result =
+                let command_result = if let (Some(conversation_id), Some(assistant_message_id)) =
+                    (conversation_id.as_deref(), assistant_message_id.as_deref())
+                {
+                    let cancellation_probe = cancellation_token.clone();
+                    let launch = self.command_sessions.start(StartAgentCommandSession {
+                        owner: CommandSessionOwner {
+                            conversation_id: conversation_id.to_string(),
+                            assistant_message_id: assistant_message_id.to_string(),
+                            origin_run_id: run_id.clone(),
+                            call_id: command.id.clone(),
+                            project_id: agent_input_project_id(&agent_input)
+                                .map(ToString::to_string),
+                        },
+                        workspace_root: workspace_root.as_deref(),
+                        command: &command,
+                        permissions,
+                        authorization_source: CommandAuthorizationSource::Automatic,
+                        approval_provenance: serde_json::json!({
+                            "source": "automatic",
+                            "approvalStatus": "approved",
+                        }),
+                        artifact_runtime: self.artifact_runtime.clone(),
+                        file_inputs: Some(&file_input_context),
+                        notifications: notifications.clone(),
+                        cancellation_token: cancellation_token.clone(),
+                        cancel_probe: Some(Arc::new(move || cancellation_probe.is_cancelled())),
+                    });
+                    match launch {
+                        Ok(AgentCommandSessionLaunch::Running {
+                            snapshot,
+                            tool_result,
+                        }) => {
+                            // The Session lock is the ownership-transfer fence. Cancellation and
+                            // the durable running receipt are decided while the Session is still
+                            // Pending; only a confirmed receipt may move the process to Adopted.
+                            let mut handoff_file_effect_guard = Some(file_effect_guard);
+                            let mut audit_definitely_uncommitted = false;
+                            let handoff = self.command_sessions.commit_handoff(
+                                &snapshot.session_id,
+                                &mut handoff_file_effect_guard,
+                                || cancellation_token.is_cancelled(),
+                                || {
+                                    let finalized = self.finalize_auto_action_execution_audit(
+                                        &run_id,
+                                        Some(conversation_id),
+                                        Some(assistant_message_id),
+                                        &agent_input,
+                                        &action,
+                                        "completed",
+                                        None,
+                                        &tool_result,
+                                        None,
+                                        created_at,
+                                        now_ms(),
+                                    );
+                                    let Err(finalize_error) = finalized else {
+                                        return Ok(());
+                                    };
+                                    match self
+                                        .inspect_auto_action_execution_audit(
+                                            &run_id,
+                                            Some(conversation_id),
+                                            Some(assistant_message_id),
+                                            &agent_input,
+                                            &action,
+                                            created_at,
+                                        )
+                                        .map_err(|inspect_error| {
+                                            format!(
+                                                "automatic command handoff audit failed ({finalize_error}) and could not be inspected: {inspect_error}"
+                                            )
+                                        })
+                                        .and_then(|outcome| {
+                                            reconcile_command_audit_outcome(&command, outcome)
+                                        })
+                                    {
+                                        Ok(CommandAuditReconciliation::Terminal(persisted))
+                                            if agent_tool_results_match(
+                                                &persisted,
+                                                &tool_result,
+                                            ) =>
+                                        {
+                                            // SQLite committed the exact running receipt even
+                                            // though the caller observed a post-commit error.
+                                            Ok(())
+                                        }
+                                        Ok(CommandAuditReconciliation::Executing) => {
+                                            audit_definitely_uncommitted = true;
+                                            Err(format!(
+                                                "automatic command handoff audit is still executing after finalization failed: {finalize_error}"
+                                            ))
+                                        }
+                                        Ok(CommandAuditReconciliation::Terminal(_)) => Err(
+                                            format!(
+                                                "automatic command handoff audit committed a different ToolResult after finalization failed: {finalize_error}"
+                                            ),
+                                        ),
+                                        Err(error) => Err(error),
+                                    }
+                                },
+                            );
+                            match handoff {
+                                Ok(AgentCommandHandoffOutcome::Adopted) => {
+                                    debug_assert!(handoff_file_effect_guard.is_none());
+                                    return Ok(tool_result);
+                                }
+                                Ok(AgentCommandHandoffOutcome::CancelledBeforeCommit) => {
+                                    let terminal = self
+                                        .command_sessions
+                                        .abort_before_handoff(&snapshot.session_id)
+                                        .map_err(|error| {
+                                            AgentError::structured(
+                                                "agent.command_session_pre_handoff_abort_failed",
+                                                "The command was cancelled before its durable handoff, but the Host could not confirm process termination.",
+                                                serde_json::json!({
+                                                    "type": "command_session",
+                                                    "code": "preHandoffTerminationUnconfirmed",
+                                                    "sessionId": snapshot.session_id,
+                                                    "effectsMayHaveOccurred": true,
+                                                    "terminationConfirmed": false,
+                                                    "error": bounded_audit_error(&error),
+                                                }),
+                                            )
+                                        })?;
+                                    file_effect_guard = handoff_file_effect_guard
+                                        .take()
+                                        .expect("cancelled handoff retains the file-effect lease");
+                                    let mut execution = terminal.execution;
+                                    execution.cancelled = true;
+                                    execution
+                                }
+                                Ok(AgentCommandHandoffOutcome::PersistenceFailed(error))
+                                    if audit_definitely_uncommitted =>
+                                {
+                                    let terminal = self
+                                        .command_sessions
+                                        .abort_before_handoff(&snapshot.session_id)
+                                        .map_err(|abort_error| {
+                                            AgentError::structured(
+                                                "agent.command_session_pre_handoff_abort_failed",
+                                                "The command handoff receipt was not committed, and the Host could not confirm process termination.",
+                                                serde_json::json!({
+                                                    "type": "command_session",
+                                                    "code": "preHandoffTerminationUnconfirmed",
+                                                    "sessionId": snapshot.session_id,
+                                                    "effectsMayHaveOccurred": true,
+                                                    "terminationConfirmed": false,
+                                                    "auditError": bounded_audit_error(&error),
+                                                    "terminationError": bounded_audit_error(&abort_error),
+                                                }),
+                                            )
+                                        })?;
+                                    file_effect_guard = handoff_file_effect_guard.take().expect(
+                                        "failed durable handoff retains the file-effect lease",
+                                    );
+                                    let mut execution = terminal.execution;
+                                    execution.error.get_or_insert_with(|| {
+                                        format!(
+                                            "Command Session was terminated before handoff because its running receipt was not durable: {error}"
+                                        )
+                                    });
+                                    execution
+                                }
+                                Ok(AgentCommandHandoffOutcome::PersistenceFailed(error)) => {
+                                    let termination = self
+                                        .command_sessions
+                                        .abort_before_handoff(&snapshot.session_id);
+                                    return Err(AgentError::structured(
+                                        "agent.command_session_handoff_indeterminate",
+                                        "The command Session was not handed off because its durable running receipt could not be confirmed.",
+                                        serde_json::json!({
+                                            "type": "command_session",
+                                            "code": "handoffIndeterminate",
+                                            "sessionId": snapshot.session_id,
+                                            "effectsMayHaveOccurred": true,
+                                            "terminationConfirmed": termination.is_ok(),
+                                            "auditError": bounded_audit_error(&error),
+                                            "terminationError": termination.as_ref().err().map(|value| bounded_audit_error(value)),
+                                            "execution": termination.as_ref().ok().map(|value| &value.execution),
+                                        }),
+                                    ));
+                                }
+                                Err(error) => {
+                                    let termination = self
+                                        .command_sessions
+                                        .abort_before_handoff(&snapshot.session_id);
+                                    return Err(AgentError::structured(
+                                        "agent.command_session_handoff_failed",
+                                        "The command Session ownership transfer could not be completed safely.",
+                                        serde_json::json!({
+                                            "type": "command_session",
+                                            "code": "handoffFailed",
+                                            "sessionId": snapshot.session_id,
+                                            "effectsMayHaveOccurred": true,
+                                            "terminationConfirmed": termination.is_ok(),
+                                            "handoffError": bounded_audit_error(&error),
+                                            "terminationError": termination.as_ref().err().map(|value| bounded_audit_error(value)),
+                                        }),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(AgentCommandSessionLaunch::Exited(terminal)) => terminal.execution,
+                        Err(error) => failed_command_result(&command_for_error, error, None),
+                    }
+                } else {
+                    // Internal callers without durable conversation identity retain the legacy
+                    // synchronous adapter; product Agent turns always use managed Sessions.
                     run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
                         workspace_root.as_deref(),
                         &command,
@@ -565,7 +771,7 @@ impl AgentService {
                         None,
                         self.artifact_runtime.as_deref(),
                         Some(&file_input_context),
-                        output_observer,
+                        None,
                     )
                     .unwrap_or_else(|error| {
                         let policy_evaluation = error.policy_evaluation().cloned();
@@ -577,7 +783,8 @@ impl AgentService {
                         );
                         result.artifact_observation = artifact_observation;
                         result
-                    });
+                    })
+                };
                 let command_succeeded = command_result.error.is_none()
                     && !command_result.timed_out
                     && !command_result.cancelled
@@ -1119,6 +1326,7 @@ pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtim
     )
 }
 
+#[cfg(test)]
 pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
     record: &PendingActionRecord,
     cancellation_token: AgentCancellationToken,

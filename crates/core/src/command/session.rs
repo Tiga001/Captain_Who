@@ -141,6 +141,28 @@ pub struct CommandSessionPoll {
     pub output: CommandOutputBatch,
 }
 
+/// Host-facing lifecycle notifications emitted from the one authoritative
+/// session state machine. Output notifications carry the exact transcript
+/// sequence used by poll/read operations; hosts must not invent a second
+/// sequence domain.
+#[derive(Debug, Clone)]
+pub enum CommandSessionLifecycleEvent {
+    Started(CommandSessionSnapshot),
+    Output {
+        session_id: CommandSessionId,
+        chunk: CommandOutputChunk,
+        latest_sequence: u64,
+        output_truncated: bool,
+    },
+    Terminal(Box<CommandTerminalResult>),
+}
+
+pub type CommandSessionLifecycleObserver =
+    Arc<dyn Fn(CommandSessionLifecycleEvent) + Send + Sync + 'static>;
+
+pub(crate) type CommandSessionCompletionHook =
+    Box<dyn FnOnce(&mut AgentCommandExecutionResult) + Send + 'static>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandSessionError {
     InvalidSessionId,
@@ -209,7 +231,6 @@ struct ModelInteractionState {
     output_cursor: u64,
 }
 
-#[derive(Debug)]
 pub(crate) struct ManagedCommandSession {
     id: CommandSessionId,
     scope_id: CommandSessionScopeId,
@@ -217,9 +238,27 @@ pub(crate) struct ManagedCommandSession {
     started_at: u64,
     observed: Mutex<ObservedSessionState>,
     changed: Condvar,
+    /// Serializes state transitions with lifecycle delivery. Output sequence numbers are assigned
+    /// under `observed`; taking this fence first guarantees callbacks observe Started, every
+    /// Output, and Terminal in exactly that same order even when stdout/stderr readers race.
+    lifecycle_order: Mutex<()>,
     interaction: Mutex<ModelInteractionState>,
     control_tx: SyncSender<ProcessControl>,
     watcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    lifecycle_observer: Option<CommandSessionLifecycleObserver>,
+}
+
+impl fmt::Debug for ManagedCommandSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedCommandSession")
+            .field("id", &self.id)
+            .field("scope_id", &self.scope_id)
+            .field("projection", &self.projection)
+            .field("started_at", &self.started_at)
+            .field("snapshot", &self.snapshot())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ManagedCommandSession {
@@ -230,6 +269,7 @@ impl ManagedCommandSession {
         started_at: u64,
         transcript_bytes: usize,
         output_observer: Option<ProcessOutputObserver>,
+        lifecycle_observer: Option<CommandSessionLifecycleObserver>,
     ) -> (Arc<Self>, Receiver<ProcessControl>) {
         let (control_tx, control_rx) = mpsc::sync_channel(4);
         let live_output = output_observer.and_then(start_live_output_dispatcher);
@@ -247,9 +287,11 @@ impl ManagedCommandSession {
                 terminal_result: None,
             }),
             changed: Condvar::new(),
+            lifecycle_order: Mutex::new(()),
             interaction: Mutex::new(ModelInteractionState::default()),
             control_tx,
             watcher: Mutex::new(None),
+            lifecycle_observer,
         });
         (session, control_rx)
     }
@@ -267,11 +309,17 @@ impl ManagedCommandSession {
     }
 
     pub(crate) fn mark_running(&self) {
-        let mut observed = lock(&self.observed);
-        if observed.state == CommandSessionState::Starting {
+        let _lifecycle_order = lock(&self.lifecycle_order);
+        let snapshot = {
+            let mut observed = lock(&self.observed);
+            if observed.state != CommandSessionState::Starting {
+                return;
+            }
             observed.state = CommandSessionState::Running;
             self.changed.notify_all();
-        }
+            self.snapshot_from(&observed)
+        };
+        self.notify_lifecycle(CommandSessionLifecycleEvent::Started(snapshot));
     }
 
     pub(crate) fn commit_output(
@@ -279,13 +327,29 @@ impl ManagedCommandSession {
         stream: crate::AgentCommandOutputStream,
         text: String,
     ) -> Vec<CommandOutputChunk> {
-        let mut observed = lock(&self.observed);
-        if let Some(live) = observed.live_output.as_mut() {
-            live.emit(stream, &text);
-        }
-        let committed = observed.transcript.commit(stream, text);
-        if !committed.is_empty() {
-            self.changed.notify_all();
+        let _lifecycle_order = lock(&self.lifecycle_order);
+        let (committed, output_truncated) = {
+            let mut observed = lock(&self.observed);
+            if let Some(live) = observed.live_output.as_mut() {
+                live.emit(stream, &text);
+            }
+            let committed = observed.transcript.commit(stream, text);
+            if !committed.is_empty() {
+                self.changed.notify_all();
+            }
+            (committed, observed.transcript.output_truncated())
+        };
+        for chunk in committed.iter().cloned() {
+            // One lifecycle event represents one durably appendable prefix. Using the batch's
+            // final sequence on every chunk would let consumers advance their persistence watermark
+            // before the remaining chunks have actually been delivered.
+            let latest_sequence = chunk.sequence;
+            self.notify_lifecycle(CommandSessionLifecycleEvent::Output {
+                session_id: self.id.clone(),
+                chunk,
+                latest_sequence,
+                output_truncated,
+            });
         }
         committed
     }
@@ -297,6 +361,7 @@ impl ManagedCommandSession {
         error: Option<String>,
         output_capture_incomplete: bool,
     ) -> bool {
+        let _lifecycle_order = lock(&self.lifecycle_order);
         let live_output = {
             let mut observed = lock(&self.observed);
             if observed.state.is_terminal() {
@@ -311,12 +376,19 @@ impl ManagedCommandSession {
         if let Some(live_output) = live_output {
             live_output.finish(Duration::from_millis(250));
         }
-        let mut observed = lock(&self.observed);
-        observed.state = state;
-        observed.ended_at = Some(unix_time_millis());
-        observed.error = error;
-        observed.terminal_result = Some(result);
-        self.changed.notify_all();
+        let terminal = {
+            let mut observed = lock(&self.observed);
+            observed.state = state;
+            observed.ended_at = Some(unix_time_millis());
+            observed.error = error;
+            observed.terminal_result = Some(result.clone());
+            self.changed.notify_all();
+            CommandTerminalResult {
+                snapshot: self.snapshot_from(&observed),
+                execution: result,
+            }
+        };
+        self.notify_lifecycle(CommandSessionLifecycleEvent::Terminal(Box::new(terminal)));
         true
     }
 
@@ -495,6 +567,14 @@ impl ManagedCommandSession {
             let _ = self.control_tx.try_send(ProcessControl::ForceTerminate);
         }
     }
+
+    fn notify_lifecycle(&self, event: CommandSessionLifecycleEvent) {
+        let Some(observer) = self.lifecycle_observer.as_ref() else {
+            return;
+        };
+        let observer = Arc::clone(observer);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(event)));
+    }
 }
 
 fn start_live_output_dispatcher(observer: ProcessOutputObserver) -> Option<LiveOutputState> {
@@ -572,6 +652,7 @@ pub(crate) fn run_session_watcher(
     hard_timeout: Option<Duration>,
     interrupt_grace: Duration,
     drain_grace: Duration,
+    completion_hook: Option<CommandSessionCompletionHook>,
     on_terminal: Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut intent = None;
@@ -698,7 +779,7 @@ pub(crate) fn run_session_watcher(
                 .and_then(std::process::ExitStatus::code),
         },
     };
-    let result = AgentCommandExecutionResult {
+    let mut result = AgentCommandExecutionResult {
         command: session.projection.command.clone(),
         cwd: session.projection.cwd.clone(),
         exit_code: exit_status
@@ -720,6 +801,14 @@ pub(crate) fn run_session_watcher(
         input_files: Vec::new(),
         runtime: None,
     };
+    if let Some(completion_hook) = completion_hook {
+        let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            completion_hook(&mut result);
+        }));
+        if completion.is_err() {
+            result.error = Some("命令终态结算回调异常退出。".to_string());
+        }
+    }
     session.complete(state, result, error, output_capture_incomplete);
     on_terminal();
 }

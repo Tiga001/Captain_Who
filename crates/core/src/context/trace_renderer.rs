@@ -51,7 +51,7 @@ impl ConversationTraceRenderer {
             items: trace
                 .items
                 .iter()
-                .filter(|item| item.sequence() > covered_sequence)
+                .filter(|item| item.sequence() > covered_sequence && item.is_model_visible())
                 .cloned()
                 .collect(),
         };
@@ -112,15 +112,22 @@ impl ConversationTraceRenderer {
                     operation,
                     ..
                 } => {
-                    let result_sequence = trace.items.get(index + 1).and_then(|item| match item {
-                        ConversationTurnTraceItem::ToolResult { sequence, .. } => Some(*sequence),
-                        _ => None,
-                    });
+                    let result_sequence = trace.items[index + 1..]
+                        .iter()
+                        .find(|item| item.is_model_visible())
+                        .and_then(|item| match item {
+                            ConversationTurnTraceItem::ToolResult { sequence, .. } => {
+                                Some(*sequence)
+                            }
+                            _ => None,
+                        });
                     let Some(result_sequence) = result_sequence else {
                         // The durable audit may end with one process-owned unresolved call. It is
                         // intentionally invisible to model context until its result is appended.
                         if trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-                            && index + 1 == trace.items.len()
+                            && !trace.items[index + 1..]
+                                .iter()
+                                .any(ConversationTurnTraceItem::is_model_visible)
                         {
                             continue;
                         }
@@ -192,6 +199,10 @@ impl ConversationTraceRenderer {
                         trace_item_metadata(&trace.assistant_message_id, item.sequence())
                             .with_group(group),
                     ));
+                }
+                ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {
+                    // Host lifecycle audit is intentionally invisible to model context. Only an
+                    // explicit command_session Tool result exposes later output to the model.
                 }
             }
         }
@@ -300,11 +311,12 @@ mod tests {
     use super::*;
     use crate::context::ContextFrame;
     use crate::conversation_trace::{
-        ConversationTraceToolResultStatus, ConversationTurnTraceTerminalStatus,
-        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        ConversationCommandSessionLifecyclePhase, ConversationTraceToolResultStatus,
+        ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use crate::llm::{model_response_tool_call_id, LlmMessageRole};
     use crate::protocol::{AgentApprovalStatus, AgentContextCheckpointToolCall};
+    use crate::AgentCommandSessionStatus;
 
     fn trace() -> ConversationTurnTrace {
         let call_id = model_response_tool_call_id("run/with spaces", 0, 0, "provider-call-1");
@@ -426,6 +438,103 @@ mod tests {
             .join("\n");
         assert!(!context.contains("todo_update"));
         assert!(!context.contains("Do not carry me"));
+    }
+
+    #[test]
+    fn command_session_audit_is_not_rendered_or_required_in_model_context_log() {
+        let mut trace = trace();
+        let call_id = match &trace.items[1] {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => call_id.clone(),
+            _ => panic!("expected tool call"),
+        };
+        match &mut trace.items[1] {
+            ConversationTurnTraceItem::ToolCall { tool, .. } => *tool = "run_command".to_string(),
+            _ => unreachable!(),
+        }
+        match &mut trace.items[2] {
+            ConversationTurnTraceItem::ToolResult { tool, sequence, .. } => {
+                *tool = "run_command".to_string();
+                *sequence = 6;
+            }
+            _ => unreachable!(),
+        }
+        trace.items.insert(
+            2,
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 5,
+                phase: ConversationCommandSessionLifecyclePhase::Started,
+                session_id: "cmd_0123456789abcdef0123456789abcdef".to_string(),
+                call_id,
+                status: AgentCommandSessionStatus::Running,
+                exit_code: None,
+                latest_sequence: 0,
+                output_truncated: false,
+                archive: Default::default(),
+                created_at: 1_000,
+            },
+        );
+
+        let rendered = ConversationTraceRenderer::render(&trace).unwrap();
+        assert_eq!(rendered.activity_items.len(), 3);
+        assert!(!ContextFrame::new(rendered.activity_items)
+            .to_messages()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .contains("cmd_0123456789abcdef0123456789abcdef"));
+
+        let model_context_items = trace
+            .items
+            .iter()
+            .filter(|item| item.is_model_visible())
+            .map(|item| match item {
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence, content, ..
+                } => ConversationModelContextItem {
+                    sequence: *sequence,
+                    ordinal: 0,
+                    role: "assistant".to_string(),
+                    content: content.clone(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    is_error: false,
+                },
+                ConversationTurnTraceItem::ToolCall {
+                    sequence,
+                    call_id,
+                    tool,
+                    operation,
+                    ..
+                } => ConversationModelContextItem {
+                    sequence: *sequence,
+                    ordinal: 0,
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![AgentContextCheckpointToolCall {
+                        id: call_id.clone(),
+                        name: tool.clone(),
+                        args: operation.clone(),
+                    }],
+                    is_error: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence, call_id, ..
+                } => ConversationModelContextItem {
+                    sequence: *sequence,
+                    ordinal: 0,
+                    role: "tool".to_string(),
+                    content: "command is running".to_string(),
+                    tool_call_id: Some(call_id.clone()),
+                    tool_calls: Vec::new(),
+                    is_error: false,
+                },
+                ConversationTurnTraceItem::UserGuidance { .. }
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        ConversationTraceRenderer::render_with_model_context(&trace, &model_context_items).unwrap();
     }
 
     #[test]
@@ -611,7 +720,8 @@ mod tests {
                     *call_id = legacy_id.clone();
                 }
                 ConversationTurnTraceItem::AssistantNarration { .. }
-                | ConversationTurnTraceItem::UserGuidance { .. } => {}
+                | ConversationTurnTraceItem::UserGuidance { .. }
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
         }
 

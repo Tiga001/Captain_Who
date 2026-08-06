@@ -411,7 +411,6 @@
           "absent": [
             "/result/command",
             "/result/cwd",
-            "/result/durationMs",
             "/result/policyEvaluation",
             "/result/artifactObservation",
             "/result/inputFiles"

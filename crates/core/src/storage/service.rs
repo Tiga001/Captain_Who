@@ -14,8 +14,9 @@ use crate::storage::models::{
     ModelSettingsRecord, ModelSettingsSnapshot, ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
-    agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
-    chat_repository, chat_search_repository, composer_draft_repository, config_repository,
+    agent_action_audit_repository, agent_command_session_repository,
+    agent_prompt_preferences_repository, attachment_repository, chat_repository,
+    chat_search_repository, composer_draft_repository, config_repository,
     context_compaction_receipt_repository, context_compaction_repository,
     conversation_fork_repository, conversation_goal_repository,
     conversation_history_archive_repository, conversation_history_repository,
@@ -42,6 +43,7 @@ use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 mod attachments;
+mod command_sessions;
 mod compaction;
 mod conversations;
 mod file_drafts;
@@ -58,6 +60,7 @@ mod turn_diffs;
 mod world_state;
 
 use attachments::*;
+pub use command_sessions::AgentCommandSessionLifecycleAppendOutcome;
 pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutcome};
 pub use lifecycle::*;
 pub use pending_actions::{

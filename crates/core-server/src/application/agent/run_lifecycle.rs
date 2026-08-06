@@ -296,18 +296,23 @@ impl AgentService {
     }
 
     fn cancel_run_internal(&self, run_id: &str) -> bool {
-        let cancellations = self
-            .cancellations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let cancelled_run = if let Some(token) = cancellations.get(run_id) {
-            token.cancel();
-            true
-        } else {
-            false
+        let cancelled_run = {
+            let cancellations = self
+                .cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(token) = cancellations.get(run_id) {
+                token.cancel();
+                true
+            } else {
+                false
+            }
         };
+        // This fence only reaches Sessions which have not durably transferred ownership. Once a
+        // running receipt wins `commit_handoff`, cancelling the Agent Run cannot kill the process.
+        let cancelled_sessions = self.command_sessions.cancel_pre_handoff_for_run(run_id);
         let cancelled_processes = self.process_runs.cancel_run(run_id);
-        cancelled_run || cancelled_processes > 0
+        cancelled_run || cancelled_sessions > 0 || cancelled_processes > 0
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
@@ -343,6 +348,9 @@ impl AgentService {
         for run_id in &run_ids {
             self.cancel_run_internal(run_id);
         }
+        // A handed-off command is no longer owned by its Agent Run. Project deletion is an
+        // explicit process-lifecycle boundary and therefore terminates those Sessions directly.
+        self.command_sessions.terminate_project(project_id);
 
         if !self
             .file_effects
@@ -470,6 +478,10 @@ impl AgentService {
         for run_id in &run_ids {
             self.cancel_run_internal(run_id);
         }
+        // Agent cancellation deliberately does not reach handed-off Sessions; conversation
+        // deletion does, and waits below for their terminal file-effect settlement.
+        self.command_sessions
+            .terminate_conversation(conversation_id);
 
         if !self
             .file_effects
@@ -585,6 +597,8 @@ impl AgentService {
         for run_id in &run_ids {
             self.cancel_run_internal(run_id);
         }
+        self.command_sessions
+            .terminate_messages(conversation_id, &message_id_set);
 
         if !self
             .file_effects
@@ -729,32 +743,48 @@ impl AgentService {
 
         for (run_id, token) in &active_runs {
             token.cancel();
+            self.command_sessions.cancel_pre_handoff_for_run(run_id);
             self.process_runs.cancel_run(run_id);
         }
 
-        if active_runs.is_empty() {
-            return (0, false);
-        }
+        // Process shutdown and Agent Run retirement advance independently under one deadline.
+        // The process lane closes start admission, terminates every group, and waits for durable
+        // Session settlement even when there are no active model runs.
+        let command_sessions = self.command_sessions.clone();
+        let (session_result_tx, session_result_rx) = std::sync::mpsc::sync_channel(1);
+        let _session_worker = std::thread::Builder::new()
+            .name("agent-command-session-shutdown".to_string())
+            .spawn(move || {
+                let _ = session_result_tx.send(command_sessions.shutdown(timeout));
+            });
 
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut sessions_settled = false;
+        let mut active_runs_settled = active_runs.is_empty();
         loop {
             let active_run_count = self
                 .cancellations
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .len();
-            if active_run_count == 0 {
+            active_runs_settled |= active_run_count == 0;
+            if let Ok(settled) = session_result_rx.try_recv() {
+                sessions_settled = settled;
+            }
+            if active_runs_settled && sessions_settled {
                 return (active_runs.len(), false);
             }
             if tokio::time::Instant::now() >= deadline {
-                let remaining_run_ids = self
-                    .cancellations
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                self.persist_forced_cancelled_runs(&remaining_run_ids);
+                if !active_runs_settled {
+                    let remaining_run_ids = self
+                        .cancellations
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.persist_forced_cancelled_runs(&remaining_run_ids);
+                }
                 return (active_runs.len(), true);
             }
 

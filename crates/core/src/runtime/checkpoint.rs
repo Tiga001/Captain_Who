@@ -764,7 +764,8 @@ fn validate_conversation_trace_tool_call_ids(
                 validate_model_tool_call_id(call_id)?;
             }
             ConversationTurnTraceItem::AssistantNarration { .. }
-            | ConversationTurnTraceItem::UserGuidance { .. } => {}
+            | ConversationTurnTraceItem::UserGuidance { .. }
+            | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
         }
     }
     Ok(())

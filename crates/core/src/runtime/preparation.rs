@@ -222,15 +222,18 @@ pub(super) fn hydrate_legacy_model_history(
                     operation,
                     ..
                 } => {
-                    let paired = trace.items.get(index + 1).is_some_and(|next| {
-                        matches!(
-                            next,
-                            crate::ConversationTurnTraceItem::ToolResult {
-                                call_id: result_call_id,
-                                ..
-                            } if result_call_id == call_id
-                        )
-                    });
+                    let paired = trace.items[index + 1..]
+                        .iter()
+                        .find(|item| item.is_model_visible())
+                        .is_some_and(|next| {
+                            matches!(
+                                next,
+                                crate::ConversationTurnTraceItem::ToolResult {
+                                    call_id: result_call_id,
+                                    ..
+                                } if result_call_id == call_id
+                            )
+                        });
                     if !paired {
                         break;
                     }
@@ -299,6 +302,7 @@ pub(super) fn hydrate_legacy_model_history(
                         ),
                     ))
                 }
+                crate::ConversationTurnTraceItem::CommandSessionLifecycle { .. } => None,
             };
             let Some(model_message) = model_message else {
                 continue;

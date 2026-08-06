@@ -120,6 +120,8 @@ fn is_blocking_read_method(method: &str) -> bool {
     matches!(
         method,
         AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD
+            | AGENT_COMMAND_SESSIONS_LIST_METHOD
+            | AGENT_COMMAND_SESSIONS_GET_METHOD
             | AGENT_LIST_PENDING_ACTIONS_METHOD
             | AGENT_GET_USAGE_SUMMARY_METHOD
             | AGENT_READ_FILE_DRAFT_METHOD
@@ -622,6 +624,8 @@ mod tests {
         assert!(is_blocking_read_method(STORAGE_LOAD_CONVERSATION_METHOD));
         assert!(is_blocking_read_method(STORAGE_LOAD_UI_PREFERENCES_METHOD));
         assert!(is_blocking_read_method(STORAGE_LOAD_COMPOSER_DRAFTS_METHOD));
+        assert!(is_blocking_read_method(AGENT_COMMAND_SESSIONS_LIST_METHOD));
+        assert!(is_blocking_read_method(AGENT_COMMAND_SESSIONS_GET_METHOD));
         assert!(!is_blocking_read_method(
             STORAGE_SAVE_CONVERSATION_META_METHOD
         ));

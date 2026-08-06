@@ -18,6 +18,12 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.getContextWindowSnapshot, (_event, input) =>
     captureHostInvocation(() => coreServer.getContextWindowSnapshot(input))
   )
+  ipcMain.handle(HOST_CHANNELS.agent.listCommandSessions, (_event, input) =>
+    captureHostInvocation(() => coreServer.listCommandSessions(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.getCommandSession, (_event, input) =>
+    captureHostInvocation(() => coreServer.getCommandSession(input))
+  )
   ipcMain.handle(HOST_CHANNELS.agent.steerRun, (_event, input) => coreServer.steerRun(input))
   ipcMain.handle(HOST_CHANNELS.agent.cancelRun, (_event, input) => coreServer.cancelRun(input))
   ipcMain.handle(HOST_CHANNELS.agent.listPendingActions, () => coreServer.listPendingActions())

@@ -3,6 +3,10 @@ import type {
   AgentActionIdRequest,
   AgentCancelRunRequest,
   AgentCancelRunResponse,
+  AgentCommandSessionGetInput,
+  AgentCommandSessionGetOutput,
+  AgentCommandSessionListInput,
+  AgentCommandSessionListOutput,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentContextWindowSnapshotInput,
@@ -296,6 +300,12 @@ export interface AgentHostApi {
   getContextWindowSnapshot(
     input: AgentContextWindowSnapshotInput
   ): Promise<HostInvocationResult<AgentContextWindowSnapshotOutput>>
+  listCommandSessions(
+    input: AgentCommandSessionListInput
+  ): Promise<HostInvocationResult<AgentCommandSessionListOutput>>
+  getCommandSession(
+    input: AgentCommandSessionGetInput
+  ): Promise<HostInvocationResult<AgentCommandSessionGetOutput>>
   steerRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput>
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>

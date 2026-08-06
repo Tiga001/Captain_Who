@@ -13,9 +13,9 @@ use crate::conversation_trace_projection::{
 };
 use crate::llm::LlmMessage;
 use crate::protocol::{
-    AgentApprovalStatus, AgentContextCheckpointToolCall, AgentInputAttachment,
-    AgentInputAttachmentKind, AgentMcpServerScope, AgentProposedAction, AgentRunCheckpoint,
-    AgentToolCall, AgentToolIdentity, AgentToolResult,
+    AgentApprovalStatus, AgentCommandSessionStatus, AgentContextCheckpointToolCall,
+    AgentInputAttachment, AgentInputAttachmentKind, AgentMcpServerScope, AgentProposedAction,
+    AgentRunCheckpoint, AgentToolCall, AgentToolIdentity, AgentToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,6 +55,35 @@ pub enum ConversationTraceToolResultStatus {
     Rejected,
     Conflict,
     Cancelled,
+}
+
+/// Durable audit phase for a Host-owned command Session.
+///
+/// This is deliberately not a Tool result: `started` records the durable handoff boundary and
+/// `terminal` records later Host settlement without pretending that either event was returned to
+/// the model.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationCommandSessionLifecyclePhase {
+    Started,
+    Terminal,
+}
+
+/// Sequence-free lifecycle payload supplied by the managed command owner when it appends audit.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationCommandSessionLifecycle {
+    pub phase: ConversationCommandSessionLifecyclePhase,
+    pub session_id: String,
+    pub call_id: String,
+    pub status: AgentCommandSessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub latest_sequence: u64,
+    pub output_truncated: bool,
+    #[serde(flatten)]
+    pub archive: ConversationHistoryArchiveTraceMetadata,
+    pub created_at: i64,
 }
 
 /// One provider-neutral message from the durable, replay-safe conversation timeline.
@@ -196,6 +225,7 @@ pub(crate) fn validate_model_context_prefix(
         .items
         .iter()
         .take_while(|item| item.sequence() <= covered_through)
+        .filter(|item| item.is_model_visible())
         .map(ConversationTurnTraceItem::sequence)
         .collect::<std::collections::BTreeSet<_>>();
     if covered_sequences != expected_sequences {
@@ -243,6 +273,7 @@ fn validate_model_item_against_trace(
                 && item.tool_call_id.as_deref() == Some(call_id.as_str())
                 && item.tool_calls.is_empty()
         }
+        ConversationTurnTraceItem::CommandSessionLifecycle { .. } => false,
     };
     valid.then_some(()).ok_or_else(|| {
         "model context item identity does not match its durable trace item".to_string()
@@ -307,6 +338,25 @@ pub enum ConversationTurnTraceItem {
         #[serde(flatten)]
         archive: ConversationHistoryArchiveTraceMetadata,
     },
+    /// Host-observed lifecycle metadata for a managed command Session.
+    ///
+    /// Command output is intentionally absent. Bounded runtime output belongs to the Session
+    /// store and terminal output belongs to Exact History; this item is only an append-only audit
+    /// link between those projections and the originating Tool call.
+    CommandSessionLifecycle {
+        sequence: u64,
+        phase: ConversationCommandSessionLifecyclePhase,
+        session_id: String,
+        call_id: String,
+        status: AgentCommandSessionStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        latest_sequence: u64,
+        output_truncated: bool,
+        #[serde(flatten)]
+        archive: ConversationHistoryArchiveTraceMetadata,
+        created_at: i64,
+    },
 }
 
 /// Exact-history metadata is flattened into a tool-result trace item so older readers can ignore
@@ -359,7 +409,8 @@ impl ConversationTurnTraceItem {
             Self::AssistantNarration { sequence, .. }
             | Self::UserGuidance { sequence, .. }
             | Self::ToolCall { sequence, .. }
-            | Self::ToolResult { sequence, .. } => *sequence,
+            | Self::ToolResult { sequence, .. }
+            | Self::CommandSessionLifecycle { sequence, .. } => *sequence,
         }
     }
 
@@ -369,7 +420,14 @@ impl ConversationTurnTraceItem {
             Self::UserGuidance { .. } => "user_guidance",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
+            Self::CommandSessionLifecycle { .. } => "command_session_lifecycle",
         }
+    }
+
+    /// Whether this audit item has a provider-neutral model-context representation.
+    #[must_use]
+    pub fn is_model_visible(&self) -> bool {
+        !matches!(self, Self::CommandSessionLifecycle { .. })
     }
 
     pub fn is_safe_compaction_boundary(&self) -> bool {
@@ -427,6 +485,8 @@ impl ConversationTurnTrace {
         let mut previous_sequence = None;
         let mut pending_call: Option<(&str, &str)> = None;
         let mut call_ids = BTreeSet::new();
+        let mut command_call_ids = BTreeSet::new();
+        let mut command_sessions = BTreeMap::<&str, (&str, bool)>::new();
         for item in &self.items {
             let sequence = item.sequence();
             if previous_sequence.is_some_and(|previous| sequence <= previous) {
@@ -506,6 +566,9 @@ impl ConversationTurnTrace {
                             "conversation trace contains duplicate tool call id: {call_id}"
                         ));
                     }
+                    if tool == "run_command" {
+                        command_call_ids.insert(call_id.as_str());
+                    }
                     ensure_no_binary_value("tool operation", operation)?;
                     pending_call = Some((call_id, tool));
                 }
@@ -541,6 +604,95 @@ impl ConversationTurnTrace {
                     }
                     archive.validate()?;
                 }
+                ConversationTurnTraceItem::CommandSessionLifecycle {
+                    phase,
+                    session_id,
+                    call_id,
+                    status,
+                    exit_code,
+                    archive,
+                    created_at,
+                    ..
+                } => {
+                    if pending_call.is_some_and(|(pending_call_id, _)| pending_call_id != call_id) {
+                        return Err(
+                            "conversation trace command session lifecycle does not match the pending tool call"
+                                .to_string(),
+                        );
+                    }
+                    let session_suffix = session_id.strip_prefix("cmd_");
+                    if session_suffix.is_none_or(|suffix| {
+                        suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }) || call_id.trim().is_empty()
+                        || call_id.len() > 1_024
+                        || call_id.chars().any(char::is_control)
+                        || *created_at < 0
+                    {
+                        return Err(
+                            "conversation trace command session lifecycle identity is invalid"
+                                .to_string(),
+                        );
+                    }
+                    if !command_call_ids.contains(call_id.as_str()) {
+                        return Err(
+                            "conversation trace command session lifecycle references a missing run_command call"
+                                .to_string(),
+                        );
+                    }
+                    match phase {
+                        ConversationCommandSessionLifecyclePhase::Started => {
+                            if !matches!(
+                                *status,
+                                AgentCommandSessionStatus::Starting
+                                    | AgentCommandSessionStatus::Running
+                            ) || exit_code.is_some()
+                                || *archive != ConversationHistoryArchiveTraceMetadata::default()
+                            {
+                                return Err(
+                                    "conversation trace command session started item is invalid"
+                                        .to_string(),
+                                );
+                            }
+                            if command_sessions
+                                .insert(session_id.as_str(), (call_id.as_str(), false))
+                                .is_some()
+                            {
+                                return Err(
+                                    "conversation trace contains duplicate command session start"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        ConversationCommandSessionLifecyclePhase::Terminal => {
+                            if !status.is_terminal()
+                                || (*status != AgentCommandSessionStatus::Exited
+                                    && exit_code.is_some())
+                            {
+                                return Err(
+                                    "conversation trace command session terminal item is invalid"
+                                        .to_string(),
+                                );
+                            }
+                            if let Some((started_call_id, terminal_seen)) =
+                                command_sessions.get_mut(session_id.as_str())
+                            {
+                                if *started_call_id != call_id || *terminal_seen {
+                                    return Err(
+                                        "conversation trace command session terminal identity is inconsistent"
+                                            .to_string(),
+                                    );
+                                }
+                                *terminal_seen = true;
+                            } else {
+                                // Startup reconciliation can append a terminal record to a trace
+                                // whose pre-handoff start was not durably observed.
+                                command_sessions
+                                    .insert(session_id.as_str(), (call_id.as_str(), true));
+                            }
+                        }
+                    }
+                    archive.validate()?;
+                }
             }
         }
         if pending_call.is_some()
@@ -554,16 +706,34 @@ impl ConversationTurnTrace {
     /// Number of items that form complete exchanges and may be rendered into model context.
     #[must_use]
     pub fn model_context_item_count(&self) -> usize {
-        if self.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-            && matches!(
-                self.items.last(),
-                Some(ConversationTurnTraceItem::ToolCall { .. })
-            )
-        {
-            self.items.len().saturating_sub(1)
-        } else {
-            self.items.len()
-        }
+        let unresolved_call_index = (self.terminal_status
+            == ConversationTurnTraceTerminalStatus::InProgress)
+            .then(|| {
+                self.items
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, item)| {
+                        let ConversationTurnTraceItem::ToolCall { call_id, .. } = item else {
+                            return None;
+                        };
+                        let closed = self.items[index + 1..].iter().any(|candidate| {
+                            matches!(
+                                candidate,
+                                ConversationTurnTraceItem::ToolResult {
+                                    call_id: result_id,
+                                    ..
+                                } if result_id == call_id
+                            )
+                        });
+                        (!closed).then_some(index)
+                    })
+            })
+            .flatten();
+        self.items[..unresolved_call_index.unwrap_or(self.items.len())]
+            .iter()
+            .filter(|item| item.is_model_visible())
+            .count()
     }
 }
 
@@ -692,6 +862,70 @@ impl ConversationHistoryArchiveTraceMetadata {
             return Err("conversation trace history archive metadata is incomplete".to_string());
         }
         Ok(())
+    }
+}
+
+impl ConversationTurnTrace {
+    /// Appends one idempotent command-Session audit event using the trace sequence domain.
+    ///
+    /// The candidate is validated before `self` is changed, so a rejected transition cannot
+    /// leave a partially invalid trace in memory or storage.
+    pub fn append_command_session_lifecycle(
+        &mut self,
+        lifecycle: ConversationCommandSessionLifecycle,
+    ) -> Result<u64, String> {
+        if let Some(existing) = self.items.iter().find(|item| {
+            matches!(
+                item,
+                ConversationTurnTraceItem::CommandSessionLifecycle {
+                    phase,
+                    session_id,
+                    ..
+                } if *phase == lifecycle.phase && session_id == &lifecycle.session_id
+            )
+        }) {
+            let expected = ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: existing.sequence(),
+                phase: lifecycle.phase,
+                session_id: lifecycle.session_id,
+                call_id: lifecycle.call_id,
+                status: lifecycle.status,
+                exit_code: lifecycle.exit_code,
+                latest_sequence: lifecycle.latest_sequence,
+                output_truncated: lifecycle.output_truncated,
+                archive: lifecycle.archive,
+                created_at: lifecycle.created_at,
+            };
+            return (existing == &expected)
+                .then_some(existing.sequence())
+                .ok_or_else(|| {
+                    "conversation trace command session lifecycle conflicts with existing audit"
+                        .to_string()
+                });
+        }
+
+        let sequence = self
+            .items
+            .last()
+            .map(ConversationTurnTraceItem::sequence)
+            .map_or(0, |current| current.saturating_add(1));
+        let item = ConversationTurnTraceItem::CommandSessionLifecycle {
+            sequence,
+            phase: lifecycle.phase,
+            session_id: lifecycle.session_id,
+            call_id: lifecycle.call_id,
+            status: lifecycle.status,
+            exit_code: lifecycle.exit_code,
+            latest_sequence: lifecycle.latest_sequence,
+            output_truncated: lifecycle.output_truncated,
+            archive: lifecycle.archive,
+            created_at: lifecycle.created_at,
+        };
+        let mut candidate = self.clone();
+        candidate.items.push(item.clone());
+        candidate.validate()?;
+        self.items.push(item);
+        Ok(sequence)
     }
 }
 
@@ -1712,6 +1946,29 @@ fn project_durable_trace_items(
                     archive,
                 }
             }
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence,
+                phase,
+                session_id,
+                call_id,
+                status,
+                exit_code,
+                latest_sequence,
+                output_truncated,
+                archive,
+                created_at,
+            } => ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: *sequence,
+                phase: *phase,
+                session_id: session_id.clone(),
+                call_id: call_id.clone(),
+                status: *status,
+                exit_code: *exit_code,
+                latest_sequence: *latest_sequence,
+                output_truncated: *output_truncated,
+                archive: archive.clone(),
+                created_at: *created_at,
+            },
         };
         projected.push(projected_item);
     }
@@ -1905,6 +2162,120 @@ mod tests {
         }
     }
 
+    fn command_lifecycle(
+        phase: ConversationCommandSessionLifecyclePhase,
+        status: AgentCommandSessionStatus,
+        created_at: i64,
+    ) -> ConversationCommandSessionLifecycle {
+        ConversationCommandSessionLifecycle {
+            phase,
+            session_id: "cmd_0123456789abcdef0123456789abcdef".to_string(),
+            call_id: "command-call".to_string(),
+            status,
+            exit_code: (status == AgentCommandSessionStatus::Exited).then_some(0),
+            latest_sequence: 7,
+            output_truncated: false,
+            archive: Default::default(),
+            created_at,
+        }
+    }
+
+    fn command_trace() -> ConversationTurnTrace {
+        ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-command".to_string(),
+            conversation_id: "conversation-command".to_string(),
+            assistant_message_id: "assistant-command".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "command-call".to_string(),
+                    tool: "run_command".to_string(),
+                    provenance: None,
+                    operation: json!({ "command": "long-running" }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::CommandSessionLifecycle {
+                    sequence: 1,
+                    phase: ConversationCommandSessionLifecyclePhase::Started,
+                    session_id: "cmd_0123456789abcdef0123456789abcdef".to_string(),
+                    call_id: "command-call".to_string(),
+                    status: AgentCommandSessionStatus::Running,
+                    exit_code: None,
+                    latest_sequence: 0,
+                    output_truncated: false,
+                    archive: Default::default(),
+                    created_at: 1_000,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 2,
+                    call_id: "command-call".to_string(),
+                    tool: "run_command".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({
+                        "status": "running",
+                        "sessionId": "cmd_0123456789abcdef0123456789abcdef"
+                    }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    error: None,
+                    truncated: false,
+                    archive: Default::default(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn command_session_lifecycle_is_a_body_free_audit_item() {
+        let mut trace = command_trace();
+        trace
+            .append_command_session_lifecycle(command_lifecycle(
+                ConversationCommandSessionLifecyclePhase::Terminal,
+                AgentCommandSessionStatus::Exited,
+                2_000,
+            ))
+            .unwrap();
+        trace.validate().unwrap();
+
+        let serialized = serde_json::to_value(trace.items.last().unwrap()).unwrap();
+        assert_eq!(serialized["type"], "command_session_lifecycle");
+        assert_eq!(serialized["phase"], "terminal");
+        assert_eq!(serialized["status"], "exited");
+        assert!(serialized.get("output").is_none());
+        assert!(serialized.get("observation").is_none());
+    }
+
+    #[test]
+    fn appending_command_session_lifecycle_is_idempotent_and_conflict_safe() {
+        let mut trace = command_trace();
+        let terminal = command_lifecycle(
+            ConversationCommandSessionLifecyclePhase::Terminal,
+            AgentCommandSessionStatus::Exited,
+            2_000,
+        );
+        let sequence = trace
+            .append_command_session_lifecycle(terminal.clone())
+            .unwrap();
+        assert_eq!(
+            trace.append_command_session_lifecycle(terminal).unwrap(),
+            sequence
+        );
+        assert_eq!(trace.items.len(), 4);
+
+        let conflict = command_lifecycle(
+            ConversationCommandSessionLifecyclePhase::Terminal,
+            AgentCommandSessionStatus::TimedOut,
+            3_000,
+        );
+        assert!(trace.append_command_session_lifecycle(conflict).is_err());
+        assert_eq!(trace.items.len(), 4);
+    }
+
     #[test]
     fn mcp_tool_identity_round_trips_and_legacy_tool_calls_remain_readable() {
         let tool_name = "mcp__fixture__echo";
@@ -2064,6 +2435,102 @@ mod tests {
         assert!(observation["summary"].as_str().unwrap().chars().count() < 20_000);
         assert_eq!(observation["bodyTruncatedInHistory"], true);
         assert!(trace.truncated);
+    }
+
+    #[test]
+    fn recorder_omits_command_session_output_from_durable_trace() {
+        const SECRET_OUTPUT: &str = "command-session-secret-marker\nsecond line";
+        const OUTPUT_HASH: &str =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let call = AgentToolCall {
+            id: "command-session-poll".to_string(),
+            tool: "command_session".to_string(),
+            args: json!({
+                "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+                "action": "poll",
+                "waitMs": 1_000,
+            }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({
+                "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+                "status": "running",
+                "output": SECRET_OUTPUT,
+                "exitCode": null,
+                "latestSequence": 17,
+                "outputTruncated": false,
+                "read": {
+                    "requestedAfterSequence": 12,
+                    "firstSequence": 13,
+                    "throughSequence": 17,
+                    "truncatedBefore": false,
+                    "outputBytes": SECRET_OUTPUT.len(),
+                    "outputHash": OUTPUT_HASH,
+                    "hostPrivateReadField": "must not survive",
+                },
+                "hostPrivateField": "must not survive",
+            })),
+            error: None,
+        };
+
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&call);
+        recorder.record_tool_result(&call, &result);
+
+        let (checkpoint_items, _, _, _) = recorder.checkpoint();
+        let ConversationTurnTraceItem::ToolResult {
+            observation: checkpoint_observation,
+            ..
+        } = &checkpoint_items[1]
+        else {
+            panic!("expected checkpoint command_session result");
+        };
+        assert_eq!(checkpoint_observation["output"], SECRET_OUTPUT);
+
+        let trace = recorder.finish(
+            "run-command-session",
+            "conversation-command-session",
+            "assistant-command-session",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        trace.validate().unwrap();
+        let ConversationTurnTraceItem::ToolResult {
+            observation,
+            truncated,
+            ..
+        } = &trace.items[1]
+        else {
+            panic!("expected durable command_session result");
+        };
+
+        assert!(*truncated);
+        assert!(observation.get("output").is_none());
+        assert_eq!(observation["sessionId"], call.args["sessionId"]);
+        assert_eq!(observation["status"], "running");
+        assert_eq!(observation["exitCode"], Value::Null);
+        assert_eq!(observation["latestSequence"], 17);
+        assert_eq!(observation["outputTruncated"], false);
+        assert_eq!(observation["read"]["requestedAfterSequence"], 12);
+        assert_eq!(observation["read"]["firstSequence"], 13);
+        assert_eq!(observation["read"]["throughSequence"], 17);
+        assert_eq!(observation["read"]["truncatedBefore"], false);
+        assert_eq!(observation["read"]["outputBytes"], SECRET_OUTPUT.len());
+        assert_eq!(observation["read"]["outputHash"], OUTPUT_HASH);
+        assert!(observation.get("hostPrivateField").is_none());
+        assert!(observation["read"].get("hostPrivateReadField").is_none());
+        assert!(trace.truncated);
+
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert!(!serialized.contains(SECRET_OUTPUT));
+        assert!(!serialized.contains("must not survive"));
     }
 
     #[test]

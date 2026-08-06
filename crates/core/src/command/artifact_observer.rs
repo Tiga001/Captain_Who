@@ -87,7 +87,7 @@ impl Default for ObservationBudget {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CommandArtifactCapture {
     files: BTreeMap<PathBuf, ObservedArtifact>,
     complete_roots: Vec<PathBuf>,

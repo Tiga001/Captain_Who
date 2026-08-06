@@ -5,6 +5,8 @@ import {
   AGENT_APPROVE_ACTION_METHOD,
   AGENT_CANCEL_ACTION_METHOD,
   AGENT_CANCEL_RUN_METHOD,
+  AGENT_COMMAND_SESSIONS_GET_METHOD,
+  AGENT_COMMAND_SESSIONS_LIST_METHOD,
   AGENT_CLEAR_USAGE_RECORDS_METHOD,
   AGENT_EVENT_NOTIFICATION_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
@@ -51,6 +53,54 @@ const events: Record<string, AgentEvent> = {
       ok: true,
       result: { content: 'MyCopilot Next' }
     }
+  },
+  commandStarted: {
+    type: 'command_started',
+    runId: 'run-contract-v1',
+    conversationId: 'conversation-contract-v1',
+    assistantMessageId: 'assistant-contract-v1',
+    projectId: 'project-contract-v1',
+    callId: 'call-command-contract-v1',
+    sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+    startedAt: 10
+  },
+  commandOutput: {
+    type: 'command_output',
+    runId: 'run-contract-v1',
+    conversationId: 'conversation-contract-v1',
+    assistantMessageId: 'assistant-contract-v1',
+    projectId: 'project-contract-v1',
+    callId: 'call-command-contract-v1',
+    sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+    sequence: 1,
+    stream: 'stdout',
+    output: 'ready\n'
+  },
+  commandExited: {
+    type: 'command_exited',
+    runId: 'run-contract-v1',
+    conversationId: 'conversation-contract-v1',
+    assistantMessageId: 'assistant-contract-v1',
+    projectId: 'project-contract-v1',
+    callId: 'call-command-contract-v1',
+    sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+    status: 'exited',
+    exitCode: 0,
+    endedAt: 20,
+    latestSequence: 1,
+    outputTruncated: false
+  },
+  commandInterrupted: {
+    type: 'command_interrupted',
+    runId: 'run-contract-v1',
+    conversationId: 'conversation-contract-v1',
+    assistantMessageId: 'assistant-contract-v1',
+    projectId: 'project-contract-v1',
+    callId: 'call-command-contract-v1',
+    sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+    endedAt: 21,
+    latestSequence: 1,
+    outputTruncated: false
   },
   done: {
     type: 'done',
@@ -109,6 +159,8 @@ describe('Agent cross-language golden contract', () => {
       steerRun: AGENT_STEER_RUN_METHOD,
       startConversationTurn: AGENT_START_CONVERSATION_TURN_METHOD,
       getContextWindowSnapshot: AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
+      listCommandSessions: AGENT_COMMAND_SESSIONS_LIST_METHOD,
+      getCommandSession: AGENT_COMMAND_SESSIONS_GET_METHOD,
       listPendingActions: AGENT_LIST_PENDING_ACTIONS_METHOD,
       approveAction: AGENT_APPROVE_ACTION_METHOD,
       rejectAction: AGENT_REJECT_ACTION_METHOD,

@@ -50,6 +50,38 @@ pub(crate) fn handle_agent_cancel_run(
     )
 }
 
+pub(crate) fn handle_agent_list_command_sessions(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentCommandSessionListInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.list_command_sessions(input) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
+pub(crate) fn handle_agent_get_command_session(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentCommandSessionGetInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.get_command_session(input) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
 pub(crate) fn handle_agent_steer_run(
     agent_service: &AgentService,
     notification_tx: agent::CoreServerNotificationSender,

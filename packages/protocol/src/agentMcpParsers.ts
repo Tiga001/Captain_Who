@@ -23,6 +23,10 @@ import {
   expectString,
   invalidProtocolValue
 } from './skills/validation'
+import {
+  isAgentCommandSessionEventType,
+  parseAgentCommandSessionEvent
+} from './agentCommandSessionParsers'
 
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -38,11 +42,14 @@ const MAX_MCP_DIAGNOSTIC_RESULT_BLOCKS = 128
 const MAX_MCP_DIAGNOSTIC_RESULT_BYTES = 4 * 1024 * 1024
 
 /**
- * Parses the MCP-only Agent event boundary. Existing non-MCP events remain on their historical
- * contract until their own versioned parsers are introduced.
+ * Parses Agent event families that have strict Host-boundary contracts. Legacy event families
+ * retain their historical projection until they receive their own versioned parsers.
  */
 export function parseAgentEventForHost(value: unknown): AgentEvent {
   const record = expectRecord(value, 'Agent event')
+  if (isAgentCommandSessionEventType(record.type)) {
+    return parseAgentCommandSessionEvent(record)
+  }
   if (record.type === 'mcp_tool_invocation_state_changed') {
     expectOnlyKeys(record, ['type', 'runId', 'invocation'] as const, 'MCP Agent event')
     return {

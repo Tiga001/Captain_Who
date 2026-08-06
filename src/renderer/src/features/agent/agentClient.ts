@@ -7,6 +7,10 @@ import type {
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentActionExecutionOutput,
+  AgentCommandSessionGetInput,
+  AgentCommandSessionGetOutput,
+  AgentCommandSessionListInput,
+  AgentCommandSessionListOutput,
   AgentSteerRunInput,
   AgentSteerRunOutput,
   PendingAgentActionSnapshot,
@@ -31,6 +35,18 @@ export async function getContextWindowSnapshot(
   input: AgentContextWindowSnapshotInput
 ): Promise<AgentContextWindowSnapshotOutput> {
   return unwrapHostInvocation(await hostClient.agent.getContextWindowSnapshot(input))
+}
+
+export async function listAgentCommandSessions(
+  input: AgentCommandSessionListInput
+): Promise<AgentCommandSessionListOutput> {
+  return unwrapHostInvocation(await hostClient.agent.listCommandSessions(input))
+}
+
+export async function getAgentCommandSession(
+  input: AgentCommandSessionGetInput
+): Promise<AgentCommandSessionGetOutput> {
+  return unwrapHostInvocation(await hostClient.agent.getCommandSession(input))
 }
 
 export async function listPendingAgentActions(): Promise<PendingAgentActionSnapshot[]> {

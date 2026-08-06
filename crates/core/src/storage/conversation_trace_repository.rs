@@ -1,5 +1,7 @@
+use crate::storage::agent_command_session_repository;
 use crate::{
-    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    ConversationCommandSessionLifecycle, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus,
 };
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -14,6 +16,12 @@ struct TraceHeader {
     terminal_status: ConversationTurnTraceTerminalStatus,
     terminal_error: Option<String>,
     truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSessionLifecycleAppendOutcome {
+    Appended { sequence: u64 },
+    Idempotent { sequence: u64 },
 }
 
 pub fn replace_trace(
@@ -82,7 +90,7 @@ pub(crate) fn commit_trace_in_connection(
         }
     }
 
-    let existing = get_trace_for_message(connection, &trace.assistant_message_id)?;
+    let existing = get_base_trace_for_message(connection, &trace.assistant_message_id)?;
     let existing_item_count = if let Some(existing) = &existing {
         validate_append_only_transition(existing, trace)?;
         existing.items.len()
@@ -96,7 +104,21 @@ pub(crate) fn commit_trace_in_connection(
             || existing.items.len() != trace.items.len()
     });
     if !state_changed {
-        return Ok(false);
+        let materialized = if trace.terminal_status.is_terminal() {
+            let materialized = materialize_pending_command_session_lifecycle(
+                connection,
+                &trace.assistant_message_id,
+                committed_at,
+            )?;
+            agent_command_session_repository::prune_terminal_sessions_in_connection(
+                connection,
+                &trace.conversation_id,
+            )?;
+            materialized
+        } else {
+            0
+        };
+        return Ok(materialized > 0);
     }
 
     if existing.is_none() {
@@ -143,7 +165,7 @@ pub(crate) fn commit_trace_in_connection(
                 terminal_error = ?2,
                 truncated = ?3,
                 updated_at = ?4,
-                completed_at = ?5
+                completed_at = COALESCE(completed_at, ?5)
             WHERE assistant_message_id = ?6
             ",
             params![
@@ -157,7 +179,112 @@ pub(crate) fn commit_trace_in_connection(
         )?;
     }
 
+    if trace.terminal_status.is_terminal() {
+        materialize_pending_command_session_lifecycle(
+            connection,
+            &trace.assistant_message_id,
+            committed_at,
+        )?;
+        agent_command_session_repository::prune_terminal_sessions_in_connection(
+            connection,
+            &trace.conversation_id,
+        )?;
+    }
+
     Ok(true)
+}
+
+/// Records one command lifecycle audit item in the append-only sidecar journal.
+///
+/// Callers hold a write transaction (normally `BEGIN IMMEDIATE`). Active runtime Trace items are
+/// never changed. If the source Trace is already terminal, pending sidecar events are
+/// deterministically materialized into its sequence domain in the same transaction.
+pub(crate) fn append_command_session_lifecycle_in_connection(
+    connection: &Connection,
+    assistant_message_id: &str,
+    conversation_id: &str,
+    lifecycle: ConversationCommandSessionLifecycle,
+    _require_terminal_trace: bool,
+    committed_at: i64,
+) -> rusqlite::Result<CommandSessionLifecycleAppendOutcome> {
+    if committed_at < 0 || lifecycle.created_at < 0 {
+        return Err(invalid_trace_input(
+            "command session lifecycle timestamps cannot be negative",
+        ));
+    }
+    let phase = lifecycle_phase_as_str(lifecycle.phase);
+    let is_terminal = lifecycle.phase == crate::ConversationCommandSessionLifecyclePhase::Terminal;
+    let payload = serde_json::to_string(&lifecycle)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let existing = connection
+        .query_row(
+            "SELECT event_id, event_json
+             FROM agent_command_session_lifecycle_events
+             WHERE session_id = ?1 AND phase = ?2",
+            params![&lifecycle.session_id, phase],
+            |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let (event_id, inserted) = if let Some((event_id, existing_payload)) = existing {
+        let existing_lifecycle =
+            serde_json::from_str::<ConversationCommandSessionLifecycle>(&existing_payload)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+                })?;
+        if existing_lifecycle != lifecycle {
+            return Err(invalid_trace_input(
+                "command session lifecycle identity conflicts with an existing event",
+            ));
+        }
+        (event_id, false)
+    } else {
+        connection.execute(
+            "INSERT INTO agent_command_session_lifecycle_events (
+                 session_id, phase, conversation_id, assistant_message_id, call_id,
+                 event_json, archive_ref, created_at, recorded_at,
+                 trace_sequence, materialized_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)",
+            params![
+                &lifecycle.session_id,
+                phase,
+                conversation_id,
+                assistant_message_id,
+                &lifecycle.call_id,
+                payload,
+                &lifecycle.archive.archive_ref,
+                lifecycle.created_at,
+                committed_at.max(lifecycle.created_at),
+            ],
+        )?;
+        let event_id = u64::try_from(connection.last_insert_rowid())
+            .map_err(|_| invalid_trace_input("command session lifecycle event id exceeds u64"))?;
+        (event_id, true)
+    };
+    materialize_pending_command_session_lifecycle(connection, assistant_message_id, committed_at)?;
+    if is_terminal {
+        agent_command_session_repository::prune_terminal_sessions_in_connection(
+            connection,
+            conversation_id,
+        )?;
+    }
+    let sequence = connection
+        .query_row(
+            "SELECT trace_sequence
+             FROM agent_command_session_lifecycle_events
+             WHERE event_id = ?1",
+            [i64::try_from(event_id).map_err(|_| {
+                invalid_trace_input("command session lifecycle event id exceeds SQLite INTEGER")
+            })?],
+            |row| row.get::<_, Option<u64>>(0),
+        )
+        .optional()?
+        .flatten()
+        .unwrap_or(event_id);
+    Ok(if inserted {
+        CommandSessionLifecycleAppendOutcome::Appended { sequence }
+    } else {
+        CommandSessionLifecycleAppendOutcome::Idempotent { sequence }
+    })
 }
 
 fn validate_append_only_transition(
@@ -222,6 +349,15 @@ pub fn get_trace_for_message(
     connection: &Connection,
     assistant_message_id: &str,
 ) -> rusqlite::Result<Option<ConversationTurnTrace>> {
+    get_base_trace_for_message(connection, assistant_message_id)?
+        .map(|trace| overlay_pending_command_session_lifecycle(connection, trace))
+        .transpose()
+}
+
+fn get_base_trace_for_message(
+    connection: &Connection,
+    assistant_message_id: &str,
+) -> rusqlite::Result<Option<ConversationTurnTrace>> {
     let header = connection
         .query_row(
             "
@@ -275,7 +411,10 @@ pub fn list_traces_for_conversation(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     headers
         .into_iter()
-        .map(|header| load_trace(connection, header))
+        .map(|header| {
+            load_trace(connection, header)
+                .and_then(|trace| overlay_pending_command_session_lifecycle(connection, trace))
+        })
         .collect()
 }
 
@@ -391,6 +530,117 @@ fn load_trace(
     Ok(trace)
 }
 
+fn lifecycle_phase_as_str(phase: crate::ConversationCommandSessionLifecyclePhase) -> &'static str {
+    match phase {
+        crate::ConversationCommandSessionLifecyclePhase::Started => "started",
+        crate::ConversationCommandSessionLifecyclePhase::Terminal => "terminal",
+    }
+}
+
+fn pending_command_session_lifecycle(
+    connection: &Connection,
+    assistant_message_id: &str,
+) -> rusqlite::Result<Vec<(u64, i64, ConversationCommandSessionLifecycle)>> {
+    let mut statement = connection.prepare(
+        "SELECT event_id, recorded_at, event_json
+         FROM agent_command_session_lifecycle_events
+         WHERE assistant_message_id = ?1 AND trace_sequence IS NULL
+         ORDER BY
+             created_at ASC,
+             CASE phase WHEN 'started' THEN 0 ELSE 1 END ASC,
+             session_id ASC,
+             event_id ASC",
+    )?;
+    let rows = statement
+        .query_map([assistant_message_id], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(event_id, recorded_at, payload)| {
+            let lifecycle = serde_json::from_str(&payload).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(2, Type::Text, Box::new(error))
+            })?;
+            Ok((event_id, recorded_at, lifecycle))
+        })
+        .collect()
+}
+
+fn overlay_pending_command_session_lifecycle(
+    connection: &Connection,
+    mut trace: ConversationTurnTrace,
+) -> rusqlite::Result<ConversationTurnTrace> {
+    if !trace.terminal_status.is_terminal() {
+        return Ok(trace);
+    }
+    for (_, _, lifecycle) in
+        pending_command_session_lifecycle(connection, &trace.assistant_message_id)?
+    {
+        trace
+            .append_command_session_lifecycle(lifecycle)
+            .map_err(|message| corrupt_trace_data(2, Type::Text, message))?;
+    }
+    Ok(trace)
+}
+
+fn materialize_pending_command_session_lifecycle(
+    connection: &Connection,
+    assistant_message_id: &str,
+    committed_at: i64,
+) -> rusqlite::Result<usize> {
+    let Some(mut trace) = get_base_trace_for_message(connection, assistant_message_id)? else {
+        return Ok(0);
+    };
+    if !trace.terminal_status.is_terminal() {
+        return Ok(0);
+    }
+    let pending = pending_command_session_lifecycle(connection, assistant_message_id)?;
+    let mut materialized = 0_usize;
+    let mut newest_materialized_at = committed_at;
+    for (event_id, recorded_at, lifecycle) in pending {
+        let previous_len = trace.items.len();
+        let sequence = trace
+            .append_command_session_lifecycle(lifecycle)
+            .map_err(invalid_trace_input)?;
+        if trace.items.len() != previous_len {
+            let item = trace.items.last().ok_or_else(|| {
+                invalid_trace_input("new command session lifecycle item is missing")
+            })?;
+            insert_trace_item(connection, assistant_message_id, item)?;
+        }
+        let materialized_at = committed_at.max(recorded_at);
+        connection.execute(
+            "UPDATE agent_command_session_lifecycle_events
+             SET trace_sequence = ?1, materialized_at = ?2
+             WHERE event_id = ?3 AND trace_sequence IS NULL",
+            params![
+                i64::try_from(sequence).map_err(|_| invalid_trace_input(
+                    "command session lifecycle trace sequence exceeds SQLite INTEGER"
+                ))?,
+                materialized_at,
+                i64::try_from(event_id).map_err(|_| invalid_trace_input(
+                    "command session lifecycle event id exceeds SQLite INTEGER"
+                ))?,
+            ],
+        )?;
+        newest_materialized_at = newest_materialized_at.max(materialized_at);
+        materialized = materialized.saturating_add(1);
+    }
+    if materialized > 0 {
+        connection.execute(
+            "UPDATE conversation_turn_traces
+             SET updated_at = MAX(updated_at, ?1)
+             WHERE assistant_message_id = ?2",
+            params![newest_materialized_at, assistant_message_id],
+        )?;
+    }
+    Ok(materialized)
+}
+
 fn terminal_status_from_str(value: &str) -> Option<ConversationTurnTraceTerminalStatus> {
     match value {
         "in_progress" => Some(ConversationTurnTraceTerminalStatus::InProgress),
@@ -493,6 +743,37 @@ mod tests {
             .unwrap();
         assert_eq!(trace_count, 1);
         assert_eq!(item_count, 3);
+    }
+
+    #[test]
+    fn append_only_audit_items_do_not_rewrite_the_original_completion_time() {
+        let mut connection = test_connection();
+        insert_conversation(&connection, "conversation-1");
+        insert_message(&connection, "conversation-1", "assistant-1", 1);
+        let completed = trace("conversation-1", "assistant-1", "run-1");
+        replace_trace(&mut connection, &completed, 10, 20).unwrap();
+
+        let mut with_late_audit_item = completed;
+        with_late_audit_item
+            .items
+            .push(ConversationTurnTraceItem::AssistantNarration {
+                sequence: 3,
+                content: "late audit placeholder".to_string(),
+                truncated: false,
+            });
+        replace_trace(&mut connection, &with_late_audit_item, 10, 50).unwrap();
+
+        let (updated_at, completed_at): (i64, i64) = connection
+            .query_row(
+                "SELECT updated_at, completed_at
+                 FROM conversation_turn_traces
+                 WHERE assistant_message_id = 'assistant-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(updated_at, 50);
+        assert_eq!(completed_at, 20);
     }
 
     #[test]
