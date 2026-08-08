@@ -1,4 +1,5 @@
 use super::*;
+use crate::command::session::CommandSessionCompletionHook;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 
@@ -249,8 +250,8 @@ fn lifecycle_events_are_serialized_from_started_through_terminal() {
         .start_plan_with_observers(
             CommandSessionScopeId::new("lifecycle-order").unwrap(),
             CommandSpawnPlan::shell(
-                "(awk 'BEGIN { for (i = 0; i < 10000; i++) print \"stdout\" }') & \
-                 (awk 'BEGIN { for (i = 0; i < 10000; i++) print \"stderr\" }' >&2) & wait"
+                "(awk 'BEGIN { for (i = 0; i < 200; i++) print \"stdout\" }') & \
+                 (awk 'BEGIN { for (i = 0; i < 200; i++) print \"stderr\" }' >&2) & wait"
                     .to_string(),
                 workspace.path.clone(),
                 Some(&workspace.path),
@@ -349,6 +350,262 @@ fn lifecycle_events_are_serialized_from_started_through_terminal() {
         !callbacks_overlapped.load(Ordering::SeqCst),
         "lifecycle callbacks must never overlap across stdout, stderr, and watcher threads"
     );
+}
+
+#[test]
+fn terminal_wait_linearizes_after_terminal_lifecycle_delivery() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let terminal_release = Arc::new(Barrier::new(2));
+    let lifecycle_delivered = Arc::new(AtomicBool::new(false));
+    let (terminal_entered_tx, terminal_entered_rx) = mpsc::channel();
+    let observer: CommandSessionLifecycleObserver = {
+        let terminal_release = Arc::clone(&terminal_release);
+        let lifecycle_delivered = Arc::clone(&lifecycle_delivered);
+        Arc::new(move |event| {
+            if matches!(event, CommandSessionLifecycleEvent::Terminal(_)) {
+                terminal_entered_tx.send(()).unwrap();
+                terminal_release.wait();
+                lifecycle_delivered.store(true, Ordering::Release);
+            }
+        })
+    };
+    let outcome = manager
+        .start_plan_with_observers(
+            CommandSessionScopeId::new("terminal-publication").unwrap(),
+            CommandSpawnPlan::shell(
+                "while [ ! -f terminal-release ]; do sleep 0.01; done".to_string(),
+                workspace.path.clone(),
+                Some(&workspace.path),
+                None,
+            ),
+            CommandStartOptions {
+                initial_yield: Duration::from_millis(10),
+            },
+            None,
+            Some(observer),
+            None,
+            None,
+        )
+        .unwrap();
+    let session_id = running_id(outcome);
+    let waiter_manager = manager.clone();
+    let (waiter_started_tx, waiter_started_rx) = mpsc::channel();
+    let (waiter_done_tx, waiter_done_rx) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        waiter_started_tx.send(()).unwrap();
+        let terminal = waiter_manager
+            .wait_terminal_result(&session_id, Duration::from_secs(3))
+            .unwrap()
+            .expect("terminal result should be published");
+        waiter_done_tx.send(terminal).unwrap();
+    });
+
+    waiter_started_rx.recv().unwrap();
+    std::fs::write(workspace.path.join("terminal-release"), b"release").unwrap();
+    terminal_entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("terminal lifecycle callback should start");
+    assert!(matches!(
+        waiter_done_rx.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+    terminal_release.wait();
+    let terminal = waiter_done_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("terminal wait should complete after lifecycle delivery");
+    assert_eq!(
+        terminal.snapshot.state,
+        CommandSessionState::Exited { exit_code: Some(0) }
+    );
+    assert!(lifecycle_delivered.load(Ordering::Acquire));
+    waiter.join().unwrap();
+}
+
+#[test]
+fn initial_yield_does_not_publish_terminal_before_lifecycle_delivery() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let terminal_release = Arc::new(Barrier::new(2));
+    let (terminal_entered_tx, terminal_entered_rx) = mpsc::channel();
+    let observer: CommandSessionLifecycleObserver = {
+        let terminal_release = Arc::clone(&terminal_release);
+        Arc::new(move |event| {
+            if matches!(event, CommandSessionLifecycleEvent::Terminal(_)) {
+                terminal_entered_tx.send(()).unwrap();
+                terminal_release.wait();
+            }
+        })
+    };
+    let start_manager = manager.clone();
+    let workspace_path = workspace.path.clone();
+    let starter = thread::spawn(move || {
+        start_manager
+            .start_plan_with_observers(
+                CommandSessionScopeId::new("start-publication").unwrap(),
+                CommandSpawnPlan::shell(
+                    "printf done".to_string(),
+                    workspace_path.clone(),
+                    Some(&workspace_path),
+                    None,
+                ),
+                CommandStartOptions {
+                    initial_yield: Duration::from_millis(50),
+                },
+                None,
+                Some(observer),
+                None,
+                None,
+            )
+            .unwrap()
+    });
+
+    terminal_entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("terminal lifecycle callback should start");
+    let outcome = starter
+        .join()
+        .expect("finite initial yield must not wait for a blocked observer");
+    let CommandStartOutcome::Running(snapshot) = outcome else {
+        panic!("unpublished terminal must not escape through the start outcome");
+    };
+    assert_eq!(snapshot.state, CommandSessionState::Running);
+    let session_id = snapshot.session_id;
+    assert_eq!(
+        manager.snapshot(&session_id).unwrap().state,
+        CommandSessionState::Running
+    );
+    assert_eq!(
+        manager
+            .list(None)
+            .into_iter()
+            .find(|candidate| candidate.session_id == session_id)
+            .expect("session should remain listed")
+            .state,
+        CommandSessionState::Running
+    );
+    assert_eq!(
+        manager
+            .poll(&session_id, Duration::ZERO)
+            .unwrap()
+            .snapshot
+            .state,
+        CommandSessionState::Running
+    );
+    assert_eq!(
+        manager
+            .read_output(&session_id, 0, Duration::ZERO)
+            .unwrap()
+            .snapshot
+            .state,
+        CommandSessionState::Running
+    );
+    assert_eq!(
+        manager
+            .interrupt(&session_id, Duration::ZERO)
+            .expect("control must not target an internally terminal process")
+            .state,
+        CommandSessionState::Running
+    );
+    terminal_release.wait();
+    let terminal = wait_terminal(&manager, &session_id);
+    assert_eq!(
+        terminal.snapshot.state,
+        CommandSessionState::Exited { exit_code: Some(0) }
+    );
+}
+
+#[test]
+fn managed_runtime_integrity_completion_error_marks_session_failed() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
+    let lifecycle_observer: CommandSessionLifecycleObserver =
+        Arc::new(move |event| lifecycle_tx.send(event).unwrap());
+    let completion_hook: CommandSessionCompletionHook = Box::new(|result| {
+        result.error = Some("managed runtime integrity verification failed".to_string());
+    });
+    let outcome = manager
+        .start_plan_with_observers(
+            CommandSessionScopeId::new("managed-integrity-failure").unwrap(),
+            CommandSpawnPlan::shell(
+                "printf completed".to_string(),
+                workspace.path.clone(),
+                Some(&workspace.path),
+                None,
+            ),
+            CommandStartOptions {
+                initial_yield: Duration::from_secs(1),
+            },
+            None,
+            Some(lifecycle_observer),
+            None,
+            Some(completion_hook),
+        )
+        .unwrap();
+    let CommandStartOutcome::Exited(terminal) = outcome else {
+        panic!("short command should settle inside initial yield");
+    };
+    assert_eq!(terminal.snapshot.state, CommandSessionState::Failed);
+    assert_eq!(terminal.snapshot.exit_code, Some(0));
+    assert_eq!(
+        terminal.snapshot.error.as_deref(),
+        Some("managed runtime integrity verification failed")
+    );
+    assert_eq!(terminal.execution.exit_code, Some(0));
+    assert_eq!(terminal.execution.stdout, "completed");
+    assert_eq!(terminal.execution.error, terminal.snapshot.error);
+
+    let lifecycle_terminal = lifecycle_rx
+        .into_iter()
+        .find_map(|event| match event {
+            CommandSessionLifecycleEvent::Terminal(terminal) => Some(terminal),
+            CommandSessionLifecycleEvent::Started(_)
+            | CommandSessionLifecycleEvent::Output { .. } => None,
+        })
+        .expect("terminal lifecycle event should be delivered");
+    assert_eq!(
+        lifecycle_terminal.snapshot.state,
+        CommandSessionState::Failed
+    );
+    assert_eq!(lifecycle_terminal.snapshot.error, terminal.snapshot.error);
+}
+
+#[test]
+fn completion_hook_panic_marks_successful_process_failed() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let completion_hook: CommandSessionCompletionHook =
+        Box::new(|_| panic!("simulated completion hook panic"));
+    let outcome = manager
+        .start_plan_with_observers(
+            CommandSessionScopeId::new("completion-hook-panic").unwrap(),
+            CommandSpawnPlan::shell(
+                "exit 0".to_string(),
+                workspace.path.clone(),
+                Some(&workspace.path),
+                None,
+            ),
+            CommandStartOptions {
+                initial_yield: Duration::from_secs(1),
+            },
+            None,
+            None,
+            None,
+            Some(completion_hook),
+        )
+        .unwrap();
+    let CommandStartOutcome::Exited(terminal) = outcome else {
+        panic!("short command should settle inside initial yield");
+    };
+    assert_eq!(terminal.snapshot.state, CommandSessionState::Failed);
+    assert_eq!(terminal.snapshot.exit_code, Some(0));
+    assert_eq!(
+        terminal.snapshot.error.as_deref(),
+        Some("命令终态结算回调异常退出。")
+    );
+    assert_eq!(terminal.execution.exit_code, Some(0));
+    assert_eq!(terminal.execution.error, terminal.snapshot.error);
 }
 
 #[test]

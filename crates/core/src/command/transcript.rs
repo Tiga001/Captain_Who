@@ -1,10 +1,13 @@
 //! Bounded, non-destructive command output history.
 
-use crate::AgentCommandOutputStream;
+use crate::{AgentCommandOutputStream, AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 const MAX_TRANSCRIPT_CHUNK_BYTES: usize = 1024;
+const MAX_TRANSCRIPT_HEAD_CHUNKS: usize = AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS / 4;
+const MAX_TRANSCRIPT_TAIL_CHUNKS: usize =
+    AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS - MAX_TRANSCRIPT_HEAD_CHUNKS;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,7 +92,10 @@ impl CommandTranscript {
         mut text: String,
         committed: &mut Vec<CommandOutputChunk>,
     ) {
-        if !self.head_sealed && self.head_bytes < self.head_limit {
+        if !self.head_sealed
+            && self.head_bytes < self.head_limit
+            && self.head.len() < MAX_TRANSCRIPT_HEAD_CHUNKS
+        {
             let available = self.head_limit - self.head_bytes;
             let split = utf8_prefix_len(&text, available);
             if split > 0 {
@@ -129,7 +135,9 @@ impl CommandTranscript {
     }
 
     fn trim_tail(&mut self) {
-        while self.tail_bytes > self.tail_limit && self.tail.len() > 1 {
+        while (self.tail_bytes > self.tail_limit || self.tail.len() > MAX_TRANSCRIPT_TAIL_CHUNKS)
+            && self.tail.len() > 1
+        {
             if let Some(removed) = self.tail.pop_front() {
                 self.tail_bytes = self.tail_bytes.saturating_sub(removed.text.len());
                 self.truncated = true;
@@ -269,5 +277,31 @@ mod tests {
                 .collect::<String>(),
             "abc你z"
         );
+    }
+
+    #[test]
+    fn tiny_output_has_a_hard_chunk_bound_without_losing_monotonic_order() {
+        let mut transcript = CommandTranscript::new(256 * 1024);
+        for _ in 0..100_000 {
+            transcript.commit(AgentCommandOutputStream::Stdout, "x".to_string());
+        }
+
+        let batch = transcript.read_after(0, 256 * 1024);
+        assert_eq!(
+            batch.chunks.len(),
+            AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS
+        );
+        assert_eq!(batch.chunks.first().unwrap().sequence, 1);
+        assert_eq!(batch.chunks.last().unwrap().sequence, 100_000);
+        assert!(batch.truncated_before);
+        assert!(transcript.output_truncated());
+        assert!(batch
+            .chunks
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence));
+        assert!(batch
+            .chunks
+            .windows(2)
+            .any(|pair| pair[1].sequence > pair[0].sequence + 1));
     }
 }

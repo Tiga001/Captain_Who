@@ -194,6 +194,19 @@ impl FileEffectTracker {
         effect_ids.truncate(8);
         effect_ids
     }
+
+    #[cfg(test)]
+    pub(super) fn active_run_ids_for_conversation(&self, conversation_id: &str) -> Vec<String> {
+        self.active_run_ids(&FileEffectScope::Conversation(conversation_id.to_string()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn unsettled_effect_ids_for_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Vec<String> {
+        self.unsettled_effect_ids(&FileEffectScope::Conversation(conversation_id.to_string()))
+    }
 }
 
 fn file_effect_scopes(

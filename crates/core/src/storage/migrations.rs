@@ -1,7 +1,14 @@
 use crate::context::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION;
+use crate::storage::agent_command_session_repository::prune_all_transcripts_for_migration;
+use crate::storage::command_session_receipt_payload::encode_command_session_receipt_payload;
 use crate::storage::{conversation_history_archive_repository, usage_repository};
-use crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION;
+use crate::{
+    AgentCommandOutputStream, AgentCommandSessionOutputChunk,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+};
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
+use std::io::{Error as IoError, ErrorKind};
 
 const REMOVE_INITIAL_DEMO_PROFILE_TASK: &str = "remove_initial_demo_profile";
 const CLEAR_PLACEHOLDER_TAVILY_KEY_TASK: &str = "clear_placeholder_tavily_key";
@@ -299,6 +306,13 @@ fn ensure_agent_command_session_schema(connection: &Connection) -> rusqlite::Res
                 length(output_hash) = 64
                 AND output_hash NOT GLOB '*[^0-9a-f]*'
             ),
+            output_payload_compression TEXT NOT NULL CHECK (
+                output_payload_compression = 'zstd_json_v1'
+            ),
+            output_payload BLOB NOT NULL CHECK (
+                length(output_payload) BETWEEN 1 AND 16777216
+            ),
+            output_chunk_count INTEGER NOT NULL CHECK (output_chunk_count >= 0),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             UNIQUE (conversation_id, session_id, run_id, call_id),
             CHECK (
@@ -456,12 +470,6 @@ fn ensure_agent_command_session_schema(connection: &Connection) -> rusqlite::Res
             SELECT RAISE(ABORT, 'command session model receipt owner is invalid');
         END;
 
-        CREATE TRIGGER IF NOT EXISTS prevent_agent_command_session_model_receipt_update
-        BEFORE UPDATE ON agent_command_session_model_read_receipts
-        BEGIN
-            SELECT RAISE(ABORT, 'command session model read receipts are immutable');
-        END;
-
         CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_lifecycle_owner
         BEFORE INSERT ON agent_command_session_lifecycle_events
         WHEN NOT EXISTS (
@@ -497,7 +505,177 @@ fn ensure_agent_command_session_schema(connection: &Connection) -> rusqlite::Res
             SELECT RAISE(ABORT, 'command session lifecycle events are append-only');
         END;
         ",
-    )
+    )?;
+
+    add_column_if_missing(
+        connection,
+        "agent_command_session_model_read_receipts",
+        "output_payload_compression",
+        "TEXT CHECK (output_payload_compression IS NULL OR output_payload_compression = 'zstd_json_v1')",
+    )?;
+    add_column_if_missing(
+        connection,
+        "agent_command_session_model_read_receipts",
+        "output_payload",
+        "BLOB CHECK (output_payload IS NULL OR length(output_payload) BETWEEN 1 AND 16777216)",
+    )?;
+    add_column_if_missing(
+        connection,
+        "agent_command_session_model_read_receipts",
+        "output_chunk_count",
+        "INTEGER CHECK (output_chunk_count IS NULL OR output_chunk_count >= 0)",
+    )?;
+
+    // Existing receipts pin their exact raw sequence ranges. Backfill the immutable compressed
+    // payload before operational chunks gain an independent hard row limit. The savepoint makes a
+    // failed hash/availability check fully recoverable and restores the old immutability trigger.
+    connection.execute_batch(
+        "SAVEPOINT backfill_command_session_receipts;
+         DROP TRIGGER IF EXISTS prevent_agent_command_session_model_receipt_update;",
+    )?;
+    if let Err(error) = backfill_agent_command_session_receipt_payloads(connection) {
+        let _ = connection.execute_batch(
+            "ROLLBACK TO backfill_command_session_receipts;
+             RELEASE backfill_command_session_receipts;",
+        );
+        return Err(error);
+    }
+    if let Err(error) = prune_all_transcripts_for_migration(connection) {
+        let _ = connection.execute_batch(
+            "ROLLBACK TO backfill_command_session_receipts;
+             RELEASE backfill_command_session_receipts;",
+        );
+        return Err(error);
+    }
+    connection.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS validate_agent_command_session_model_receipt_payload_insert
+         BEFORE INSERT ON agent_command_session_model_read_receipts
+         WHEN NEW.output_payload_compression IS NULL
+           OR NEW.output_payload IS NULL
+           OR NEW.output_chunk_count IS NULL
+         BEGIN
+             SELECT RAISE(ABORT, 'command session model receipt payload is required');
+         END;
+
+         CREATE TRIGGER prevent_agent_command_session_model_receipt_update
+         BEFORE UPDATE ON agent_command_session_model_read_receipts
+         BEGIN
+             SELECT RAISE(ABORT, 'command session model read receipts are immutable');
+         END;
+         RELEASE backfill_command_session_receipts;",
+    )?;
+    Ok(())
+}
+
+fn backfill_agent_command_session_receipt_payloads(
+    connection: &Connection,
+) -> rusqlite::Result<()> {
+    let receipts = {
+        let mut statement = connection.prepare(
+            "SELECT receipt_id, session_id, first_output_sequence, last_output_sequence,
+                    output_bytes, output_hash
+             FROM agent_command_session_model_read_receipts
+             WHERE output_payload IS NULL
+                OR output_payload_compression IS NULL
+                OR output_chunk_count IS NULL
+             ORDER BY receipt_id ASC",
+        )?;
+        let receipts = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<u64>>(2)?,
+                    row.get::<_, Option<u64>>(3)?,
+                    row.get::<_, usize>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        receipts
+    };
+
+    for (receipt_id, session_id, first, last, expected_bytes, expected_hash) in receipts {
+        let chunks = match (first, last) {
+            (None, None) => Vec::new(),
+            (Some(first), Some(last)) => {
+                let mut statement = connection.prepare(
+                    "SELECT sequence, stream, output
+                     FROM agent_command_session_output_chunks
+                     WHERE session_id = ?1 AND sequence BETWEEN ?2 AND ?3
+                     ORDER BY sequence ASC",
+                )?;
+                let chunks = statement
+                    .query_map(rusqlite::params![session_id, first, last], |row| {
+                        let stream = match row.get::<_, String>(1)?.as_str() {
+                            "stdout" => AgentCommandOutputStream::Stdout,
+                            "stderr" => AgentCommandOutputStream::Stderr,
+                            _ => {
+                                return Err(receipt_payload_migration_error(
+                                    "命令 Session 旧回执包含未知输出流。",
+                                ));
+                            }
+                        };
+                        Ok(AgentCommandSessionOutputChunk {
+                            sequence: row.get(0)?,
+                            stream,
+                            output: row.get(2)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                chunks
+            }
+            _ => {
+                return Err(receipt_payload_migration_error(
+                    "命令 Session 旧回执的 sequence 范围不完整。",
+                ));
+            }
+        };
+        if first.is_some()
+            && (chunks.first().map(|chunk| chunk.sequence) != first
+                || chunks.last().map(|chunk| chunk.sequence) != last)
+        {
+            return Err(receipt_payload_migration_error(
+                "命令 Session 旧回执引用的输出已不完整。",
+            ));
+        }
+        let output = chunks
+            .iter()
+            .map(|chunk| chunk.output.as_str())
+            .collect::<String>();
+        if output.len() != expected_bytes
+            || format!("{:x}", Sha256::digest(output.as_bytes())) != expected_hash
+        {
+            return Err(receipt_payload_migration_error(
+                "命令 Session 旧回执的输出 hash 校验失败。",
+            ));
+        }
+        let encoded = encode_command_session_receipt_payload(&chunks)
+            .map_err(receipt_payload_migration_error)?;
+        connection.execute(
+            "UPDATE agent_command_session_model_read_receipts
+             SET output_payload_compression = ?1,
+                 output_payload = ?2,
+                 output_chunk_count = ?3
+             WHERE receipt_id = ?4",
+            rusqlite::params![
+                encoded.compression,
+                encoded.payload,
+                i64::try_from(encoded.chunk_count).map_err(|_| {
+                    receipt_payload_migration_error("命令 Session 旧回执的 chunk 数量无法持久化。")
+                })?,
+                receipt_id,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn receipt_payload_migration_error(error: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(IoError::new(
+        ErrorKind::InvalidData,
+        error.to_string(),
+    )))
 }
 
 fn ensure_command_session_lifecycle_identity_index(

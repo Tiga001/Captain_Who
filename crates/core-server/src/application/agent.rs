@@ -20,12 +20,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider};
+#[cfg(test)]
 use mycopilot_core::command::{
     run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer,
+    CommandExecutionError, ProcessOutputObserver,
+};
+use mycopilot_core::command::{
     AgentCommandExecutionResult, CommandAuthorizationSource, CommandRunGuard, CommandRunState,
 };
-#[cfg(test)]
-use mycopilot_core::command::{CommandExecutionError, ProcessOutputObserver};
 use mycopilot_core::file_input::AgentFileInputExecutionContext;
 use mycopilot_core::file_write::{
     file_draft_snapshot, file_write_action_approval_status, file_write_approval_route,
@@ -109,6 +111,8 @@ mod turn;
 mod usage;
 
 use action_execution::*;
+#[cfg(test)]
+use command_sessions::AgentCommandSessionHandoffGuard;
 use command_sessions::{
     AgentCommandHandoffOutcome, AgentCommandSessionLaunch, AgentCommandSessionRegistry,
     CommandSessionOwner, StartAgentCommandSession,

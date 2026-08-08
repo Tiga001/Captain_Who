@@ -3,8 +3,10 @@ import {
   parseAgentCommandSessionEvent,
   parseAgentCommandSessionGetInput,
   parseAgentCommandSessionGetOutput,
-  parseAgentCommandSessionListOutput
+  parseAgentCommandSessionListOutput,
+  parseAgentCommandSessionTranscript
 } from './agentCommandSessionParsers'
+import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from './agent'
 import { parseAgentEventForHost } from './agentMcpParsers'
 
 const sessionId = 'cmd_1234567890abcdef1234567890abcdef'
@@ -107,6 +109,47 @@ describe('Agent command Session protocol', () => {
         }
       })
     ).toMatchObject({ session: { sessionId }, transcript: { latestSequence: 2 } })
+  })
+
+  it('accepts the Host transcript chunk boundary and rejects one item beyond it', () => {
+    const chunks = Array.from(
+      { length: AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS },
+      (_, index) => ({ sequence: index + 1, stream: 'stdout' as const, output: 'x' })
+    )
+    expect(
+      parseAgentCommandSessionGetOutput({
+        session: {
+          ...snapshot,
+          latestSequence: AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS
+        },
+        transcript: {
+          requestedAfterSequence: 0,
+          firstAvailableSequence: 1,
+          latestSequence: AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS,
+          truncatedBefore: false,
+          outputCaptureTruncated: false,
+          chunks
+        }
+      }).transcript.chunks
+    ).toHaveLength(AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS)
+
+    expect(() =>
+      parseAgentCommandSessionTranscript({
+        requestedAfterSequence: 0,
+        firstAvailableSequence: 1,
+        latestSequence: AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS + 1,
+        truncatedBefore: false,
+        outputCaptureTruncated: false,
+        chunks: [
+          ...chunks,
+          {
+            sequence: AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS + 1,
+            stream: 'stderr',
+            output: 'y'
+          }
+        ]
+      })
+    ).toThrow(/chunks exceeded 2048 items/)
   })
 
   it('validates Host query identities and bounds', () => {

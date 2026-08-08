@@ -650,6 +650,7 @@ export function AppShell() {
   } = useAgentRunLifecycle({
     contextWindowIndicatorEnabled,
     conversationState: {
+      activeConversationId,
       activeConversationIdRef,
       conversations,
       conversationsRef,

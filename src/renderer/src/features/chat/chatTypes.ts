@@ -1,5 +1,6 @@
 import type {
   AgentCommandOutputStream,
+  AgentCommandSessionStatus,
   AgentDiffProposal,
   AgentContextCompactionEventOutcome,
   AgentFileDraftSnapshot,
@@ -116,6 +117,21 @@ export interface ChatCommandOutputPreview {
 }
 
 /**
+ * Renderer projection of one managed process. Approval remains authoritative on the Tool Call;
+ * this view starts only after approval has settled and describes the independent process state.
+ */
+export interface ChatCommandSessionView {
+  callId: string
+  sessionId?: string
+  status: AgentCommandSessionStatus
+  startedAt?: number
+  endedAt?: number
+  exitCode?: number
+  latestSequence: number
+  outputTruncated: boolean
+}
+
+/**
  * Renderer-owned, allowlisted projection of an MCP invocation.
  *
  * Keep this separate from AgentToolCall/AgentToolResult: those generic DTOs can contain arguments
@@ -189,6 +205,11 @@ export interface ChatAgentRunView {
   fileWritePreviews?: ChatFileWritePreview[]
   /** Ephemeral live process output. Final ToolResults remain the durable source of truth. */
   commandOutputPreviews?: Record<string, ChatCommandOutputPreview>
+  /**
+   * Managed process projection keyed by the original run_command call id. Active entries are
+   * Host-authoritative and ephemeral; immutable terminal metadata is durable Timeline state.
+   */
+  commandSessions?: Record<string, ChatCommandSessionView>
   /** Safe lifecycle-only MCP views. Never store MCP arguments or result bodies here. */
   mcpInvocations?: ChatMcpToolInvocationView[]
   messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>

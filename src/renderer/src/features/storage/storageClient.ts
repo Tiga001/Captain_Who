@@ -24,6 +24,7 @@ import type { AppProject } from '../../config/projectConfig'
 import type {
   ChatAgentTimelineItem,
   ChatAgentRunView,
+  ChatCommandSessionView,
   ChatComposerDraft,
   ChatConversation,
   ChatMessage,
@@ -514,8 +515,91 @@ function projectStoredMcpInvocation(value: unknown): ChatMcpToolInvocationView |
   }
 }
 
+const DURABLE_COMMAND_TERMINAL_STATUSES = new Set<ChatCommandSessionView['status']>([
+  'exited',
+  'interrupted',
+  'timed_out',
+  'failed',
+  'outcome_unknown'
+])
+
+function optionalSafeInteger(value: unknown, minimum?: number): number | undefined {
+  if (!Number.isSafeInteger(value)) return undefined
+  const integer = value as number
+  return minimum === undefined || integer >= minimum ? integer : undefined
+}
+
+/**
+ * Persist only immutable terminal process metadata. Active state and transcript bytes remain
+ * exclusively Host-owned, while this small projection keeps old Timeline cards truthful after the
+ * Host's bounded operational Session row has aged out.
+ */
+function projectDurableTerminalCommandSession(
+  value: unknown,
+  expectedCallId: string
+): ChatCommandSessionView | undefined {
+  if (!isUnknownRecord(value)) return undefined
+  if (
+    value.callId !== expectedCallId ||
+    expectedCallId.length === 0 ||
+    expectedCallId.length > 1024
+  ) {
+    return undefined
+  }
+  if (
+    typeof value.status !== 'string' ||
+    !DURABLE_COMMAND_TERMINAL_STATUSES.has(value.status as ChatCommandSessionView['status'])
+  ) {
+    return undefined
+  }
+
+  const startedAt = optionalSafeInteger(value.startedAt, 0)
+  const endedAt = optionalSafeInteger(value.endedAt, 0)
+  const exitCode = optionalSafeInteger(value.exitCode)
+  const latestSequence = optionalSafeInteger(value.latestSequence, 0) ?? 0
+  return {
+    callId: expectedCallId,
+    status: value.status as ChatCommandSessionView['status'],
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(endedAt === undefined ? {} : { endedAt }),
+    ...(exitCode === undefined ? {} : { exitCode }),
+    latestSequence,
+    outputTruncated: value.outputTruncated === true
+  }
+}
+
+function projectDurableTerminalCommandSessions(
+  value: unknown,
+  allowedCallIds: ReadonlySet<string>
+): Record<string, ChatCommandSessionView> | undefined {
+  if (!isUnknownRecord(value)) return undefined
+  const projectedSessions: Record<string, ChatCommandSessionView> = {}
+  for (const [callId, session] of Object.entries(value)) {
+    if (!allowedCallIds.has(callId)) continue
+    const projected = projectDurableTerminalCommandSession(session, callId)
+    if (projected) projectedSessions[callId] = projected
+  }
+  return Object.keys(projectedSessions).length > 0 ? projectedSessions : undefined
+}
+
 function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView {
   const normalized = ensureAgentRun(storedRun, storedRun.runId, storedRun.status)
+  const runCommandCallIds = new Set(
+    normalized.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
+  )
+  const durableCommandSessions = projectDurableTerminalCommandSessions(
+    storedRun.commandSessions,
+    runCommandCallIds
+  )
+  // Active command state and transcript previews are Host-owned runtime projections. Retain only
+  // the allowlisted immutable terminal metadata written by the current Renderer.
+  const durableNormalized = { ...normalized }
+  if (durableCommandSessions) {
+    durableNormalized.commandSessions = durableCommandSessions
+  } else {
+    delete durableNormalized.commandSessions
+  }
+  delete durableNormalized.commandOutputPreviews
   const rawMcpInvocations = Array.isArray(storedRun.mcpInvocations) ? storedRun.mcpInvocations : []
   const referencedMcpCallIds = new Set<string>(
     rawMcpInvocations.flatMap((invocation) =>
@@ -595,7 +679,7 @@ function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView 
   }
 
   return {
-    ...normalized,
+    ...durableNormalized,
     approvals,
     toolCalls: normalized.toolCalls.filter(
       (call) =>
@@ -848,6 +932,18 @@ function stringifyAgentRun(run: ChatAgentRunView | undefined): string | null {
   const persistedRun = { ...run }
   delete persistedRun.fileWritePreviews
   delete persistedRun.commandOutputPreviews
+  const runCommandCallIds = new Set(
+    run.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
+  )
+  const durableCommandSessions = projectDurableTerminalCommandSessions(
+    run.commandSessions,
+    runCommandCallIds
+  )
+  if (durableCommandSessions) {
+    persistedRun.commandSessions = durableCommandSessions
+  } else {
+    delete persistedRun.commandSessions
+  }
   return JSON.stringify(persistedRun)
 }
 

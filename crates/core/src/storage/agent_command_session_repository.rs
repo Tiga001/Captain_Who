@@ -6,9 +6,13 @@
 //! transcript so a Renderer reload does not depend on in-process memory.
 
 use crate::command::CommandAuthorizationSource;
+use crate::storage::command_session_receipt_payload::{
+    decode_command_session_receipt_payload, encode_command_session_receipt_payload,
+};
 use crate::{
     AgentCommandOutputStream, AgentCommandSessionAction, AgentCommandSessionOutputChunk,
     AgentCommandSessionSnapshot, AgentCommandSessionStatus, AgentCommandSessionTranscript,
+    AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -20,6 +24,8 @@ use std::io::{Error as IoError, ErrorKind};
 pub const AGENT_COMMAND_SESSION_SCHEMA_VERSION: u32 = 1;
 pub const MAX_PERSISTED_COMMAND_TRANSCRIPT_BYTES: usize = 256 * 1024;
 const PERSISTED_COMMAND_TRANSCRIPT_HEAD_BYTES: usize = 64 * 1024;
+const PERSISTED_COMMAND_TRANSCRIPT_HEAD_CHUNKS: usize =
+    AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS / 4;
 const MAX_PERSISTED_COMMAND_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_RETAINED_TERMINAL_COMMAND_SESSIONS_PER_CONVERSATION: usize = 128;
 pub const MAX_RETAINED_MODEL_READ_RECEIPTS_PER_SESSION: usize = 64;
@@ -96,6 +102,24 @@ pub struct AgentCommandSessionModelReadReceipt {
 pub struct AgentCommandSessionModelRead {
     pub receipt: AgentCommandSessionModelReadReceipt,
     pub chunks: Vec<AgentCommandSessionOutputChunk>,
+}
+
+struct StoredAgentCommandSessionModelReadReceipt {
+    receipt: AgentCommandSessionModelReadReceipt,
+    payload_compression: String,
+    payload: Vec<u8>,
+    chunk_count: usize,
+}
+
+/// Internal ascending model cursor projection. It shares the operational row-count bound but is
+/// independent from the Host's latest-tail hydration view, so a reload cannot advance or skip the
+/// model's unread retained prefix.
+struct AgentCommandSessionModelTranscriptCut {
+    requested_after_sequence: u64,
+    latest_sequence: u64,
+    truncated_before: bool,
+    output_capture_truncated: bool,
+    chunks: Vec<AgentCommandSessionOutputChunk>,
 }
 
 #[derive(Debug, Clone)]
@@ -485,15 +509,105 @@ pub fn read_transcript(
     let Some(record) = get_session(connection, conversation_id, session_id)? else {
         return Ok(None);
     };
+    // Host reload is a bounded latest-output projection, not the model's incremental cursor.
+    // Reading in reverse lets a large number of tiny chunks retain the useful tail while never
+    // crossing the Rust/TypeScript 2,048-item contract.
     let mut statement = connection.prepare(
         "SELECT sequence, stream, output
          FROM agent_command_session_output_chunks
          WHERE session_id = ?1 AND sequence > ?2
-         ORDER BY sequence ASC",
+         ORDER BY sequence DESC
+         LIMIT ?3",
     )?;
     let candidates = statement
         .query_map(
-            params![session_id, sqlite_integer(after_sequence)?],
+            params![
+                session_id,
+                sqlite_integer(after_sequence)?,
+                sqlite_integer(
+                    u64::try_from(AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS)
+                        .map_err(|_| invalid_input("command transcript chunk limit is invalid"))?
+                )?
+            ],
+            output_chunk_from_row,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let earliest_requested_sequence = connection.query_row(
+        "SELECT MIN(sequence)
+         FROM agent_command_session_output_chunks
+         WHERE session_id = ?1 AND sequence > ?2",
+        params![session_id, sqlite_integer(after_sequence)?],
+        |row| row.get::<_, Option<u64>>(0),
+    )?;
+    let mut chunks_descending = Vec::new();
+    let mut bytes = 0_usize;
+    for chunk in candidates {
+        if !chunks_descending.is_empty() && bytes.saturating_add(chunk.output.len()) > max_bytes {
+            break;
+        }
+        bytes = bytes.saturating_add(chunk.output.len());
+        chunks_descending.push(chunk);
+    }
+    chunks_descending.reverse();
+    let chunks = chunks_descending;
+    let first_available_sequence = connection.query_row(
+        "SELECT MIN(sequence)
+             FROM agent_command_session_output_chunks
+             WHERE session_id = ?1",
+        [session_id],
+        |row| row.get::<_, Option<u64>>(0),
+    )?;
+    let has_gap_after_cursor = chunks
+        .first()
+        .is_some_and(|chunk| chunk.sequence > after_sequence.saturating_add(1));
+    let host_projection_omitted_prefix = earliest_requested_sequence
+        .zip(chunks.first().map(|chunk| chunk.sequence))
+        .is_some_and(|(earliest, returned)| returned > earliest);
+    Ok(Some(AgentCommandSessionTranscript {
+        requested_after_sequence: after_sequence,
+        first_available_sequence,
+        latest_sequence: record.snapshot.latest_sequence,
+        truncated_before: (record.transcript_truncated
+            && after_sequence < record.snapshot.latest_sequence)
+            || has_gap_after_cursor
+            || host_projection_omitted_prefix,
+        output_capture_truncated: record.output_capture_truncated,
+        chunks,
+    }))
+}
+
+fn read_model_transcript_cut(
+    connection: &Connection,
+    conversation_id: &str,
+    session_id: &str,
+    after_sequence: u64,
+    max_bytes: usize,
+) -> rusqlite::Result<Option<AgentCommandSessionModelTranscriptCut>> {
+    if max_bytes == 0 {
+        return Err(invalid_input(
+            "command session model transcript max_bytes must be positive",
+        ));
+    }
+    let Some(record) = get_session(connection, conversation_id, session_id)? else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT sequence, stream, output
+         FROM agent_command_session_output_chunks
+         WHERE session_id = ?1 AND sequence > ?2
+         ORDER BY sequence ASC
+         LIMIT ?3",
+    )?;
+    let candidates = statement
+        .query_map(
+            params![
+                session_id,
+                sqlite_integer(after_sequence)?,
+                sqlite_integer(
+                    u64::try_from(AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS)
+                        .map_err(|_| invalid_input("command transcript chunk limit is invalid"))?
+                )?
+            ],
             output_chunk_from_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -506,23 +620,15 @@ pub fn read_transcript(
         bytes = bytes.saturating_add(chunk.output.len());
         chunks.push(chunk);
     }
-    let first_available_sequence = connection.query_row(
-        "SELECT MIN(sequence)
-             FROM agent_command_session_output_chunks
-             WHERE session_id = ?1",
-        [session_id],
-        |row| row.get::<_, Option<u64>>(0),
-    )?;
-    let has_gap = chunks
+    let has_gap_after_cursor = chunks
         .first()
         .is_some_and(|chunk| chunk.sequence > after_sequence.saturating_add(1));
-    Ok(Some(AgentCommandSessionTranscript {
+    Ok(Some(AgentCommandSessionModelTranscriptCut {
         requested_after_sequence: after_sequence,
-        first_available_sequence,
         latest_sequence: record.snapshot.latest_sequence,
         truncated_before: (record.transcript_truncated
             && after_sequence < record.snapshot.latest_sequence)
-            || has_gap,
+            || has_gap_after_cursor,
         output_capture_truncated: record.output_capture_truncated,
         chunks,
     }))
@@ -530,25 +636,25 @@ pub fn read_transcript(
 
 /// Atomically allocates or replays one model-visible transcript cut.
 ///
-/// The receipt stores only immutable sequence/status metadata and a hash. Output text remains in
-/// the Session transcript, whose retention pass pins every range referenced by a retained
-/// receipt. Retrying the same runtime ToolCall therefore returns the exact same cut without
-/// advancing the Session's shared model cursor twice.
+/// The receipt stores immutable sequence/status metadata plus a compressed exact chunk payload.
+/// Operational Host transcript retention is therefore independent: retrying the same runtime
+/// ToolCall remains exact without pinning an unbounded number of SQLite output rows.
 pub fn read_or_create_model_read(
     connection: &mut Connection,
     input: &AgentCommandSessionModelReadRequest<'_>,
 ) -> rusqlite::Result<Option<AgentCommandSessionModelRead>> {
     validate_model_read_request(input)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(receipt) = get_model_read_receipt_in_connection(
+    if let Some(stored) = get_model_read_receipt_in_connection(
         &transaction,
         input.conversation_id,
         input.session_id,
         input.run_id,
         input.call_id,
     )? {
-        validate_model_read_retry(&receipt, input)?;
-        let chunks = read_model_receipt_chunks_in_connection(&transaction, &receipt)?;
+        validate_model_read_retry(&stored.receipt, input)?;
+        let chunks = decode_model_receipt_chunks(&stored)?;
+        let receipt = stored.receipt;
         transaction.commit()?;
         return Ok(Some(AgentCommandSessionModelRead { receipt, chunks }));
     }
@@ -559,7 +665,7 @@ pub fn read_or_create_model_read(
         transaction.commit()?;
         return Ok(None);
     };
-    let transcript = read_transcript(
+    let transcript = read_model_transcript_cut(
         &transaction,
         input.conversation_id,
         input.session_id,
@@ -594,7 +700,7 @@ pub fn read_or_create_model_read(
         output_hash: format!("{:x}", Sha256::digest(output.as_bytes())),
         created_at: input.created_at,
     };
-    insert_model_read_receipt_in_connection(&transaction, &receipt)?;
+    insert_model_read_receipt_in_connection(&transaction, &receipt, &transcript.chunks)?;
     if let Some(last_sequence) = receipt.last_output_sequence {
         let advanced = advance_model_read_sequence(
             &transaction,
@@ -611,7 +717,14 @@ pub fn read_or_create_model_read(
         }
     }
     prune_model_read_receipts_in_connection(&transaction, input.session_id)?;
-    prune_transcript_in_connection(&transaction, input.session_id)?;
+    if prune_transcript_in_connection(&transaction, input.session_id)? {
+        transaction.execute(
+            "UPDATE agent_command_sessions
+             SET transcript_truncated = 1
+             WHERE conversation_id = ?1 AND session_id = ?2",
+            params![input.conversation_id, input.session_id],
+        )?;
+    }
     transaction.commit()?;
     Ok(Some(AgentCommandSessionModelRead {
         receipt,
@@ -628,7 +741,7 @@ pub fn load_model_read(
     input: &AgentCommandSessionModelReadRequest<'_>,
 ) -> rusqlite::Result<Option<AgentCommandSessionModelRead>> {
     validate_model_read_request(input)?;
-    let Some(receipt) = get_model_read_receipt_in_connection(
+    let Some(stored) = get_model_read_receipt_in_connection(
         connection,
         input.conversation_id,
         input.session_id,
@@ -638,8 +751,9 @@ pub fn load_model_read(
     else {
         return Ok(None);
     };
-    validate_model_read_retry(&receipt, input)?;
-    let chunks = read_model_receipt_chunks_in_connection(connection, &receipt)?;
+    validate_model_read_retry(&stored.receipt, input)?;
+    let chunks = decode_model_receipt_chunks(&stored)?;
+    let receipt = stored.receipt;
     Ok(Some(AgentCommandSessionModelRead { receipt, chunks }))
 }
 
@@ -678,7 +792,7 @@ fn get_model_read_receipt_in_connection(
     session_id: &str,
     run_id: &str,
     call_id: &str,
-) -> rusqlite::Result<Option<AgentCommandSessionModelReadReceipt>> {
+) -> rusqlite::Result<Option<StoredAgentCommandSessionModelReadReceipt>> {
     connection
         .query_row(
             "SELECT
@@ -686,12 +800,13 @@ fn get_model_read_receipt_in_connection(
                  max_output_bytes, requested_after_sequence,
                  first_output_sequence, last_output_sequence, status, exit_code,
                  latest_sequence, truncated_before, output_truncated,
-                 output_bytes, output_hash, created_at
+                 output_bytes, output_hash, created_at,
+                 output_payload_compression, output_payload, output_chunk_count
              FROM agent_command_session_model_read_receipts
              WHERE conversation_id = ?1 AND session_id = ?2
                AND run_id = ?3 AND call_id = ?4",
             params![conversation_id, session_id, run_id, call_id],
-            model_read_receipt_from_row,
+            stored_model_read_receipt_from_row,
         )
         .optional()
 }
@@ -699,17 +814,21 @@ fn get_model_read_receipt_in_connection(
 fn insert_model_read_receipt_in_connection(
     connection: &Connection,
     receipt: &AgentCommandSessionModelReadReceipt,
+    chunks: &[AgentCommandSessionOutputChunk],
 ) -> rusqlite::Result<()> {
+    let encoded = encode_command_session_receipt_payload(chunks)
+        .map_err(|error| invalid_input(format!("command session receipt payload: {error}")))?;
     connection.execute(
         "INSERT INTO agent_command_session_model_read_receipts (
              conversation_id, session_id, run_id, call_id, action,
              max_output_bytes, requested_after_sequence,
              first_output_sequence, last_output_sequence, status, exit_code,
              latest_sequence, truncated_before, output_truncated,
-             output_bytes, output_hash, created_at
+             output_bytes, output_hash, created_at,
+             output_payload_compression, output_payload, output_chunk_count
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-             ?14, ?15, ?16, ?17
+             ?14, ?15, ?16, ?17, ?18, ?19, ?20
          )",
         params![
             &receipt.conversation_id,
@@ -735,15 +854,27 @@ fn insert_model_read_receipt_in_connection(
             sqlite_integer(receipt.output_bytes as u64)?,
             &receipt.output_hash,
             receipt.created_at,
+            encoded.compression,
+            encoded.payload,
+            sqlite_integer(
+                u64::try_from(encoded.chunk_count)
+                    .map_err(|_| invalid_input("command session receipt chunk count is invalid"))?
+            )?,
         ],
     )?;
     Ok(())
 }
 
-fn read_model_receipt_chunks_in_connection(
-    connection: &Connection,
-    receipt: &AgentCommandSessionModelReadReceipt,
+fn decode_model_receipt_chunks(
+    stored: &StoredAgentCommandSessionModelReadReceipt,
 ) -> rusqlite::Result<Vec<AgentCommandSessionOutputChunk>> {
+    let receipt = &stored.receipt;
+    let chunks = decode_command_session_receipt_payload(
+        &stored.payload_compression,
+        &stored.payload,
+        stored.chunk_count,
+    )
+    .map_err(|error| corrupt_data(0, Type::Blob, &error))?;
     let (Some(first), Some(last)) = (receipt.first_output_sequence, receipt.last_output_sequence)
     else {
         if receipt.first_output_sequence.is_some()
@@ -757,24 +888,15 @@ fn read_model_receipt_chunks_in_connection(
                 "empty command session model receipt has inconsistent output metadata",
             ));
         }
-        return Ok(Vec::new());
+        if !chunks.is_empty() {
+            return Err(corrupt_data(
+                0,
+                Type::Blob,
+                "empty command session model receipt contains output chunks",
+            ));
+        }
+        return Ok(chunks);
     };
-    let mut statement = connection.prepare(
-        "SELECT sequence, stream, output
-         FROM agent_command_session_output_chunks
-         WHERE session_id = ?1 AND sequence BETWEEN ?2 AND ?3
-         ORDER BY sequence ASC",
-    )?;
-    let chunks = statement
-        .query_map(
-            params![
-                receipt.session_id,
-                sqlite_integer(first)?,
-                sqlite_integer(last)?
-            ],
-            output_chunk_from_row,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
     let output = chunks
         .iter()
         .map(|chunk| chunk.output.as_str())
@@ -787,7 +909,7 @@ fn read_model_receipt_chunks_in_connection(
         return Err(corrupt_data(
             0,
             Type::Text,
-            "command session model receipt references unavailable transcript output",
+            "command session model receipt payload does not match its immutable metadata",
         ));
     }
     Ok(chunks)
@@ -989,42 +1111,29 @@ fn prune_transcript_in_connection(
     let total = rows
         .iter()
         .fold(0_usize, |total, (_, bytes)| total.saturating_add(*bytes));
-    if total <= MAX_PERSISTED_COMMAND_TRANSCRIPT_BYTES {
+    if total <= MAX_PERSISTED_COMMAND_TRANSCRIPT_BYTES
+        && rows.len() <= AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS
+    {
         return Ok(false);
     }
 
     let mut keep = HashSet::new();
-    let receipt_ranges = {
-        let mut statement = connection.prepare(
-            "SELECT first_output_sequence, last_output_sequence
-             FROM agent_command_session_model_read_receipts
-             WHERE session_id = ?1 AND first_output_sequence IS NOT NULL
-             ORDER BY receipt_id ASC",
-        )?;
-        let ranges = statement
-            .query_map([session_id], |row| {
-                Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        ranges
-    };
-    for (sequence, _) in &rows {
-        if receipt_ranges
-            .iter()
-            .any(|(first, last)| sequence >= first && sequence <= last)
-        {
-            keep.insert(*sequence);
-        }
-    }
     let mut head_bytes = 0_usize;
+    let mut head_chunks = 0_usize;
     for (sequence, bytes) in &rows {
         if head_bytes > 0
             && head_bytes.saturating_add(*bytes) > PERSISTED_COMMAND_TRANSCRIPT_HEAD_BYTES
         {
             break;
         }
+        if head_chunks >= PERSISTED_COMMAND_TRANSCRIPT_HEAD_CHUNKS
+            || keep.len() >= AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS
+        {
+            break;
+        }
         keep.insert(*sequence);
         head_bytes = head_bytes.saturating_add(*bytes);
+        head_chunks = head_chunks.saturating_add(1);
     }
     let tail_limit = MAX_PERSISTED_COMMAND_TRANSCRIPT_BYTES
         .saturating_sub(PERSISTED_COMMAND_TRANSCRIPT_HEAD_BYTES);
@@ -1034,6 +1143,9 @@ fn prune_transcript_in_connection(
             continue;
         }
         if tail_bytes > 0 && tail_bytes.saturating_add(*bytes) > tail_limit {
+            break;
+        }
+        if keep.len() >= AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS {
             break;
         }
         keep.insert(*sequence);
@@ -1049,6 +1161,33 @@ fn prune_transcript_in_connection(
         }
     }
     Ok(true)
+}
+
+/// Converts transcript rows created under the legacy receipt-pinning policy to the bounded
+/// operational projection after receipt payloads have been backfilled successfully.
+pub(crate) fn prune_all_transcripts_for_migration(connection: &Connection) -> rusqlite::Result<()> {
+    let session_ids = {
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT session_id
+             FROM agent_command_session_output_chunks
+             ORDER BY session_id ASC",
+        )?;
+        let session_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        session_ids
+    };
+    for session_id in session_ids {
+        if prune_transcript_in_connection(connection, &session_id)? {
+            connection.execute(
+                "UPDATE agent_command_sessions
+                 SET transcript_truncated = 1
+                 WHERE session_id = ?1",
+                [&session_id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn record_select() -> &'static str {
@@ -1134,6 +1273,17 @@ fn model_read_receipt_from_row(
         output_bytes: row.get(14)?,
         output_hash: row.get(15)?,
         created_at: row.get(16)?,
+    })
+}
+
+fn stored_model_read_receipt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<StoredAgentCommandSessionModelReadReceipt> {
+    Ok(StoredAgentCommandSessionModelReadReceipt {
+        receipt: model_read_receipt_from_row(row)?,
+        payload_compression: row.get(17)?,
+        payload: row.get(18)?,
+        chunk_count: row.get(19)?,
     })
 }
 
@@ -1235,7 +1385,7 @@ fn validate_model_read_request(
         }
     }
     if input.max_output_bytes == 0
-        || input.max_output_bytes > MAX_PERSISTED_COMMAND_TRANSCRIPT_BYTES
+        || input.max_output_bytes > AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES
     {
         return Err(invalid_input(
             "command session model receipt output limit is invalid",

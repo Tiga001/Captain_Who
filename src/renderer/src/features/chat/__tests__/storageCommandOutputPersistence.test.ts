@@ -112,6 +112,16 @@ it('keeps live command output transient while persisting the final tool result',
           chunks: [{ sequence: 1, stream: 'stdout', output: 'done' }]
         }
       },
+      commandSessions: {
+        'command-call': {
+          callId: 'command-call',
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'running',
+          startedAt: 1,
+          latestSequence: 1,
+          outputTruncated: false
+        }
+      },
       timeline: []
     }
   }
@@ -122,7 +132,176 @@ it('keeps live command output transient while persisting the final tool result',
   const storedMessage = storage.saveChatMessageState.mock.calls[0]?.[0]?.message
   const storedRun = JSON.parse(storedMessage.agentRunJson) as Record<string, unknown>
   expect(storedRun.commandOutputPreviews).toBeUndefined()
+  expect(storedRun.commandSessions).toBeUndefined()
   expect(storedRun.toolResults).toEqual(message.agentRun?.toolResults)
+})
+
+it('discards legacy persisted managed command projections during reload', async () => {
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-command-reload',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'Managed command reload',
+    messages: [
+      {
+        id: 'assistant-command-reload',
+        role: 'assistant',
+        content: 'The process was handed off.',
+        createdAt: 1,
+        status: 'sent',
+        attachments: [],
+        agentRunJson: JSON.stringify({
+          runId: 'run-command-reload',
+          status: 'completed',
+          completedAt: 2,
+          toolDefinitions: [],
+          toolCalls: [
+            {
+              id: 'command-call',
+              tool: 'run_command',
+              args: { command: 'long-running' },
+              approvalStatus: 'approved'
+            }
+          ],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: [{ id: 'tool-call-command-call', type: 'tool_call', callId: 'command-call' }],
+          commandSessions: {
+            'command-call': {
+              callId: 'command-call',
+              sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+              status: 'running',
+              startedAt: 1,
+              latestSequence: 1,
+              outputTruncated: false
+            }
+          },
+          commandOutputPreviews: {
+            'command-call': {
+              callId: 'command-call',
+              chunks: [{ sequence: 1, stream: 'stdout', output: 'stale output' }]
+            }
+          }
+        }),
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 2,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restored = await loadConversation('conversation-command-reload')
+
+  expect(restored?.messages[0].agentRun?.commandSessions).toBeUndefined()
+  expect(restored?.messages[0].agentRun?.commandOutputPreviews).toBeUndefined()
+})
+
+it('persists and reloads only immutable command terminal metadata', async () => {
+  const message: ChatMessage = {
+    id: 'assistant-command-terminal',
+    role: 'assistant',
+    content: 'The application exited successfully.',
+    createdAt: 1,
+    status: 'sent',
+    agentRun: {
+      runId: 'run-command-terminal',
+      status: 'completed',
+      completedAt: 20,
+      toolDefinitions: [],
+      toolCalls: [
+        {
+          id: 'command-call',
+          tool: 'run_command',
+          args: { command: 'long-running' },
+          approvalStatus: 'approved'
+        }
+      ],
+      toolResults: [
+        {
+          callId: 'command-call',
+          tool: 'run_command',
+          ok: true,
+          result: {
+            status: 'running',
+            sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+            output: 'ready\n',
+            startedAt: 2,
+            latestSequence: 1
+          }
+        }
+      ],
+      approvals: [],
+      diffs: [],
+      commandOutputPreviews: {
+        'command-call': {
+          callId: 'command-call',
+          chunks: [{ sequence: 1, stream: 'stdout', output: 'ready\n' }]
+        }
+      },
+      commandSessions: {
+        'command-call': {
+          callId: 'command-call',
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'exited',
+          startedAt: 2,
+          endedAt: 12,
+          exitCode: 0,
+          latestSequence: 1,
+          outputTruncated: false
+        }
+      },
+      timeline: [{ id: 'tool-call-command-call', type: 'tool_call', callId: 'command-call' }]
+    }
+  }
+
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+  await saveChatMessageState('conversation-command-terminal', message)
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+  const storedRun = JSON.parse(storedMessage.agentRunJson) as Record<string, unknown>
+  expect(storedRun.commandOutputPreviews).toBeUndefined()
+  expect(storedRun.commandSessions).toEqual({
+    'command-call': {
+      callId: 'command-call',
+      status: 'exited',
+      startedAt: 2,
+      endedAt: 12,
+      exitCode: 0,
+      latestSequence: 1,
+      outputTruncated: false
+    }
+  })
+
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-command-terminal',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'Managed command terminal history',
+    messages: [
+      {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        status: message.status,
+        attachments: [],
+        agentRunJson: storedMessage.agentRunJson,
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 20,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restored = await loadConversation('conversation-command-terminal')
+  expect(restored?.messages[0].agentRun?.commandSessions).toEqual(storedRun.commandSessions)
+  expect(restored?.messages[0].agentRun?.commandOutputPreviews).toBeUndefined()
 })
 
 it('persists settled Skill installation activity across a conversation reload', async () => {

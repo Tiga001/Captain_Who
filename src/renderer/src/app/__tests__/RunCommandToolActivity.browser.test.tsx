@@ -15,6 +15,18 @@ const { copyTextSpy } = vi.hoisted(() => ({
 
 const translations: Record<string, string> = {
   'agent.command.completed': '已运行命令',
+  'agent.command.failed': '命令失败',
+  'agent.command.waitingApproval': '等待审批运行命令',
+  'agent.command.waitingApprovalStatus': '等待审批',
+  'agent.command.starting': '正在启动命令',
+  'agent.command.startingStatus': '正在启动',
+  'agent.command.running': '正在运行命令',
+  'agent.command.interrupted': '已中断',
+  'agent.command.interruptedStatus': '已中断',
+  'agent.command.timedOutLabel': '已超时',
+  'agent.command.timedOut': '已超时',
+  'agent.command.failedStatus': '失败',
+  'agent.command.exitCode': '退出码 {code}',
   'agent.command.noOutput': '无输出',
   'agent.command.shell': 'Shell',
   'agent.command.successStatus': '成功',
@@ -22,6 +34,8 @@ const translations: Record<string, string> = {
   'agent.command.waitingForOutput': '等待命令输出…',
   'agent.command.copyOutput': '复制命令输出',
   'agent.command.outputCopied': '命令输出已复制',
+  'agent.command.cancelled': '已取消',
+  'agent.separator': ' · ',
   'agent.tool.running': '正在{tool}',
   'tool.runCommand': '运行命令'
 }
@@ -51,10 +65,11 @@ describe('RunCommandToolActivity', () => {
       callId: call.id,
       ok: true,
       result: {
-        command: 'python3 gen_budget.py',
+        status: 'exited',
         exitCode: 0,
         stderr: '',
-        stdout: 'OK'
+        stdout: 'OK',
+        durationMs: 25
       },
       tool: 'run_command'
     }
@@ -100,6 +115,8 @@ describe('RunCommandToolActivity', () => {
     const copyButton =
       screen.container.querySelector<HTMLButtonElement>('[aria-label="复制命令输出"]')
     expect(copyButton).not.toBeNull()
+    expect(copyButton?.parentElement).toHaveClass('run-command-shell')
+    expect(window.getComputedStyle(copyButton!).top).toBe('8px')
     await userEvent.click(screen.container.querySelector('summary')!)
     await userEvent.click(copyButton!)
     expect(copyTextSpy).toHaveBeenCalledWith('suite started\none warning\n')
@@ -123,6 +140,83 @@ describe('RunCommandToolActivity', () => {
     )
     expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
       '运行中'
+    )
+  })
+
+  it('distinguishes approval waiting from a process that is starting', async () => {
+    const waitingCall: AgentToolCall = {
+      approvalStatus: 'required',
+      args: { command: 'python3 app.py', reason: '启动应用' },
+      id: 'approval-command',
+      tool: 'run_command'
+    }
+    const waiting = await render(<RunCommandToolActivity call={waitingCall} />)
+    expect(waiting.container.querySelector('summary')?.textContent).toContain('等待审批运行命令')
+    expect(waiting.container.querySelector('.run-command-shell__status')?.textContent).toContain(
+      '等待审批'
+    )
+
+    const starting = await render(
+      <RunCommandToolActivity
+        call={{ ...waitingCall, approvalStatus: 'approved' }}
+        session={{
+          callId: waitingCall.id,
+          status: 'starting',
+          latestSequence: 0,
+          outputTruncated: false
+        }}
+      />
+    )
+    expect(starting.container.querySelector('summary')?.textContent).toContain('正在启动命令')
+    expect(starting.container.querySelector('.run-command-shell__status')?.textContent).toContain(
+      '正在启动'
+    )
+  })
+
+  it('renders a managed non-zero exit as failed with exit code and duration', async () => {
+    const call: AgentToolCall = {
+      approvalStatus: 'approved',
+      args: { command: 'pnpm test', reason: '运行测试' },
+      id: 'failed-command',
+      tool: 'run_command'
+    }
+    const result: AgentToolResult = {
+      callId: call.id,
+      tool: 'run_command',
+      ok: true,
+      result: {
+        status: 'running',
+        sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+        output: '',
+        startedAt: 1,
+        latestSequence: 0,
+        outputTruncated: false
+      }
+    }
+    const screen = await render(
+      <RunCommandToolActivity
+        call={call}
+        result={result}
+        session={{
+          callId: call.id,
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'exited',
+          startedAt: 1_000,
+          endedAt: 3_500,
+          exitCode: 2,
+          latestSequence: 0,
+          outputTruncated: false
+        }}
+      />
+    )
+
+    expect(screen.container.querySelector('summary')?.textContent).toContain('命令失败')
+    expect(screen.container.querySelector('.run-command-shell__status')).toHaveAttribute(
+      'data-status',
+      'failed'
+    )
+    expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
+      '失败 · 退出码 2 · 2s'
     )
   })
 
@@ -157,6 +251,14 @@ describe('RunCommandToolActivity', () => {
           ]
         }}
         result={result}
+        session={{
+          callId: call.id,
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'running',
+          startedAt: 10,
+          latestSequence: 3,
+          outputTruncated: false
+        }}
         settledStatus="completed"
       />
     )
@@ -172,6 +274,34 @@ describe('RunCommandToolActivity', () => {
       'data-status',
       'running'
     )
+    expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
+      '运行中'
+    )
+  })
+
+  it('keeps a durable handoff receipt as the last-known running state until Host refreshes it', async () => {
+    const call: AgentToolCall = {
+      approvalStatus: 'approved',
+      args: { command: 'python3 app.py', reason: '启动应用' },
+      id: 'stale-managed-command',
+      tool: 'run_command'
+    }
+    const result: AgentToolResult = {
+      callId: call.id,
+      ok: true,
+      result: {
+        status: 'running',
+        sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+        output: 'booting\n',
+        startedAt: 10,
+        latestSequence: 1,
+        outputTruncated: false
+      },
+      tool: 'run_command'
+    }
+    const screen = await render(<RunCommandToolActivity call={call} result={result} />)
+
+    expect(screen.container.querySelector('summary')?.textContent).toContain('正在运行命令')
     expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
       '运行中'
     )

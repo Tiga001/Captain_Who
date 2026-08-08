@@ -9,7 +9,10 @@ import type {
   AgentCommandSessionTranscript,
   AgentEvent
 } from './agent'
-import { AGENT_COMMAND_SESSION_SCHEMA_VERSION } from './agent'
+import {
+  AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS,
+  AGENT_COMMAND_SESSION_SCHEMA_VERSION
+} from './agent'
 import {
   expectArray,
   expectBoolean,
@@ -29,7 +32,6 @@ const MAX_COMMAND_BYTES = 8 * 1024
 const MAX_CWD_BYTES = 16 * 1024
 const MAX_EVENT_OUTPUT_BYTES = 64 * 1024
 const MAX_TRANSCRIPT_BYTES = 1024 * 1024
-const MAX_TRANSCRIPT_CHUNKS = 2048
 const MAX_LISTED_SESSIONS = 512
 
 const SESSION_STATUSES = [
@@ -342,8 +344,11 @@ export function parseAgentCommandSessionTranscript(value: unknown): AgentCommand
     `${context}.firstAvailableSequence`
   )
   const rawChunks = expectArray(record.chunks, `${context}.chunks`)
-  if (rawChunks.length > MAX_TRANSCRIPT_CHUNKS) {
-    throw invalidProtocolValue(context, `chunks exceeded ${MAX_TRANSCRIPT_CHUNKS} items`)
+  if (rawChunks.length > AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS) {
+    throw invalidProtocolValue(
+      context,
+      `chunks exceeded ${AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS} items`
+    )
   }
   const chunks = rawChunks.map((chunk) => parseOutputChunk(chunk))
   let outputBytes = 0

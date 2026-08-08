@@ -1,6 +1,8 @@
 import {
   useCallback,
   useEffect,
+  useRef,
+  useState,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction
@@ -8,6 +10,8 @@ import {
 import type { AgentContextWindowSnapshot, AgentEvent, SkillSelection } from '@mycopilot/protocol'
 import {
   cancelAgentRun,
+  getAgentCommandSession,
+  listAgentCommandSessions,
   listPendingAgentActions,
   onAgentEvent,
   startConversationTurn
@@ -30,7 +34,9 @@ import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { DEFAULT_AGENT_MAX_TOKENS, THINKING_PLACEHOLDER } from '../features/agentRun/constants'
 import {
   applyAgentEventToChatMessage,
+  applyAgentCommandSessionSnapshotToChatMessage,
   ensureAgentRun,
+  markMissingAgentCommandSessionOutcomeUnknown,
   removeGuidanceFromChatMessage,
   settleAgentRunToolActivities,
   shouldTouchConversationForAgentEvent
@@ -55,6 +61,78 @@ const MAX_RETIRED_AGENT_RUN_IDS = 1024
 const MAX_BUFFERED_AGENT_RUNS = 128
 const MAX_BUFFERED_AGENT_EVENTS_PER_RUN = 128
 const MAX_UNCONFIRMED_STOPPED_RUNS = 128
+const COMMAND_SESSION_HYDRATION_MAX_BYTES = 256 * 1024
+const COMMAND_SESSION_HYDRATION_RETRY_DELAYS_MS = [500, 1500, 4000] as const
+const TERMINAL_COMMAND_SESSION_STATUSES = new Set([
+  'exited',
+  'interrupted',
+  'timed_out',
+  'failed',
+  'outcome_unknown'
+])
+
+type AgentCommandSessionEvent = Extract<
+  AgentEvent,
+  {
+    type: 'command_started' | 'command_output' | 'command_exited' | 'command_interrupted'
+  }
+>
+
+function isAgentCommandSessionEvent(event: AgentEvent): event is AgentCommandSessionEvent {
+  return (
+    event.type === 'command_started' ||
+    event.type === 'command_output' ||
+    event.type === 'command_exited' ||
+    event.type === 'command_interrupted'
+  )
+}
+
+function isTerminalCommandSessionStatus(status: string) {
+  return TERMINAL_COMMAND_SESSION_STATUSES.has(status)
+}
+
+interface CommandSessionRefreshCandidate {
+  assistantMessageId: string
+  callId: string
+  sessionId: string
+}
+
+function runningCommandReceiptSessionId(message: ChatMessage, callId: string) {
+  const result = message.agentRun?.toolResults.find(
+    (candidate) => candidate.callId === callId && candidate.tool === 'run_command'
+  )
+  if (
+    !result?.ok ||
+    !result.result ||
+    typeof result.result !== 'object' ||
+    Array.isArray(result.result)
+  ) {
+    return undefined
+  }
+  const receipt = result.result as Record<string, unknown>
+  return receipt.status === 'running' && typeof receipt.sessionId === 'string'
+    ? receipt.sessionId
+    : undefined
+}
+
+function captureCommandSessionRefreshCandidates(
+  conversation: ChatConversation | undefined
+): CommandSessionRefreshCandidate[] {
+  const candidates: CommandSessionRefreshCandidate[] = []
+  for (const message of conversation?.messages ?? []) {
+    const run = message.agentRun
+    if (!run) continue
+    for (const call of run.toolCalls) {
+      if (call.tool !== 'run_command') continue
+      const session = run.commandSessions?.[call.id]
+      if (session && isTerminalCommandSessionStatus(session.status)) continue
+      const sessionId = session?.sessionId ?? runningCommandReceiptSessionId(message, call.id)
+      if (!sessionId) continue
+      candidates.push({ assistantMessageId: message.id, callId: call.id, sessionId })
+    }
+  }
+  return candidates
+}
 
 function isSameRunBinding(
   current: ActiveRunBinding | undefined,
@@ -111,6 +189,7 @@ interface AgentRunLifecycleRefs {
 interface UseAgentRunLifecycleOptions {
   contextWindowIndicatorEnabled: boolean
   conversationState: {
+    activeConversationId: string | null
     activeConversationIdRef: MutableRefObject<string | null>
     conversations: ChatConversation[]
     conversationsRef: MutableRefObject<ChatConversation[]>
@@ -155,6 +234,7 @@ export function useAgentRunLifecycle({
   uiPreferences
 }: UseAgentRunLifecycleOptions) {
   const {
+    activeConversationId,
     activeConversationIdRef,
     conversations,
     conversationsRef,
@@ -193,6 +273,32 @@ export function useAgentRunLifecycle({
   const stopReconciliationTimerMap = stopReconciliationTimers.current
   const stopRequestedPendingMessageIdSet = stopRequestedPendingMessageIds.current
   const stopRequestedRunIdSet = stopRequestedRunIds.current
+  const commandSessionHydratedConversationSetRef = useRef<Set<string>>(new Set())
+  const commandSessionHydrationEpochRef = useRef<Map<string, number>>(new Map())
+  const commandSessionHydrationRetryCountRef = useRef<Map<string, number>>(new Map())
+  const commandSessionHydrationRetryTimerRef = useRef<Map<string, number>>(new Map())
+  const [commandSessionHydrationRetryRevision, setCommandSessionHydrationRetryRevision] =
+    useState(0)
+  const lastCommandSessionActiveConversationIdRef = useRef<string | null>(null)
+  const commandSessionHydrationMountedRef = useRef(true)
+
+  useEffect(() => {
+    const hydratedConversationSet = commandSessionHydratedConversationSetRef.current
+    const hydrationEpochMap = commandSessionHydrationEpochRef.current
+    const retryCountMap = commandSessionHydrationRetryCountRef.current
+    const retryTimerMap = commandSessionHydrationRetryTimerRef.current
+    commandSessionHydrationMountedRef.current = true
+    return () => {
+      commandSessionHydrationMountedRef.current = false
+      hydratedConversationSet.clear()
+      retryCountMap.clear()
+      for (const timerId of retryTimerMap.values()) window.clearTimeout(timerId)
+      retryTimerMap.clear()
+      for (const [conversationId, epoch] of hydrationEpochMap) {
+        hydrationEpochMap.set(conversationId, epoch + 1)
+      }
+    }
+  }, [])
 
   const clearPendingMessageDelta = useCallback(
     (runId: string) => {
@@ -467,10 +573,22 @@ export function useAgentRunLifecycle({
       .then((pendingActions) => {
         for (const pendingAction of pendingActions) {
           if (!pendingAction.conversationId || !pendingAction.assistantMessageId) continue
-          const conversationExists = conversationsRef.current.some(
-            (conversation) => conversation.id === pendingAction.conversationId
+          const conversation = conversationsRef.current.find(
+            (candidate) => candidate.id === pendingAction.conversationId
           )
-          if (!conversationExists) continue
+          if (!conversation) continue
+          const message = conversation.messages.find(
+            (candidate) => candidate.id === pendingAction.assistantMessageId
+          )
+          if (
+            pendingAction.toolName === 'run_command' &&
+            pendingAction.toolCallId &&
+            message?.agentRun?.commandSessions?.[pendingAction.toolCallId]
+          ) {
+            // This list response was captured before the Session authority advanced the same call.
+            // Do not resurrect either its approval card or an obsolete active Run binding.
+            continue
+          }
 
           activeRunBindingMap.set(pendingAction.runId, {
             conversationId: pendingAction.conversationId,
@@ -504,10 +622,231 @@ export function useAgentRunLifecycle({
     updateAssistantMessage
   ])
 
+  useEffect(() => {
+    const hydratedConversationSet = commandSessionHydratedConversationSetRef.current
+    const hydrationEpochMap = commandSessionHydrationEpochRef.current
+    const retryCountMap = commandSessionHydrationRetryCountRef.current
+    const retryTimerMap = commandSessionHydrationRetryTimerRef.current
+    const loadedConversationIds = new Set(
+      conversations
+        .filter((conversation) => conversation.messagesLoaded !== false)
+        .map((conversation) => conversation.id)
+    )
+    for (const conversationId of hydratedConversationSet) {
+      if (loadedConversationIds.has(conversationId)) continue
+      hydratedConversationSet.delete(conversationId)
+      hydrationEpochMap.set(conversationId, (hydrationEpochMap.get(conversationId) ?? 0) + 1)
+    }
+    const conversationIds = new Set(
+      conversations
+        .filter(
+          (conversation) =>
+            conversation.messagesLoaded !== false && !hydratedConversationSet.has(conversation.id)
+        )
+        .map((conversation) => conversation.id)
+    )
+    const activeConversationChanged =
+      activeConversationId !== lastCommandSessionActiveConversationIdRef.current
+    lastCommandSessionActiveConversationIdRef.current = activeConversationId
+    if (
+      activeConversationChanged &&
+      activeConversationId &&
+      loadedConversationIds.has(activeConversationId)
+    ) {
+      // Reopening a previously loaded conversation refreshes its Host-owned Session projection.
+      // Live events normally keep inactive conversations current, while this closes any IPC gap.
+      conversationIds.add(activeConversationId)
+    }
+
+    for (const conversationId of conversationIds) {
+      hydratedConversationSet.add(conversationId)
+      const requestEpoch = (hydrationEpochMap.get(conversationId) ?? 0) + 1
+      hydrationEpochMap.set(conversationId, requestEpoch)
+      const pendingRetryTimer = retryTimerMap.get(conversationId)
+      if (pendingRetryTimer !== undefined) {
+        window.clearTimeout(pendingRetryTimer)
+        retryTimerMap.delete(conversationId)
+      }
+      // Capture only identities which existed before issuing the list request. The success
+      // reconciliation below must never classify a Session created while this request is in flight
+      // as missing from an older Host snapshot.
+      const refreshCandidates = captureCommandSessionRefreshCandidates(
+        conversationsRef.current.find(
+          (candidate) => candidate.id === conversationId && candidate.messagesLoaded !== false
+        )
+      )
+      const scheduleHydrationRetry = (error: unknown) => {
+        if (
+          !commandSessionHydrationMountedRef.current ||
+          hydrationEpochMap.get(conversationId) !== requestEpoch ||
+          retryTimerMap.has(conversationId)
+        ) {
+          return
+        }
+        const retryCount = retryCountMap.get(conversationId) ?? 0
+        const retryDelay = COMMAND_SESSION_HYDRATION_RETRY_DELAYS_MS[retryCount]
+        if (retryDelay !== undefined) {
+          retryCountMap.set(conversationId, retryCount + 1)
+          const timerId = window.setTimeout(() => {
+            retryTimerMap.delete(conversationId)
+            if (
+              !commandSessionHydrationMountedRef.current ||
+              hydrationEpochMap.get(conversationId) !== requestEpoch
+            ) {
+              return
+            }
+            hydratedConversationSet.delete(conversationId)
+            setCommandSessionHydrationRetryRevision((revision) => revision + 1)
+          }, retryDelay)
+          retryTimerMap.set(conversationId, timerId)
+        }
+        console.error('Failed to hydrate managed command Sessions', error)
+      }
+
+      void listAgentCommandSessions({ conversationId })
+        .then(async ({ sessions }) => {
+          if (
+            !commandSessionHydrationMountedRef.current ||
+            hydrationEpochMap.get(conversationId) !== requestEpoch
+          ) {
+            return
+          }
+          const conversation = conversationsRef.current.find(
+            (candidate) => candidate.id === conversationId && candidate.messagesLoaded !== false
+          )
+          if (!conversation) return
+
+          const matchingSessions = sessions.filter(
+            (session) =>
+              session.conversationId === conversationId &&
+              conversation.messages.some((message) => {
+                const run = message.agentRun
+                if (!run || message.id !== session.assistantMessageId) return false
+                return (
+                  (run.runId === null || run.runId === session.originRunId) &&
+                  run.toolCalls.some(
+                    (call) => call.id === session.callId && call.tool === 'run_command'
+                  )
+                )
+              })
+          )
+
+          // The list projection is already authoritative for process state. Apply it before
+          // loading transcript bytes so a failed or slow transcript read cannot leave a command
+          // looking permanently active (or permanently awaiting approval) after reload.
+          for (const session of matchingSessions) {
+            updateAssistantMessage(
+              conversationId,
+              session.assistantMessageId,
+              (message) => applyAgentCommandSessionSnapshotToChatMessage(message, session),
+              {
+                persist: isTerminalCommandSessionStatus(session.status),
+                touchConversation: false
+              }
+            )
+          }
+
+          const listedSessionIds = new Set(matchingSessions.map((session) => session.sessionId))
+          const reconciledAt = Date.now()
+          for (const candidate of refreshCandidates) {
+            if (listedSessionIds.has(candidate.sessionId)) continue
+            updateAssistantMessage(
+              conversationId,
+              candidate.assistantMessageId,
+              (message) =>
+                markMissingAgentCommandSessionOutcomeUnknown(
+                  message,
+                  candidate.callId,
+                  candidate.sessionId,
+                  reconciledAt
+                ),
+              { persist: true, touchConversation: false }
+            )
+          }
+
+          const transcriptResults = await Promise.allSettled(
+            matchingSessions.map((session) =>
+              getAgentCommandSession({
+                conversationId,
+                sessionId: session.sessionId,
+                afterSequence: 0,
+                maxBytes: COMMAND_SESSION_HYDRATION_MAX_BYTES
+              })
+            )
+          )
+          if (
+            !commandSessionHydrationMountedRef.current ||
+            hydrationEpochMap.get(conversationId) !== requestEpoch
+          ) {
+            return
+          }
+          if (
+            !conversationsRef.current.some(
+              (candidate) => candidate.id === conversationId && candidate.messagesLoaded !== false
+            )
+          ) {
+            return
+          }
+
+          for (let index = 0; index < transcriptResults.length; index += 1) {
+            const result = transcriptResults[index]
+            const listedSession = matchingSessions[index]
+            if (result.status !== 'fulfilled' || !listedSession) continue
+            const { session, transcript } = result.value
+            if (
+              session.conversationId !== conversationId ||
+              session.sessionId !== listedSession.sessionId ||
+              session.callId !== listedSession.callId ||
+              session.assistantMessageId !== listedSession.assistantMessageId ||
+              session.originRunId !== listedSession.originRunId
+            ) {
+              continue
+            }
+
+            updateAssistantMessage(
+              conversationId,
+              session.assistantMessageId,
+              (message) =>
+                applyAgentCommandSessionSnapshotToChatMessage(message, session, transcript),
+              {
+                persist: isTerminalCommandSessionStatus(session.status),
+                touchConversation: false
+              }
+            )
+          }
+          const transcriptFailure = transcriptResults.find(
+            (result): result is PromiseRejectedResult => result.status === 'rejected'
+          )
+          if (transcriptFailure) {
+            // Status snapshots above are already authoritative and remain applied. Retry the
+            // bounded transcript read without rolling back process state.
+            scheduleHydrationRetry(transcriptFailure.reason)
+          } else {
+            retryCountMap.delete(conversationId)
+          }
+        })
+        .catch(scheduleHydrationRetry)
+    }
+  }, [
+    activeConversationId,
+    commandSessionHydrationRetryRevision,
+    conversations,
+    conversationsRef,
+    updateAssistantMessage
+  ])
+
   const handleBoundAgentEvent = useCallback(
     (conversationId: string, assistantMessageId: string, agentEvent: AgentEvent) => {
-      if (agentEvent.runId && cancelledRunIdSet.has(agentEvent.runId)) return
-      if (cancelledPendingMessageIdSet.has(assistantMessageId)) return
+      const isCommandSessionEvent = isAgentCommandSessionEvent(agentEvent)
+      const isTerminalCommandSessionEvent =
+        agentEvent.type === 'command_exited' || agentEvent.type === 'command_interrupted'
+      // Once run_command has handed a process to the Session registry, its lifecycle is no longer
+      // owned by the originating Agent Run. A later stop/retirement of that Run must not suppress
+      // process output or its terminal state on the original command card.
+      if (!isCommandSessionEvent && agentEvent.runId && cancelledRunIdSet.has(agentEvent.runId)) {
+        return
+      }
+      if (!isCommandSessionEvent && cancelledPendingMessageIdSet.has(assistantMessageId)) return
 
       if (agentEvent.type === 'message_delta') {
         bufferMessageDelta(conversationId, assistantMessageId, agentEvent)
@@ -575,7 +914,11 @@ export function useAgentRunLifecycle({
               : message
           return applyAgentEventToChatMessage(messageForEvent, agentEvent)
         },
-        { touchConversation: shouldTouchConversationForAgentEvent(agentEvent) }
+        {
+          persist: !isCommandSessionEvent || isTerminalCommandSessionEvent,
+          touchConversation:
+            !isCommandSessionEvent && shouldTouchConversationForAgentEvent(agentEvent)
+        }
       )
 
       if (agentEvent.type === 'done') {
@@ -775,6 +1118,14 @@ export function useAgentRunLifecycle({
       if (agentEvent.type === 'context_window_updated') {
         const conversationId = agentEvent.conversationId
         if (conversationId) recordContextWindowSnapshot(conversationId, agentEvent.snapshot)
+        return
+      }
+
+      // Managed process events carry their durable owner identity. Route them directly to the
+      // original assistant message even after cleanupRunBinding retired the Agent Run. This does
+      // not create a message and does not revive the assistant/Run pending state.
+      if (isAgentCommandSessionEvent(agentEvent)) {
+        handleBoundAgentEvent(agentEvent.conversationId, agentEvent.assistantMessageId, agentEvent)
         return
       }
 

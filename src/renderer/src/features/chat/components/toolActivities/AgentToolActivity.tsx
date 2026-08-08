@@ -131,6 +131,7 @@ export function AgentToolActivity({
         call={call}
         liveOutput={run.commandOutputPreviews?.[call.id]}
         result={result}
+        session={run.commandSessions?.[call.id]}
         settledStatus={settledStatus}
       />
     )

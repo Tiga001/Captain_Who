@@ -684,8 +684,8 @@
 .run-command-shell__copy {
   position: absolute;
   z-index: 1;
-  top: 0;
-  right: 6px;
+  top: 8px;
+  right: 22px;
   display: grid;
   width: 28px;
   height: 28px;

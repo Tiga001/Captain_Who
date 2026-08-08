@@ -3,16 +3,17 @@ import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
-import type { ChatCommandOutputPreview } from '../../chatTypes'
-import { copyTextToClipboard } from '../chatMessageItemUtils'
+import type { ChatCommandOutputPreview, ChatCommandSessionView } from '../../chatTypes'
+import { copyTextToClipboard, formatElapsedDuration } from '../chatMessageItemUtils'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
-import { getToolCallLabel, getToolDisplayName, type SettledToolStatus } from './toolActivityUtils'
+import { getToolCallLabel, type SettledToolStatus } from './toolActivityUtils'
 
 interface RunCommandToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
   liveOutput?: ChatCommandOutputPreview
   result?: AgentToolResult
+  session?: ChatCommandSessionView
   settledStatus?: SettledToolStatus
 }
 
@@ -22,7 +23,16 @@ interface RunCommandToolActivityGroupProps {
   items: RunCommandToolActivityGroupItem[]
 }
 
-type RunCommandStatus = 'running' | 'completed' | 'failed' | 'rejected' | 'cancelled'
+type RunCommandStatus =
+  | 'waiting_for_approval'
+  | 'starting'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'rejected'
+  | 'cancelled'
+  | 'interrupted'
+  | 'timed_out'
 
 const COPIED_INDICATOR_MS = 1300
 
@@ -77,19 +87,30 @@ function getRunningCommandReceipt(result: AgentToolResult | undefined) {
   }
 }
 
-function getCommandResult(result: AgentToolResult | undefined) {
+function getCommandResult(result: AgentToolResult | undefined, fallbackCommand = '') {
   const resultValue = getObjectValue(result?.result)
-  if (resultValue?.status === 'rejected') return null
-  if (!resultValue || typeof resultValue.command !== 'string') return null
+  if (!resultValue || resultValue.status === 'rejected' || resultValue.status === 'running') {
+    return null
+  }
+  const command =
+    typeof resultValue.command === 'string' ? resultValue.command.trim() : fallbackCommand.trim()
+  const status = typeof resultValue.status === 'string' ? resultValue.status : ''
+  const isCommandResult =
+    Boolean(command) ||
+    ['exited', 'interrupted', 'timed_out', 'failed'].includes(status) ||
+    typeof resultValue.stdout === 'string' ||
+    typeof resultValue.stderr === 'string' ||
+    typeof resultValue.exitCode === 'number'
+  if (!isCommandResult) return null
 
   return {
-    command: resultValue.command.trim(),
+    command,
     stdout: typeof resultValue.stdout === 'string' ? resultValue.stdout : '',
     stderr: typeof resultValue.stderr === 'string' ? resultValue.stderr : '',
     error: typeof resultValue.error === 'string' ? resultValue.error : '',
     exitCode: typeof resultValue.exitCode === 'number' ? resultValue.exitCode : undefined,
-    timedOut: resultValue.timedOut === true,
-    cancelled: resultValue.cancelled === true
+    timedOut: resultValue.timedOut === true || status === 'timed_out',
+    cancelled: resultValue.cancelled === true || status === 'interrupted'
   }
 }
 
@@ -121,11 +142,31 @@ function getCommandStatus(
 }
 
 function getRunCommandStatus(item: RunCommandToolActivityGroupItem): RunCommandStatus {
-  if (item.cancelled && !item.result) return 'cancelled'
   if (isRejectedResult(item.result)) return 'rejected'
+  if (item.session?.status === 'exited') {
+    return item.session.exitCode === 0 ? 'completed' : 'failed'
+  }
+  if (item.session?.status === 'interrupted' || item.session?.status === 'outcome_unknown') {
+    return 'interrupted'
+  }
+  if (item.session?.status === 'timed_out') return 'timed_out'
+  if (item.session?.status === 'failed') return 'failed'
+  if (item.session?.status === 'starting') return 'starting'
+  if (item.session?.status === 'running') return 'running'
+  if (item.cancelled && !item.result) return 'cancelled'
+  const commandResult = getCommandResult(item.result, getRunCommandDetails(item.call).command)
+  if (commandResult?.timedOut) return 'timed_out'
+  if (commandResult?.cancelled) return 'interrupted'
+  if (commandResult?.exitCode !== undefined && commandResult.exitCode !== 0) return 'failed'
   if (item.result?.ok === false) return 'failed'
+  if (commandResult) return 'completed'
+  // The receipt is the last confirmed handoff state. A successful Host refresh will replace it
+  // with running or immutable terminal metadata; a transient Host failure must not invent an
+  // interruption that never occurred.
   if (getRunningCommandReceipt(item.result)) return 'running'
   if (item.result) return 'completed'
+  if (item.call.approvalStatus === 'required') return 'waiting_for_approval'
+  if (item.call.approvalStatus === 'rejected') return 'rejected'
   if (item.settledStatus) return item.settledStatus
   return 'running'
 }
@@ -139,12 +180,26 @@ function getGroupLabel(
       currentCounts[getRunCommandStatus(item)] += 1
       return currentCounts
     },
-    { cancelled: 0, completed: 0, failed: 0, rejected: 0, running: 0 }
+    {
+      cancelled: 0,
+      completed: 0,
+      failed: 0,
+      interrupted: 0,
+      rejected: 0,
+      running: 0,
+      starting: 0,
+      timed_out: 0,
+      waiting_for_approval: 0
+    }
   )
 
   if (
     counts.running === 0 &&
+    counts.starting === 0 &&
+    counts.waiting_for_approval === 0 &&
     counts.failed === 0 &&
+    counts.timed_out === 0 &&
+    counts.interrupted === 0 &&
     counts.rejected === 0 &&
     counts.cancelled === 0
   ) {
@@ -152,23 +207,27 @@ function getGroupLabel(
   }
 
   const summaryParts = [
-    counts.running > 0
-      ? formatTranslation(t, 'agent.command.groupRunningCount', { count: String(counts.running) })
+    counts.running + counts.starting + counts.waiting_for_approval > 0
+      ? formatTranslation(t, 'agent.command.groupRunningCount', {
+          count: String(counts.running + counts.starting + counts.waiting_for_approval)
+        })
       : '',
     counts.completed > 0
       ? formatTranslation(t, 'agent.command.groupSucceededCount', {
           count: String(counts.completed)
         })
       : '',
-    counts.failed > 0
-      ? formatTranslation(t, 'agent.command.groupFailedCount', { count: String(counts.failed) })
+    counts.failed + counts.timed_out > 0
+      ? formatTranslation(t, 'agent.command.groupFailedCount', {
+          count: String(counts.failed + counts.timed_out)
+        })
       : '',
     counts.rejected > 0
       ? formatTranslation(t, 'agent.command.groupRejectedCount', { count: String(counts.rejected) })
       : '',
-    counts.cancelled > 0
+    counts.cancelled + counts.interrupted > 0
       ? formatTranslation(t, 'agent.command.groupCancelledCount', {
-          count: String(counts.cancelled)
+          count: String(counts.cancelled + counts.interrupted)
         })
       : ''
   ].filter(Boolean)
@@ -184,25 +243,35 @@ export function RunCommandToolActivity({
   call,
   liveOutput,
   result,
+  session,
   settledStatus
 }: RunCommandToolActivityProps) {
   const { t } = useFrontendConfig()
   const details = getRunCommandDetails(call)
-  const rejected = isRejectedResult(result)
+  const rejected = isRejectedResult(result) || call.approvalStatus === 'rejected'
   const rejectedMessage = getRejectedMessage(result)
   const runningReceipt = getRunningCommandReceipt(result)
-  const commandResult = getCommandResult(result)
+  const commandResult = getCommandResult(result, details.command)
   const command = commandResult?.command || details.command
   const commandOutput = getCommandOutput(commandResult)
   const liveCommandOutput = getLiveCommandOutput(liveOutput, runningReceipt?.latestSequence)
   const runningCommandOutput = `${runningReceipt?.output ?? ''}${liveCommandOutput}`
   const copyableOutput = commandOutput || runningCommandOutput
-  const commandFailed = result?.ok === false
-  const status = getRunCommandStatus({ cancelled, call, result, settledStatus })
+  const status = getRunCommandStatus({ cancelled, call, result, session, settledStatus })
   const hasDetails = Boolean(
     command || rejectedMessage || result?.error || commandResult || runningCommandOutput
   )
-  const isPending = status === 'running'
+  const isPending =
+    status === 'waiting_for_approval' || status === 'starting' || status === 'running'
+  const commandFailed =
+    status === 'failed' ||
+    status === 'timed_out' ||
+    status === 'interrupted' ||
+    status === 'cancelled'
+  const durationMs =
+    session?.startedAt !== undefined && session.endedAt !== undefined
+      ? Math.max(0, session.endedAt - session.startedAt)
+      : undefined
   const [copied, setCopied] = useState(false)
   const outputRef = useRef<HTMLPreElement>(null)
   const keepLiveOutputPinnedRef = useRef(true)
@@ -225,7 +294,7 @@ export function RunCommandToolActivity({
         />
       )
     }
-    if (status === 'failed') {
+    if (status === 'failed' || status === 'timed_out') {
       return (
         <span
           aria-hidden="true"
@@ -238,17 +307,14 @@ export function RunCommandToolActivity({
     return null
   })()
   const statusLabel = (() => {
-    if (rejected) return t('agent.command.rejected')
-    if (runningReceipt) {
-      return formatTranslation(t, 'agent.tool.running', {
-        tool: getToolDisplayName(call.tool, t)
-      })
-    }
-    if (commandResult) {
-      return t(result?.ok === false ? 'agent.command.failed' : 'agent.command.completed')
-    }
+    if (rejected || status === 'rejected') return t('agent.command.rejected')
+    if (status === 'waiting_for_approval') return t('agent.command.waitingApproval')
+    if (status === 'starting') return t('agent.command.starting')
+    if (status === 'running') return t('agent.command.running')
     if (status === 'completed') return t('agent.command.completed')
     if (status === 'failed') return t('agent.command.failed')
+    if (status === 'interrupted') return t('agent.command.interrupted')
+    if (status === 'timed_out') return t('agent.command.timedOutLabel')
     return getToolCallLabel(call, result, t, { cancelled, settledStatus })
   })()
   const label = details.reason ? `${statusLabel} ${details.reason}` : statusLabel
@@ -259,15 +325,34 @@ export function RunCommandToolActivity({
       hasDetails={hasDetails}
       icon={SquareTerminal}
       iconBadge={iconBadge}
-      iconBadgeTone={rejected ? 'blocked' : status === 'failed' ? 'danger' : undefined}
+      iconBadgeTone={
+        rejected ? 'blocked' : status === 'failed' || status === 'timed_out' ? 'danger' : undefined
+      }
       isPending={isPending}
       label={label}
     >
       {hasDetails && (
         <div className="agent-activity__details run-command-activity__details">
-          {commandResult || runningCommandOutput || isPending ? (
+          {commandResult || runningCommandOutput || session || isPending ? (
             <div className="run-command-shell" role="group" aria-label={t('agent.command.shell')}>
               <div className="run-command-shell__title">{t('agent.command.shell')}</div>
+              {copyableOutput && (
+                <button
+                  aria-label={
+                    copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')
+                  }
+                  className="run-command-shell__copy"
+                  onClick={() => {
+                    void copyTextToClipboard(copyableOutput)
+                      .then(() => setCopied(true))
+                      .catch(() => setCopied(false))
+                  }}
+                  title={copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')}
+                  type="button"
+                >
+                  {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                </button>
+              )}
               {command && <pre className="run-command-shell__command">$ {command}</pre>}
               <div className="run-command-shell__output-region">
                 <pre
@@ -287,23 +372,6 @@ export function RunCommandToolActivity({
                   {copyableOutput ||
                     t(isPending ? 'agent.command.waitingForOutput' : 'agent.command.noOutput')}
                 </pre>
-                {copyableOutput && (
-                  <button
-                    aria-label={
-                      copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')
-                    }
-                    className="run-command-shell__copy"
-                    onClick={() => {
-                      void copyTextToClipboard(copyableOutput)
-                        .then(() => setCopied(true))
-                        .catch(() => setCopied(false))
-                    }}
-                    title={copied ? t('agent.command.outputCopied') : t('agent.command.copyOutput')}
-                    type="button"
-                  >
-                    {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-                  </button>
-                )}
               </div>
               <div
                 className="run-command-shell__status"
@@ -312,9 +380,31 @@ export function RunCommandToolActivity({
               >
                 <span aria-hidden="true">{isPending ? '•' : commandFailed ? '×' : '✓'}</span>
                 <span>
-                  {isPending
-                    ? t('agent.command.runningStatus')
-                    : getCommandStatus(commandResult, result?.ok, t)}
+                  {[
+                    status === 'waiting_for_approval'
+                      ? t('agent.command.waitingApprovalStatus')
+                      : status === 'starting'
+                        ? t('agent.command.startingStatus')
+                        : status === 'running'
+                          ? t('agent.command.runningStatus')
+                          : status === 'failed'
+                            ? t('agent.command.failedStatus')
+                            : status === 'interrupted'
+                              ? t('agent.command.interruptedStatus')
+                              : status === 'timed_out'
+                                ? t('agent.command.timedOut')
+                                : status === 'cancelled'
+                                  ? t('agent.command.cancelled')
+                                  : getCommandStatus(commandResult, result?.ok, t),
+                    session?.exitCode !== undefined
+                      ? formatTranslation(t, 'agent.command.exitCode', {
+                          code: String(session.exitCode)
+                        })
+                      : '',
+                    durationMs !== undefined ? formatElapsedDuration(durationMs) : ''
+                  ]
+                    .filter(Boolean)
+                    .join(t('agent.separator'))}
                 </span>
               </div>
             </div>
@@ -350,12 +440,15 @@ export function RunCommandToolActivityGroup({ items }: RunCommandToolActivityGro
         call={item.call}
         liveOutput={item.liveOutput}
         result={item.result}
+        session={item.session}
         settledStatus={item.settledStatus}
       />
     )
   }
 
-  const isPending = items.some((item) => getRunCommandStatus(item) === 'running')
+  const isPending = items.some((item) =>
+    ['waiting_for_approval', 'starting', 'running'].includes(getRunCommandStatus(item))
+  )
 
   return (
     <AgentActivityDisclosure
@@ -373,6 +466,7 @@ export function RunCommandToolActivityGroup({ items }: RunCommandToolActivityGro
             key={item.call.id}
             liveOutput={item.liveOutput}
             result={item.result}
+            session={item.session}
             settledStatus={item.settledStatus}
           />
         ))}

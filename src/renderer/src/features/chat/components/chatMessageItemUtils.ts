@@ -800,6 +800,7 @@ export function getRunCommandGroupItems(
         cancelled: settledStatus === 'cancelled',
         liveOutput: run.commandOutputPreviews?.[call.id],
         result,
+        session: run.commandSessions?.[call.id],
         settledStatus
       }
     ]

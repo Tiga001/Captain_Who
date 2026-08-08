@@ -447,6 +447,9 @@ export interface AgentCommandSessionOutputChunk {
   output: string
 }
 
+/** Maximum chunk count accepted across the Rust/TypeScript command transcript boundary. */
+export const AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS = 2048
+
 export interface AgentCommandSessionTranscript {
   requestedAfterSequence: number
   firstAvailableSequence?: number

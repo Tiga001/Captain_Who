@@ -1594,6 +1594,13 @@ pub struct AgentCommandSessionOutputChunk {
     pub output: String,
 }
 
+/// Cross-process upper bound for one Host transcript projection.
+///
+/// Keep the TypeScript protocol constant with the same name and value in sync. Host hydration,
+/// live transcript retention, and the operational model cursor all use this resource bound, while
+/// immutable receipts remain a separate exact-replay projection.
+pub const AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS: usize = 2_048;
+
 /// Non-destructive, cursor-addressed transcript projection for Host reload recovery.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]

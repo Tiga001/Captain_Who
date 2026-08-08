@@ -515,7 +515,7 @@ impl AgentService {
             AgentProposedAction::Command { command } => {
                 let effect_storage_id = pending_action_storage_id(&run_id, &command.id);
                 let mut file_effect_guard =
-                    self.register_file_effect(&agent_input, &run_id, &effect_storage_id)?;
+                    Some(self.register_file_effect(&agent_input, &run_id, &effect_storage_id)?);
                 let action = AgentProposedAction::Command {
                     command: command.clone(),
                 };
@@ -532,7 +532,10 @@ impl AgentService {
                             // A prior attempt already published the authoritative terminal
                             // receipt. Clear any in-process unresolved marker restored by an
                             // earlier commit-unknown path before returning the replayed result.
-                            file_effect_guard.mark_durably_settled();
+                            file_effect_guard
+                                .as_mut()
+                                .expect("unstarted command retains its file-effect lease")
+                                .mark_durably_settled();
                             return Ok(result);
                         }
                     }
@@ -553,7 +556,10 @@ impl AgentService {
                     skill_resources.clone(),
                     Arc::clone(&self.storage),
                 );
-                file_effect_guard.mark_effects_started();
+                file_effect_guard
+                    .as_mut()
+                    .expect("command retains its file-effect lease before Session start")
+                    .mark_effects_started();
                 let command_result = if let (Some(conversation_id), Some(assistant_message_id)) =
                     (conversation_id.as_deref(), assistant_message_id.as_deref())
                 {
@@ -580,20 +586,19 @@ impl AgentService {
                         notifications: notifications.clone(),
                         cancellation_token: cancellation_token.clone(),
                         cancel_probe: Some(Arc::new(move || cancellation_probe.is_cancelled())),
+                        file_effect_guard: &mut file_effect_guard,
                     });
                     match launch {
                         Ok(AgentCommandSessionLaunch::Running {
                             snapshot,
                             tool_result,
+                            mut handoff_guard,
                         }) => {
                             // The Session lock is the ownership-transfer fence. Cancellation and
                             // the durable running receipt are decided while the Session is still
                             // Pending; only a confirmed receipt may move the process to Adopted.
-                            let mut handoff_file_effect_guard = Some(file_effect_guard);
                             let mut audit_definitely_uncommitted = false;
-                            let handoff = self.command_sessions.commit_handoff(
-                                &snapshot.session_id,
-                                &mut handoff_file_effect_guard,
+                            let handoff = handoff_guard.commit(
                                 || cancellation_token.is_cancelled(),
                                 || {
                                     let finalized = self.finalize_auto_action_execution_audit(
@@ -657,13 +662,11 @@ impl AgentService {
                             );
                             match handoff {
                                 Ok(AgentCommandHandoffOutcome::Adopted) => {
-                                    debug_assert!(handoff_file_effect_guard.is_none());
                                     return Ok(tool_result);
                                 }
                                 Ok(AgentCommandHandoffOutcome::CancelledBeforeCommit) => {
-                                    let terminal = self
-                                        .command_sessions
-                                        .abort_before_handoff(&snapshot.session_id)
+                                    let terminal = handoff_guard
+                                        .abort_before_handoff()
                                         .map_err(|error| {
                                             AgentError::structured(
                                                 "agent.command_session_pre_handoff_abort_failed",
@@ -678,9 +681,6 @@ impl AgentService {
                                                 }),
                                             )
                                         })?;
-                                    file_effect_guard = handoff_file_effect_guard
-                                        .take()
-                                        .expect("cancelled handoff retains the file-effect lease");
                                     let mut execution = terminal.execution;
                                     execution.cancelled = true;
                                     execution
@@ -688,9 +688,8 @@ impl AgentService {
                                 Ok(AgentCommandHandoffOutcome::PersistenceFailed(error))
                                     if audit_definitely_uncommitted =>
                                 {
-                                    let terminal = self
-                                        .command_sessions
-                                        .abort_before_handoff(&snapshot.session_id)
+                                    let terminal = handoff_guard
+                                        .abort_before_handoff()
                                         .map_err(|abort_error| {
                                             AgentError::structured(
                                                 "agent.command_session_pre_handoff_abort_failed",
@@ -706,9 +705,6 @@ impl AgentService {
                                                 }),
                                             )
                                         })?;
-                                    file_effect_guard = handoff_file_effect_guard.take().expect(
-                                        "failed durable handoff retains the file-effect lease",
-                                    );
                                     let mut execution = terminal.execution;
                                     execution.error.get_or_insert_with(|| {
                                         format!(
@@ -718,9 +714,7 @@ impl AgentService {
                                     execution
                                 }
                                 Ok(AgentCommandHandoffOutcome::PersistenceFailed(error)) => {
-                                    let termination = self
-                                        .command_sessions
-                                        .abort_before_handoff(&snapshot.session_id);
+                                    let termination = handoff_guard.abort_before_handoff();
                                     return Err(AgentError::structured(
                                         "agent.command_session_handoff_indeterminate",
                                         "The command Session was not handed off because its durable running receipt could not be confirmed.",
@@ -737,9 +731,7 @@ impl AgentService {
                                     ));
                                 }
                                 Err(error) => {
-                                    let termination = self
-                                        .command_sessions
-                                        .abort_before_handoff(&snapshot.session_id);
+                                    let termination = handoff_guard.abort_before_handoff();
                                     return Err(AgentError::structured(
                                         "agent.command_session_handoff_failed",
                                         "The command Session ownership transfer could not be completed safely.",
@@ -760,30 +752,46 @@ impl AgentService {
                         Err(error) => failed_command_result(&command_for_error, error, None),
                     }
                 } else {
-                    // Internal callers without durable conversation identity retain the legacy
-                    // synchronous adapter; product Agent turns always use managed Sessions.
-                    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
-                        workspace_root.as_deref(),
-                        &command,
-                        permissions,
-                        CommandAuthorizationSource::Automatic,
-                        cancellation_token.clone(),
-                        None,
-                        self.artifact_runtime.as_deref(),
-                        Some(&file_input_context),
-                        None,
-                    )
-                    .unwrap_or_else(|error| {
-                        let policy_evaluation = error.policy_evaluation().cloned();
-                        let artifact_observation = error.artifact_observation().cloned();
-                        let mut result = failed_command_result(
+                    // Production Agent commands have one ownership path: a durable managed
+                    // Session bound to the conversation and assistant message. Missing identity
+                    // is a host invariant violation, not permission to fall back to the old
+                    // wait-until-exit adapter and silently change process lifetime semantics.
+                    #[cfg(not(test))]
+                    {
+                        failed_command_result(
                             &command_for_error,
-                            error.to_string(),
-                            policy_evaluation,
-                        );
-                        result.artifact_observation = artifact_observation;
-                        result
-                    })
+                            "run_command 缺少持久会话身份，命令未启动。".to_string(),
+                            None,
+                        )
+                    }
+                    // A small number of Core Server unit tests exercise the action-audit layer in
+                    // isolation and intentionally omit conversation identity. Keep their finite,
+                    // synchronous harness explicit and compile it out of production builds.
+                    #[cfg(test)]
+                    {
+                        run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
+                            workspace_root.as_deref(),
+                            &command,
+                            permissions,
+                            CommandAuthorizationSource::Automatic,
+                            cancellation_token.clone(),
+                            None,
+                            self.artifact_runtime.as_deref(),
+                            Some(&file_input_context),
+                            None,
+                        )
+                        .unwrap_or_else(|error| {
+                            let policy_evaluation = error.policy_evaluation().cloned();
+                            let artifact_observation = error.artifact_observation().cloned();
+                            let mut result = failed_command_result(
+                                &command_for_error,
+                                error.to_string(),
+                                policy_evaluation,
+                            );
+                            result.artifact_observation = artifact_observation;
+                            result
+                        })
+                    }
                 };
                 let command_succeeded = command_result.error.is_none()
                     && !command_result.timed_out
@@ -826,7 +834,9 @@ impl AgentService {
                             // SQLite committed the first terminal receipt even though the caller
                             // observed an error. Durable state is authoritative; never replace a
                             // successful receipt with a manufactured persistence failure.
-                            file_effect_guard.mark_durably_settled();
+                            if let Some(guard) = file_effect_guard.as_mut() {
+                                guard.mark_durably_settled();
+                            }
                             return Ok(persisted);
                         }
                         Ok(CommandAuditReconciliation::Executing) => {}
@@ -880,7 +890,9 @@ impl AgentService {
                             .and_then(|outcome| reconcile_command_audit_outcome(&command, outcome));
                         match reconciliation {
                             Ok(CommandAuditReconciliation::Terminal(persisted)) => {
-                                file_effect_guard.mark_durably_settled();
+                                if let Some(guard) = file_effect_guard.as_mut() {
+                                    guard.mark_durably_settled();
+                                }
                                 return Ok(persisted);
                             }
                             Ok(CommandAuditReconciliation::Executing) => {
@@ -903,10 +915,14 @@ impl AgentService {
                             }
                         }
                     }
-                    file_effect_guard.mark_durably_settled();
+                    if let Some(guard) = file_effect_guard.as_mut() {
+                        guard.mark_durably_settled();
+                    }
                     return Ok(persistence_failure);
                 }
-                file_effect_guard.mark_durably_settled();
+                if let Some(guard) = file_effect_guard.as_mut() {
+                    guard.mark_durably_settled();
+                }
                 Ok(tool_result)
             }
             AgentProposedAction::FileWrite { file_write } => {

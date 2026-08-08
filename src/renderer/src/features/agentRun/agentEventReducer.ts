@@ -2,17 +2,22 @@ import type {
   AgentActionExecutionOutput,
   AgentApprovalStatus,
   AgentChatOutput,
+  AgentCommandSessionSnapshot,
+  AgentCommandSessionTranscript,
   AgentEvent,
   AgentFileWritePreview,
   AgentMcpToolApproval,
   AgentMcpToolInvocationEvent,
-  AgentProposedAction
+  AgentProposedAction,
+  AgentToolResult
 } from '@mycopilot/protocol'
+import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from '@mycopilot/protocol'
 import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
   ChatCommandOutputChunk,
   ChatCommandOutputPreview,
+  ChatCommandSessionView,
   ChatFileWritePreview,
   ChatGuidanceTimelineItem,
   ChatMcpToolInvocationView,
@@ -430,21 +435,27 @@ function appendCommandOutputChunk(
   callId: string,
   existing: ChatCommandOutputPreview | undefined,
   chunk: ChatCommandOutputChunk
-): ChatCommandOutputPreview {
+): { preview: ChatCommandOutputPreview; truncated: boolean } {
   if (
     !chunk.output ||
     existing?.chunks.some((candidate) => candidate.sequence === chunk.sequence)
   ) {
-    return existing ?? { callId, chunks: [] }
+    return { preview: existing ?? { callId, chunks: [] }, truncated: false }
   }
 
   let chunks = [...(existing?.chunks ?? []), chunk].sort(
     (left, right) => left.sequence - right.sequence
   )
+  let truncated = false
+  if (chunks.length > AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS) {
+    chunks = chunks.slice(chunks.length - AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS)
+    truncated = true
+  }
   let excess = chunks.reduce((total, candidate) => total + candidate.output.length, 0)
   excess = Math.max(0, excess - MAX_LIVE_COMMAND_OUTPUT_CHARS)
 
   if (excess > 0) {
+    truncated = true
     chunks = chunks.flatMap((candidate) => {
       if (excess <= 0) return [candidate]
       if (candidate.output.length <= excess) {
@@ -457,7 +468,268 @@ function appendCommandOutputChunk(
     })
   }
 
-  return { callId, chunks }
+  return { preview: { callId, chunks }, truncated }
+}
+
+const TERMINAL_COMMAND_SESSION_STATUSES = new Set<ChatCommandSessionView['status']>([
+  'exited',
+  'interrupted',
+  'timed_out',
+  'failed',
+  'outcome_unknown'
+])
+
+function isTerminalCommandSessionStatus(status: ChatCommandSessionView['status']) {
+  return TERMINAL_COMMAND_SESSION_STATUSES.has(status)
+}
+
+function hasRunCommandCall(run: ChatAgentRunView, callId: string) {
+  return run.toolCalls.some((call) => call.id === callId && call.tool === 'run_command')
+}
+
+function settleCommandApproval(
+  run: ChatAgentRunView,
+  callId: string,
+  resumedStatus: 'starting' | 'running' = 'running'
+): ChatAgentRunView {
+  const hasRequiredCall = run.toolCalls.some(
+    (call) =>
+      call.id === callId && call.tool === 'run_command' && call.approvalStatus === 'required'
+  )
+  const hasApproval = run.approvals.some(
+    (action) => action.type === 'command' && action.command.id === callId
+  )
+  const approvals = run.approvals.filter(
+    (action) => !(action.type === 'command' && action.command.id === callId)
+  )
+  const shouldResumeRun = run.status === 'waiting_for_approval' && approvals.length === 0
+  if (!hasRequiredCall && !hasApproval && !shouldResumeRun) return run
+  return {
+    ...run,
+    status: shouldResumeRun ? resumedStatus : run.status,
+    toolCalls: run.toolCalls.map((call) =>
+      call.id === callId && call.tool === 'run_command' && call.approvalStatus === 'required'
+        ? { ...call, approvalStatus: 'approved' }
+        : call
+    ),
+    approvals
+  }
+}
+
+function mergeCommandSessionView(
+  existing: ChatCommandSessionView | undefined,
+  incoming: ChatCommandSessionView
+): ChatCommandSessionView {
+  if (existing?.sessionId && incoming.sessionId && existing.sessionId !== incoming.sessionId) {
+    return existing
+  }
+
+  const existingTerminal = existing ? isTerminalCommandSessionStatus(existing.status) : false
+  const incomingTerminal = isTerminalCommandSessionStatus(incoming.status)
+  if (existing && existingTerminal && !incomingTerminal) return existing
+
+  const status =
+    existingTerminal || incomingTerminal
+      ? existingTerminal
+        ? existing!.status
+        : incoming.status
+      : existing?.status === 'running' || incoming.status === 'running'
+        ? 'running'
+        : 'starting'
+
+  const merged: ChatCommandSessionView = {
+    callId: incoming.callId,
+    sessionId: existing?.sessionId ?? incoming.sessionId,
+    status,
+    startedAt: existing?.startedAt ?? incoming.startedAt,
+    endedAt: existing?.endedAt ?? incoming.endedAt,
+    exitCode: existing?.exitCode ?? incoming.exitCode,
+    latestSequence: Math.max(existing?.latestSequence ?? 0, incoming.latestSequence),
+    outputTruncated: Boolean(existing?.outputTruncated || incoming.outputTruncated)
+  }
+  if (
+    existing &&
+    existing.callId === merged.callId &&
+    existing.sessionId === merged.sessionId &&
+    existing.status === merged.status &&
+    existing.startedAt === merged.startedAt &&
+    existing.endedAt === merged.endedAt &&
+    existing.exitCode === merged.exitCode &&
+    existing.latestSequence === merged.latestSequence &&
+    existing.outputTruncated === merged.outputTruncated
+  ) {
+    return existing
+  }
+  return merged
+}
+
+function withCommandSession(
+  run: ChatAgentRunView,
+  incoming: ChatCommandSessionView
+): ChatAgentRunView {
+  if (!hasRunCommandCall(run, incoming.callId)) return run
+  const existing = run.commandSessions?.[incoming.callId]
+  const merged = mergeCommandSessionView(existing, incoming)
+  if (merged === existing) return run
+  return {
+    ...run,
+    commandSessions: {
+      ...(run.commandSessions ?? {}),
+      [incoming.callId]: merged
+    }
+  }
+}
+
+function runningCommandReceipt(result: AgentToolResult | undefined) {
+  if (result?.tool !== 'run_command' || result.ok !== true) return null
+  const value = result.result
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (
+    record.status !== 'running' ||
+    typeof record.sessionId !== 'string' ||
+    record.sessionId.length === 0
+  ) {
+    return null
+  }
+  return {
+    sessionId: record.sessionId,
+    startedAt:
+      typeof record.startedAt === 'number' && Number.isSafeInteger(record.startedAt)
+        ? record.startedAt
+        : undefined,
+    latestSequence:
+      typeof record.latestSequence === 'number' && Number.isSafeInteger(record.latestSequence)
+        ? Math.max(0, record.latestSequence)
+        : 0,
+    outputTruncated: record.outputTruncated === true
+  }
+}
+
+function terminalCommandStatusFromToolResult(
+  result: AgentToolResult
+): Pick<ChatCommandSessionView, 'status' | 'exitCode'> | null {
+  if (result.tool !== 'run_command') return null
+  const value = result.result
+  const record =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null
+  if (record?.status === 'running' || record?.status === 'rejected') return null
+  if (record?.timedOut === true) return { status: 'timed_out' }
+  if (record?.cancelled === true) return { status: 'interrupted' }
+  if (result.ok === false) return { status: 'failed' }
+  if (typeof record?.exitCode === 'number') {
+    return { status: 'exited', exitCode: record.exitCode }
+  }
+  return null
+}
+
+/**
+ * Merges a Host-owned Session snapshot into an existing run_command Timeline item. This helper is
+ * deliberately message/run neutral: restoring an independently running process must never reopen
+ * a completed assistant response.
+ */
+export function applyAgentCommandSessionSnapshotToChatMessage(
+  message: ChatMessage,
+  snapshot: AgentCommandSessionSnapshot,
+  transcript?: AgentCommandSessionTranscript
+): ChatMessage {
+  const currentRun = message.agentRun
+  if (
+    !currentRun ||
+    snapshot.assistantMessageId !== message.id ||
+    (currentRun.runId !== null && currentRun.runId !== snapshot.originRunId) ||
+    !hasRunCommandCall(currentRun, snapshot.callId)
+  ) {
+    return message
+  }
+
+  const existing = currentRun.commandSessions?.[snapshot.callId]
+  if (existing?.sessionId && existing.sessionId !== snapshot.sessionId) return message
+
+  const runWithSettledApproval = settleCommandApproval(
+    currentRun,
+    snapshot.callId,
+    snapshot.status === 'starting' ? 'starting' : 'running'
+  )
+
+  let nextPreview = runWithSettledApproval.commandOutputPreviews?.[snapshot.callId]
+  let previewTruncated = false
+  for (const chunk of transcript?.chunks ?? []) {
+    const appended = appendCommandOutputChunk(snapshot.callId, nextPreview, chunk)
+    nextPreview = appended.preview
+    previewTruncated ||= appended.truncated
+  }
+
+  const nextRun = withCommandSession(runWithSettledApproval, {
+    callId: snapshot.callId,
+    sessionId: snapshot.sessionId,
+    status: snapshot.status,
+    startedAt: snapshot.startedAt,
+    endedAt: snapshot.endedAt,
+    exitCode: snapshot.exitCode,
+    latestSequence: snapshot.latestSequence,
+    outputTruncated: Boolean(
+      snapshot.outputTruncated ||
+      transcript?.outputCaptureTruncated ||
+      transcript?.truncatedBefore ||
+      previewTruncated
+    )
+  })
+  const previewChanged = nextPreview !== currentRun.commandOutputPreviews?.[snapshot.callId]
+
+  return {
+    ...message,
+    agentRun: {
+      ...nextRun,
+      ...(previewChanged && nextPreview
+        ? {
+            commandOutputPreviews: {
+              ...(nextRun.commandOutputPreviews ?? {}),
+              [snapshot.callId]: nextPreview
+            }
+          }
+        : {})
+    }
+  }
+}
+
+/**
+ * Settles one pre-refresh active identity which was absent from a successful authoritative Host
+ * list. The expected Session id is captured before the request and checked again here, so a newly
+ * started process that appeared while the request was in flight cannot be terminalized by the old
+ * response.
+ */
+export function markMissingAgentCommandSessionOutcomeUnknown(
+  message: ChatMessage,
+  callId: string,
+  expectedSessionId: string,
+  observedAt: number
+): ChatMessage {
+  const currentRun = message.agentRun
+  if (!currentRun || !hasRunCommandCall(currentRun, callId)) return message
+  const existing = currentRun.commandSessions?.[callId]
+  if (existing && isTerminalCommandSessionStatus(existing.status)) return message
+  if (existing?.sessionId && existing.sessionId !== expectedSessionId) return message
+
+  const receipt = runningCommandReceipt(
+    currentRun.toolResults.find((result) => result.callId === callId)
+  )
+  if (!existing && receipt?.sessionId !== expectedSessionId) return message
+  if (existing && !existing.sessionId && receipt?.sessionId !== expectedSessionId) return message
+
+  const runWithSettledApproval = settleCommandApproval(currentRun, callId)
+  const nextRun = withCommandSession(runWithSettledApproval, {
+    callId,
+    sessionId: expectedSessionId,
+    status: 'outcome_unknown',
+    startedAt: existing?.startedAt ?? receipt?.startedAt,
+    endedAt: observedAt,
+    latestSequence: Math.max(existing?.latestSequence ?? 0, receipt?.latestSequence ?? 0),
+    outputTruncated: Boolean(existing?.outputTruncated || receipt?.outputTruncated)
+  })
+  return nextRun === currentRun ? message : { ...message, agentRun: nextRun }
 }
 
 function upsertFileWritePreview(
@@ -776,8 +1048,13 @@ export function applyAgentEventToChatMessage(
 
   // A durable terminal Run is a tombstone. Late buffered notifications must not resurrect it as
   // pending/running or append post-terminal model/tool activity. A handed-off command is an
-  // independent process lifecycle, so its output may still refresh only the call-scoped preview.
-  if (isCompletedAgentRunStatus(currentRun.status) && agentEvent.type !== 'command_output') {
+  // independent process lifecycle, so its events may still refresh only the call-scoped view.
+  const isManagedCommandEvent =
+    agentEvent.type === 'command_started' ||
+    agentEvent.type === 'command_output' ||
+    agentEvent.type === 'command_exited' ||
+    agentEvent.type === 'command_interrupted'
+  if (isCompletedAgentRunStatus(currentRun.status) && !isManagedCommandEvent) {
     if (agentEvent.type !== 'done') return message
     const doneStatus = agentEvent.status ?? (agentEvent.success ? 'completed' : 'failed')
     if (doneStatus !== currentRun.status) return message
@@ -1029,7 +1306,7 @@ export function applyAgentEventToChatMessage(
       return message
     }
 
-    const nextRun: ChatAgentRunView = {
+    let nextRun: ChatAgentRunView = {
       ...currentRun,
       status: 'running',
       toolResults: upsertById(currentRun.toolResults, agentEvent.result, (result) => result.callId),
@@ -1044,7 +1321,39 @@ export function applyAgentEventToChatMessage(
             )
           : (currentRun.fileWritePreviews ?? [])
     }
-    if (currentRun.commandOutputPreviews?.[agentEvent.result.callId]) {
+    const managedReceipt = runningCommandReceipt(agentEvent.result)
+    if (managedReceipt) {
+      nextRun = withCommandSession(nextRun, {
+        callId: agentEvent.result.callId,
+        sessionId: managedReceipt.sessionId,
+        status: 'running',
+        startedAt: managedReceipt.startedAt,
+        latestSequence: managedReceipt.latestSequence,
+        outputTruncated: managedReceipt.outputTruncated
+      })
+    } else {
+      const terminal = terminalCommandStatusFromToolResult(agentEvent.result)
+      const existingSession = nextRun.commandSessions?.[agentEvent.result.callId]
+      if (terminal && !existingSession?.sessionId) {
+        nextRun = withCommandSession(nextRun, {
+          callId: agentEvent.result.callId,
+          sessionId: existingSession?.sessionId,
+          status: terminal.status,
+          startedAt: existingSession?.startedAt,
+          exitCode: terminal.exitCode,
+          latestSequence: existingSession?.latestSequence ?? 0,
+          outputTruncated: existingSession?.outputTruncated ?? false
+        })
+      }
+    }
+    const hasManagedSessionIdentity = Boolean(
+      nextRun.commandSessions?.[agentEvent.result.callId]?.sessionId
+    )
+    if (
+      !managedReceipt &&
+      !hasManagedSessionIdentity &&
+      currentRun.commandOutputPreviews?.[agentEvent.result.callId]
+    ) {
       const commandOutputPreviews = { ...currentRun.commandOutputPreviews }
       delete commandOutputPreviews[agentEvent.result.callId]
       if (Object.keys(commandOutputPreviews).length > 0) {
@@ -1126,6 +1435,10 @@ export function applyAgentEventToChatMessage(
     }
 
     const call = getActionToolCall(agentEvent.action)
+    // Pending-action hydration is an independent async snapshot. Once the Host Session authority
+    // has projected this command call, an older `approval_required` record may no longer move the
+    // call or parent Run back to waiting_for_approval.
+    if (call?.tool === 'run_command' && currentRun.commandSessions?.[call.id]) return message
     const timeline = call
       ? appendToolCallToTimeline(currentRun, call.id)
       : removeTransientToolTimelineItems(currentRun.timeline)
@@ -1175,40 +1488,99 @@ export function applyAgentEventToChatMessage(
     }
   }
 
+  if (agentEvent.type === 'command_started') {
+    if (
+      (currentRun.runId && currentRun.runId !== agentEvent.runId) ||
+      !hasRunCommandCall(currentRun, agentEvent.callId)
+    ) {
+      return message
+    }
+    const existing = currentRun.commandSessions?.[agentEvent.callId]
+    if (existing?.sessionId && existing.sessionId !== agentEvent.sessionId) return message
+
+    const nextRun = withCommandSession(settleCommandApproval(currentRun, agentEvent.callId), {
+      callId: agentEvent.callId,
+      sessionId: agentEvent.sessionId,
+      status: 'running',
+      startedAt: agentEvent.startedAt,
+      latestSequence: 0,
+      outputTruncated: false
+    })
+    return nextRun === currentRun ? message : { ...message, agentRun: nextRun }
+  }
+
   if (agentEvent.type === 'command_output') {
-    if (!agentEvent.output || (currentRun.runId && currentRun.runId !== agentEvent.runId)) {
+    if (
+      (currentRun.runId && currentRun.runId !== agentEvent.runId) ||
+      !hasRunCommandCall(currentRun, agentEvent.callId)
+    ) {
       return message
     }
 
-    const existing = currentRun.commandOutputPreviews?.[agentEvent.callId]
-    const nextPreview = appendCommandOutputChunk(agentEvent.callId, existing, {
+    const runWithSettledApproval = settleCommandApproval(currentRun, agentEvent.callId)
+    const existingSession = runWithSettledApproval.commandSessions?.[agentEvent.callId]
+    if (
+      (existingSession?.sessionId && existingSession.sessionId !== agentEvent.sessionId) ||
+      (existingSession && isTerminalCommandSessionStatus(existingSession.status))
+    ) {
+      return message
+    }
+    if (agentEvent.sequence <= (existingSession?.latestSequence ?? 0)) {
+      return runWithSettledApproval === currentRun
+        ? message
+        : { ...message, agentRun: runWithSettledApproval }
+    }
+
+    const existing = runWithSettledApproval.commandOutputPreviews?.[agentEvent.callId]
+    const appended = appendCommandOutputChunk(agentEvent.callId, existing, {
       sequence: agentEvent.sequence,
       stream: agentEvent.stream,
       output: agentEvent.output
     })
-    if (nextPreview === existing) return message
+    const nextPreview = appended.preview
+    const nextRun = withCommandSession(runWithSettledApproval, {
+      callId: agentEvent.callId,
+      sessionId: agentEvent.sessionId,
+      status: 'running',
+      startedAt: existingSession?.startedAt,
+      latestSequence: agentEvent.sequence,
+      outputTruncated: Boolean(existingSession?.outputTruncated || appended.truncated)
+    })
 
     return {
       ...message,
       agentRun: {
-        ...currentRun,
+        ...nextRun,
         commandOutputPreviews: {
-          ...(currentRun.commandOutputPreviews ?? {}),
+          ...(nextRun.commandOutputPreviews ?? {}),
           [agentEvent.callId]: nextPreview
         }
       }
     }
   }
 
-  // Managed command lifecycle is delivered end-to-end in round 2, but its durable Timeline
-  // projection is intentionally deferred to round 3. Explicitly ignore the new state-only events
-  // here so they cannot fall through to the terminal Agent `done` projection.
-  if (
-    agentEvent.type === 'command_started' ||
-    agentEvent.type === 'command_exited' ||
-    agentEvent.type === 'command_interrupted'
-  ) {
-    return message
+  if (agentEvent.type === 'command_exited' || agentEvent.type === 'command_interrupted') {
+    if (
+      (currentRun.runId && currentRun.runId !== agentEvent.runId) ||
+      !hasRunCommandCall(currentRun, agentEvent.callId)
+    ) {
+      return message
+    }
+    const runWithSettledApproval = settleCommandApproval(currentRun, agentEvent.callId)
+    const existing = runWithSettledApproval.commandSessions?.[agentEvent.callId]
+    if (existing?.sessionId && existing.sessionId !== agentEvent.sessionId) return message
+
+    const nextRun = withCommandSession(runWithSettledApproval, {
+      callId: agentEvent.callId,
+      sessionId: agentEvent.sessionId,
+      status: agentEvent.type === 'command_interrupted' ? 'interrupted' : agentEvent.status,
+      startedAt: existing?.startedAt,
+      endedAt: agentEvent.endedAt,
+      exitCode: agentEvent.type === 'command_exited' ? agentEvent.exitCode : undefined,
+      latestSequence: agentEvent.latestSequence,
+      outputTruncated: agentEvent.outputTruncated
+    })
+    return nextRun === currentRun ? message : { ...message, agentRun: nextRun }
   }
 
   if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {
@@ -1458,7 +1830,15 @@ export function applyAgentActionExecutionToChatMessage(
   execution: AgentActionExecutionOutput,
   mcpRejectionMessage?: string
 ): ChatMessage {
-  const messageWithAgentOutput = applyAgentOutputToChatMessage(message, execution.agentOutput)
+  // Action-decision RPCs and Agent notifications travel on independent channels. In particular,
+  // an approved command is dispatched on a background worker before the approval RPC response is
+  // serialized, so a fast continuation can publish `done` first. A terminal parent Run is a
+  // tombstone: the late RPC may still settle approval and process child state below, but it must
+  // never reopen the assistant message or replace the terminal Run status/content.
+  const parentIsTerminal = isCompletedAgentRunStatus(message.agentRun?.status)
+  const messageWithAgentOutput = parentIsTerminal
+    ? message
+    : applyAgentOutputToChatMessage(message, execution.agentOutput)
   const outputRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
   const currentRun: ChatAgentRunView =
     message.agentRun?.status === 'waiting_for_approval' &&
@@ -1509,12 +1889,38 @@ export function applyAgentActionExecutionToChatMessage(
   }
 
   if (!execution.toolResult) {
-    const nextRun = normalizeAgentRunToolActivities({
+    const approvalStatus: AgentApprovalStatus =
+      execution.status === 'rejected' ? 'rejected' : 'approved'
+    let nextRun = normalizeAgentRunToolActivities({
       ...currentRun,
       approvals: removeAgentAction(currentRun.approvals, execution.actionId),
+      toolCalls: currentRun.toolCalls.map((call) =>
+        call.id === execution.actionId ? { ...call, approvalStatus } : call
+      ),
+      diffs: currentRun.diffs.map((diff) =>
+        diff.id === execution.actionId ? { ...diff, approvalStatus } : diff
+      ),
       skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
       timeline: removeTransientToolTimelineItems(currentRun.timeline)
     })
+    const commandCall = nextRun.toolCalls.find(
+      (call) => call.id === execution.actionId && call.tool === 'run_command'
+    )
+    if (commandCall && execution.status !== 'rejected') {
+      const existingSession = nextRun.commandSessions?.[commandCall.id]
+      if (!existingSession?.sessionId) {
+        nextRun = withCommandSession(nextRun, {
+          callId: commandCall.id,
+          status:
+            execution.status === 'failed' || execution.status === 'conflict'
+              ? 'failed'
+              : 'starting',
+          startedAt: existingSession?.startedAt,
+          latestSequence: existingSession?.latestSequence ?? 0,
+          outputTruncated: existingSession?.outputTruncated ?? false
+        })
+      }
+    }
 
     return {
       ...messageWithAgentOutput,
@@ -1524,7 +1930,7 @@ export function applyAgentActionExecutionToChatMessage(
 
   const finalApprovalStatus: AgentApprovalStatus =
     execution.status === 'rejected' ? 'rejected' : 'approved'
-  const runWithExecutionResult = normalizeAgentRunToolActivities({
+  let runWithExecutionResult = normalizeAgentRunToolActivities({
     ...currentRun,
     toolCalls: currentRun.toolCalls.map((call) =>
       call.id === execution.actionId
@@ -1552,6 +1958,31 @@ export function applyAgentActionExecutionToChatMessage(
     skillInstallations: applySkillInstallationExecution(currentRun.skillInstallations, execution),
     timeline: removeTransientToolTimelineItems(currentRun.timeline)
   })
+  const managedReceipt = runningCommandReceipt(execution.toolResult)
+  if (managedReceipt) {
+    runWithExecutionResult = withCommandSession(runWithExecutionResult, {
+      callId: execution.toolResult.callId,
+      sessionId: managedReceipt.sessionId,
+      status: 'running',
+      startedAt: managedReceipt.startedAt,
+      latestSequence: managedReceipt.latestSequence,
+      outputTruncated: managedReceipt.outputTruncated
+    })
+  } else {
+    const terminal = terminalCommandStatusFromToolResult(execution.toolResult)
+    const existingSession = runWithExecutionResult.commandSessions?.[execution.toolResult.callId]
+    if (terminal && !existingSession?.sessionId) {
+      runWithExecutionResult = withCommandSession(runWithExecutionResult, {
+        callId: execution.toolResult.callId,
+        sessionId: existingSession?.sessionId,
+        status: terminal.status,
+        startedAt: existingSession?.startedAt,
+        exitCode: terminal.exitCode,
+        latestSequence: existingSession?.latestSequence ?? 0,
+        outputTruncated: existingSession?.outputTruncated ?? false
+      })
+    }
+  }
 
   return {
     ...messageWithAgentOutput,

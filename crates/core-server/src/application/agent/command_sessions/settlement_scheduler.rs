@@ -1,4 +1,4 @@
-use super::{AgentCommandSessionRegistryInner, HandoffState, HostCommandSession};
+use super::{AgentCommandSessionRegistryInner, DurableRowState, HandoffState, HostCommandSession};
 use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
@@ -139,9 +139,12 @@ impl CommandSessionSettlementScheduler {
                 Ok(())
             } else if let Some(terminal) = job.session.terminal() {
                 match job.session.handoff_state() {
-                    HandoffState::Adopted => registry.settle_handed_off(&job.session, &terminal),
-                    HandoffState::Synchronous | HandoffState::Aborted => {
-                        registry.settle_synchronous(&job.session, &terminal)
+                    HandoffState::Adopted | HandoffState::Synchronous | HandoffState::Aborted => {
+                        if job.session.durable_row_state() == DurableRowState::Indeterminate {
+                            registry.reconcile_indeterminate_durable_start(&job.session)
+                        } else {
+                            registry.settle_terminal(&job.session, &terminal)
+                        }
                     }
                     HandoffState::Pending => {
                         Err("未完成持久交接的命令 Session 不能进入终态结算队列。".to_string())

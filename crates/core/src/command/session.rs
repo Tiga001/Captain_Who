@@ -9,6 +9,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -216,6 +217,10 @@ struct ObservedSessionState {
     transcript: CommandTranscript,
     live_output: Option<LiveOutputState>,
     terminal_result: Option<AgentCommandExecutionResult>,
+    /// Becomes true only after the serialized Terminal lifecycle callback returns.  A committed
+    /// process outcome and its host notification are one completion boundary for APIs that wait
+    /// for the terminal result.
+    terminal_lifecycle_delivered: bool,
 }
 
 #[derive(Debug)]
@@ -243,6 +248,10 @@ pub(crate) struct ManagedCommandSession {
     /// Output, and Terminal in exactly that same order even when stdout/stderr readers race.
     lifecycle_order: Mutex<()>,
     interaction: Mutex<ModelInteractionState>,
+    /// Sticky for the lifetime of the controlled OS process. A model ToolCall may be retried
+    /// after its durable receipt fails or has an unknown commit outcome; that retry may observe
+    /// state again, but must never enqueue a second SIGINT request.
+    interrupt_requested: AtomicBool,
     control_tx: SyncSender<ProcessControl>,
     watcher: Mutex<Option<std::thread::JoinHandle<()>>>,
     lifecycle_observer: Option<CommandSessionLifecycleObserver>,
@@ -285,10 +294,12 @@ impl ManagedCommandSession {
                 transcript: CommandTranscript::new(transcript_bytes),
                 live_output,
                 terminal_result: None,
+                terminal_lifecycle_delivered: false,
             }),
             changed: Condvar::new(),
             lifecycle_order: Mutex::new(()),
             interaction: Mutex::new(ModelInteractionState::default()),
+            interrupt_requested: AtomicBool::new(false),
             control_tx,
             watcher: Mutex::new(None),
             lifecycle_observer,
@@ -382,13 +393,17 @@ impl ManagedCommandSession {
             observed.ended_at = Some(unix_time_millis());
             observed.error = error;
             observed.terminal_result = Some(result.clone());
-            self.changed.notify_all();
             CommandTerminalResult {
-                snapshot: self.snapshot_from(&observed),
+                snapshot: self.authoritative_snapshot_from(&observed),
                 execution: result,
             }
         };
         self.notify_lifecycle(CommandSessionLifecycleEvent::Terminal(Box::new(terminal)));
+        {
+            let mut observed = lock(&self.observed);
+            observed.terminal_lifecycle_delivered = true;
+            self.changed.notify_all();
+        }
         true
     }
 
@@ -435,6 +450,20 @@ impl ManagedCommandSession {
     }
 
     fn snapshot_from(&self, observed: &ObservedSessionState) -> CommandSessionSnapshot {
+        let mut snapshot = self.authoritative_snapshot_from(observed);
+        if snapshot.state.is_terminal() && !observed.terminal_lifecycle_delivered {
+            snapshot.state = CommandSessionState::Running;
+            snapshot.ended_at = None;
+            snapshot.exit_code = None;
+            snapshot.error = None;
+        }
+        snapshot
+    }
+
+    fn authoritative_snapshot_from(
+        &self,
+        observed: &ObservedSessionState,
+    ) -> CommandSessionSnapshot {
         let exit_code = match observed.state {
             CommandSessionState::Exited { exit_code } => exit_code,
             _ => observed
@@ -460,21 +489,31 @@ impl ManagedCommandSession {
         let observed = lock(&self.observed);
         let (observed, _) = self
             .changed
-            .wait_timeout_while(observed, wait, |state| !state.state.is_terminal())
+            .wait_timeout_while(observed, wait, |state| !state.terminal_lifecycle_delivered)
             .unwrap_or_else(|error| error.into_inner());
-        let snapshot = self.snapshot_from(&observed);
-        if let Some(execution) = observed.terminal_result.clone() {
+        let published_execution = if observed.terminal_lifecycle_delivered {
+            observed.terminal_result.clone()
+        } else {
+            None
+        };
+        if let Some(execution) = published_execution {
             CommandStartOutcome::Exited(Box::new(CommandTerminalResult {
-                snapshot,
+                snapshot: self.snapshot_from(&observed),
                 execution,
             }))
         } else {
-            CommandStartOutcome::Running(snapshot)
+            // The OS process may have exited while a slow lifecycle callback is still publishing
+            // its Terminal event.  The public projection remains non-terminal, and the observer
+            // cannot extend the finite initial-yield contract.
+            CommandStartOutcome::Running(self.snapshot_from(&observed))
         }
     }
 
     pub(crate) fn terminal_result(&self) -> Option<CommandTerminalResult> {
         let observed = lock(&self.observed);
+        if !observed.terminal_lifecycle_delivered {
+            return None;
+        }
         observed
             .terminal_result
             .clone()
@@ -488,8 +527,11 @@ impl ManagedCommandSession {
         let observed = lock(&self.observed);
         let (observed, _) = self
             .changed
-            .wait_timeout_while(observed, wait, |state| !state.state.is_terminal())
+            .wait_timeout_while(observed, wait, |state| !state.terminal_lifecycle_delivered)
             .unwrap_or_else(|error| error.into_inner());
+        if !observed.terminal_lifecycle_delivered {
+            return None;
+        }
         observed
             .terminal_result
             .clone()
@@ -506,7 +548,7 @@ impl ManagedCommandSession {
         let (observed, _) = self
             .changed
             .wait_timeout_while(observed, wait, |state| {
-                !state.state.is_terminal() && state.transcript.latest_sequence() <= cursor
+                !state.terminal_lifecycle_delivered && state.transcript.latest_sequence() <= cursor
             })
             .unwrap_or_else(|error| error.into_inner());
         let output = observed.transcript.read_after(cursor, max_bytes);
@@ -531,7 +573,7 @@ impl ManagedCommandSession {
         let (observed, _) = self
             .changed
             .wait_timeout_while(observed, wait, |state| {
-                !state.state.is_terminal() && state.transcript.latest_sequence() <= after
+                !state.terminal_lifecycle_delivered && state.transcript.latest_sequence() <= after
             })
             .unwrap_or_else(|error| error.into_inner());
         CommandSessionPoll {
@@ -546,16 +588,38 @@ impl ManagedCommandSession {
         wait: Duration,
     ) -> Result<CommandSessionSnapshot, CommandSessionError> {
         let _interaction = lock(&self.interaction);
-        if self.snapshot().state.is_terminal() {
-            return Ok(self.snapshot());
+        {
+            let observed = lock(&self.observed);
+            if observed.state.is_terminal() {
+                let (observed, _) = self
+                    .changed
+                    .wait_timeout_while(observed, wait, |state| !state.terminal_lifecycle_delivered)
+                    .unwrap_or_else(|error| error.into_inner());
+                return Ok(self.snapshot_from(&observed));
+            }
         }
-        self.control_tx
-            .send(control)
-            .map_err(|_| CommandSessionError::ControlChannelClosed)?;
+        let should_send = match control {
+            ProcessControl::Interrupt => !self.interrupt_requested.swap(true, Ordering::AcqRel),
+            ProcessControl::ForceTerminate => true,
+        };
+        if should_send && self.control_tx.send(control).is_err() {
+            if matches!(control, ProcessControl::Interrupt) {
+                self.interrupt_requested.store(false, Ordering::Release);
+            }
+            let observed = lock(&self.observed);
+            if !observed.state.is_terminal() {
+                return Err(CommandSessionError::ControlChannelClosed);
+            }
+            let (observed, _) = self
+                .changed
+                .wait_timeout_while(observed, wait, |state| !state.terminal_lifecycle_delivered)
+                .unwrap_or_else(|error| error.into_inner());
+            return Ok(self.snapshot_from(&observed));
+        }
         let observed = lock(&self.observed);
         let (observed, _) = self
             .changed
-            .wait_timeout_while(observed, wait, |state| !state.state.is_terminal())
+            .wait_timeout_while(observed, wait, |state| !state.terminal_lifecycle_delivered)
             .unwrap_or_else(|error| error.into_inner());
         Ok(self.snapshot_from(&observed))
     }
@@ -563,7 +627,7 @@ impl ManagedCommandSession {
     /// Lifecycle-only escape hatch.  Application shutdown must not wait behind
     /// a model poll that is intentionally holding the interaction lock.
     pub(crate) fn force_for_shutdown(&self) {
-        if !self.snapshot().state.is_terminal() {
+        if !lock(&self.observed).state.is_terminal() {
             let _ = self.control_tx.try_send(ProcessControl::ForceTerminate);
         }
     }
@@ -768,17 +832,6 @@ pub(crate) fn run_session_watcher(
     let stderr_spool = stderr_capture
         .as_ref()
         .map_or_else(ProcessOutputSpool::default, CapturedProcessOutput::spool);
-    let state = match intent {
-        Some(TerminationIntent::Interrupted) => CommandSessionState::Interrupted,
-        Some(TerminationIntent::TimedOut) => CommandSessionState::TimedOut,
-        Some(TerminationIntent::Failed) => CommandSessionState::Failed,
-        None if error.is_some() => CommandSessionState::Failed,
-        None => CommandSessionState::Exited {
-            exit_code: exit_status
-                .as_ref()
-                .and_then(std::process::ExitStatus::code),
-        },
-    };
     let mut result = AgentCommandExecutionResult {
         command: session.projection.command.clone(),
         cwd: session.projection.cwd.clone(),
@@ -787,8 +840,8 @@ pub(crate) fn run_session_watcher(
             .and_then(std::process::ExitStatus::code),
         stdout,
         stderr,
-        timed_out: state == CommandSessionState::TimedOut,
-        cancelled: state == CommandSessionState::Interrupted,
+        timed_out: matches!(intent, Some(TerminationIntent::TimedOut)),
+        cancelled: matches!(intent, Some(TerminationIntent::Interrupted)),
         duration_ms: elapsed_millis(started),
         stdout_truncated,
         stderr_truncated,
@@ -809,7 +862,23 @@ pub(crate) fn run_session_watcher(
             result.error = Some("命令终态结算回调异常退出。".to_string());
         }
     }
-    session.complete(state, result, error, output_capture_incomplete);
+    // Completion hooks are part of terminal settlement. In particular, managed-runtime integrity
+    // verification can turn a successful OS exit into a failed command result. Derive the public
+    // state only after the hook has produced the final result so Session, ToolResult, Trace, and UI
+    // cannot disagree about success.
+    let state = match intent {
+        Some(TerminationIntent::Interrupted) => CommandSessionState::Interrupted,
+        Some(TerminationIntent::TimedOut) => CommandSessionState::TimedOut,
+        Some(TerminationIntent::Failed) => CommandSessionState::Failed,
+        None if result.error.is_some() => CommandSessionState::Failed,
+        None => CommandSessionState::Exited {
+            exit_code: exit_status
+                .as_ref()
+                .and_then(std::process::ExitStatus::code),
+        },
+    };
+    let terminal_error = result.error.clone();
+    session.complete(state, result, terminal_error, output_capture_incomplete);
     on_terminal();
 }
 

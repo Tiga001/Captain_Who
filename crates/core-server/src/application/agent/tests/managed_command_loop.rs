@@ -39,6 +39,26 @@ async fn read_json_request(stream: &mut TcpStream) -> Value {
 }
 
 async fn write_run_command_stream(stream: &mut TcpStream) {
+    write_tool_call_stream(
+        stream,
+        "provider-managed-command",
+        "run_command",
+        json!({
+            "command": "sleep 0.8",
+            "reason": "exercise managed command handoff"
+        }),
+        "Starting the long-lived command.",
+    )
+    .await;
+}
+
+async fn write_tool_call_stream(
+    stream: &mut TcpStream,
+    call_id: &str,
+    tool: &str,
+    arguments: Value,
+    narration: &str,
+) {
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -49,17 +69,14 @@ async fn write_run_command_stream(stream: &mut TcpStream) {
         "choices": [{
             "delta": {
                 "role": "assistant",
-                "content": "Starting the long-lived command.",
+                "content": narration,
                 "tool_calls": [{
                     "index": 0,
-                    "id": "provider-managed-command",
+                    "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": "run_command",
-                        "arguments": serde_json::to_string(&json!({
-                            "command": "sleep 0.8",
-                            "reason": "exercise managed command handoff"
-                        })).unwrap()
+                        "name": tool,
+                        "arguments": serde_json::to_string(&arguments).unwrap()
                     }
                 }]
             },
@@ -251,4 +268,196 @@ async fn running_command_handoff_continues_loop_consumes_guidance_and_never_auto
         .unwrap()
         .unwrap();
     assert_eq!(conversation.messages.len(), 2);
+}
+
+#[tokio::test]
+async fn model_poll_observes_nonzero_terminal_result_without_background_continuation() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _first_request = read_json_request(&mut first).await;
+        write_tool_call_stream(
+            &mut first,
+            "provider-build-command",
+            "run_command",
+            json!({
+                "command": "printf 'ready\\n'; sleep 0.25; printf 'progress\\n'; sleep 0.35; exit 7",
+                "reason": "exercise explicit terminal polling"
+            }),
+            "Starting the build.",
+        )
+        .await;
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let second_request = read_json_request(&mut second).await;
+        let running_receipt = second_request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .and_then(|message| message["content"].as_str())
+            .and_then(|content| serde_json::from_str::<Value>(content).ok())
+            .expect("the second model request must contain the run_command running receipt");
+        assert_eq!(running_receipt["status"], "running");
+        let session_id = running_receipt["sessionId"].as_str().unwrap().to_string();
+        write_tool_call_stream(
+            &mut second,
+            "provider-command-poll",
+            "command_session",
+            json!({
+                "sessionId": session_id,
+                "waitMs": 2_000
+            }),
+            "Waiting for the build's terminal result.",
+        )
+        .await;
+        drop(second);
+
+        let (mut third, _) = listener.accept().await.unwrap();
+        let third_request = read_json_request(&mut third).await;
+        let first_poll_result = third_request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "tool")
+            .and_then(|message| message["content"].as_str())
+            .and_then(|content| serde_json::from_str::<Value>(content).ok())
+            .expect("the third model request must contain the first command_session result");
+        assert_eq!(first_poll_result["status"], "running");
+        assert!(first_poll_result["output"]
+            .as_str()
+            .unwrap()
+            .contains("progress"));
+        // Model turns are intentionally the only continuation source. A second explicit poll
+        // waits for terminal state; the background exit itself must not create this request.
+        write_tool_call_stream(
+            &mut third,
+            "provider-command-poll-terminal",
+            "command_session",
+            json!({
+                "sessionId": session_id,
+                "waitMs": 2_000
+            }),
+            "The build is still running; waiting for its terminal result.",
+        )
+        .await;
+        drop(third);
+
+        let (mut fourth, _) = listener.accept().await.unwrap();
+        let fourth_request = read_json_request(&mut fourth).await;
+        write_text_stream(&mut fourth, "The build exited with status 7.").await;
+        drop(fourth);
+
+        let fifth_request_seen =
+            tokio::time::timeout(Duration::from_millis(800), listener.accept())
+                .await
+                .is_ok();
+        (session_id, fourth_request, fifth_request_seen)
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: "project-managed-poll".to_string(),
+            name: "Managed poll".to_string(),
+            path: Some(fixture.path().to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+
+    let mut service = AgentService::new(Arc::clone(&storage));
+    service.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        Duration::from_millis(100),
+    );
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-managed-poll".to_string()),
+                project_id: Some("project-managed-poll".to_string()),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Run the build and verify its final exit code.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-managed-poll".to_string()),
+                assistant_message_id: Some("assistant-managed-poll".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::AutoApprove,
+                    command_safety: AgentCommandSafetyPolicy::FullAccess,
+                    ..AgentPermissions::default()
+                },
+            },
+            notifications,
+        )
+        .unwrap();
+
+    let mut exited_events = 0;
+    let mut saw_done = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(saw_done && exited_events == 1) {
+            let notification = receiver.recv().await.unwrap();
+            match notification["params"]["type"].as_str() {
+                Some("done") => saw_done = true,
+                Some("command_exited") => {
+                    assert_eq!(notification["params"]["exitCode"], 7);
+                    exited_events += 1;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let (session_id, fourth_request, fifth_request_seen) = server.await.unwrap();
+    assert!(
+        !fifth_request_seen,
+        "neither the terminal event nor a finished Agent run may create another model request"
+    );
+    let poll_result = fourth_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .and_then(|content| serde_json::from_str::<Value>(content).ok())
+        .expect("the third model request must contain the command_session result");
+    assert_eq!(poll_result["sessionId"], session_id);
+    assert_eq!(poll_result["status"], "exited");
+    assert_eq!(poll_result["exitCode"], 7);
+    assert_eq!(poll_result["output"], "");
+
+    let record = storage
+        .load_agent_command_session(&turn.conversation_id, &session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.snapshot.status, AgentCommandSessionStatus::Exited);
+    assert_eq!(record.snapshot.exit_code, Some(7));
+    assert_eq!(
+        storage
+            .load_conversation(&turn.conversation_id)
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        2,
+        "command polling and terminal events stay inside the original assistant turn"
+    );
 }

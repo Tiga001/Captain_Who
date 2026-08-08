@@ -4,6 +4,7 @@ pub mod agent_prompt_preferences_repository;
 pub mod attachment_repository;
 pub mod chat_repository;
 pub mod chat_search_repository;
+pub(crate) mod command_session_receipt_payload;
 pub mod composer_draft_repository;
 pub mod config_repository;
 pub mod context_compaction_receipt_repository;

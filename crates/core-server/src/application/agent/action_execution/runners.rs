@@ -1667,7 +1667,7 @@ impl AgentService {
 
         let mut file_effect_guard =
             match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
-                Ok(guard) => guard,
+                Ok(guard) => Some(guard),
                 Err(_) => {
                     self.discard_usage_context(&run_id);
                     return;
@@ -1697,7 +1697,10 @@ impl AgentService {
             skill_resources,
             Arc::clone(&self.storage),
         );
-        file_effect_guard.mark_effects_started();
+        file_effect_guard
+            .as_mut()
+            .expect("approved command retains its file-effect lease before Session start")
+            .mark_effects_started();
         let command_sessions = self.command_sessions.clone();
         let session_owner = CommandSessionOwner {
             conversation_id: record.snapshot.conversation_id.clone().unwrap_or_default(),
@@ -1718,7 +1721,8 @@ impl AgentService {
         let session_action_id = action_id.clone();
         let command_launch = tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            command_sessions.start(StartAgentCommandSession {
+            let mut file_effect_guard = file_effect_guard;
+            let launch = command_sessions.start(StartAgentCommandSession {
                 owner: session_owner,
                 workspace_root: workspace_root.as_deref(),
                 command: &session_command,
@@ -1736,17 +1740,24 @@ impl AgentService {
                 cancel_probe: Some(Arc::new(move || {
                     cancellation_probe_token.is_cancelled() || cancel_flag.load(Ordering::SeqCst)
                 })),
-            })
+                file_effect_guard: &mut file_effect_guard,
+            });
+            (launch, file_effect_guard)
         })
         .await;
 
-        let mut handoff_file_effect_guard = Some(file_effect_guard);
+        let (command_launch, mut file_effect_guard) = match command_launch {
+            Ok((launch, file_effect_guard)) => (launch, file_effect_guard),
+            Err(error) => (Err(format!("命令执行任务失败：{error}")), None),
+        };
+
         let mut command_result = match command_launch {
-            Ok(Ok(AgentCommandSessionLaunch::Exited(terminal))) => terminal.execution,
-            Ok(Ok(AgentCommandSessionLaunch::Running {
+            Ok(AgentCommandSessionLaunch::Exited(terminal)) => terminal.execution,
+            Ok(AgentCommandSessionLaunch::Running {
                 snapshot,
                 tool_result,
-            })) => {
+                mut handoff_guard,
+            }) => {
                 let mut continuation_input = record.agent_input.clone();
                 continuation_input.approval_decision = Some(AgentApprovalDecision {
                     action_id: record.snapshot.action_id.clone(),
@@ -1761,9 +1772,7 @@ impl AgentService {
                 let mut settlement_errors = Vec::new();
                 let mut handoff_already_advanced = false;
                 let mut audit_definitely_uncommitted = false;
-                let handoff = self.command_sessions.commit_handoff(
-                    &snapshot.session_id,
-                    &mut handoff_file_effect_guard,
+                let handoff = handoff_guard.commit(
                     || {
                         run_cancellation_token.is_cancelled()
                             || post_execution_cancel_flag.load(Ordering::SeqCst)
@@ -1820,7 +1829,6 @@ impl AgentService {
 
                 match handoff {
                     Ok(AgentCommandHandoffOutcome::Adopted) => {
-                        debug_assert!(handoff_file_effect_guard.is_none());
                         if handoff_already_advanced {
                             self.unregister_cancellation_if_current(
                                 &run_id,
@@ -1853,10 +1861,7 @@ impl AgentService {
                         return;
                     }
                     Ok(AgentCommandHandoffOutcome::CancelledBeforeCommit) => {
-                        match self
-                            .command_sessions
-                            .abort_before_handoff(&snapshot.session_id)
-                        {
+                        match handoff_guard.abort_before_handoff() {
                             Ok(terminal) => {
                                 let mut execution = terminal.execution;
                                 execution.cancelled = true;
@@ -1892,10 +1897,7 @@ impl AgentService {
                     Ok(AgentCommandHandoffOutcome::PersistenceFailed(error))
                         if audit_definitely_uncommitted =>
                     {
-                        match self
-                            .command_sessions
-                            .abort_before_handoff(&snapshot.session_id)
-                        {
+                        match handoff_guard.abort_before_handoff() {
                             Ok(terminal) => {
                                 let mut execution = terminal.execution;
                                 execution.error.get_or_insert_with(|| {
@@ -1934,9 +1936,7 @@ impl AgentService {
                         }
                     }
                     Ok(AgentCommandHandoffOutcome::PersistenceFailed(error)) => {
-                        let termination = self
-                            .command_sessions
-                            .abort_before_handoff(&snapshot.session_id);
+                        let termination = handoff_guard.abort_before_handoff();
                         self.unregister_cancellation_if_current(&run_id, &run_cancellation_token);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id),
@@ -1957,9 +1957,7 @@ impl AgentService {
                         return;
                     }
                     Err(error) => {
-                        let termination = self
-                            .command_sessions
-                            .abort_before_handoff(&snapshot.session_id);
+                        let termination = handoff_guard.abort_before_handoff();
                         self.unregister_cancellation_if_current(&run_id, &run_cancellation_token);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id),
@@ -1980,16 +1978,8 @@ impl AgentService {
                     }
                 }
             }
-            Ok(Err(error)) => failed_command_result(&command_for_error, error, None),
-            Err(error) => failed_command_result(
-                &command_for_error,
-                format!("命令执行任务失败：{error}"),
-                None,
-            ),
+            Err(error) => failed_command_result(&command_for_error, error, None),
         };
-        let mut file_effect_guard = handoff_file_effect_guard
-            .take()
-            .expect("non-handed-off command retains its file-effect lease");
         let execution_was_cancelled = run_cancellation_token.is_cancelled()
             || post_execution_cancel_flag.load(Ordering::SeqCst)
             || command_result.cancelled;
@@ -2058,7 +2048,9 @@ impl AgentService {
                         settled = true;
                     }
                     Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
-                        file_effect_guard.mark_durably_settled();
+                        if let Some(guard) = file_effect_guard.as_mut() {
+                            guard.mark_durably_settled();
+                        }
                         self.unregister_cancellation(&run_id);
                         return;
                     }
@@ -2147,7 +2139,9 @@ impl AgentService {
                             settled = true;
                         }
                         Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
-                            file_effect_guard.mark_durably_settled();
+                            if let Some(guard) = file_effect_guard.as_mut() {
+                                guard.mark_durably_settled();
+                            }
                             self.unregister_cancellation(&run_id);
                             return;
                         }
@@ -2212,7 +2206,9 @@ impl AgentService {
                 }
             }
             debug_assert!(settled);
-            file_effect_guard.mark_durably_settled();
+            if let Some(guard) = file_effect_guard.as_mut() {
+                guard.mark_durably_settled();
+            }
             (agent_input, final_pending_status)
         };
         // The file-producing boundary is now durably paired with its ToolResult. Release the

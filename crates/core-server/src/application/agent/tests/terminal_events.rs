@@ -326,10 +326,37 @@ fn automatic_running_command_reconciles_post_commit_audit_and_outlives_run_cance
         AgentCommandSessionStatus::Running,
         "run cancellation after the durable handoff must not terminate the process Session"
     );
+    let session_id = sessions.sessions[0].session_id.clone();
 
     service
         .command_sessions
         .terminate_conversation(conversation_id);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let terminal = loop {
+        let sessions = service
+            .command_sessions
+            .list(AgentCommandSessionListInput {
+                conversation_id: conversation_id.to_string(),
+            })
+            .unwrap();
+        if let Some(session) = sessions
+            .sessions
+            .into_iter()
+            .find(|session| session.session_id == session_id && session.status.is_terminal())
+        {
+            break session;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "conversation termination did not settle the adopted Session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        terminal.status,
+        AgentCommandSessionStatus::Interrupted,
+        "conversation deletion is a process-lifecycle boundary even after durable handoff"
+    );
     service.unregister_cancellation_if_current(run_id, &cancellation);
 }
 
@@ -372,6 +399,15 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
     let mut second = command_request("command-action-scoped-second", "sleep 2");
     second.approval_status = AgentApprovalStatus::Approved;
     let start = |command: &AgentCommandRequest| {
+        let tracker = Arc::new(FileEffectTracker::default());
+        let mut file_effect_guard = tracker.register(
+            None,
+            Some(conversation_id),
+            "run-action-scoped-session-cancel",
+            &command.id,
+        );
+        file_effect_guard.mark_effects_started();
+        let mut file_effect_guard = Some(file_effect_guard);
         registry
             .start(StartAgentCommandSession {
                 owner: CommandSessionOwner {
@@ -394,15 +430,24 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
                 notifications: None,
                 cancellation_token: AgentCancellationToken::new(),
                 cancel_probe: None,
+                file_effect_guard: &mut file_effect_guard,
             })
             .unwrap()
     };
-    let first_session_id = match start(&first) {
-        AgentCommandSessionLaunch::Running { snapshot, .. } => snapshot.session_id,
+    let (first_session_id, mut first_handoff_guard) = match start(&first) {
+        AgentCommandSessionLaunch::Running {
+            snapshot,
+            handoff_guard,
+            ..
+        } => (snapshot.session_id, handoff_guard),
         AgentCommandSessionLaunch::Exited(_) => panic!("first command must still be running"),
     };
-    let second_session_id = match start(&second) {
-        AgentCommandSessionLaunch::Running { snapshot, .. } => snapshot.session_id,
+    let (second_session_id, mut second_handoff_guard) = match start(&second) {
+        AgentCommandSessionLaunch::Running {
+            snapshot,
+            handoff_guard,
+            ..
+        } => (snapshot.session_id, handoff_guard),
         AgentCommandSessionLaunch::Exited(_) => panic!("second command must still be running"),
     };
 
@@ -413,7 +458,7 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
         ),
         1
     );
-    registry.abort_before_handoff(&first_session_id).unwrap();
+    first_handoff_guard.abort_before_handoff().unwrap();
     let sessions = registry
         .list(AgentCommandSessionListInput {
             conversation_id: conversation_id.to_string(),
@@ -432,7 +477,7 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
     assert!(first_snapshot.status.is_terminal());
     assert_eq!(second_snapshot.status, AgentCommandSessionStatus::Running);
 
-    registry.abort_before_handoff(&second_session_id).unwrap();
+    second_handoff_guard.abort_before_handoff().unwrap();
 }
 
 #[test]
