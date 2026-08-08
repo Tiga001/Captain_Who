@@ -829,6 +829,8 @@ export const enUSTranslations = {
   'chat.unfavorite': 'Unfavorite',
   'chat.unfavoriteMessage': 'Remove message from favorites',
   'chat.continueInNewTask': 'Continue in new task',
+  'chat.continueInNewTaskActiveCommand':
+    'A command is still running in this conversation. Close it or wait for it to finish before continuing in a new task.',
   'chat.continueInNewTaskFailed': 'Unable to create a new task from this reply.',
   'chat.continuationOrigin': 'Continued from task',
   'chat.continuationOriginArchived': 'The original task is archived.',

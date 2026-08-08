@@ -155,6 +155,126 @@ fn model_poll_is_incremental_and_timeline_reads_are_non_destructive() {
 }
 
 #[test]
+fn terminal_or_deadline_read_aggregates_noisy_output_until_the_deadline() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let id = running_id(start_unchecked(
+        &manager,
+        &workspace,
+        "aggregate-noisy-output",
+        "i=0; while [ \"$i\" -lt 40 ]; do printf 'tick-%02d\\n' \"$i\"; i=$((i + 1)); sleep 0.02; done; sleep 1",
+        Duration::from_millis(10),
+        None,
+    ));
+
+    let wait = Duration::from_millis(220);
+    let started = Instant::now();
+    let poll = manager
+        .read_output_until_terminal_or_deadline(&id, 0, wait)
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(180),
+        "ordinary output must not end the aggregate wait early: {elapsed:?}"
+    );
+    assert_eq!(poll.snapshot.state, CommandSessionState::Running);
+    assert!(poll.output.latest_sequence > 1);
+    assert!(poll
+        .output
+        .chunks
+        .iter()
+        .map(|chunk| chunk.text.as_str())
+        .collect::<String>()
+        .contains("tick-"));
+
+    manager
+        .force_terminate(&id, Duration::from_secs(2))
+        .unwrap();
+}
+
+#[test]
+fn terminal_or_deadline_read_returns_as_soon_as_terminal_is_published() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let id = running_id(start_unchecked(
+        &manager,
+        &workspace,
+        "aggregate-terminal",
+        "sleep 0.1; printf done",
+        Duration::from_millis(10),
+        None,
+    ));
+
+    let started = Instant::now();
+    let poll = manager
+        .read_output_until_terminal_or_deadline(&id, 0, Duration::from_secs(5))
+        .unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "terminal publication must end the aggregate wait"
+    );
+    assert_eq!(
+        poll.snapshot.state,
+        CommandSessionState::Exited { exit_code: Some(0) }
+    );
+    assert_eq!(
+        poll.output
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>(),
+        "done"
+    );
+}
+
+#[test]
+fn terminal_or_deadline_reads_are_bounded_and_page_without_loss() {
+    let workspace = TestWorkspace::new();
+    let mut config = test_config();
+    config.transcript_bytes = 8 * 1024;
+    config.poll_bytes = MIN_COMMAND_POLL_BYTES;
+    let manager = CommandSessionManager::new(config).unwrap();
+    let outcome = start_unchecked(
+        &manager,
+        &workspace,
+        "aggregate-page",
+        "awk 'BEGIN { for (i = 0; i < 3000; i++) printf \"x\" }'",
+        Duration::from_millis(500),
+        None,
+    );
+    let CommandStartOutcome::Exited(terminal) = outcome else {
+        panic!("command should finish inside yield");
+    };
+
+    let mut after = 0;
+    let mut total = 0;
+    loop {
+        let batch = manager
+            .read_output_until_terminal_or_deadline(
+                &terminal.snapshot.session_id,
+                after,
+                Duration::ZERO,
+            )
+            .unwrap()
+            .output;
+        let bytes = batch
+            .chunks
+            .iter()
+            .map(|chunk| chunk.text.len())
+            .sum::<usize>();
+        assert!(bytes <= MIN_COMMAND_POLL_BYTES);
+        total += bytes;
+        let Some(last) = batch.chunks.last() else {
+            break;
+        };
+        after = last.sequence;
+    }
+    assert_eq!(total, 3000);
+}
+
+#[test]
 fn concurrent_model_polls_on_one_session_are_serialized() {
     let workspace = TestWorkspace::new();
     let manager = Arc::new(CommandSessionManager::new(test_config()).unwrap());

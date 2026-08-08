@@ -555,16 +555,19 @@ pub(crate) fn load_fork_copy(
     source_archive_ref: &str,
     target_conversation_id: &str,
     target_assistant_message_id: &str,
-    target_call_id: &str,
 ) -> rusqlite::Result<ConversationHistoryArchiveForkCopy> {
-    find_archive_by_ref(connection, source_conversation_id, source_archive_ref)?
+    let source = find_archive_by_ref(connection, source_conversation_id, source_archive_ref)?
         .ok_or_else(|| invalid_data("fork trace references a missing history archive"))?;
     Ok(ConversationHistoryArchiveForkCopy {
         source_archive_ref: source_archive_ref.to_string(),
         target_archive_ref: format!("{ARCHIVE_REF_PREFIX}{}", Uuid::new_v4()),
         target_conversation_id: target_conversation_id.to_string(),
         target_assistant_message_id: target_assistant_message_id.to_string(),
-        target_call_id: target_call_id.to_string(),
+        // The Archive owns its durable identity. A command Session lifecycle item deliberately
+        // points at the same logical tool call while its exact terminal output uses the distinct
+        // `command-session:<sessionId>` Archive call id. Re-deriving this field from the Trace item
+        // collapses those two archives and violates the per-conversation uniqueness constraint.
+        target_call_id: source.call_id,
     })
 }
 

@@ -224,6 +224,9 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确规定脚本生成二进制或结构化产物时，必须先用文件编辑工具保存可审查脚本，再用 run_command 执行，并按 Skill 契约填写产物观察提示；产物观察只记录结果，不授予任何权限。".to_string());
         rules.push("- run_command.command 必须是单行字符串。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
     }
+    if has_tool(tool_definitions, "command_session") {
+        rules.push("- 对同一个 command Session 的 wait 是原命令阶段内的安静等待，不是新的工作进展。调用 wait 前不要输出“继续等待”类进展文字；返回后若仍为 running，也不要逐次向用户播报。命令的实时输出和状态由 Timeline 展示，只在进入终态、需要用户决策或出现新的可操作事实时再说明。".to_string());
+    }
 
     format!("## 工具路由\n{}", rules.join("\n"))
 }
@@ -504,6 +507,24 @@ mod tests {
         assert!(prompt.contains("Todo 只表示当前 Run 的计划"));
         assert!(prompt.contains("不要依据上一轮 Todo 自动续建"));
         assert!(prompt.contains("仍有未完成 Todo 时"));
+    }
+
+    #[test]
+    fn command_session_wait_is_one_silent_progress_stage() {
+        let prompt = build_system_prompt(
+            None,
+            &[
+                tool_definition("run_command"),
+                tool_definition("command_session"),
+            ],
+        );
+
+        assert!(prompt.contains("command Session 的 wait 是原命令阶段内的安静等待"));
+        assert!(prompt.contains("不要输出“继续等待”类进展文字"));
+        assert!(prompt.contains("实时输出和状态由 Timeline 展示"));
+
+        let without_session = build_system_prompt(None, &[tool_definition("run_command")]);
+        assert!(!without_session.contains("command Session 的 wait"));
     }
 
     #[test]

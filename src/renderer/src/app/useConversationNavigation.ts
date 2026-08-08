@@ -1,4 +1,6 @@
 import { useCallback, type Dispatch, type SetStateAction } from 'react'
+import { HostInvocationError } from '@mycopilot/host-api'
+import { parseStorageForkConversationErrorData } from '@mycopilot/protocol'
 import type {
   ChatComposerDraft,
   ChatConversation,
@@ -15,6 +17,7 @@ import { createComposerDraft, createId } from './chatMessageFactory'
 type MutableRef<T> = { current: T }
 
 interface ConversationNavigationMessages {
+  activeCommandSession: string
   continueInNewTaskFailed: string
   originArchived: string
   originMissing: string
@@ -153,8 +156,13 @@ export function useConversationNavigation({
         setSettingsOpen(false)
       } catch (error) {
         console.error('Failed to continue conversation in a new task', error)
-        const message = error instanceof Error ? error.message.trim() : ''
-        showToast(message || messages.continueInNewTaskFailed)
+        showToast(
+          resolveConversationForkErrorMessage(
+            error,
+            messages.activeCommandSession,
+            messages.continueInNewTaskFailed
+          )
+        )
       }
     },
     [
@@ -162,6 +170,7 @@ export function useConversationNavigation({
       conversationScrollPositionsRef,
       drafts,
       messages.continueInNewTaskFailed,
+      messages.activeCommandSession,
       setActiveConversationId,
       setActiveConversationInitialScrollTop,
       setConversationScrollToBottomSignal,
@@ -253,4 +262,21 @@ export function useConversationNavigation({
     rememberConversationScrollPosition,
     selectConversation
   }
+}
+
+function resolveConversationForkErrorMessage(
+  error: unknown,
+  activeCommandSessionMessage: string,
+  fallbackMessage: string
+): string {
+  if (!(error instanceof HostInvocationError)) return fallbackMessage
+
+  try {
+    const data = parseStorageForkConversationErrorData(error.data)
+    if (data.code === 'active_command_session') return activeCommandSessionMessage
+  } catch {
+    // Unknown or malformed recovery data must never expose the underlying Host/Core message.
+  }
+
+  return fallbackMessage
 }

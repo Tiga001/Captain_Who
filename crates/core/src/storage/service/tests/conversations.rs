@@ -365,6 +365,45 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             },
         )
         .unwrap();
+    let managed_session_id = "cmd_000000000000000000000000000000a1";
+    let managed_running_exact =
+        format!(r#"{{"status":"running","sessionId":"{managed_session_id}"}}"#);
+    let managed_running_archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-archive-source".to_string(),
+                assistant_message_id: "assistant-archive-source".to_string(),
+                sequence: 5,
+                call_id: "call-managed-source".to_string(),
+                tool: "run_command".to_string(),
+                content_type: "application/json".to_string(),
+                content: managed_running_exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: false,
+                archive_projection_truncated: false,
+                created_at: 4,
+            },
+        )
+        .unwrap();
+    let managed_terminal_exact =
+        r#"{"status":"exited","exitCode":0,"stdout":"managed exact output"}"#.to_string();
+    let managed_terminal_archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-archive-source".to_string(),
+                assistant_message_id: "assistant-archive-source".to_string(),
+                sequence: 6,
+                call_id: format!("command-session:{managed_session_id}"),
+                tool: "run_command".to_string(),
+                content_type: "application/json".to_string(),
+                content: managed_terminal_exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 5,
+            },
+        )
+        .unwrap();
     let source_archive_open =
         crate::storage::conversation_history_open::encode_archive_history_open(
             archive.archive_ref.clone(),
@@ -445,6 +484,55 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                 truncated: false,
                 archive: Default::default(),
             },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 4,
+                call_id: "call-managed-source".to_string(),
+                tool: "run_command".to_string(),
+                provenance: None,
+                operation: serde_json::json!({ "command": "python3 app.py" }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 5,
+                call_id: "call-managed-source".to_string(),
+                tool: "run_command".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({
+                    "status": "running",
+                    "sessionId": managed_session_id
+                }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                    archive_ref: Some(managed_running_archive.archive_ref.clone()),
+                    content_hash: Some(managed_running_archive.content_hash.clone()),
+                    archived_bytes: Some(managed_running_archive.total_bytes),
+                    archived_completely: Some(true),
+                    ..Default::default()
+                },
+            },
+            ConversationTurnTraceItem::CommandSessionLifecycle {
+                sequence: 6,
+                phase: crate::ConversationCommandSessionLifecyclePhase::Terminal,
+                session_id: managed_session_id.to_string(),
+                call_id: "call-managed-source".to_string(),
+                status: crate::AgentCommandSessionStatus::Exited,
+                exit_code: Some(0),
+                latest_sequence: 1,
+                output_truncated: false,
+                archive: crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                    archive_ref: Some(managed_terminal_archive.archive_ref.clone()),
+                    content_hash: Some(managed_terminal_archive.content_hash.clone()),
+                    archived_bytes: Some(managed_terminal_archive.total_bytes),
+                    archived_completely: Some(true),
+                    model_projection_truncated: true,
+                    ..Default::default()
+                },
+                created_at: 5,
+            },
         ],
     };
     let exact_model_items = vec![
@@ -496,6 +584,28 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             })
             .to_string(),
             tool_call_id: Some("call-history-source".to_string()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 4,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: "call-managed-source".to_string(),
+                name: "run_command".to_string(),
+                args: serde_json::json!({ "command": "python3 app.py" }),
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 5,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: managed_running_exact.clone(),
+            tool_call_id: Some("call-managed-source".to_string()),
             tool_calls: Vec::new(),
             is_error: false,
         },
@@ -628,6 +738,563 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             archive_ref
         } if Some(archive_ref.as_str()) == forked_archive.archive_ref.as_deref()
     ));
+
+    let ConversationTurnTraceItem::ToolResult {
+        archive: forked_managed_running,
+        ..
+    } = &forked_trace.items[5]
+    else {
+        panic!("forked trace must retain the managed running result");
+    };
+    let ConversationTurnTraceItem::CommandSessionLifecycle {
+        archive: forked_managed_terminal,
+        ..
+    } = &forked_trace.items[6]
+    else {
+        panic!("forked trace must retain the managed terminal lifecycle");
+    };
+    let forked_managed_running_ref = forked_managed_running.archive_ref.as_deref().unwrap();
+    let forked_managed_terminal_ref = forked_managed_terminal.archive_ref.as_deref().unwrap();
+    assert_ne!(forked_managed_running_ref, forked_managed_terminal_ref);
+    assert_eq!(
+        forked_managed_running.content_hash.as_deref(),
+        Some(managed_running_archive.content_hash.as_str())
+    );
+    assert_eq!(
+        forked_managed_terminal.content_hash.as_deref(),
+        Some(managed_terminal_archive.content_hash.as_str())
+    );
+    for (archive_ref, expected_call_id, expected_content) in [
+        (
+            forked_managed_running_ref,
+            "call-managed-source",
+            managed_running_exact.as_str(),
+        ),
+        (
+            forked_managed_terminal_ref,
+            "command-session:cmd_000000000000000000000000000000a1",
+            managed_terminal_exact.as_str(),
+        ),
+    ] {
+        let descriptor = {
+            let connection = service.state.connection().unwrap();
+            crate::storage::conversation_history_archive_repository::find_archive_by_ref(
+                &connection,
+                &forked.id,
+                archive_ref,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(descriptor.call_id, expected_call_id);
+        let page = service
+            .read_conversation_history_archive_page(
+                &forked.id,
+                archive_ref,
+                crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+                0,
+                u64::MAX,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(page.content, expected_content);
+    }
+
+    let recursively_forked = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-archive-recursive-request".to_string(),
+            source_conversation_id: forked.id.clone(),
+            through_assistant_message_id: forked_assistant.id.clone(),
+        })
+        .unwrap();
+    let recursive_assistant = recursively_forked.messages.last().unwrap();
+    let recursive_trace = service
+        .get_conversation_turn_trace(&recursive_assistant.id)
+        .unwrap()
+        .unwrap();
+    let recursive_refs = [&recursive_trace.items[5], &recursive_trace.items[6]]
+        .into_iter()
+        .map(|item| match item {
+            ConversationTurnTraceItem::ToolResult { archive, .. }
+            | ConversationTurnTraceItem::CommandSessionLifecycle { archive, .. } => {
+                archive.archive_ref.as_deref().unwrap()
+            }
+            _ => panic!("recursive managed archive item has the wrong type"),
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(recursive_refs[0], recursive_refs[1]);
+    let connection = service.state.connection().unwrap();
+    let recursive_call_ids = recursive_refs
+        .iter()
+        .map(|archive_ref| {
+            crate::storage::conversation_history_archive_repository::find_archive_by_ref(
+                &connection,
+                &recursively_forked.id,
+                archive_ref,
+            )
+            .unwrap()
+            .unwrap()
+            .call_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        recursive_call_ids,
+        vec![
+            "call-managed-source".to_string(),
+            "command-session:cmd_000000000000000000000000000000a1".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn conversation_fork_blocks_source_wide_active_command_without_mutating_it() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    save_forkable_command_conversation(&service, "conversation-active-fork");
+
+    let active_session_id = "cmd_000000000000000000000000000000b1";
+    create_fork_test_command_session(
+        &service,
+        active_session_id,
+        "conversation-active-fork",
+        "assistant-active-fork-2",
+        10,
+    );
+    let running_session_id = "cmd_000000000000000000000000000000b2";
+    create_fork_test_command_session(
+        &service,
+        running_session_id,
+        "conversation-active-fork",
+        "assistant-active-fork-2",
+        10,
+    );
+    service
+        .mark_agent_command_session_running("conversation-active-fork", running_session_id, 11)
+        .unwrap();
+    let starting_before = service
+        .load_agent_command_session("conversation-active-fork", active_session_id)
+        .unwrap()
+        .unwrap();
+    let running_before = service
+        .load_agent_command_session("conversation-active-fork", running_session_id)
+        .unwrap()
+        .unwrap();
+
+    let error = service
+        .fork_conversation_view(ForkConversationInput {
+            request_id: "fork-active-command-request".to_string(),
+            source_conversation_id: "conversation-active-fork".to_string(),
+            // The active command belongs to a later turn. Fork admission is intentionally scoped
+            // to the complete source conversation, not only the copied prefix.
+            through_assistant_message_id: "assistant-active-fork-1".to_string(),
+        })
+        .unwrap_err();
+    assert_eq!(
+        error,
+        crate::storage::conversation_fork_repository::ConversationForkError::ActiveCommandSession {
+            conversation_id: "conversation-active-fork".to_string(),
+            active_session_count: 2,
+        }
+    );
+    let starting_after = service
+        .load_agent_command_session("conversation-active-fork", active_session_id)
+        .unwrap()
+        .unwrap();
+    let running_after = service
+        .load_agent_command_session("conversation-active-fork", running_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        starting_after.snapshot.status,
+        crate::AgentCommandSessionStatus::Starting
+    );
+    assert_eq!(starting_after.updated_at, starting_before.updated_at);
+    assert_eq!(starting_after.settled_at, starting_before.settled_at);
+    assert_eq!(
+        running_after.snapshot.status,
+        crate::AgentCommandSessionStatus::Running
+    );
+    assert_eq!(running_after.updated_at, running_before.updated_at);
+    assert_eq!(running_after.settled_at, running_before.settled_at);
+
+    settle_fork_test_command_session(
+        &service,
+        active_session_id,
+        "conversation-active-fork",
+        crate::AgentCommandSessionStatus::Exited,
+        12,
+    );
+    settle_fork_test_command_session(
+        &service,
+        running_session_id,
+        "conversation-active-fork",
+        crate::AgentCommandSessionStatus::Interrupted,
+        12,
+    );
+    for (suffix, status) in [
+        ('3', crate::AgentCommandSessionStatus::TimedOut),
+        ('4', crate::AgentCommandSessionStatus::Failed),
+    ] {
+        let session_id = format!("cmd_000000000000000000000000000000b{suffix}");
+        create_fork_test_command_session(
+            &service,
+            &session_id,
+            "conversation-active-fork",
+            "assistant-active-fork-2",
+            20,
+        );
+        settle_fork_test_command_session(
+            &service,
+            &session_id,
+            "conversation-active-fork",
+            status,
+            21,
+        );
+    }
+    let outcome_unknown_session_id = "cmd_000000000000000000000000000000b5";
+    create_fork_test_command_session(
+        &service,
+        outcome_unknown_session_id,
+        "conversation-active-fork",
+        "assistant-active-fork-2",
+        30,
+    );
+    {
+        let connection = service.state.connection().unwrap();
+        connection
+            .execute(
+                "UPDATE agent_command_sessions
+                 SET status = 'outcome_unknown', ended_at = 31,
+                     terminal_reason = 'restart', updated_at = 31, settled_at = 31
+                 WHERE session_id = ?1",
+                [outcome_unknown_session_id],
+            )
+            .unwrap();
+    }
+
+    let forked = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-after-command-settlement".to_string(),
+            source_conversation_id: "conversation-active-fork".to_string(),
+            through_assistant_message_id: "assistant-active-fork-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(forked.messages.len(), 2);
+
+    create_fork_test_command_session(
+        &service,
+        "cmd_000000000000000000000000000000b6",
+        "conversation-active-fork",
+        "assistant-active-fork-2",
+        50,
+    );
+    let idempotent_retry = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-after-command-settlement".to_string(),
+            source_conversation_id: "conversation-active-fork".to_string(),
+            through_assistant_message_id: "assistant-active-fork-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(idempotent_retry.id, forked.id);
+}
+
+#[test]
+fn fork_commit_rechecks_active_commands_before_writing_any_target_state() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    save_forkable_command_conversation(&service, "conversation-fork-race");
+    let archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-fork-race".to_string(),
+                assistant_message_id: "assistant-fork-race-1".to_string(),
+                sequence: 1,
+                call_id: "call-fork-race".to_string(),
+                tool: "read_file".to_string(),
+                content_type: "text/plain".to_string(),
+                content: "fork race exact content".to_string(),
+                truncated_at_source: false,
+                model_projection_truncated: false,
+                archive_projection_truncated: false,
+                created_at: 3,
+            },
+        )
+        .unwrap();
+    service
+        .replace_conversation_turn_trace(
+            &ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: "run-conversation-fork-race-1".to_string(),
+                conversation_id: "conversation-fork-race".to_string(),
+                assistant_message_id: "assistant-fork-race-1".to_string(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+                terminal_error: None,
+                truncated: false,
+                items: vec![
+                    ConversationTurnTraceItem::ToolCall {
+                        sequence: 0,
+                        call_id: "call-fork-race".to_string(),
+                        tool: "read_file".to_string(),
+                        provenance: None,
+                        operation: serde_json::json!({ "path": "large.txt" }),
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolResult {
+                        sequence: 1,
+                        call_id: "call-fork-race".to_string(),
+                        tool: "read_file".to_string(),
+                        status: crate::ConversationTraceToolResultStatus::Succeeded,
+                        success: true,
+                        observation: serde_json::json!({ "content": "bounded" }),
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        error: None,
+                        truncated: true,
+                        archive:
+                            crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                                archive_ref: Some(archive.archive_ref.clone()),
+                                content_hash: Some(archive.content_hash.clone()),
+                                archived_bytes: Some(archive.total_bytes),
+                                archived_completely: Some(true),
+                                history_projection_truncated: true,
+                                ..Default::default()
+                            },
+                    },
+                ],
+            },
+            2,
+            3,
+        )
+        .unwrap();
+
+    let mut connection = service.state.connection().unwrap();
+    let plan = crate::storage::conversation_fork_repository::build_fork_plan(
+        &connection,
+        &ForkConversationInput {
+            request_id: "fork-race-request".to_string(),
+            source_conversation_id: "conversation-fork-race".to_string(),
+            through_assistant_message_id: "assistant-fork-race-1".to_string(),
+        },
+        40,
+    )
+    .unwrap();
+    crate::storage::agent_command_session_repository::create_session(
+        &mut connection,
+        &fork_test_command_session_create(
+            "cmd_000000000000000000000000000000c1",
+            "conversation-fork-race",
+            "assistant-fork-race-2",
+            41,
+        ),
+    )
+    .unwrap();
+    let error =
+        crate::storage::conversation_fork_repository::commit_fork_plan(&mut connection, &plan)
+            .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::storage::conversation_fork_repository::ConversationForkError::ActiveCommandSession {
+            active_session_count: 1,
+            ..
+        }
+    ));
+
+    crate::storage::agent_command_session_repository::commit_terminal(
+        &mut connection,
+        &crate::storage::agent_command_session_repository::AgentCommandSessionTerminalUpdate {
+            conversation_id: "conversation-fork-race",
+            session_id: "cmd_000000000000000000000000000000c1",
+            status: crate::AgentCommandSessionStatus::Failed,
+            ended_at: 42,
+            exit_code: None,
+            latest_sequence: 0,
+            transcript_truncated: false,
+            output_capture_truncated: false,
+            archive_ref: None,
+            terminal_reason: Some("test settlement"),
+            committed_at: 42,
+        },
+    )
+    .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TEMP TRIGGER force_fork_commit_failure
+             BEFORE INSERT ON conversation_forks
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced fork commit failure');
+             END;",
+        )
+        .unwrap();
+    let forced_error =
+        crate::storage::conversation_fork_repository::commit_fork_plan(&mut connection, &plan)
+            .unwrap_err();
+    assert!(matches!(
+        forced_error,
+        crate::storage::conversation_fork_repository::ConversationForkError::Other(_)
+    ));
+
+    for (table, predicate) in [
+        ("conversations", "id = ?1"),
+        ("conversation_history_blobs", "conversation_id = ?1"),
+        ("conversation_history_blob_chunks", "archive_ref IN (SELECT archive_ref FROM conversation_history_blobs WHERE conversation_id = ?1)"),
+        ("conversation_history_fts", "conversation_id = ?1"),
+        ("conversation_forks", "target_conversation_id = ?1"),
+    ] {
+        let count = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {predicate}"),
+                [&plan.target.id],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} retained partial target state");
+    }
+    for table in [
+        "messages",
+        "conversation_turn_traces",
+        "conversation_turn_trace_items",
+        "conversation_model_context_items",
+    ] {
+        let column = if matches!(table, "messages" | "conversation_turn_traces") {
+            "conversation_id"
+        } else {
+            "assistant_message_id"
+        };
+        let value = if column == "assistant_message_id" {
+            plan.target.messages[1].id.as_str()
+        } else {
+            plan.target.id.as_str()
+        };
+        let count = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                [value],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} retained partial target state");
+    }
+}
+
+fn save_forkable_command_conversation(service: &StorageService, conversation_id: &str) {
+    service
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "fork command source".to_string(),
+            messages: vec![
+                ("user", "1", 1),
+                ("assistant", "1", 2),
+                ("user", "2", 3),
+                ("assistant", "2", 4),
+            ]
+            .into_iter()
+            .map(|(role, suffix, created_at)| ChatMessageRecord {
+                id: format!(
+                    "{role}-{conversation_id_suffix}-{suffix}",
+                    conversation_id_suffix = conversation_id.trim_start_matches("conversation-")
+                ),
+                role: role.to_string(),
+                content: format!("{role} {suffix}"),
+                created_at,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: (role == "assistant").then(|| {
+                    serde_json::json!({
+                        "runId": format!("run-{conversation_id}-{suffix}"),
+                        "status": "completed"
+                    })
+                    .to_string()
+                }),
+                ui_state_json: None,
+            })
+            .collect(),
+            created_at: 1,
+            updated_at: 4,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+}
+
+fn fork_test_command_session_create(
+    session_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    started_at: u64,
+) -> crate::storage::agent_command_session_repository::AgentCommandSessionCreate {
+    crate::storage::agent_command_session_repository::AgentCommandSessionCreate {
+        snapshot: crate::AgentCommandSessionSnapshot {
+            schema_version: crate::storage::agent_command_session_repository::AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+            session_id: session_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            origin_run_id: format!("run-{session_id}"),
+            call_id: format!("call-{session_id}"),
+            project_id: None,
+            command: "python3 app.py".to_string(),
+            cwd: "/tmp".to_string(),
+            command_digest:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_string(),
+            status: crate::AgentCommandSessionStatus::Starting,
+            started_at,
+            ended_at: None,
+            exit_code: None,
+            latest_sequence: 0,
+            output_truncated: false,
+            archive_ref: None,
+        },
+        authorization_source: crate::command::CommandAuthorizationSource::ExplicitUser,
+        approval_provenance: serde_json::json!({ "decision": "approved" }),
+        permission_provenance: serde_json::json!({ "mode": "default" }),
+        created_at: i64::try_from(started_at).unwrap(),
+    }
+}
+
+fn create_fork_test_command_session(
+    service: &StorageService,
+    session_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    started_at: u64,
+) {
+    service
+        .create_agent_command_session(&fork_test_command_session_create(
+            session_id,
+            conversation_id,
+            assistant_message_id,
+            started_at,
+        ))
+        .unwrap();
+}
+
+fn settle_fork_test_command_session(
+    service: &StorageService,
+    session_id: &str,
+    conversation_id: &str,
+    status: crate::AgentCommandSessionStatus,
+    timestamp: u64,
+) {
+    service
+        .settle_agent_command_session(
+            &crate::storage::agent_command_session_repository::AgentCommandSessionTerminalUpdate {
+                conversation_id,
+                session_id,
+                status,
+                ended_at: timestamp,
+                exit_code: (status == crate::AgentCommandSessionStatus::Exited).then_some(0),
+                latest_sequence: 0,
+                transcript_truncated: false,
+                output_capture_truncated: false,
+                archive_ref: None,
+                terminal_reason: None,
+                committed_at: i64::try_from(timestamp).unwrap(),
+            },
+        )
+        .unwrap();
 }
 
 #[test]

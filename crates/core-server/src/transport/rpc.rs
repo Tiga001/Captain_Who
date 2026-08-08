@@ -46,6 +46,39 @@ where
     }
 }
 
+pub(crate) fn conversation_fork_response<T>(
+    id: JsonRpcId,
+    result: Result<T, mycopilot_core::storage::conversation_fork_repository::ConversationForkError>,
+) -> Value
+where
+    T: Serialize,
+{
+    use mycopilot_core::storage::conversation_fork_repository::{
+        ConversationForkError, CONVERSATION_FORK_ACTIVE_COMMAND_ERROR_CODE,
+        CONVERSATION_FORK_ACTIVE_COMMAND_MESSAGE, CONVERSATION_FORK_ERROR_TYPE,
+    };
+
+    match result {
+        Ok(value) => response_success(id, value),
+        Err(ConversationForkError::ActiveCommandSession {
+            conversation_id,
+            active_session_count,
+        }) => serde_json::to_value(error_with_data(
+            Some(id),
+            -32000,
+            CONVERSATION_FORK_ACTIVE_COMMAND_MESSAGE,
+            json!({
+                "type": CONVERSATION_FORK_ERROR_TYPE,
+                "code": CONVERSATION_FORK_ACTIVE_COMMAND_ERROR_CODE,
+                "conversationId": conversation_id,
+                "activeSessionCount": active_session_count,
+            }),
+        ))
+        .expect("conversation fork JSON-RPC error response must serialize"),
+        Err(error) => response_error(Some(id), -32000, error.message()),
+    }
+}
+
 pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

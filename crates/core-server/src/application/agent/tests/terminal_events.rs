@@ -250,7 +250,7 @@ fn automatic_running_command_is_aborted_when_handoff_audit_is_definitely_uncommi
 }
 
 #[test]
-fn automatic_running_command_reconciles_post_commit_audit_and_outlives_run_cancel() {
+fn explicit_run_cancel_interrupts_handed_off_command_after_active_control_is_retired() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let conversation_id = "conversation-running-post-commit";
@@ -312,8 +312,6 @@ fn automatic_running_command_reconciles_post_commit_audit_and_outlives_run_cance
 
     assert!(result.ok);
     assert_eq!(result.result.as_ref().unwrap()["status"], "running");
-    assert!(service.cancel_run(run_id));
-    assert!(cancellation.is_cancelled());
     let sessions = service
         .command_sessions
         .list(AgentCommandSessionListInput {
@@ -321,16 +319,20 @@ fn automatic_running_command_reconciles_post_commit_audit_and_outlives_run_cance
         })
         .unwrap();
     assert_eq!(sessions.sessions.len(), 1);
+    let session_id = sessions.sessions[0].session_id.clone();
     assert_eq!(
         sessions.sessions[0].status,
-        AgentCommandSessionStatus::Running,
-        "run cancellation after the durable handoff must not terminate the process Session"
+        AgentCommandSessionStatus::Running
     );
-    let session_id = sessions.sessions[0].session_id.clone();
+    assert!(service
+        .active_runs
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(run_id)
+        .is_none());
 
-    service
-        .command_sessions
-        .terminate_conversation(conversation_id);
+    assert!(service.cancel_run(run_id));
+    assert!(cancellation.is_cancelled());
     let deadline = Instant::now() + Duration::from_secs(5);
     let terminal = loop {
         let sessions = service
@@ -348,14 +350,14 @@ fn automatic_running_command_reconciles_post_commit_audit_and_outlives_run_cance
         }
         assert!(
             Instant::now() < deadline,
-            "conversation termination did not settle the adopted Session"
+            "explicit Run cancellation did not settle the adopted Session"
         );
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(
         terminal.status,
         AgentCommandSessionStatus::Interrupted,
-        "conversation deletion is a process-lifecycle boundary even after durable handoff"
+        "input-composer stop is a process-lifecycle boundary even after durable handoff"
     );
     service.unregister_cancellation_if_current(run_id, &cancellation);
 }

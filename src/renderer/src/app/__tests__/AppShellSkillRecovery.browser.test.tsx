@@ -1542,6 +1542,77 @@ describe('edited turn Skill recovery', () => {
 })
 
 describe('authoritative run cancellation and conversation forking', () => {
+  it('keeps a stopped run command event routed to its original Timeline item', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    const turnInput = testState.startConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnInput
+    const assistantMessageId = turnInput.assistantMessageId!
+    const sessionId = 'cmd_1234567890abcdef1234567890abcdef'
+
+    emitAgentEvent({
+      type: 'tool_call',
+      runId: 'run-1',
+      call: {
+        id: 'command-call',
+        tool: 'run_command',
+        args: { command: 'python3 snake_game/main.py' },
+        approvalStatus: 'approved'
+      }
+    })
+    emitAgentEvent({
+      type: 'command_started',
+      runId: 'run-1',
+      conversationId: 'conversation-a',
+      assistantMessageId,
+      projectId: 'project-a',
+      callId: 'command-call',
+      sessionId,
+      startedAt: 10
+    })
+    emitAgentEvent({
+      type: 'tool_result',
+      runId: 'run-1',
+      result: {
+        callId: 'command-call',
+        tool: 'run_command',
+        ok: true,
+        result: { status: 'running', sessionId, output: '', startedAt: 10 }
+      }
+    })
+    await expect.element(screen.getByTestId('command-sessions')).toHaveTextContent('"running"')
+
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    expect(testState.cancelAgentRun).toHaveBeenCalledWith('run-1')
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: false,
+      status: 'cancelled',
+      content: ''
+    })
+    emitAgentEvent({
+      type: 'command_interrupted',
+      runId: 'run-1',
+      conversationId: 'conversation-a',
+      assistantMessageId,
+      projectId: 'project-a',
+      callId: 'command-call',
+      sessionId,
+      endedAt: 20,
+      latestSequence: 0,
+      outputTruncated: false
+    })
+
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('cancelled')
+    await expect.element(screen.getByTestId('command-sessions')).toHaveTextContent('"interrupted"')
+  })
+
   it('keeps a stopped run pending until the backend terminal event is received', async () => {
     mockSuccessfulTurnStarts()
     const cancellation = deferred<boolean>()
@@ -1759,15 +1830,38 @@ describe('authoritative run cancellation and conversation forking', () => {
     expect(testState.showToast).toHaveBeenCalledWith('chat.continuationOriginMissing')
   })
 
-  it('shows the backend fork rejection instead of replacing it with a generic toast', async () => {
+  it('shows the localized active-command explanation for a typed fork rejection', async () => {
     testState.forkConversation.mockRejectedValueOnce(
-      new Error('这条回复仍在生成，结束后才能在新任务中继续。')
+      new HostInvocationError({
+        message: 'Conversation fork was rejected.',
+        code: -32000,
+        data: {
+          type: 'conversation_fork',
+          code: 'active_command_session',
+          conversationId: 'conversation-a',
+          activeSessionCount: 1
+        }
+      })
     )
     const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
 
     await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
-    expect(testState.showToast).toHaveBeenCalledWith('这条回复仍在生成，结束后才能在新任务中继续。')
+    expect(testState.showToast).toHaveBeenCalledWith('chat.continueInNewTaskActiveCommand')
+  })
+
+  it('does not expose an unknown Core, IPC, or database failure in the fork toast', async () => {
+    testState.forkConversation.mockRejectedValueOnce(
+      new Error(
+        "Error invoking remote method 'host:storage.forkConversation': CoreJsonRpcError: UNIQUE constraint failed"
+      )
+    )
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
+
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
+    expect(testState.showToast).toHaveBeenCalledWith('chat.continueInNewTaskFailed')
   })
 })

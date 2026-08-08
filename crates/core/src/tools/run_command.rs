@@ -46,7 +46,7 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. A long-lived command returns status=running with a sessionId: GUI apps and servers usually need no further wait, while builds and tests should be polled with command_session until terminal; background exit never wakes the model. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
+            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. A command that outlives the Host's short initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2184,5 +2184,23 @@ mod tests {
         assert_eq!(result["latestSequence"], 3);
         assert_eq!(result["outputTruncated"], false);
         assert!(result.get("hostPrivateField").is_none());
+    }
+
+    #[test]
+    fn model_contract_routes_long_lived_commands_without_polling_loops() {
+        let definition = RunCommandTool.definition();
+
+        assert!(definition
+            .description
+            .contains("running is not final success"));
+        assert!(definition
+            .description
+            .contains("GUI app or long-lived server"));
+        assert!(definition
+            .description
+            .contains("command_session once with action=wait"));
+        assert!(definition
+            .description
+            .contains("do not repeatedly poll or narrate waiting"));
     }
 }

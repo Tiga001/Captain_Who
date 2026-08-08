@@ -582,6 +582,29 @@ impl ManagedCommandSession {
         }
     }
 
+    /// Returns the transcript accumulated through either terminal publication or
+    /// the caller's deadline. Unlike [`Self::read_output`], newly committed output
+    /// does not satisfy this wait: output notifications only cause the condition
+    /// to be rechecked. This lets a model-facing caller aggregate a bounded wait
+    /// without changing the immediate, sequence-driven semantics used by live
+    /// timeline readers.
+    pub(crate) fn read_output_until_terminal_or_deadline(
+        &self,
+        after: u64,
+        wait: Duration,
+        max_bytes: usize,
+    ) -> CommandSessionPoll {
+        let observed = lock(&self.observed);
+        let (observed, _) = self
+            .changed
+            .wait_timeout_while(observed, wait, |state| !state.terminal_lifecycle_delivered)
+            .unwrap_or_else(|error| error.into_inner());
+        CommandSessionPoll {
+            snapshot: self.snapshot_from(&observed),
+            output: observed.transcript.read_after(after, max_bytes),
+        }
+    }
+
     pub(crate) fn control(
         &self,
         control: ProcessControl,

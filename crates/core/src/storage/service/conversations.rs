@@ -119,6 +119,14 @@ impl StorageService {
         &self,
         input: ForkConversationInput,
     ) -> Result<ChatConversationRecord, String> {
+        self.fork_conversation_with_domain_error(input)
+            .map_err(|error| error.to_string())
+    }
+
+    fn fork_conversation_with_domain_error(
+        &self,
+        input: ForkConversationInput,
+    ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
         let mut connection = self.state.connection()?;
         if let Some(existing) =
             conversation_fork_repository::find_existing_fork(&connection, input.request_id.trim())
@@ -127,7 +135,9 @@ impl StorageService {
             if existing.source_conversation_id != input.source_conversation_id
                 || existing.source_message_id != input.through_assistant_message_id
             {
-                return Err("同一个分叉请求 ID 不能用于不同的历史快照。".to_string());
+                return Err("同一个分叉请求 ID 不能用于不同的历史快照。"
+                    .to_string()
+                    .into());
             }
             let mut conversation =
                 chat_repository::get_conversation(&connection, &existing.target_conversation_id)
@@ -193,7 +203,7 @@ impl StorageService {
         })();
         if let Err(error) = prepare_files {
             cleanup_fork_files(&staged_files, &committed_files);
-            return Err(error);
+            return Err(error.into());
         }
 
         if let Err(error) = conversation_fork_repository::commit_fork_plan(&mut connection, &plan) {
@@ -211,8 +221,9 @@ impl StorageService {
     pub fn fork_conversation_view(
         &self,
         input: ForkConversationInput,
-    ) -> Result<ChatConversationViewRecord, String> {
-        let conversation = self.fork_conversation(input)?;
+    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
+    {
+        let conversation = self.fork_conversation_with_domain_error(input)?;
         let connection = self.state.connection()?;
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)

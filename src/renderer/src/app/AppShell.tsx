@@ -1026,6 +1026,7 @@ export function AppShell() {
     drafts,
     hydrateConversation,
     messages: {
+      activeCommandSession: t('chat.continueInNewTaskActiveCommand'),
       continueInNewTaskFailed: t('chat.continueInNewTaskFailed'),
       originArchived: t('chat.continuationOriginArchived'),
       originMissing: t('chat.continuationOriginMissing'),

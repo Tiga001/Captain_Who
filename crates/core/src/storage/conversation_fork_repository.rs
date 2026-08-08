@@ -15,10 +15,47 @@ use crate::storage::{
 use crate::{
     AgentGuidanceStatus, ConversationModelContextItem, ConversationTurnTrace, WorldStateRecord,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+pub const CONVERSATION_FORK_ERROR_TYPE: &str = "conversation_fork";
+pub const CONVERSATION_FORK_ACTIVE_COMMAND_ERROR_CODE: &str = "active_command_session";
+pub const CONVERSATION_FORK_ACTIVE_COMMAND_MESSAGE: &str =
+    "当前任务仍有命令正在运行，请先关闭程序或等待命令结束后再继续新任务。";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationForkError {
+    ActiveCommandSession {
+        conversation_id: String,
+        active_session_count: u64,
+    },
+    Other(String),
+}
+
+impl ConversationForkError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::ActiveCommandSession { .. } => CONVERSATION_FORK_ACTIVE_COMMAND_MESSAGE,
+            Self::Other(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for ConversationForkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for ConversationForkError {}
+
+impl From<String> for ConversationForkError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ForkAttachmentCopy {
@@ -113,8 +150,9 @@ pub(crate) fn build_fork_plan(
     connection: &Connection,
     input: &ForkConversationInput,
     created_at: i64,
-) -> Result<ConversationForkPlan, String> {
+) -> Result<ConversationForkPlan, ConversationForkError> {
     validate_input(input)?;
+    ensure_no_active_command_sessions(connection, &input.source_conversation_id)?;
     let source = chat_repository::get_conversation(connection, &input.source_conversation_id)
         .map_err(database_error)?
         .ok_or_else(|| "原任务不存在。".to_string())?;
@@ -125,7 +163,7 @@ pub(crate) fn build_fork_plan(
         .ok_or_else(|| "所选回复不属于原任务。".to_string())?;
     let cutoff_message = &source.messages[cutoff];
     if cutoff_message.role != "assistant" {
-        return Err("只能从 assistant 回复继续新任务。".to_string());
+        return Err("只能从 assistant 回复继续新任务。".to_string().into());
     }
     let source_positions = source
         .messages
@@ -166,7 +204,9 @@ pub(crate) fn build_fork_plan(
                 .as_deref()
                 .is_some_and(|run_id| run_id != trace.run_id)
             {
-                return Err("历史回复的运行标识与后端工具轨迹不一致。".to_string());
+                return Err("历史回复的运行标识与后端工具轨迹不一致。"
+                    .to_string()
+                    .into());
             }
             let new_run_id = new_id("run");
             run_id_map.insert(trace.run_id.clone(), new_run_id.clone());
@@ -207,7 +247,9 @@ pub(crate) fn build_fork_plan(
         if turn_diff.record.identity.conversation_id != source.id
             || source.project_id.as_deref() != Some(turn_diff.record.identity.project_id.as_str())
         {
-            return Err("历史文件变更证据的任务或项目归属不一致。".to_string());
+            return Err("历史文件变更证据的任务或项目归属不一致。"
+                .to_string()
+                .into());
         }
         turn_diff.record.identity.conversation_id = target_conversation_id.clone();
         turn_diff.record.identity.assistant_message_id = mapped_id(
@@ -229,7 +271,7 @@ pub(crate) fn build_fork_plan(
             .map_err(database_error)?
         {
             if source_draft.conversation_id != source.id {
-                return Err("文件草稿的任务归属与历史回复不一致。".to_string());
+                return Err("文件草稿的任务归属与历史回复不一致。".to_string().into());
             }
             let target_draft_id = new_id("file-draft");
             draft_id_map.insert(source_draft.id.clone(), target_draft_id.clone());
@@ -310,15 +352,11 @@ pub(crate) fn build_fork_plan(
     let mut archives = Vec::new();
     for trace in &traces {
         for item in &trace.trace.items {
-            let (call_id, archive) = match item {
-                crate::ConversationTurnTraceItem::ToolResult {
-                    call_id, archive, ..
+            let archive = match item {
+                crate::ConversationTurnTraceItem::ToolResult { archive, .. }
+                | crate::ConversationTurnTraceItem::CommandSessionLifecycle { archive, .. } => {
+                    archive
                 }
-                | crate::ConversationTurnTraceItem::CommandSessionLifecycle {
-                    call_id,
-                    archive,
-                    ..
-                } => (call_id, archive),
                 _ => continue,
             };
             let Some(source_archive_ref) = archive.archive_ref.as_deref() else {
@@ -333,7 +371,6 @@ pub(crate) fn build_fork_plan(
                 source_archive_ref,
                 &target_conversation_id,
                 &trace.trace.assistant_message_id,
-                call_id,
             )
             .map_err(database_error)?;
             archive_id_map.insert(
@@ -433,13 +470,16 @@ pub(crate) fn build_fork_plan(
 pub(crate) fn commit_fork_plan(
     connection: &mut Connection,
     plan: &ConversationForkPlan,
-) -> Result<(), String> {
+) -> Result<(), ConversationForkError> {
     let target_message_id = mapped_id(
         &plan.message_id_map,
         &plan.source_message_id,
         "新任务接续边界消息",
     )?;
-    let transaction = connection.transaction().map_err(database_error)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(database_error)?;
+    ensure_no_active_command_sessions(&transaction, &plan.source_conversation_id)?;
     insert_conversation(&transaction, &plan.target)?;
     for archive in &plan.archives {
         conversation_history_archive_repository::clone_archive_in_connection(&transaction, archive)
@@ -479,7 +519,7 @@ pub(crate) fn commit_fork_plan(
         {
             guidance_repository::AgentRunGuidanceStoreOutcome::Inserted => {}
             outcome => {
-                return Err(format!("克隆用户引导 journal 时发生意外冲突：{outcome:?}"));
+                return Err(format!("克隆用户引导 journal 时发生意外冲突：{outcome:?}").into());
             }
         }
         match guidance_repository::mark_guidance_applied(
@@ -492,9 +532,7 @@ pub(crate) fn commit_fork_plan(
         {
             guidance_repository::AgentRunGuidanceTransitionOutcome::Updated => {}
             outcome => {
-                return Err(format!(
-                    "克隆用户引导 trace 状态时发生意外冲突：{outcome:?}"
-                ));
+                return Err(format!("克隆用户引导 trace 状态时发生意外冲突：{outcome:?}").into());
             }
         }
     }
@@ -514,7 +552,33 @@ pub(crate) fn commit_fork_plan(
             ],
         )
         .map_err(database_error)?;
-    transaction.commit().map_err(database_error)
+    transaction
+        .commit()
+        .map_err(database_error)
+        .map_err(Into::into)
+}
+
+fn ensure_no_active_command_sessions(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<(), ConversationForkError> {
+    let active_session_count = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM agent_command_sessions
+             WHERE conversation_id = ?1
+               AND status IN ('starting', 'running')",
+            [conversation_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(database_error)?;
+    if active_session_count == 0 {
+        return Ok(());
+    }
+    Err(ConversationForkError::ActiveCommandSession {
+        conversation_id: conversation_id.to_string(),
+        active_session_count,
+    })
 }
 
 fn validate_input(input: &ForkConversationInput) -> Result<(), String> {

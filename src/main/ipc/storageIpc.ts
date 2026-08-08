@@ -1,6 +1,14 @@
 import type { IpcMainInvokeEvent } from 'electron'
-import { HOST_CHANNELS } from '@mycopilot/host-api'
-import type { StorageImageFileRecord, StorageProjectRecord } from '@mycopilot/protocol'
+import {
+  captureHostInvocation,
+  HOST_CHANNELS,
+  type HostInvocationResult
+} from '@mycopilot/host-api'
+import {
+  parseStorageForkConversationErrorData,
+  type StorageImageFileRecord,
+  type StorageProjectRecord
+} from '@mycopilot/protocol'
 import type { CoreServer } from '../core/coreServer'
 import type { TrustedIpcMain } from './trustedIpc'
 
@@ -57,7 +65,7 @@ export function registerStorageIpc(
     coreServer.loadConversation(conversationId)
   )
   ipcMain.handle(HOST_CHANNELS.storage.forkConversation, (_event, input) =>
-    coreServer.forkConversation(input)
+    captureConversationForkInvocation(() => coreServer.forkConversation(input))
   )
   ipcMain.handle(HOST_CHANNELS.storage.saveConversationMeta, (_event, conversation) =>
     coreServer.saveConversationMeta(conversation)
@@ -97,4 +105,32 @@ export function registerStorageIpc(
   ipcMain.handle(HOST_CHANNELS.storage.loadImageFile, (_event, input) =>
     actions.loadImageFile(coreServer, input)
   )
+}
+
+/**
+ * Keeps Core diagnostics out of Electron's renderer-facing error surface while preserving the
+ * narrow recovery contract that the UI understands.
+ */
+async function captureConversationForkInvocation<T>(
+  operation: () => Promise<T>
+): Promise<HostInvocationResult<T>> {
+  const result = await captureHostInvocation(operation)
+  if (result.ok) return result
+
+  try {
+    const data = parseStorageForkConversationErrorData(result.error.data)
+    return {
+      ok: false,
+      error: {
+        message: 'Conversation fork was rejected.',
+        ...(result.error.code === undefined ? {} : { code: result.error.code }),
+        data
+      }
+    }
+  } catch {
+    return {
+      ok: false,
+      error: { message: 'Conversation fork failed.' }
+    }
+  }
 }

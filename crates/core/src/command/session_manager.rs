@@ -617,6 +617,25 @@ impl CommandSessionManager {
             .read_output(after_sequence, wait, self.inner.config.poll_bytes))
     }
 
+    /// Reads output accumulated until the session publishes a terminal state or
+    /// `wait` elapses. Ordinary output remains observable during the wait but does
+    /// not make this operation return early. Use [`Self::read_output`] for the
+    /// immediate, sequence-driven view used by live consumers.
+    pub fn read_output_until_terminal_or_deadline(
+        &self,
+        session_id: &CommandSessionId,
+        after_sequence: u64,
+        wait: Duration,
+    ) -> Result<CommandSessionPoll, CommandSessionError> {
+        Ok(self
+            .lookup(session_id)?
+            .read_output_until_terminal_or_deadline(
+                after_sequence,
+                wait,
+                self.inner.config.poll_bytes,
+            ))
+    }
+
     pub fn snapshot(
         &self,
         session_id: &CommandSessionId,

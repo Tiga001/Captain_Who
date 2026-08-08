@@ -791,6 +791,8 @@ export const zhCNTranslations = {
   'chat.unfavorite': '取消收藏',
   'chat.unfavoriteMessage': '取消收藏消息',
   'chat.continueInNewTask': '在新任务中继续',
+  'chat.continueInNewTaskActiveCommand':
+    '当前对话仍有命令正在运行，请先关闭程序或等待命令结束后再继续新任务。',
   'chat.continueInNewTaskFailed': '无法从这条回复创建新任务。',
   'chat.continuationOrigin': '接续自任务',
   'chat.continuationOriginArchived': '原任务已归档',

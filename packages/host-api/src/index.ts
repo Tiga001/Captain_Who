@@ -139,7 +139,9 @@ export interface StorageHostApi {
   loadConversationMetas(): Promise<StorageChatConversationMetaRecord[]>
   loadConversation(conversationId: string): Promise<StorageChatConversationRecord | null>
   loadConversations(): Promise<StorageChatConversationRecord[]>
-  forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord>
+  forkConversation(
+    input: StorageForkConversationRequest
+  ): Promise<HostInvocationResult<StorageChatConversationRecord>>
   saveConversationMeta(
     conversation: StorageChatConversationMetaRecord
   ): Promise<StorageChatConversationMetaRecord>

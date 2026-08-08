@@ -1,17 +1,24 @@
-use super::{AgentTool, ToolExecutionContext};
+use super::{
+    AgentTool, AgentToolCancellationSettlement, AsyncAgentTool, BoxAgentToolFuture,
+    ToolExecutionContext,
+};
 use crate::command::CommandSessionId;
 use crate::protocol::{
     AgentCommandSessionStatus, AgentError, AgentResult, AgentToolApprovalMode, AgentToolDefinition,
     AgentToolResult, AgentToolSafety,
 };
 use crate::runtime::{
-    AgentCommandSessionAction, AgentCommandSessionExecutionOutput,
-    AgentCommandSessionExecutionRequest, AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
+    AgentCommandSessionAction, AgentCommandSessionExecutionControl,
+    AgentCommandSessionExecutionOutput, AgentCommandSessionExecutionRequest,
+    AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS, AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
     AGENT_COMMAND_SESSION_MAX_WAIT_MS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+
+const LEGACY_COMMAND_SESSION_MIN_WAIT_MS: u64 = 30_000;
 
 pub(super) struct CommandSessionTool;
 
@@ -27,7 +34,7 @@ impl AgentTool for CommandSessionTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "command_session".to_string(),
-            description: "Poll or interrupt a managed command returned by run_command with status=running. Poll returns only output added since the model's previous poll. For a GUI app or long-lived server, normally continue without waiting for natural exit; for a build or test, poll until a terminal status and exitCode are observed. Background output or exit never wakes the model automatically. Arbitrary stdin is not supported.".to_string(),
+            description: "Wait for or interrupt a managed command returned by run_command with status=running. action defaults to wait. wait lets the Host quietly collect incremental output until the command reaches a terminal state or the Host's bounded deadline; ordinary output does not require repeated calls. For a GUI app or long-lived server, normally continue without waiting for natural exit. For a build or test whose result is required, call wait and do not emit repeated waiting narration. A running status is not final success, and background exit never starts a new model turn. Arbitrary stdin is not supported.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -38,14 +45,8 @@ impl AgentTool for CommandSessionTool {
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["poll", "interrupt"],
-                        "description": "Defaults to poll. interrupt sends a controlled interrupt to this Session."
-                    },
-                    "waitMs": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": AGENT_COMMAND_SESSION_MAX_WAIT_MS,
-                        "description": "Optional bounded wait for new output or interrupt settlement."
+                        "enum": ["wait", "interrupt"],
+                        "description": "Defaults to wait. wait observes terminal state through a Host-bounded quiet wait; interrupt sends a controlled interrupt to this Session."
                     }
                 },
                 "required": ["sessionId"],
@@ -61,39 +62,19 @@ impl AgentTool for CommandSessionTool {
     }
 
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
-        let input: CommandSessionInput = serde_json::from_value(args)
-            .map_err(|error| AgentError::new(format!("command_session 参数无效：{error}")))?;
-        context.check_cancelled()?;
-
-        let session_id = CommandSessionId::parse(&input.session_id)
-            .map_err(|_| AgentError::new("command_session.sessionId 格式无效。"))?;
-        let wait_ms = input
-            .wait_ms
-            .unwrap_or(AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS);
-        if wait_ms > AGENT_COMMAND_SESSION_MAX_WAIT_MS {
-            return Err(AgentError::new(format!(
-                "command_session.waitMs 不能超过 {AGENT_COMMAND_SESSION_MAX_WAIT_MS}。"
-            )));
-        }
-
-        let action = match input.action.unwrap_or_default() {
-            CommandSessionInputAction::Poll => AgentCommandSessionAction::Poll,
-            CommandSessionInputAction::Interrupt => AgentCommandSessionAction::Interrupt,
-        };
-        let request = AgentCommandSessionExecutionRequest {
-            conversation_id: context.conversation_id()?.to_string(),
-            run_id: context.run_id()?.to_string(),
-            call_id: context.tool_call_id()?.to_string(),
-            session_id: session_id.as_str().to_string(),
-            action,
-            wait_ms,
-            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-        };
+        let (session_id, request, control) = prepare_execution(context, args)?;
         let output = context
             .command_session_executor()?
-            .execute_command_session(request)?;
-        validate_host_output(session_id.as_str(), &output)?;
+            .execute_command_session(request, control)?;
+        validate_host_output(&session_id, &output)?;
         Ok(model_result(output))
+    }
+
+    fn cancellation_settlement(&self) -> AgentToolCancellationSettlement {
+        // The Host observes cancellation itself and returns without signaling the handed-off
+        // process or committing a model-read receipt. Await that bounded authoritative outcome
+        // instead of detaching a blocking worker which could consume the cursor after Run stop.
+        AgentToolCancellationSettlement::Authoritative
     }
 
     fn archives_result(&self) -> bool {
@@ -111,6 +92,87 @@ impl AgentTool for CommandSessionTool {
     }
 }
 
+impl AsyncAgentTool for CommandSessionTool {
+    fn execute_async<'a>(
+        &'a self,
+        context: &'a ToolExecutionContext,
+        args: Value,
+    ) -> BoxAgentToolFuture<'a> {
+        Box::pin(async move {
+            let (session_id, request, control) = prepare_execution(context, args)?;
+            let executor = Arc::clone(context.command_session_executor()?);
+            let output = tokio::task::spawn_blocking(move || {
+                executor.execute_command_session(request, control)
+            })
+            .await
+            .map_err(|error| {
+                AgentError::structured(
+                    "agent.command_session_join_failed",
+                    format!("命令 Session 观察线程失败：{error}"),
+                    json!({
+                        "type": "command_session",
+                        "code": "commandSessionJoinFailed"
+                    }),
+                )
+            })??;
+            validate_host_output(&session_id, &output)?;
+            Ok(model_result(output))
+        })
+    }
+}
+
+fn prepare_execution(
+    context: &ToolExecutionContext,
+    args: Value,
+) -> AgentResult<(
+    String,
+    AgentCommandSessionExecutionRequest,
+    AgentCommandSessionExecutionControl,
+)> {
+    let input: CommandSessionInput = serde_json::from_value(args)
+        .map_err(|error| AgentError::new(format!("command_session 参数无效：{error}")))?;
+    context.check_cancelled()?;
+
+    let session_id = CommandSessionId::parse(&input.session_id)
+        .map_err(|_| AgentError::new("command_session.sessionId 格式无效。"))?;
+    let action = match input.action.unwrap_or_default() {
+        CommandSessionInputAction::Wait => AgentCommandSessionAction::Poll,
+        CommandSessionInputAction::Interrupt => AgentCommandSessionAction::Interrupt,
+    };
+    // `waitMs` was exposed by the v1 model contract. Keep accepting it so a durable
+    // checkpoint or an older provider response can resume safely, but make timing a Host
+    // policy for new calls and clamp the legacy hint instead of spending another model turn on
+    // a harmless range error.
+    let wait_ms = normalize_legacy_wait_ms(input.wait_ms, action);
+    let request = AgentCommandSessionExecutionRequest {
+        conversation_id: context.conversation_id()?.to_string(),
+        run_id: context.run_id()?.to_string(),
+        call_id: context.tool_call_id()?.to_string(),
+        session_id: session_id.as_str().to_string(),
+        action,
+        wait_ms,
+        max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    };
+    let control = AgentCommandSessionExecutionControl::new(
+        context.cancellation_token(),
+        context.steer_input(),
+    );
+    Ok((session_id.as_str().to_string(), request, control))
+}
+
+fn normalize_legacy_wait_ms(wait_ms: Option<u64>, action: AgentCommandSessionAction) -> u64 {
+    match wait_ms {
+        None | Some(0) => match action {
+            AgentCommandSessionAction::Poll => AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
+            AgentCommandSessionAction::Interrupt => AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
+        },
+        Some(wait_ms) => wait_ms.clamp(
+            LEGACY_COMMAND_SESSION_MIN_WAIT_MS.min(AGENT_COMMAND_SESSION_MAX_WAIT_MS),
+            AGENT_COMMAND_SESSION_MAX_WAIT_MS,
+        ),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommandSessionInput {
@@ -125,7 +187,8 @@ struct CommandSessionInput {
 #[serde(rename_all = "snake_case")]
 enum CommandSessionInputAction {
     #[default]
-    Poll,
+    #[serde(alias = "poll")]
+    Wait,
     Interrupt,
 }
 
@@ -239,6 +302,7 @@ mod tests {
         fn execute_command_session(
             &self,
             request: AgentCommandSessionExecutionRequest,
+            _control: AgentCommandSessionExecutionControl,
         ) -> AgentResult<AgentCommandSessionExecutionOutput> {
             self.requests
                 .lock()
@@ -297,12 +361,41 @@ mod tests {
     }
 
     #[test]
-    fn schema_is_narrow_and_defaults_to_bounded_poll() {
+    fn default_registry_keeps_command_session_authoritative_and_async() {
+        let registry = super::super::ToolRegistry::defaults_with_search(None);
+        assert_eq!(
+            registry.cancellation_settlement("command_session"),
+            AgentToolCancellationSettlement::Authoritative
+        );
+        assert!(registry
+            .tools
+            .get("command_session")
+            .and_then(super::super::AgentToolHandler::async_tool)
+            .is_some());
+    }
+
+    #[test]
+    fn schema_is_narrow_and_defaults_to_host_bounded_wait() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let context = context(Arc::new(RecordingExecutor {
             requests: Arc::clone(&requests),
             output: output(AgentCommandSessionStatus::Running, "next output"),
         }));
+
+        let definition = CommandSessionTool.definition();
+        let properties = definition.input_schema["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), 2);
+        assert!(properties.contains_key("sessionId"));
+        assert!(properties.contains_key("action"));
+        assert!(!properties.contains_key("waitMs"));
+        assert_eq!(
+            definition.input_schema["properties"]["action"]["enum"],
+            json!(["wait", "interrupt"])
+        );
+        assert!(definition.description.contains("action defaults to wait"));
+        assert!(definition
+            .description
+            .contains("ordinary output does not require repeated calls"));
 
         let result = execute(&context, json!({ "sessionId": session_id() }));
 
@@ -322,6 +415,28 @@ mod tests {
         assert_eq!(value["output"], "next output");
         assert_eq!(value["read"]["requestedAfterSequence"], 4);
         assert_eq!(value["read"]["throughSequence"], 6);
+    }
+
+    #[test]
+    fn forwards_explicit_wait_without_model_owned_identity() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let context = context(Arc::new(RecordingExecutor {
+            requests: Arc::clone(&requests),
+            output: output(AgentCommandSessionStatus::Running, "next output"),
+        }));
+
+        let result = execute(
+            &context,
+            json!({
+                "sessionId": session_id(),
+                "action": "wait"
+            }),
+        );
+
+        assert!(result.ok, "{result:?}");
+        let request = requests.lock().unwrap().first().unwrap().clone();
+        assert_eq!(request.action, AgentCommandSessionAction::Poll);
+        assert_eq!(request.wait_ms, AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS);
     }
 
     #[test]
@@ -346,11 +461,56 @@ mod tests {
         assert!(result.ok, "{result:?}");
         let request = requests.lock().unwrap().first().unwrap().clone();
         assert_eq!(request.action, AgentCommandSessionAction::Interrupt);
-        assert_eq!(request.wait_ms, 2_500);
+        assert_eq!(
+            request.wait_ms,
+            LEGACY_COMMAND_SESSION_MIN_WAIT_MS.min(AGENT_COMMAND_SESSION_MAX_WAIT_MS)
+        );
     }
 
     #[test]
-    fn rejects_invalid_id_unknown_fields_and_excessive_wait() {
+    fn accepts_legacy_poll_and_clamps_legacy_wait_hint() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let legacy_context = context(Arc::new(RecordingExecutor {
+            requests: Arc::clone(&requests),
+            output: output(AgentCommandSessionStatus::Running, ""),
+        }));
+
+        let result = execute(
+            &legacy_context,
+            json!({
+                "sessionId": session_id(),
+                "action": "poll",
+                "waitMs": AGENT_COMMAND_SESSION_MAX_WAIT_MS + 1
+            }),
+        );
+
+        assert!(result.ok, "{result:?}");
+        let request = requests.lock().unwrap().first().unwrap().clone();
+        assert_eq!(request.action, AgentCommandSessionAction::Poll);
+        assert_eq!(request.wait_ms, AGENT_COMMAND_SESSION_MAX_WAIT_MS);
+
+        let zero_wait_requests = Arc::new(Mutex::new(Vec::new()));
+        let zero_wait_context = context(Arc::new(RecordingExecutor {
+            requests: Arc::clone(&zero_wait_requests),
+            output: output(AgentCommandSessionStatus::Running, ""),
+        }));
+        let zero_wait_result = execute(
+            &zero_wait_context,
+            json!({
+                "sessionId": session_id(),
+                "action": "poll",
+                "waitMs": 0
+            }),
+        );
+        assert!(zero_wait_result.ok, "{zero_wait_result:?}");
+        assert_eq!(
+            zero_wait_requests.lock().unwrap()[0].wait_ms,
+            AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_id_and_unknown_fields() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let context = context(Arc::new(RecordingExecutor {
             requests: Arc::clone(&requests),
@@ -359,10 +519,6 @@ mod tests {
 
         for args in [
             json!({ "sessionId": "predictable" }),
-            json!({
-                "sessionId": session_id(),
-                "waitMs": AGENT_COMMAND_SESSION_MAX_WAIT_MS + 1
-            }),
             json!({ "sessionId": session_id(), "conversationId": "forged" }),
         ] {
             let result = execute(&context, args);

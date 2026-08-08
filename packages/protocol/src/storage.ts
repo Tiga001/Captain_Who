@@ -110,6 +110,14 @@ export interface StorageForkConversationRequest {
   throughAssistantMessageId: string
 }
 
+/** Stable recovery metadata returned when Core rejects a conversation fork. */
+export interface StorageForkConversationErrorData {
+  type: 'conversation_fork'
+  code: 'active_command_session'
+  conversationId: string
+  activeSessionCount: number
+}
+
 export interface StorageComposerDraftRecord {
   scopeId: string
   message: string

@@ -4,6 +4,7 @@ import type {
   AgentPermissions,
   AgentPromptPreferences
 } from '@mycopilot/protocol'
+import { unwrapHostInvocation } from '@mycopilot/host-api'
 import { parseAgentMcpProposedAction, parseAgentMcpToolInvocationEvent } from '@mycopilot/protocol'
 import type {
   StorageAttachmentImageRecord,
@@ -150,11 +151,13 @@ export async function forkConversation(
   requestId: string
 ): Promise<ChatConversation> {
   return mapConversationFromStorage(
-    await hostClient.storage.forkConversation({
-      requestId,
-      sourceConversationId,
-      throughAssistantMessageId
-    })
+    unwrapHostInvocation(
+      await hostClient.storage.forkConversation({
+        requestId,
+        sourceConversationId,
+        throughAssistantMessageId
+      })
+    )
   )
 }
 

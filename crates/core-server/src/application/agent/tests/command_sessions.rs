@@ -7,10 +7,10 @@ use mycopilot_core::storage::agent_command_session_repository::{
 use mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit;
 use mycopilot_core::{
     AgentCommandPermission, AgentCommandSafetyPolicy, AgentCommandSessionAction,
-    AgentCommandSessionExecutionOutput, AgentCommandSessionExecutionRequest,
-    AgentCommandSessionExecutor, AgentCommandSessionGetInput, AgentCommandSessionSnapshot,
-    ConversationCommandSessionLifecyclePhase, ConversationHistoryArchiveTraceMetadata,
-    AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    AgentCommandSessionExecutionControl, AgentCommandSessionExecutionOutput,
+    AgentCommandSessionExecutionRequest, AgentCommandSessionExecutor, AgentCommandSessionGetInput,
+    AgentCommandSessionSnapshot, ConversationCommandSessionLifecyclePhase,
+    ConversationHistoryArchiveTraceMetadata, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 const INITIAL_YIELD: Duration = Duration::from_millis(10);
 const TEST_WAIT: Duration = Duration::from_secs(5);
 const ZERO_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+fn observation_control() -> AgentCommandSessionExecutionControl {
+    AgentCommandSessionExecutionControl::new(mycopilot_core::AgentCancellationToken::new(), None)
+}
 
 struct RunningFixture {
     registry: AgentCommandSessionRegistry,
@@ -198,15 +202,18 @@ impl RunningFixture {
     fn poll(&self, session_id: &str, wait: Duration) -> AgentCommandSessionExecutionOutput {
         let poll_index = self.poll_index.fetch_add(1, Ordering::Relaxed);
         self.registry
-            .execute_command_session(AgentCommandSessionExecutionRequest {
-                conversation_id: self.conversation_id.clone(),
-                run_id: format!("{}-poll", self.run_id),
-                call_id: format!("{}-poll-{poll_index}", self.call_id),
-                session_id: session_id.to_string(),
-                action: AgentCommandSessionAction::Poll,
-                wait_ms: u64::try_from(wait.as_millis()).unwrap(),
-                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-            })
+            .execute_command_session(
+                AgentCommandSessionExecutionRequest {
+                    conversation_id: self.conversation_id.clone(),
+                    run_id: format!("{}-poll", self.run_id),
+                    call_id: format!("{}-poll-{poll_index}", self.call_id),
+                    session_id: session_id.to_string(),
+                    action: AgentCommandSessionAction::Poll,
+                    wait_ms: u64::try_from(wait.as_millis()).unwrap(),
+                    max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+                },
+                observation_control(),
+            )
             .unwrap()
     }
 }
@@ -1107,15 +1114,18 @@ fn running_transition_failure_has_one_failed_terminal_across_host_and_storage() 
     assert!(host.transcript.chunks.is_empty());
     let model = fixture
         .registry
-        .execute_command_session(AgentCommandSessionExecutionRequest {
-            conversation_id: fixture.conversation_id.clone(),
-            run_id: format!("{}-failure-poll", fixture.run_id),
-            call_id: format!("{}-failure-poll", fixture.call_id),
-            session_id: terminal.snapshot.session_id.to_string(),
-            action: AgentCommandSessionAction::Poll,
-            wait_ms: 0,
-            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-        })
+        .execute_command_session(
+            AgentCommandSessionExecutionRequest {
+                conversation_id: fixture.conversation_id.clone(),
+                run_id: format!("{}-failure-poll", fixture.run_id),
+                call_id: format!("{}-failure-poll", fixture.call_id),
+                session_id: terminal.snapshot.session_id.to_string(),
+                action: AgentCommandSessionAction::Poll,
+                wait_ms: 0,
+                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            },
+            observation_control(),
+        )
         .unwrap();
     assert_eq!(model.status, AgentCommandSessionStatus::Failed);
     assert!(model.output_truncated);
@@ -1749,6 +1759,294 @@ fn model_poll_is_incremental_until_terminal() {
 }
 
 #[test]
+fn model_wait_ignores_noisy_output_until_its_deadline() {
+    let fixture = RunningFixture::new("quiet-noisy-wait");
+    let command = "printf 'tick-0\\n'; sleep 0.08; printf 'tick-1\\n'; sleep 0.08; \
+                   printf 'tick-2\\n'; sleep 0.08; printf 'tick-3\\n'; sleep 0.08; \
+                   printf 'tick-4\\n'; sleep 0.40";
+    let (snapshot, _) = fixture.start(command, None);
+    fixture.adopt(&snapshot, command);
+
+    let started = Instant::now();
+    let output = fixture.poll(&snapshot.session_id, Duration::from_millis(300));
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed >= Duration::from_millis(220),
+        "ordinary output returned the model wait early after {elapsed:?}"
+    );
+    assert_eq!(output.status, AgentCommandSessionStatus::Running);
+    assert!(output.output.contains("tick-"));
+    wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+}
+
+#[test]
+fn cancelling_model_observation_does_not_terminate_handed_off_process() {
+    let fixture = RunningFixture::new("cancel-observation-keeps-process");
+    let command = "sleep 0.05; printf before; sleep 0.80; printf after";
+    let (snapshot, _) = fixture.start(command, None);
+    fixture.adopt(&snapshot, command);
+    let cursor_before = fixture
+        .storage
+        .load_agent_command_session(&fixture.conversation_id, &snapshot.session_id)
+        .unwrap()
+        .unwrap()
+        .model_read_sequence;
+
+    let cancellation = mycopilot_core::AgentCancellationToken::new();
+    let worker_cancellation = cancellation.clone();
+    let registry = fixture.registry.clone();
+    let conversation_id = fixture.conversation_id.clone();
+    let session_id = snapshot.session_id.clone();
+    let worker = thread::spawn(move || {
+        registry.execute_command_session(
+            AgentCommandSessionExecutionRequest {
+                conversation_id,
+                run_id: "run-cancel-observation".to_string(),
+                call_id: "call-cancel-observation".to_string(),
+                session_id,
+                action: AgentCommandSessionAction::Poll,
+                wait_ms: 300_000,
+                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            },
+            AgentCommandSessionExecutionControl::new(worker_cancellation, None),
+        )
+    });
+    thread::sleep(Duration::from_millis(100));
+    let cancelled_at = Instant::now();
+    cancellation.cancel();
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(error.is_cancelled());
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "cancelling a model observation must release it promptly"
+    );
+
+    let live = fixture
+        .registry
+        .get(AgentCommandSessionGetInput {
+            conversation_id: fixture.conversation_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            after_sequence: None,
+            max_bytes: None,
+        })
+        .unwrap();
+    assert_eq!(live.session.status, AgentCommandSessionStatus::Running);
+    let durable_after_cancel = fixture
+        .storage
+        .load_agent_command_session(&fixture.conversation_id, &snapshot.session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable_after_cancel.model_read_sequence, cursor_before);
+    assert!(fixture
+        .storage
+        .load_agent_command_session_model_read(&AgentCommandSessionModelReadRequest {
+            conversation_id: &fixture.conversation_id,
+            session_id: &snapshot.session_id,
+            run_id: "run-cancel-observation",
+            call_id: "call-cancel-observation",
+            action: AgentCommandSessionAction::Poll,
+            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            host_output_truncated: false,
+            created_at: 0,
+        })
+        .unwrap()
+        .is_none());
+
+    let terminal = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(terminal.snapshot.status, AgentCommandSessionStatus::Exited);
+    let final_read = fixture.poll(&snapshot.session_id, Duration::ZERO);
+    assert!(final_read.output.contains("before"));
+    assert!(final_read.output.contains("after"));
+}
+
+#[test]
+fn explicit_run_cancel_releases_model_wait_and_interrupts_its_handed_off_process() {
+    let fixture = RunningFixture::new("explicit-cancel-during-model-wait");
+    let mut service = AgentService::new(Arc::clone(&fixture.storage));
+    service.command_sessions = fixture.registry.clone();
+    let command = "sleep 5";
+    let tracker = Arc::new(FileEffectTracker::default());
+    let launch = start_owned_session_with_tracker(
+        &fixture.registry,
+        fixture.workspace.path(),
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        command,
+        None,
+        &tracker,
+    )
+    .unwrap();
+    let (snapshot, mut handoff_guard) = match launch {
+        AgentCommandSessionLaunch::Running {
+            snapshot,
+            handoff_guard,
+            ..
+        } => (*snapshot, handoff_guard),
+        AgentCommandSessionLaunch::Exited(terminal) => panic!(
+            "command must still be running, got {:?}",
+            terminal.snapshot.state
+        ),
+    };
+    adopt_owned_session(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        &snapshot,
+        command,
+        &mut handoff_guard,
+    );
+    let cursor_before = fixture
+        .storage
+        .load_agent_command_session(&fixture.conversation_id, &snapshot.session_id)
+        .unwrap()
+        .unwrap()
+        .model_read_sequence;
+
+    let cancellation = mycopilot_core::AgentCancellationToken::new();
+    service.register_cancellation(&fixture.run_id, cancellation.clone());
+    let request = AgentCommandSessionExecutionRequest {
+        conversation_id: fixture.conversation_id.clone(),
+        run_id: fixture.run_id.clone(),
+        call_id: "call-explicit-cancel-wait".to_string(),
+        session_id: snapshot.session_id.clone(),
+        action: AgentCommandSessionAction::Poll,
+        wait_ms: 300_000,
+        max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    };
+    let worker_request = request.clone();
+    let worker_registry = fixture.registry.clone();
+    let worker_cancellation = cancellation.clone();
+    let worker = thread::spawn(move || {
+        worker_registry.execute_command_session(
+            worker_request,
+            AgentCommandSessionExecutionControl::new(worker_cancellation, None),
+        )
+    });
+    thread::sleep(Duration::from_millis(100));
+
+    let cancelled_at = Instant::now();
+    assert!(service.cancel_run(&fixture.run_id));
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(error.is_cancelled());
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "input-composer stop must release a quiet model wait promptly"
+    );
+
+    let terminal = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(
+        terminal.snapshot.status,
+        AgentCommandSessionStatus::Interrupted
+    );
+    assert_eq!(terminal.model_read_sequence, cursor_before);
+    assert!(fixture
+        .storage
+        .load_agent_command_session_model_read(&AgentCommandSessionModelReadRequest {
+            conversation_id: &request.conversation_id,
+            session_id: &request.session_id,
+            run_id: &request.run_id,
+            call_id: &request.call_id,
+            action: request.action,
+            max_output_bytes: request.max_output_bytes,
+            host_output_truncated: false,
+            created_at: 0,
+        })
+        .unwrap()
+        .is_none());
+    assert!(tracker
+        .active_run_ids_for_conversation(&fixture.conversation_id)
+        .is_empty());
+    assert_eq!(fixture.registry.retained_admission_count(), 0);
+    assert_eq!(fixture.registry.retained_live_session_count(), 0);
+    service.unregister_cancellation_if_current(&fixture.run_id, &cancellation);
+}
+
+#[test]
+fn queued_guidance_releases_a_noisy_running_wait_without_stopping_process() {
+    let fixture = RunningFixture::new("guidance-releases-wait");
+    let command = "printf 'noise-0\\n'; sleep 0.10; printf 'noise-1\\n'; sleep 0.10; \
+                   printf 'noise-2\\n'; sleep 0.10; printf 'noise-3\\n'; sleep 0.10; \
+                   printf 'noise-4\\n'; sleep 0.10; printf 'noise-5\\n'; sleep 0.40";
+    let (snapshot, _) = fixture.start(command, None);
+    fixture.adopt(&snapshot, command);
+
+    let guidance = mycopilot_core::AgentSteerInputQueue::new();
+    let registry = fixture.registry.clone();
+    let conversation_id = fixture.conversation_id.clone();
+    let session_id = snapshot.session_id.clone();
+    let worker_guidance = guidance.clone();
+    let worker = thread::spawn(move || {
+        registry.execute_command_session(
+            AgentCommandSessionExecutionRequest {
+                conversation_id,
+                run_id: "run-guidance-observation".to_string(),
+                call_id: "call-guidance-observation".to_string(),
+                session_id,
+                action: AgentCommandSessionAction::Poll,
+                wait_ms: 300_000,
+                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            },
+            AgentCommandSessionExecutionControl::new(
+                mycopilot_core::AgentCancellationToken::new(),
+                Some(worker_guidance),
+            ),
+        )
+    });
+    thread::sleep(Duration::from_millis(120));
+    let queued_at = Instant::now();
+    guidance
+        .enqueue(mycopilot_core::AgentSteerInput {
+            guidance_id: "guidance-command-wait".to_string(),
+            client_message_id: "client-command-wait".to_string(),
+            content: "Apply this updated constraint.".to_string(),
+            attachments: Vec::new(),
+            attachment_library: None,
+            created_at: 10,
+        })
+        .unwrap();
+    let output = worker.join().unwrap().unwrap();
+
+    assert!(
+        queued_at.elapsed() < Duration::from_millis(500),
+        "queued guidance must release the current model wait promptly"
+    );
+    assert_eq!(output.status, AgentCommandSessionStatus::Running);
+    assert!(guidance.pending_len() > 0);
+    let live = fixture
+        .registry
+        .get(AgentCommandSessionGetInput {
+            conversation_id: fixture.conversation_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            after_sequence: None,
+            max_bytes: None,
+        })
+        .unwrap();
+    assert_eq!(live.session.status, AgentCommandSessionStatus::Running);
+    wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+}
+
+#[test]
 fn concurrent_model_polls_share_one_serialized_durable_cursor() {
     let fixture = RunningFixture::new("concurrent-model-poll");
     let command = "sleep 0.08; printf serialized-marker; sleep 0.40";
@@ -1791,15 +2089,18 @@ fn concurrent_model_polls_share_one_serialized_durable_cursor() {
             thread::spawn(move || {
                 barrier.wait();
                 registry
-                    .execute_command_session(AgentCommandSessionExecutionRequest {
-                        conversation_id,
-                        run_id: format!("run-concurrent-poll-{index}"),
-                        call_id: format!("call-concurrent-poll-{index}"),
-                        session_id,
-                        action: AgentCommandSessionAction::Poll,
-                        wait_ms: 0,
-                        max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-                    })
+                    .execute_command_session(
+                        AgentCommandSessionExecutionRequest {
+                            conversation_id,
+                            run_id: format!("run-concurrent-poll-{index}"),
+                            call_id: format!("call-concurrent-poll-{index}"),
+                            session_id,
+                            action: AgentCommandSessionAction::Poll,
+                            wait_ms: 0,
+                            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+                        },
+                        observation_control(),
+                    )
                     .unwrap()
             })
         })
@@ -1857,15 +2158,18 @@ fn concurrent_terminal_polls_share_one_serialized_durable_cursor() {
             thread::spawn(move || {
                 barrier.wait();
                 registry
-                    .execute_command_session(AgentCommandSessionExecutionRequest {
-                        conversation_id,
-                        run_id: format!("run-concurrent-terminal-poll-{index}"),
-                        call_id: format!("call-concurrent-terminal-poll-{index}"),
-                        session_id,
-                        action: AgentCommandSessionAction::Poll,
-                        wait_ms: 0,
-                        max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-                    })
+                    .execute_command_session(
+                        AgentCommandSessionExecutionRequest {
+                            conversation_id,
+                            run_id: format!("run-concurrent-terminal-poll-{index}"),
+                            call_id: format!("call-concurrent-terminal-poll-{index}"),
+                            session_id,
+                            action: AgentCommandSessionAction::Poll,
+                            wait_ms: 0,
+                            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+                        },
+                        observation_control(),
+                    )
                     .expect("concurrent terminal poll must not expose a cursor CAS conflict")
             })
         })
@@ -1911,7 +2215,7 @@ fn retried_tool_call_replays_its_committed_cut_after_registry_restart() {
     };
     let before_restart = fixture
         .registry
-        .execute_command_session(request.clone())
+        .execute_command_session(request.clone(), observation_control())
         .unwrap();
     assert_eq!(before_restart.output, "crash-safe-marker");
 
@@ -1920,19 +2224,24 @@ fn retried_tool_call_replays_its_committed_cut_after_registry_restart() {
         CommandSessionManager::new(test_manager_config()).unwrap(),
         INITIAL_YIELD,
     );
-    let after_restart = restarted_registry.execute_command_session(request).unwrap();
+    let after_restart = restarted_registry
+        .execute_command_session(request, observation_control())
+        .unwrap();
     assert_eq!(after_restart, before_restart);
 
     let next_call = restarted_registry
-        .execute_command_session(AgentCommandSessionExecutionRequest {
-            conversation_id: fixture.conversation_id.clone(),
-            run_id: "run-crash-retry".to_string(),
-            call_id: "call-after-crash-retry".to_string(),
-            session_id: snapshot.session_id,
-            action: AgentCommandSessionAction::Poll,
-            wait_ms: 0,
-            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-        })
+        .execute_command_session(
+            AgentCommandSessionExecutionRequest {
+                conversation_id: fixture.conversation_id.clone(),
+                run_id: "run-crash-retry".to_string(),
+                call_id: "call-after-crash-retry".to_string(),
+                session_id: snapshot.session_id,
+                action: AgentCommandSessionAction::Poll,
+                wait_ms: 0,
+                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            },
+            observation_control(),
+        )
         .unwrap();
     assert!(next_call.output.is_empty());
 }
@@ -1956,18 +2265,18 @@ fn cross_conversation_session_access_is_rejected() {
     });
     assert!(get.is_err());
 
-    let model_access =
-        fixture
-            .registry
-            .execute_command_session(AgentCommandSessionExecutionRequest {
-                conversation_id: other_conversation.to_string(),
-                run_id: "run-other".to_string(),
-                call_id: "call-other".to_string(),
-                session_id: snapshot.session_id.clone(),
-                action: AgentCommandSessionAction::Poll,
-                wait_ms: 0,
-                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
-            });
+    let model_access = fixture.registry.execute_command_session(
+        AgentCommandSessionExecutionRequest {
+            conversation_id: other_conversation.to_string(),
+            run_id: "run-other".to_string(),
+            call_id: "call-other".to_string(),
+            session_id: snapshot.session_id.clone(),
+            action: AgentCommandSessionAction::Poll,
+            wait_ms: 0,
+            max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+        },
+        observation_control(),
+    );
     assert_eq!(
         model_access.unwrap_err().code(),
         Some("agent.command_session_not_found")
@@ -2005,6 +2314,162 @@ fn adopted_session_ignores_origin_run_pre_handoff_cancellation() {
     );
     assert_eq!(terminal.snapshot.status, AgentCommandSessionStatus::Exited);
     assert_eq!(terminal.snapshot.exit_code, Some(0));
+}
+
+#[test]
+fn explicit_run_interrupt_is_scoped_by_conversation_and_origin_run() {
+    let fixture = RunningFixture::new("explicit-run-interrupt-scope");
+    let command = "sleep 5";
+    let (snapshot, _) = fixture.start(command, None);
+    fixture.adopt(&snapshot, command);
+
+    assert_eq!(
+        fixture
+            .registry
+            .interrupt_origin_run("conversation-other", &fixture.run_id),
+        0
+    );
+    assert_eq!(
+        fixture
+            .registry
+            .interrupt_origin_run(&fixture.conversation_id, "run-other"),
+        0
+    );
+    let current = fixture
+        .registry
+        .get(AgentCommandSessionGetInput {
+            conversation_id: fixture.conversation_id.clone(),
+            session_id: snapshot.session_id.clone(),
+            after_sequence: None,
+            max_bytes: None,
+        })
+        .unwrap();
+    assert_eq!(current.session.status, AgentCommandSessionStatus::Running);
+
+    assert_eq!(
+        fixture
+            .registry
+            .interrupt_origin_run(&fixture.conversation_id, &fixture.run_id),
+        1
+    );
+    let terminal = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(
+        terminal.snapshot.status,
+        AgentCommandSessionStatus::Interrupted
+    );
+}
+
+#[test]
+fn explicit_run_interrupt_closes_pending_handoff_before_receipt_commit() {
+    let fixture = RunningFixture::new("explicit-stop-before-handoff");
+    let (snapshot, _) = fixture.start("sleep 5", None);
+
+    assert_eq!(
+        fixture
+            .registry
+            .interrupt_origin_run(&fixture.conversation_id, &fixture.run_id),
+        1
+    );
+    let mut handoff_guard = fixture
+        .handoff_guards
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&snapshot.session_id)
+        .expect("running fixture retains the handoff ownership token");
+    let outcome = handoff_guard
+        .commit(
+            || false,
+            || panic!("an explicit stop which wins the fence must forbid receipt persistence"),
+        )
+        .unwrap();
+    assert_eq!(outcome, AgentCommandHandoffOutcome::CancelledBeforeCommit);
+    let terminal = handoff_guard.abort_before_handoff().unwrap();
+    assert_eq!(
+        terminal.snapshot.state,
+        mycopilot_core::command::CommandSessionState::Interrupted
+    );
+    let record = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(
+        record.snapshot.status,
+        AgentCommandSessionStatus::Interrupted
+    );
+}
+
+#[test]
+fn explicit_run_interrupt_stops_every_session_owned_by_the_turn() {
+    let fixture = RunningFixture::new("explicit-stop-multiple");
+    let command = "sleep 5";
+    let (first, _) = fixture.start(command, None);
+    fixture.adopt(&first, command);
+
+    let second_assistant_message_id = format!("{}-second", fixture.assistant_message_id);
+    let second_call_id = format!("{}-second", fixture.call_id);
+    fixture
+        .storage
+        .upsert_chat_messages(
+            &fixture.conversation_id,
+            vec![ChatMessageRecord {
+                id: second_assistant_message_id.clone(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 2,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            1,
+        )
+        .unwrap();
+    let second_launch = start_owned_session(
+        &fixture.registry,
+        fixture.workspace.path(),
+        &fixture.conversation_id,
+        &second_assistant_message_id,
+        &fixture.run_id,
+        &second_call_id,
+        command,
+        None,
+    )
+    .unwrap();
+    let (second, mut second_handoff_guard) = match second_launch {
+        AgentCommandSessionLaunch::Running {
+            snapshot,
+            handoff_guard,
+            ..
+        } => (*snapshot, handoff_guard),
+        AgentCommandSessionLaunch::Exited(terminal) => panic!(
+            "second command must still be running, got {:?}",
+            terminal.snapshot.state
+        ),
+    };
+    assert_eq!(
+        second_handoff_guard.commit(|| false, || Ok(())).unwrap(),
+        AgentCommandHandoffOutcome::Adopted
+    );
+
+    assert_eq!(
+        fixture
+            .registry
+            .interrupt_origin_run(&fixture.conversation_id, &fixture.run_id),
+        2
+    );
+    for session_id in [&first.session_id, &second.session_id] {
+        let terminal =
+            wait_for_terminal_record(&fixture.storage, &fixture.conversation_id, session_id);
+        assert_eq!(
+            terminal.snapshot.status,
+            AgentCommandSessionStatus::Interrupted
+        );
+    }
 }
 
 #[test]
@@ -2051,7 +2516,7 @@ fn model_interrupt_terminates_an_adopted_session_and_publishes_one_terminal_even
     };
     let output = fixture
         .registry
-        .execute_command_session(request.clone())
+        .execute_command_session(request.clone(), observation_control())
         .unwrap();
     assert_eq!(output.status, AgentCommandSessionStatus::Interrupted);
     assert_eq!(output.exit_code, None);
@@ -2065,7 +2530,7 @@ fn model_interrupt_terminates_an_adopted_session_and_publishes_one_terminal_even
     assert_eq!(
         fixture
             .registry
-            .execute_command_session(request)
+            .execute_command_session(request, observation_control())
             .expect("an interrupt ToolCall retry replays its receipt without signaling twice"),
         output
     );
@@ -2163,7 +2628,7 @@ fn interrupt_is_sticky_when_the_first_receipt_write_fails() {
     };
     assert!(fixture
         .registry
-        .execute_command_session(request.clone())
+        .execute_command_session(request.clone(), observation_control())
         .is_err());
     failure_connection
         .execute_batch("DROP TRIGGER fail_test_command_session_receipt_insert;")
@@ -2171,12 +2636,12 @@ fn interrupt_is_sticky_when_the_first_receipt_write_fails() {
 
     let retry = fixture
         .registry
-        .execute_command_session(request.clone())
+        .execute_command_session(request.clone(), observation_control())
         .expect("retry should observe the sticky interrupt and persist its receipt");
     assert_eq!(
         fixture
             .registry
-            .execute_command_session(request)
+            .execute_command_session(request, observation_control())
             .expect("the committed interrupt receipt must replay exactly"),
         retry
     );

@@ -119,7 +119,7 @@ async fn write_text_stream(stream: &mut TcpStream, content: &str) {
 }
 
 #[tokio::test]
-async fn running_command_handoff_continues_loop_consumes_guidance_and_never_auto_wakes_model() {
+async fn guidance_releases_a_running_command_wait_and_background_exit_never_wakes_model() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -130,14 +130,40 @@ async fn running_command_handoff_continues_loop_consumes_guidance_and_never_auto
 
         let (mut second, _) = listener.accept().await.unwrap();
         let second_request = read_json_request(&mut second).await;
-        write_text_stream(&mut second, "The command is running; I can continue.").await;
+        let running_receipt = second_request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .and_then(|message| message["content"].as_str())
+            .and_then(|content| serde_json::from_str::<Value>(content).ok())
+            .expect("the second request contains the run_command handoff receipt");
+        assert_eq!(running_receipt["status"], "running");
+        let session_id = running_receipt["sessionId"].as_str().unwrap().to_string();
+        write_tool_call_stream(
+            &mut second,
+            "provider-managed-command-wait",
+            "command_session",
+            json!({ "sessionId": session_id }),
+            "Waiting quietly for the command while remaining responsive to guidance.",
+        )
+        .await;
         drop(second);
 
-        let third_request_seen =
+        let (mut third, _) = listener.accept().await.unwrap();
+        let third_request = read_json_request(&mut third).await;
+        write_text_stream(
+            &mut third,
+            "I applied the newer constraint while the command continued.",
+        )
+        .await;
+        drop(third);
+
+        let fourth_request_seen =
             tokio::time::timeout(Duration::from_millis(1_200), listener.accept())
                 .await
                 .is_ok();
-        (second_request, third_request_seen)
+        (session_id, third_request, fourth_request_seen)
     });
 
     let fixture = tempdir().unwrap();
@@ -204,6 +230,22 @@ async fn running_command_handoff_continues_loop_consumes_guidance_and_never_auto
     .await
     .unwrap();
 
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = receiver.recv().await.unwrap();
+            if notification["params"]["type"] == "tool_call"
+                && notification["params"]["call"]["tool"] == "command_session"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // The ToolCall event is emitted immediately before execution. This delay makes the guidance
+    // arrive while the Host is inside its quiet wait, rather than at the preceding model boundary.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let guidance = service
         .steer_run(
             AgentSteerRunInput {
@@ -240,16 +282,18 @@ async fn running_command_handoff_continues_loop_consumes_guidance_and_never_auto
     .await
     .unwrap();
 
-    let (second_request, third_request_seen) = server.await.unwrap();
+    let (server_session_id, third_request, fourth_request_seen) = server.await.unwrap();
+    assert_eq!(server_session_id, session_id);
     assert!(
-        !third_request_seen,
+        !fourth_request_seen,
         "background command exit must not create an automatic model request"
     );
-    let messages = second_request["messages"].as_array().unwrap();
+    let messages = third_request["messages"].as_array().unwrap();
     let tool_message = messages
         .iter()
+        .rev()
         .find(|message| message["role"] == "tool")
-        .expect("running receipt must be sent back through the ordinary Agent loop");
+        .expect("guidance must release command_session back through the ordinary Agent loop");
     let receipt: Value = serde_json::from_str(tool_message["content"].as_str().unwrap()).unwrap();
     assert_eq!(receipt["status"], "running");
     assert_eq!(receipt["sessionId"], session_id);
@@ -307,8 +351,7 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
             "provider-command-poll",
             "command_session",
             json!({
-                "sessionId": session_id,
-                "waitMs": 2_000
+                "sessionId": session_id
             }),
             "Waiting for the build's terminal result.",
         )
@@ -317,7 +360,7 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
 
         let (mut third, _) = listener.accept().await.unwrap();
         let third_request = read_json_request(&mut third).await;
-        let first_poll_result = third_request["messages"]
+        let poll_result = third_request["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -325,37 +368,18 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
             .find(|message| message["role"] == "tool")
             .and_then(|message| message["content"].as_str())
             .and_then(|content| serde_json::from_str::<Value>(content).ok())
-            .expect("the third model request must contain the first command_session result");
-        assert_eq!(first_poll_result["status"], "running");
-        assert!(first_poll_result["output"]
-            .as_str()
-            .unwrap()
-            .contains("progress"));
-        // Model turns are intentionally the only continuation source. A second explicit poll
-        // waits for terminal state; the background exit itself must not create this request.
-        write_tool_call_stream(
-            &mut third,
-            "provider-command-poll-terminal",
-            "command_session",
-            json!({
-                "sessionId": session_id,
-                "waitMs": 2_000
-            }),
-            "The build is still running; waiting for its terminal result.",
-        )
-        .await;
+            .expect("the third model request must contain the terminal command_session result");
+        assert_eq!(poll_result["status"], "exited");
+        assert_eq!(poll_result["exitCode"], 7);
+        assert!(poll_result["output"].as_str().unwrap().contains("progress"));
+        write_text_stream(&mut third, "The build exited with status 7.").await;
         drop(third);
 
-        let (mut fourth, _) = listener.accept().await.unwrap();
-        let fourth_request = read_json_request(&mut fourth).await;
-        write_text_stream(&mut fourth, "The build exited with status 7.").await;
-        drop(fourth);
-
-        let fifth_request_seen =
+        let fourth_request_seen =
             tokio::time::timeout(Duration::from_millis(800), listener.accept())
                 .await
                 .is_ok();
-        (session_id, fourth_request, fifth_request_seen)
+        (session_id, third_request, fourth_request_seen)
     });
 
     let fixture = tempdir().unwrap();
@@ -425,12 +449,12 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
     .await
     .unwrap();
 
-    let (session_id, fourth_request, fifth_request_seen) = server.await.unwrap();
+    let (session_id, third_request, fourth_request_seen) = server.await.unwrap();
     assert!(
-        !fifth_request_seen,
+        !fourth_request_seen,
         "neither the terminal event nor a finished Agent run may create another model request"
     );
-    let poll_result = fourth_request["messages"]
+    let poll_result = third_request["messages"]
         .as_array()
         .unwrap()
         .iter()
@@ -442,7 +466,7 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
     assert_eq!(poll_result["sessionId"], session_id);
     assert_eq!(poll_result["status"], "exited");
     assert_eq!(poll_result["exitCode"], 7);
-    assert_eq!(poll_result["output"], "");
+    assert!(poll_result["output"].as_str().unwrap().contains("progress"));
 
     let record = storage
         .load_agent_command_session(&turn.conversation_id, &session_id)

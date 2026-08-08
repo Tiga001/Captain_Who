@@ -305,7 +305,33 @@ fn take_project_deletion_failure(project_id: &str) -> Option<String> {
 
 impl AgentService {
     pub fn cancel_run(&self, run_id: &str) -> bool {
-        self.cancel_run_internal(run_id)
+        // `agent.cancelRun` is the explicit user stop boundary. Capture the authoritative
+        // conversation binding before cancelling the worker, because worker teardown removes the
+        // ActiveRunControl. This is intentionally separate from `cancel_run_internal`: deletion,
+        // shutdown, provider failure, and a cancelled `command_session` observation must not gain
+        // this user-authorized process termination semantic by accident.
+        let conversation_id = {
+            self.active_runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(run_id)
+                .map(|control| control.conversation_id.clone())
+        };
+        let conversation_id = conversation_id
+            .or_else(|| {
+                self.usage_contexts
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(run_id)
+                    .map(|state| state.context.conversation_id.clone())
+            })
+            .or_else(|| self.command_sessions.conversation_for_origin_run(run_id));
+        let cancelled = self.cancel_run_internal(run_id);
+        let terminated_sessions = conversation_id.as_deref().map_or(0, |conversation_id| {
+            self.command_sessions
+                .interrupt_origin_run(conversation_id, run_id)
+        });
+        cancelled || terminated_sessions > 0
     }
 
     fn cancel_run_internal(&self, run_id: &str) -> bool {
@@ -321,8 +347,10 @@ impl AgentService {
                 false
             }
         };
-        // This fence only reaches Sessions which have not durably transferred ownership. Once a
-        // running receipt wins `commit_handoff`, cancelling the Agent Run cannot kill the process.
+        // Internal cancellation only reaches Sessions which have not durably transferred
+        // ownership. Explicit user cancellation adds its process boundary in `cancel_run` after
+        // resolving the active conversation identity; all other cancellation causes keep adopted
+        // Sessions alive.
         let cancelled_sessions = self.command_sessions.cancel_pre_handoff_for_run(run_id);
         let cancelled_processes = self.process_runs.cancel_run(run_id);
         cancelled_run || cancelled_sessions > 0 || cancelled_processes > 0

@@ -192,10 +192,12 @@ pub type AgentHostActionExecutor = Arc<
         + 'static,
 >;
 
-/// Default amount of time one model-requested command Session poll may wait for new output.
-pub const AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS: u64 = 1_000;
-/// Hard upper bound for model-requested Session polling or interruption settlement.
-pub const AGENT_COMMAND_SESSION_MAX_WAIT_MS: u64 = 30_000;
+/// Default Host-owned quiet wait for a command Session terminal state.
+pub const AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS: u64 = 120_000;
+/// Default bounded settlement wait after a controlled interrupt.
+pub const AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS: u64 = 5_000;
+/// Hard upper bound for a legacy Session wait hint after Host normalization.
+pub const AGENT_COMMAND_SESSION_MAX_WAIT_MS: u64 = 300_000;
 /// Maximum incremental command output admitted by one model Tool call.
 ///
 /// Keeping this below the central Tool-result budget is important: the Host advances the model's
@@ -225,6 +227,39 @@ pub struct AgentCommandSessionExecutionRequest {
     pub max_output_bytes: usize,
 }
 
+/// Ephemeral run controls for one Host-owned command Session observation.
+///
+/// These controls stay separate from [`AgentCommandSessionExecutionRequest`] so the request
+/// remains a stable, comparable identity/audit value. Releasing an observation is not authority
+/// to terminate an already handed-off process.
+#[derive(Clone, Debug)]
+pub struct AgentCommandSessionExecutionControl {
+    cancellation_token: AgentCancellationToken,
+    steer_input: Option<AgentSteerInputQueue>,
+}
+
+impl AgentCommandSessionExecutionControl {
+    pub fn new(
+        cancellation_token: AgentCancellationToken,
+        steer_input: Option<AgentSteerInputQueue>,
+    ) -> Self {
+        Self {
+            cancellation_token,
+            steer_input,
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
+
+    pub fn has_pending_guidance(&self) -> bool {
+        self.steer_input
+            .as_ref()
+            .is_some_and(|queue| queue.pending_len() > 0)
+    }
+}
+
 /// Incremental output returned from the Host's one authoritative model-read cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCommandSessionExecutionOutput {
@@ -250,6 +285,7 @@ pub trait AgentCommandSessionExecutor: Send + Sync {
     fn execute_command_session(
         &self,
         request: AgentCommandSessionExecutionRequest,
+        control: AgentCommandSessionExecutionControl,
     ) -> AgentResult<AgentCommandSessionExecutionOutput>;
 }
 

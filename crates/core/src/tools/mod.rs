@@ -531,7 +531,7 @@ impl ToolRegistry {
         registry.register(ApplyPatchTool);
         registry.register(WriteFileTool);
         registry.register(RunCommandTool);
-        registry.register(CommandSessionTool);
+        registry.register_async(CommandSessionTool);
         registry.register(SkillsListResourcesTool);
         registry.register(SkillsReadResourceTool);
         registry.register(SkillsMaterializeResourceTool);
@@ -1018,6 +1018,16 @@ impl ToolRegistry {
     fn register<T: AgentTool + 'static>(&mut self, tool: T) {
         self.register_boxed("core".to_string(), Box::new(tool))
             .expect("core tool definitions must have valid names and portable input schemas");
+    }
+
+    fn register_async<T: AsyncAgentTool + 'static>(&mut self, tool: T) {
+        let tool_name = tool.definition().name;
+        self.register_handler(
+            "core".to_string(),
+            AgentToolIdentity::Builtin { tool_name },
+            AgentToolHandler::Async(Box::new(tool)),
+        )
+        .expect("core async tool definitions must have valid names and portable input schemas");
     }
 
     fn register_boxed(&mut self, owner: String, tool: Box<dyn AgentTool>) -> AgentResult<()> {

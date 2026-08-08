@@ -91,6 +91,7 @@ pub struct ToolExecutionContext {
     command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     command_session_executor: Option<Arc<dyn crate::runtime::AgentCommandSessionExecutor>>,
+    steer_input: Option<crate::runtime::AgentSteerInputQueue>,
     goal_runtime_state_reader: Option<Arc<dyn GoalRuntimeStateReader>>,
 }
 
@@ -123,6 +124,7 @@ impl ToolExecutionContext {
             skill_resources: None,
             command_runtime_profile_resolver: None,
             command_session_executor: None,
+            steer_input: None,
             goal_runtime_state_reader: None,
         }
     }
@@ -187,6 +189,14 @@ impl ToolExecutionContext {
         executor: Option<Arc<dyn crate::runtime::AgentCommandSessionExecutor>>,
     ) -> Self {
         self.command_session_executor = executor;
+        self
+    }
+
+    pub(crate) fn with_steer_input(
+        mut self,
+        steer_input: Option<crate::runtime::AgentSteerInputQueue>,
+    ) -> Self {
+        self.steer_input = steer_input;
         self
     }
 
@@ -411,6 +421,10 @@ impl ToolExecutionContext {
                 }),
             )
         })
+    }
+
+    pub(super) fn steer_input(&self) -> Option<crate::runtime::AgentSteerInputQueue> {
+        self.steer_input.clone()
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {
