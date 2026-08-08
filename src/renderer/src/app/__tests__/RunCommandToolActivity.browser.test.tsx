@@ -31,6 +31,7 @@ const translations: Record<string, string> = {
   'agent.command.shell': 'Shell',
   'agent.command.successStatus': '成功',
   'agent.command.runningStatus': '运行中',
+  'agent.command.runningElapsed': '已运行 {duration}',
   'agent.command.waitingForOutput': '等待命令输出…',
   'agent.command.copyOutput': '复制命令输出',
   'agent.command.outputCopied': '命令输出已复制',
@@ -276,6 +277,33 @@ describe('RunCommandToolActivity', () => {
     )
     expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
       '运行中'
+    )
+  })
+
+  it('shows live elapsed time only while a managed command is running', async () => {
+    const call: AgentToolCall = {
+      approvalStatus: 'approved',
+      args: { command: 'pnpm check', reason: '运行检查' },
+      id: 'timed-command',
+      tool: 'run_command'
+    }
+    const startedAt = Date.now() - 5_500
+    const screen = await render(
+      <RunCommandToolActivity
+        call={call}
+        session={{
+          callId: call.id,
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'running',
+          startedAt,
+          latestSequence: 0,
+          outputTruncated: false
+        }}
+      />
+    )
+
+    expect(screen.container.querySelector('.run-command-shell__status')?.textContent).toContain(
+      '已运行 5s · 运行中'
     )
   })
 

@@ -36,6 +36,14 @@ import {
 
 const FILE_WRITE_ACTIVITY_GRACE_MS = 2000
 
+const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>(['command_session'])
+
+function isHiddenTimelineTool(tool: AgentToolCall['tool']) {
+  // command_session is model-facing process coordination. Keep its call/result in agentRun for
+  // history and diagnostics, but do not let that bookkeeping create a user-visible timeline row.
+  return HIDDEN_TIMELINE_TOOLS.has(tool) || isHiddenSkillTool(tool)
+}
+
 export type RenderableTimelineItem =
   | ChatAgentTimelineItem
   | {
@@ -199,6 +207,14 @@ export function isRunSettled(run: ChatAgentRunView) {
   )
 }
 
+export function isWaitingForCommandCompletion(run: ChatAgentRunView) {
+  if (isRunSettled(run)) return false
+
+  return run.toolCalls.some(
+    (call) => call.tool === 'command_session' && !getToolResult(run, call.id)
+  )
+}
+
 export function getSettledToolStatus(
   run: ChatAgentRunView,
   result: ReturnType<typeof getToolResult>
@@ -233,7 +249,7 @@ export function isTimelineItemRenderable(run: ChatAgentRunView, item: ChatAgentT
   if (item.type === 'message') return Boolean(item.content.trim())
   if (item.type === 'tool_call') {
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
-    return Boolean(call && !isHiddenSkillTool(call.tool))
+    return Boolean(call && !isHiddenTimelineTool(call.tool))
   }
   return true
 }
@@ -392,7 +408,7 @@ export function groupTimelineItems(
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return [...items, item]
 
-    if (isHiddenSkillTool(call.tool)) return items
+    if (isHiddenTimelineTool(call.tool)) return items
 
     if (isOfficeTool(call.tool)) {
       const identity = getOfficeActivityGroupIdentity(call)

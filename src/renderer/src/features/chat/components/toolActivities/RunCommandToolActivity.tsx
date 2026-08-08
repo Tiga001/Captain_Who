@@ -77,9 +77,14 @@ function getRunningCommandReceipt(result: AgentToolResult | undefined) {
   }
 
   const latestSequence = resultValue.latestSequence
+  const startedAt = resultValue.startedAt
   return {
     sessionId: resultValue.sessionId.trim(),
     output: typeof resultValue.output === 'string' ? resultValue.output : '',
+    startedAt:
+      typeof startedAt === 'number' && Number.isFinite(startedAt)
+        ? Math.max(0, startedAt)
+        : undefined,
     latestSequence:
       typeof latestSequence === 'number' && Number.isSafeInteger(latestSequence)
         ? Math.max(0, latestSequence)
@@ -272,6 +277,12 @@ export function RunCommandToolActivity({
     session?.startedAt !== undefined && session.endedAt !== undefined
       ? Math.max(0, session.endedAt - session.startedAt)
       : undefined
+  const [clockNow, setClockNow] = useState(() => Date.now())
+  const runningStartedAt = session?.startedAt ?? runningReceipt?.startedAt
+  const runningDurationMs =
+    status === 'running' && runningStartedAt !== undefined
+      ? Math.max(0, clockNow - runningStartedAt)
+      : undefined
   const [copied, setCopied] = useState(false)
   const outputRef = useRef<HTMLPreElement>(null)
   const keepLiveOutputPinnedRef = useRef(true)
@@ -280,6 +291,11 @@ export function RunCommandToolActivity({
     const timerId = window.setTimeout(() => setCopied(false), COPIED_INDICATOR_MS)
     return () => window.clearTimeout(timerId)
   }, [copied])
+  useEffect(() => {
+    if (status !== 'running') return undefined
+    const timerId = window.setInterval(() => setClockNow(Date.now()), 1000)
+    return () => window.clearInterval(timerId)
+  }, [status])
   useLayoutEffect(() => {
     if (!isPending || !runningCommandOutput || !keepLiveOutputPinnedRef.current) return
     const output = outputRef.current
@@ -381,21 +397,28 @@ export function RunCommandToolActivity({
                 <span aria-hidden="true">{isPending ? '•' : commandFailed ? '×' : '✓'}</span>
                 <span>
                   {[
-                    status === 'waiting_for_approval'
-                      ? t('agent.command.waitingApprovalStatus')
-                      : status === 'starting'
-                        ? t('agent.command.startingStatus')
-                        : status === 'running'
-                          ? t('agent.command.runningStatus')
-                          : status === 'failed'
-                            ? t('agent.command.failedStatus')
-                            : status === 'interrupted'
-                              ? t('agent.command.interruptedStatus')
-                              : status === 'timed_out'
-                                ? t('agent.command.timedOut')
-                                : status === 'cancelled'
-                                  ? t('agent.command.cancelled')
-                                  : getCommandStatus(commandResult, result?.ok, t),
+                    status === 'running' && runningDurationMs !== undefined
+                      ? formatTranslation(t, 'agent.command.runningElapsed', {
+                          duration: formatElapsedDuration(runningDurationMs)
+                        })
+                      : status === 'waiting_for_approval'
+                        ? t('agent.command.waitingApprovalStatus')
+                        : status === 'starting'
+                          ? t('agent.command.startingStatus')
+                          : status === 'running'
+                            ? t('agent.command.runningStatus')
+                            : status === 'failed'
+                              ? t('agent.command.failedStatus')
+                              : status === 'interrupted'
+                                ? t('agent.command.interruptedStatus')
+                                : status === 'timed_out'
+                                  ? t('agent.command.timedOut')
+                                  : status === 'cancelled'
+                                    ? t('agent.command.cancelled')
+                                    : getCommandStatus(commandResult, result?.ok, t),
+                    status === 'running' && runningDurationMs !== undefined
+                      ? t('agent.command.runningStatus')
+                      : '',
                     session?.exitCode !== undefined
                       ? formatTranslation(t, 'agent.command.exitCode', {
                           code: String(session.exitCode)

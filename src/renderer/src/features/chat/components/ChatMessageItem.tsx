@@ -52,6 +52,7 @@ import {
   isContentFullyRepresentedByTimeline,
   isRunSettled,
   isTokenLimitFinishReason,
+  isWaitingForCommandCompletion,
   shouldShowAssistantActions,
   shouldShowThinkingActivity,
   type RenderableTimelineItem
@@ -288,12 +289,10 @@ function ChatMessageActions({
   )
 }
 
-function AgentThinkingActivity() {
-  const { t } = useFrontendConfig()
-
+function AgentThinkingActivity({ label }: { label: string }) {
   return (
     <div className="agent-thinking">
-      <span className="agent-running-text">{t('agent.thinking')}</span>
+      <span className="agent-running-text">{label}</span>
     </div>
   )
 }
@@ -495,6 +494,7 @@ function AgentRunView({
   )
   const runId = run?.runId
   const runIsSettled = !run || isRunSettled(run)
+  const waitingForCommandCompletion = Boolean(run && isWaitingForCommandCompletion(run))
   const hasTimeline = displayTimeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
   const canToggleTimeline = Boolean(
@@ -518,7 +518,13 @@ function AgentRunView({
     const hasFirstResponse = Boolean(run?.firstResponseAt)
     const hasVisibleToolStatus = Boolean(run && hasCollapsibleTimelineContent(run, timeline))
 
-    if (run && !hasFirstResponse && !hasVisibleToolStatus && !isRunSettled(run)) {
+    if (
+      run &&
+      !hasFirstResponse &&
+      !hasVisibleToolStatus &&
+      !waitingForCommandCompletion &&
+      !isRunSettled(run)
+    ) {
       return {
         isThinking: true,
         label: t('agent.thinking')
@@ -542,7 +548,7 @@ function AgentRunView({
         duration: formatElapsedDuration(endedAt - startedAt)
       })
     }
-  }, [message.createdAt, now, run, t, timeline])
+  }, [message.createdAt, now, run, t, timeline, waitingForCommandCompletion])
   if (!run) {
     return hasDisplayableContent(message.content) ? (
       <ChatMarkdown className="chat-agent-text" content={message.content} />
@@ -568,7 +574,7 @@ function AgentRunView({
     !headerState.isThinking &&
     !isStreamingAssistantText &&
     !isStreamingFileWrite &&
-    shouldShowThinkingActivity(run, timeline)
+    (waitingForCommandCompletion || shouldShowThinkingActivity(run, timeline))
   const showTokenLimitNotice = isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
   const webSearchSources = getUniqueWebSearchSources(run)
 
@@ -607,7 +613,13 @@ function AgentRunView({
           <span>{t('agent.tokenLimitNotice')}</span>
         </div>
       )}
-      {showThinkingActivity && <AgentThinkingActivity />}
+      {showThinkingActivity && (
+        <AgentThinkingActivity
+          label={t(
+            waitingForCommandCompletion ? 'agent.command.waitingForCompletion' : 'agent.thinking'
+          )}
+        />
+      )}
       {showTimeline && run.error && !hasTimelineError && (
         <div className="agent-run__error">{run.error}</div>
       )}

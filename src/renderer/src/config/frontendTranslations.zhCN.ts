@@ -818,6 +818,7 @@ export const zhCNTranslations = {
   'chat.usageCacheCreationInputTokens': '缓存写入',
 
   'agent.thinking': '正在思考',
+  'agent.command.waitingForCompletion': '正在等待命令完成',
   'agent.contextCompaction.running': '正在自动压缩上下文',
   'agent.contextCompaction.completed': '上下文已自动压缩',
   'agent.contextCompaction.skipped': '已重新检查上下文',
@@ -993,6 +994,7 @@ export const zhCNTranslations = {
   'agent.command.waitingApprovalStatus': '等待审批',
   'agent.command.startingStatus': '正在启动',
   'agent.command.runningStatus': '运行中',
+  'agent.command.runningElapsed': '已运行 {duration}',
   'agent.command.interruptedStatus': '已中断',
   'agent.command.exitCode': '退出码 {code}',
   'agent.command.timedOut': '已超时',

@@ -856,6 +856,7 @@ export const enUSTranslations = {
   'chat.usageCacheCreationInputTokens': 'Cache write',
 
   'agent.thinking': 'Thinking',
+  'agent.command.waitingForCompletion': 'Waiting for command to finish',
   'agent.contextCompaction.running': 'Automatically compacting context',
   'agent.contextCompaction.completed': 'Context automatically compacted',
   'agent.contextCompaction.skipped': 'Rechecked context',
@@ -1035,6 +1036,7 @@ export const enUSTranslations = {
   'agent.command.waitingApprovalStatus': 'waiting for approval',
   'agent.command.startingStatus': 'starting',
   'agent.command.runningStatus': 'running',
+  'agent.command.runningElapsed': 'running for {duration}',
   'agent.command.interruptedStatus': 'interrupted',
   'agent.command.exitCode': 'exit code {code}',
   'agent.command.timedOut': 'timed out',
