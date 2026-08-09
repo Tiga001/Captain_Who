@@ -125,6 +125,32 @@ impl CoreServerBootstrap {
             Arc::clone(&storage),
             image_generation_credential_store(&database_path, uses_development_credentials)?,
         ));
+        let provider_continuation_vault = match provider_continuation_credential_store(
+            &database_path,
+            uses_development_credentials,
+        ) {
+            Ok(credentials) => match ProviderContinuationVaultFactory::open_or_provision(
+                Arc::clone(&storage),
+                credentials,
+            ) {
+                Ok(vault) => Some(Arc::new(vault)),
+                Err(error) => {
+                    // Provider continuation is an optional Host capability. Generic runs and
+                    // DeepSeek text-only runs remain available; any Tool-bearing persist/replay
+                    // path fails closed inside Core before a provider or Host side effect.
+                    eprintln!(
+                        "Provider continuation vault is unavailable: {}",
+                        error.code()
+                    );
+                    None
+                }
+            },
+            Err(_) => {
+                // The credential backend error is deliberately redacted at this boundary.
+                eprintln!("Provider continuation credential store is unavailable");
+                None
+            }
+        };
         if let Err(error) = image_generation_configuration.reconcile_credentials() {
             // The service remains available so settings can expose a structured, retryable error.
             // Credential-store errors are deliberately redacted by the domain boundary.
@@ -230,7 +256,11 @@ impl CoreServerBootstrap {
                 ))
             })?,
         );
-        let agent_service = AgentService::try_new_deferred_startup_reconciliation(storage.clone())
+        let agent_service =
+            AgentService::try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
+                storage.clone(),
+                provider_continuation_vault,
+            )
             .map_err(|error| {
                 io::Error::other(format!("failed to initialize Agent service: {error}"))
             })?
@@ -581,6 +611,51 @@ fn image_generation_credential_store(
     }
 }
 
+/// Selects a credential backend dedicated to the provider-continuation master key.
+///
+/// This namespace is distinct from model API tokens and image-generation credentials.
+/// Development builds use a private durable file store so encrypted continuation rows remain
+/// recoverable across Core Server restarts without probing an unstable Keychain identity.
+fn provider_continuation_credential_store(
+    database_path: &Path,
+    uses_development_credentials: bool,
+) -> io::Result<Arc<dyn CredentialStore>> {
+    #[cfg(target_os = "macos")]
+    {
+        if !uses_development_credentials {
+            return NonInteractiveMacCredentialStore::new(PROVIDER_CONTINUATION_CREDENTIAL_SERVICE)
+                .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "failed to initialize Provider continuation credential store: {error}"
+                    ))
+                });
+        }
+
+        DevelopmentFileCredentialStore::new(
+            provider_continuation_development_credential_store_root(database_path),
+        )
+        .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+        .map_err(|error| {
+            io::Error::other(format!(
+                "failed to initialize development Provider continuation credential store: {error}"
+            ))
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (database_path, uses_development_credentials);
+        SystemCredentialStore::new(PROVIDER_CONTINUATION_CREDENTIAL_SERVICE)
+            .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize Provider continuation credential store: {error}"
+                ))
+            })
+    }
+}
+
 /// Selects the native credential backend dedicated to the MCP approval master key.
 ///
 /// Unlike image generation, MCP payload encryption never falls back to the development file
@@ -636,6 +711,16 @@ pub(crate) fn image_generation_development_credential_store_root(database_path: 
         .parent()
         .map(|parent| parent.join("image-generation-development-credentials-v1"))
         .unwrap_or_else(|| PathBuf::from("image-generation-development-credentials-v1"))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn provider_continuation_development_credential_store_root(
+    database_path: &Path,
+) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("provider-continuation-development-credentials-v1"))
+        .unwrap_or_else(|| PathBuf::from("provider-continuation-development-credentials-v1"))
 }
 
 #[cfg(target_os = "macos")]

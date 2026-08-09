@@ -257,6 +257,8 @@ pub struct ProviderProtocolKey {
     pub dialect: ProviderProtocolDialect,
     pub profile: ProviderProfileRef,
     pub model_id: String,
+    /// Opaque revision of this model's complete effective wire protocol. The serialized field
+    /// name is retained for checkpoint compatibility with the earlier broad settings revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_configuration_revision: Option<String>,
 }

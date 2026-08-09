@@ -28,8 +28,8 @@ use mycopilot_core::{
     AgentSkillMaterializationRequest, AgentSkillScriptRequest, AgentToolCall, AgentToolResult,
     AgentTurnDiffIdentity, AgentTurnFileChange, AgentTurnFileContent, AgentUsage,
     AgentWorkspaceContext, ContextJournalCursor, ConversationTurnTrace,
-    ConversationTurnTraceTerminalStatus, ModelCapabilities, ProviderProtocolDialect,
-    ProviderProtocolKey,
+    ConversationTurnTraceTerminalStatus, ModelCapabilities, ProviderProfileId,
+    ProviderProtocolDialect, ProviderProtocolKey,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,

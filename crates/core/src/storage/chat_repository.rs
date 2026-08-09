@@ -1,7 +1,9 @@
 use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
-use crate::storage::{context_compaction_repository, now_ms, world_state_repository};
+use crate::storage::{
+    context_compaction_repository, now_ms, provider_continuation_repository, world_state_repository,
+};
 use crate::AgentMcpServerScope;
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
@@ -274,6 +276,12 @@ pub fn save_conversation(
         &removed_message_ids,
     )
     .map_err(world_state_error_to_sqlite)?;
+    provider_continuation_repository::release_for_messages(
+        &transaction,
+        &conversation.id,
+        &removed_message_ids,
+        now_ms(),
+    )?;
     for message_id in &removed_message_ids {
         transaction.execute(
             "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
@@ -410,6 +418,12 @@ pub(crate) fn delete_messages_in_transaction(
         .map_err(context_compaction_error_to_sqlite)?;
     world_state_repository::rewind_for_message_deletion(connection, conversation_id, message_ids)
         .map_err(world_state_error_to_sqlite)?;
+    provider_continuation_repository::release_for_messages(
+        connection,
+        conversation_id,
+        message_ids,
+        now_ms(),
+    )?;
 
     for message_id in message_ids {
         connection.execute(

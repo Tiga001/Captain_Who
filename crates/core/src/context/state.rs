@@ -145,6 +145,15 @@ impl AgentConversationContextState {
         &self.configuration_revision
     }
 
+    /// Grants the runtime API one narrow, Host-private hydration boundary before measurement.
+    ///
+    /// Provider-native replay state must never be projected into `AgentChatInput` or a durable
+    /// context baseline. The public preview entry point uses this accessor only to run the exact
+    /// same validated hydration step as a real model request.
+    pub(crate) fn provider_hydration_frame_mut(&mut self) -> &mut ContextFrame {
+        &mut self.frame
+    }
+
     pub fn append_user_message(
         &mut self,
         message_id: Option<&str>,

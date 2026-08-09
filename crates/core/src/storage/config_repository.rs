@@ -1,6 +1,6 @@
 use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord, ModelSettingsSnapshot};
 use crate::storage::now_ms;
-use crate::ProviderProfileConfig;
+use crate::{ProviderProfileConfig, ProviderProtocolDialect};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::BTreeMap;
@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 const MODEL_SETTINGS_REVISION_PREFIX: &str = "model-settings-v1:";
 const PROVIDER_CONNECTION_REVISION_PREFIX: &str = "provider-connection-v1:";
+const PROVIDER_PROTOCOL_REVISION_PREFIX: &str = "provider-protocol-v1:";
 const SEARCH_CONNECTION_REVISION_PREFIX: &str = "search-connection-v1:";
 
 pub fn load_model_settings(
@@ -66,7 +67,11 @@ pub fn load_model_settings_snapshot(
         return Err(rusqlite::Error::InvalidQuery);
     }
 
-    let (models, provider_connection_revisions) = load_models(&transaction)?;
+    let LoadedModels {
+        models,
+        provider_connection_revisions,
+        provider_protocol_revisions,
+    } = load_models(&transaction)?;
     transaction.commit()?;
     Ok(Some(ModelSettingsSnapshot {
         settings: ModelSettingsRecord {
@@ -78,6 +83,7 @@ pub fn load_model_settings_snapshot(
         },
         configuration_revision,
         provider_connection_revisions,
+        provider_protocol_revisions,
         search_connection_revision,
     }))
 }
@@ -121,6 +127,31 @@ pub fn save_model_settings(
             (
                 model.id.clone(),
                 preserved.unwrap_or_else(new_provider_connection_revision),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let provider_protocol_revisions = settings
+        .models
+        .iter()
+        .map(|model| {
+            let preserved = previous.as_ref().and_then(|snapshot| {
+                let previous_model = snapshot
+                    .settings
+                    .models
+                    .iter()
+                    .find(|candidate| candidate.id == model.id)?;
+                same_effective_provider_protocol(
+                    &snapshot.settings,
+                    previous_model,
+                    &settings,
+                    model,
+                )
+                .then(|| snapshot.provider_protocol_revisions.get(&model.id).cloned())
+                .flatten()
+            });
+            (
+                model.id.clone(),
+                preserved.unwrap_or_else(new_provider_protocol_revision),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -173,6 +204,7 @@ pub fn save_model_settings(
                 context_window_tokens,
                 provider_profile_config_json,
                 provider_connection_revision,
+                provider_protocol_revision,
                 input_price,
                 output_price,
                 enabled,
@@ -180,7 +212,7 @@ pub fn save_model_settings(
                 created_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
             ",
             params![
                 &model.id,
@@ -191,6 +223,9 @@ pub fn save_model_settings(
                 model.context_window_tokens,
                 encode_provider_profile_config(model.provider_profile_config.as_ref())?,
                 provider_connection_revisions
+                    .get(&model.id)
+                    .ok_or(rusqlite::Error::InvalidQuery)?,
+                provider_protocol_revisions
                     .get(&model.id)
                     .ok_or(rusqlite::Error::InvalidQuery)?,
                 &model.input_price,
@@ -205,9 +240,13 @@ pub fn save_model_settings(
     transaction.commit()
 }
 
-fn load_models(
-    connection: &Transaction<'_>,
-) -> rusqlite::Result<(Vec<ModelConfigRecord>, BTreeMap<String, String>)> {
+struct LoadedModels {
+    models: Vec<ModelConfigRecord>,
+    provider_connection_revisions: BTreeMap<String, String>,
+    provider_protocol_revisions: BTreeMap<String, String>,
+}
+
+fn load_models(connection: &Transaction<'_>) -> rusqlite::Result<LoadedModels> {
     let mut statement = connection.prepare(
         "
         SELECT
@@ -219,6 +258,7 @@ fn load_models(
             context_window_tokens,
             provider_profile_config_json,
             provider_connection_revision,
+            provider_protocol_revision,
             input_price,
             output_price,
             enabled
@@ -237,30 +277,42 @@ fn load_models(
                 supports_image: row.get(4)?,
                 context_window_tokens: row.get(5)?,
                 provider_profile_config: decode_provider_profile_config(row.get(6)?, 6)?,
-                input_price: row.get(8)?,
-                output_price: row.get(9)?,
-                enabled: row.get(10)?,
+                input_price: row.get(9)?,
+                output_price: row.get(10)?,
+                enabled: row.get(11)?,
             };
             let connection_revision = row.get::<_, String>(7)?;
             if !is_provider_connection_revision(&connection_revision) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            Ok((model, connection_revision))
+            let protocol_revision = row.get::<_, String>(8)?;
+            if !is_provider_protocol_revision(&protocol_revision) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok((model, connection_revision, protocol_revision))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut models = Vec::with_capacity(stored.len());
     let mut provider_connection_revisions = BTreeMap::new();
-    for (model, revision) in stored {
+    let mut provider_protocol_revisions = BTreeMap::new();
+    for (model, connection_revision, protocol_revision) in stored {
         if provider_connection_revisions
-            .insert(model.id.clone(), revision)
+            .insert(model.id.clone(), connection_revision)
             .is_some()
+            || provider_protocol_revisions
+                .insert(model.id.clone(), protocol_revision)
+                .is_some()
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
         models.push(model);
     }
-    Ok((models, provider_connection_revisions))
+    Ok(LoadedModels {
+        models,
+        provider_connection_revisions,
+        provider_protocol_revisions,
+    })
 }
 
 fn encode_provider_profile_config(
@@ -300,6 +352,10 @@ fn new_provider_connection_revision() -> String {
     format!("{PROVIDER_CONNECTION_REVISION_PREFIX}{}", Uuid::new_v4())
 }
 
+fn new_provider_protocol_revision() -> String {
+    format!("{PROVIDER_PROTOCOL_REVISION_PREFIX}{}", Uuid::new_v4())
+}
+
 fn new_search_connection_revision() -> String {
     format!("{SEARCH_CONNECTION_REVISION_PREFIX}{}", Uuid::new_v4())
 }
@@ -310,6 +366,46 @@ fn same_effective_search_connection(
 ) -> bool {
     canonical_search_mode(&previous.search_mode) == canonical_search_mode(&current.search_mode)
         && previous.tavily_api_key.trim() == current.tavily_api_key.trim()
+}
+
+/// Compares the complete provider-owned wire identity for one configured model.
+///
+/// A revision is reusable only when the exact endpoint/credential pair, wire model id, detected
+/// dialect, Profile/version and reasoning policy are all equivalent. Renderer-only metadata,
+/// pricing, capacity and search settings do not participate.
+fn same_effective_provider_protocol(
+    previous_settings: &ModelSettingsRecord,
+    previous_model: &ModelConfigRecord,
+    current_settings: &ModelSettingsRecord,
+    current_model: &ModelConfigRecord,
+) -> bool {
+    if previous_model.id != current_model.id {
+        return false;
+    }
+    let Ok(previous_connection) = previous_settings.effective_connection_for(previous_model) else {
+        return false;
+    };
+    let Ok(current_connection) = current_settings.effective_connection_for(current_model) else {
+        return false;
+    };
+    if previous_connection != current_connection {
+        return false;
+    }
+
+    let previous_dialect =
+        ProviderProtocolDialect::detect_from_api_url(&previous_connection.api_url);
+    let current_dialect = ProviderProtocolDialect::detect_from_api_url(&current_connection.api_url);
+    if previous_dialect != current_dialect {
+        return false;
+    }
+
+    match (
+        previous_model.resolved_provider_profile_config(previous_dialect),
+        current_model.resolved_provider_profile_config(current_dialect),
+    ) {
+        (Ok(previous), Ok(current)) => previous == current,
+        _ => false,
+    }
 }
 
 fn canonical_search_mode(value: &str) -> &'static str {
@@ -326,6 +422,16 @@ pub fn is_model_settings_revision(value: &str) -> bool {
 
 pub fn is_provider_connection_revision(value: &str) -> bool {
     is_canonical_v4_revision(value, PROVIDER_CONNECTION_REVISION_PREFIX)
+}
+
+/// Validates the opaque identity carried by `ProviderProtocolKey` and pending-run provenance.
+///
+/// New or changed protocols use `provider-protocol-v1`. The broad `model-settings-v1` form is
+/// retained as a migration seed so continuations created before per-model protocol identities
+/// remain replayable when no effective wire setting changed.
+pub fn is_provider_protocol_revision(value: &str) -> bool {
+    is_canonical_v4_revision(value, PROVIDER_PROTOCOL_REVISION_PREFIX)
+        || is_model_settings_revision(value)
 }
 
 pub fn is_search_connection_revision(value: &str) -> bool {

@@ -84,6 +84,10 @@ pub struct ModelSettingsSnapshot {
     /// Host-only and rotate independently, so editing another model or non-connection metadata
     /// cannot invalidate an already frozen run.
     pub provider_connection_revisions: BTreeMap<String, String>,
+    /// Stable opaque identity of each model's complete provider wire protocol: endpoint/token,
+    /// dialect, wire model id, Profile/version and reasoning policy. Existing databases seed this
+    /// from their broad settings revision so pre-upgrade continuation keys remain valid.
+    pub provider_protocol_revisions: BTreeMap<String, String>,
     /// Stable opaque identity of the effective search mode/credential pair.
     pub search_connection_revision: String,
 }

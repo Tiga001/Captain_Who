@@ -31,6 +31,341 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
 }
 
 #[test]
+fn provider_profile_context_boundaries_fail_closed_without_translating_private_state() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::provider_continuation_store::ProviderContinuationBinding;
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::{
+        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
+        ProviderProtocolKey,
+    };
+    use tempfile::tempdir;
+
+    const CONVERSATION_ID: &str = "conversation-provider-boundary";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-provider-boundary";
+    const RUN_ID: &str = "run-provider-boundary";
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("boundary.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("deepseek-boundary-a".to_string()),
+            title: "Provider boundary".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("completed".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+    let vault =
+        ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
+            .unwrap();
+    let deepseek_profile = ProviderProfileConfig::deepseek_v4_default();
+    let deepseek_protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &deepseek_profile,
+        "deepseek-boundary-a",
+        Some("configuration-a".to_string()),
+    )
+    .unwrap();
+    let provider_call = LlmToolCall {
+        id: "provider-boundary-call".to_string(),
+        name: "read_file".to_string(),
+        args: json!({ "path": "README.md" }),
+    };
+    let runtime_call = LlmToolCall {
+        id: crate::llm::model_response_tool_call_id(RUN_ID, 0, 0, &provider_call.id),
+        name: provider_call.name.clone(),
+        args: provider_call.args.clone(),
+    };
+    let turn = crate::llm::LlmAssistantTurn::from_provider(
+        deepseek_protocol.clone(),
+        "",
+        vec![provider_call.clone()],
+    )
+    .unwrap()
+    .with_runtime_tool_bindings(vec![crate::llm::LlmRuntimeToolCallBinding::new(
+        0,
+        &provider_call,
+        runtime_call.clone(),
+    )])
+    .unwrap();
+    let turn_id = turn.stable_id();
+    let turn_digest = turn.stable_digest();
+    let binding = ProviderContinuationBinding {
+        conversation_id: CONVERSATION_ID,
+        assistant_message_id: ASSISTANT_MESSAGE_ID,
+        run_id: RUN_ID,
+        request_index: 0,
+        assistant_turn_id: &turn_id,
+        assistant_turn_digest: &turn_digest,
+        provider_protocol: &deepseek_protocol,
+    };
+    let continuation_ref = vault
+        .persist_staged(binding, &turn)
+        .unwrap()
+        .expect("DeepSeek tool-bearing turn must receive a private replay ref");
+    vault
+        .promote_staged(&continuation_ref, binding, now_ms())
+        .unwrap();
+
+    let generic_profile =
+        ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions);
+    let generic_protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &generic_profile,
+        "generic-model",
+        Some("generic-configuration".to_string()),
+    )
+    .unwrap();
+    let mut clean_context = ContextFrame::new(Vec::new());
+    let generic_error = hydrate_provider_continuation_history(
+        &mut clean_context,
+        &generic_profile,
+        &generic_protocol,
+        Some(CONVERSATION_ID),
+        Some(storage.as_ref()),
+        None,
+        ProviderContinuationResumeRequirement {
+            required_refs: None,
+            current_assistant_turn_id: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        generic_error.code(),
+        Some("provider_context_boundary_required")
+    );
+
+    let grouped_context = || {
+        ContextFrame::new(vec![ContextItem::new(
+            LlmMessage::assistant("", vec![runtime_call.clone()]),
+            ContextMetadata::new(
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        )])
+    };
+    let mut missing_context = grouped_context();
+    let missing_error = hydrate_provider_continuation_history(
+        &mut missing_context,
+        &deepseek_profile,
+        &deepseek_protocol,
+        Some("conversation-without-provider-state"),
+        Some(storage.as_ref()),
+        Some(&vault),
+        ProviderContinuationResumeRequirement {
+            required_refs: None,
+            current_assistant_turn_id: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        missing_error.code(),
+        Some("provider_context_boundary_required")
+    );
+
+    let mismatched_protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &deepseek_profile,
+        "deepseek-boundary-b",
+        Some("configuration-b".to_string()),
+    )
+    .unwrap();
+    let mut mismatched_context = grouped_context();
+    let mismatch = hydrate_provider_continuation_history(
+        &mut mismatched_context,
+        &deepseek_profile,
+        &mismatched_protocol,
+        Some(CONVERSATION_ID),
+        Some(storage.as_ref()),
+        Some(&vault),
+        ProviderContinuationResumeRequirement {
+            required_refs: None,
+            current_assistant_turn_id: None,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        mismatch.code(),
+        Some("provider_context_boundary_required") | Some("provider_continuation_corrupt")
+    ));
+
+    // Recoverable staged rows are promoted after the first durable ToolCall. If the process
+    // crashes before its ToolResult becomes durable, the exact provider turn can still be
+    // decrypted, but it must never become a model request with an orphan ToolCall.
+    let mut incomplete_context = ContextFrame::new(vec![ContextItem::new(
+        LlmMessage::assistant("", vec![runtime_call]),
+        ContextMetadata::new(
+            ContextSource::ConversationTrace,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        )
+        .with_origin(ContextOrigin::conversation_trace_item(
+            ASSISTANT_MESSAGE_ID,
+            0,
+        )),
+    )]);
+    hydrate_provider_continuation_history(
+        &mut incomplete_context,
+        &deepseek_profile,
+        &deepseek_protocol,
+        Some(CONVERSATION_ID),
+        Some(storage.as_ref()),
+        Some(&vault),
+        ProviderContinuationResumeRequirement {
+            required_refs: None,
+            current_assistant_turn_id: None,
+        },
+    )
+    .unwrap();
+    let incomplete_error = incomplete_context
+        .validate_complete_tool_protocol()
+        .unwrap_err();
+    assert!(incomplete_error.to_string().contains("工具调用缺少结果"));
+}
+
+#[test]
+fn deepseek_cancellation_closes_current_and_queued_calls_in_original_order() {
+    let registry = ToolRegistry::defaults_with_search(None);
+    let calls = vec![
+        LlmToolCall {
+            id: "cancel-call-1".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "first.txt" }),
+        },
+        LlmToolCall {
+            id: "cancel-call-2".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "second.txt" }),
+        },
+    ];
+    let mut batch = ToolCallBatch::from_model_response(
+        "run-deepseek-cancel",
+        0,
+        String::new(),
+        calls,
+        false,
+        |call| (call.clone(), registry.checkpoint_persistence(&call.name)),
+    );
+    let mut pending_assistant_context = take_pending_assistant_tool_context(&mut batch).unwrap();
+    let current = batch.pop_front().expect("first grouped call");
+    let current_call = AgentToolCall {
+        id: current.call.id.clone(),
+        tool: current.call.name.clone(),
+        args: current.call.args.clone(),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let mut context = ContextFrame::new(Vec::new());
+    let recorder = Arc::new(Mutex::new(ConversationTraceRecorder::default()));
+    let mut events = AgentEventStream::new(None);
+    let gate = ContextCapacityDetector::for_model(
+        "deepseek-cancel-test",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &registry.definitions(),
+    )
+    .model_tool_result_gate();
+
+    settle_cancelled_deepseek_tool_batch(
+        Some(TerminalToolCallSettlement {
+            queued: current,
+            call: Some(current_call),
+            announced: false,
+            dispatch_started: false,
+            outcome: TerminalToolCallOutcome::Synthetic,
+        }),
+        &mut batch,
+        &mut pending_assistant_context,
+        &mut context,
+        &recorder,
+        None,
+        &mut events,
+        &registry,
+        &gate,
+        Some("assistant-deepseek-cancel"),
+        "run-deepseek-cancel",
+    )
+    .unwrap();
+
+    assert!(batch.is_empty());
+    assert!(pending_assistant_context.is_none());
+    context.validate_complete_tool_protocol().unwrap();
+
+    let trace = recorder.lock().unwrap().finish(
+        "run-deepseek-cancel",
+        "conversation-deepseek-cancel",
+        "assistant-deepseek-cancel",
+        ConversationTurnTraceTerminalStatus::Cancelled,
+        None,
+    );
+    let ordered = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => {
+                Some(("call", call_id.as_str(), None))
+            }
+            ConversationTurnTraceItem::ToolResult {
+                call_id, status, ..
+            } => Some(("result", call_id.as_str(), Some(*status))),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ordered,
+        vec![
+            ("call", "cancel-call-1", None),
+            (
+                "result",
+                "cancel-call-1",
+                Some(ConversationTraceToolResultStatus::Cancelled),
+            ),
+            ("call", "cancel-call-2", None),
+            (
+                "result",
+                "cancel-call-2",
+                Some(ConversationTraceToolResultStatus::Cancelled),
+            ),
+        ]
+    );
+
+    let emitted = events.into_events();
+    let event_order = emitted
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolCall { call, .. } => Some(("call", call.id.as_str())),
+            AgentEvent::ToolResult { result, .. } => Some(("result", result.call_id.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_order,
+        vec![
+            ("call", "cancel-call-1"),
+            ("result", "cancel-call-1"),
+            ("call", "cancel-call-2"),
+            ("result", "cancel-call-2"),
+        ]
+    );
+}
+
+#[test]
 fn exact_history_archive_precedes_model_and_checkpoint_projection() {
     use crate::conversation_trace::ConversationTraceRecorder;
     use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};
@@ -6359,4 +6694,1270 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             } if trace_call_id == call_id
         )));
     }
+}
+
+#[tokio::test]
+async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::protocol::{
+        AgentCommandPermission, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::{
+        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
+        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+    };
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    const CONVERSATION_ID: &str = "conversation-deepseek-result-publish-cancel";
+    const ASSISTANT_ID: &str = "assistant-deepseek-result-publish-cancel";
+    const RUN_ID: &str = "run-deepseek-result-publish-cancel";
+    const MODEL_ID: &str = "deepseek-result-publish-cancel-model";
+
+    fn provider_read_call(id: &str, path: &str) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": serde_json::to_string(&json!({ "path": path })).unwrap(),
+            }
+        })
+    }
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("first.txt"), "first result").unwrap();
+    std::fs::write(workspace.join("second.txt"), "second must not execute").unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("runtime.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some(MODEL_ID.to_string()),
+            title: "DeepSeek result publication cancel".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+    let vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
+            .unwrap(),
+    );
+    let mut profile = ProviderProfileConfig::deepseek_v4_default();
+    profile.reasoning = ReasoningPolicy {
+        mode: ReasoningMode::Enabled,
+        effort: ReasoningEffort::High,
+    };
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        MODEL_ID,
+        None,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _request = read_runtime_test_json_request(&mut stream).await;
+        write_runtime_test_json_response(
+            &mut stream,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "Cancel only after the first result is recorded.",
+                        "tool_calls": [
+                            provider_read_call("provider-read-first", "first.txt"),
+                            provider_read_call("provider-read-second", "second.txt"),
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }]
+            }),
+        )
+        .await;
+        timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_err()
+    });
+
+    let cancellation = AgentCancellationToken::new();
+    let cancellation_for_observer = cancellation.clone();
+    let trace_snapshots = Arc::new(Mutex::new(Vec::new()));
+    let trace_snapshots_for_observer = Arc::clone(&trace_snapshots);
+    let observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        let result_count = snapshot
+            .items
+            .iter()
+            .filter(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
+            .count();
+        if result_count == 1 {
+            cancellation_for_observer.cancel();
+        }
+        trace_snapshots_for_observer.lock().unwrap().push(snapshot);
+        Ok(None)
+    });
+    let mut input = conversation_context_input(vec![message(
+        "user",
+        "Read two files but stop during first-result publication.",
+    )]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.provider_profile_config = Some(profile);
+    input.provider_protocol_key = Some(protocol.clone());
+    input.model = MODEL_ID.to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some(ASSISTANT_ID.to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some(CONVERSATION_ID.to_string()),
+        project_id: None,
+        workspace: Some(AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("DeepSeek cancellation workspace".to_string()),
+            root_path: Some(workspace.to_string_lossy().into_owned()),
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: Default::default(),
+        },
+    });
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some(RUN_ID.to_string()),
+            None,
+            cancellation,
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_storage(storage)
+                    .with_provider_continuation_vault(Arc::clone(&vault))
+                    .with_trace_observer(observer),
+            ),
+        )
+        .await
+        .unwrap();
+    let no_second_request = server.await.unwrap();
+    assert!(no_second_request);
+    assert_eq!(output.status, AgentRunStatus::Cancelled);
+    let trace = output
+        .conversation_turn_trace
+        .as_ref()
+        .expect("cancelled grouped turn must retain a complete trace");
+    trace.validate().unwrap();
+    let results = trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolResult {
+                call_id,
+                observation,
+                ..
+            } => Some((call_id, observation)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 2);
+    assert!(results[0].1.to_string().contains("first result"));
+    assert!(results[1].1.to_string().contains("runCancelled"));
+    let terminal_snapshot = trace_snapshots
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|snapshot| {
+            snapshot
+                .items
+                .iter()
+                .filter(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
+                .count()
+                == 2
+        })
+        .cloned()
+        .expect("the grouped cancellation must publish one complete model-context snapshot");
+    let result_context = terminal_snapshot
+        .model_context_items
+        .iter()
+        .filter_map(|item| {
+            item.tool_call_id
+                .as_deref()
+                .map(|call_id| (call_id, item.is_error))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result_context,
+        vec![(results[0].0.as_str(), false), (results[1].0.as_str(), true)],
+        "the authoritative successful result must not be rewritten as an error while the synthetic cancelled suffix must remain an error"
+    );
+    let persisted = vault
+        .list_replayable_for_conversation(CONVERSATION_ID, &protocol)
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].assistant_turn.provider_tool_calls().len(), 2);
+}
+
+#[tokio::test]
+async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool_dispatch() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::protocol::{
+        AgentCommandPermission, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::{
+        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
+        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    };
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    const CONVERSATION_ID: &str = "conversation-deepseek-commit-unknown";
+    const ASSISTANT_ID: &str = "assistant-deepseek-commit-unknown";
+    const RUN_ID: &str = "run-deepseek-commit-unknown";
+    const MODEL_ID: &str = "deepseek-commit-unknown-model";
+    const OBSERVER_ERROR: &str = "trace observer committed before returning an unknown outcome";
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("never-read.txt"), "must not be dispatched").unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("runtime.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some(MODEL_ID.to_string()),
+            title: "DeepSeek commit-unknown handoff".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+    let vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
+            .unwrap(),
+    );
+    let mut profile = ProviderProfileConfig::deepseek_v4_default();
+    profile.reasoning = ReasoningPolicy {
+        mode: ReasoningMode::Enabled,
+        effort: ReasoningEffort::High,
+    };
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        MODEL_ID,
+        None,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _request = read_runtime_test_json_request(&mut stream).await;
+        write_runtime_test_json_response(
+            &mut stream,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "Seal before publishing the handoff.",
+                        "tool_calls": [{
+                            "id": "provider-commit-unknown-read",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": serde_json::to_string(
+                                    &json!({ "path": "never-read.txt" })
+                                )
+                                .unwrap(),
+                            }
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }]
+            }),
+        )
+        .await;
+        timeout(Duration::from_millis(300), listener.accept())
+            .await
+            .is_err()
+    });
+
+    let storage_for_observer = Arc::clone(&storage);
+    let observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        if !snapshot
+            .items
+            .iter()
+            .any(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
+        {
+            return Ok(None);
+        }
+        let committed = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: RUN_ID.to_string(),
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_ID.to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: snapshot.truncated,
+            items: snapshot.items,
+        };
+        storage_for_observer
+            .append_in_progress_conversation_turn_trace(&committed, 1, 2)
+            .map_err(AgentError::new)?;
+        Err(AgentError::new(OBSERVER_ERROR))
+    });
+
+    let mut input = conversation_context_input(vec![message(
+        "user",
+        "Read one file after the durable provider handoff.",
+    )]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.provider_profile_config = Some(profile);
+    input.provider_protocol_key = Some(protocol.clone());
+    input.model = MODEL_ID.to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some(ASSISTANT_ID.to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some(CONVERSATION_ID.to_string()),
+        project_id: None,
+        workspace: Some(AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("DeepSeek commit-unknown workspace".to_string()),
+            root_path: Some(workspace.to_string_lossy().into_owned()),
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: Default::default(),
+        },
+    });
+    let error = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some(RUN_ID.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_storage(Arc::clone(&storage))
+                    .with_provider_continuation_vault(Arc::clone(&vault))
+                    .with_trace_observer(observer),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), OBSERVER_ERROR);
+    let terminal_trace = error
+        .conversation_turn_trace()
+        .expect("commit-unknown failure must still close the in-memory grouped turn");
+    terminal_trace.validate().unwrap();
+    assert_eq!(
+        terminal_trace
+            .items
+            .iter()
+            .filter(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        server.await.unwrap(),
+        "the failed handoff must not dispatch a Tool or send another Provider request"
+    );
+
+    let recovered = vault
+        .list_replayable_for_conversation(CONVERSATION_ID, &protocol)
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].assistant_turn.provider_tool_calls().len(), 1);
+    assert_eq!(
+        recovered[0].assistant_turn.provider_tool_calls()[0].id,
+        "provider-commit-unknown-read"
+    );
+}
+
+#[tokio::test]
+async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::protocol::{
+        AgentCommandPermission, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::{
+        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
+        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+    };
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+
+    const CONVERSATION_ID: &str = "conversation-deepseek-checkpoint-abort";
+    const FIRST_ASSISTANT_ID: &str = "assistant-deepseek-checkpoint-abort";
+    const SECOND_ASSISTANT_ID: &str = "assistant-deepseek-checkpoint-recovery";
+    const FIRST_RUN_ID: &str = "run-deepseek-checkpoint-abort";
+    const SECOND_RUN_ID: &str = "run-deepseek-checkpoint-recovery";
+    const MODEL_ID: &str = "deepseek-checkpoint-abort-model";
+    const REASONING: &str = "Preserve this reasoning across the aborted grouped turn.";
+
+    fn provider_tool_call(id: &str, name: &str, args: Value) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": serde_json::to_string(&args).unwrap(),
+            }
+        })
+    }
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("runtime.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some(MODEL_ID.to_string()),
+            title: "DeepSeek checkpoint abort".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: FIRST_ASSISTANT_ID.to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: 1,
+                    status: Some("failed".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: SECOND_ASSISTANT_ID.to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: 2,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let credentials = Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+    let vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
+            .unwrap(),
+    );
+    let mut profile = ProviderProfileConfig::deepseek_v4_default();
+    profile.reasoning = ReasoningPolicy {
+        mode: ReasoningMode::Enabled,
+        effort: ReasoningEffort::High,
+    };
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        MODEL_ID,
+        None,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let replayed_request = Arc::new(Mutex::new(None::<Value>));
+    let replayed_request_for_server = Arc::clone(&replayed_request);
+    let server = tokio::spawn(async move {
+        let (mut first_stream, _) = listener.accept().await.unwrap();
+        let first_request = read_runtime_test_json_request(&mut first_stream).await;
+        assert!(first_request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message.get("reasoning_content").is_none()));
+        write_runtime_test_json_response(
+            &mut first_stream,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": REASONING,
+                        "tool_calls": [
+                            provider_tool_call(
+                                "provider-approval-call",
+                                "run_command",
+                                json!({ "command": "echo should-require-approval" }),
+                            ),
+                            provider_tool_call(
+                                "provider-unknown-call",
+                                "unknown_private_tool",
+                                json!({ "secret": "must-stay-private" }),
+                            ),
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }]
+            }),
+        )
+        .await;
+
+        let (mut second_stream, _) = listener.accept().await.unwrap();
+        let second_request = read_runtime_test_json_request(&mut second_stream).await;
+        *replayed_request_for_server.lock().unwrap() = Some(second_request);
+        write_runtime_test_json_response(
+            &mut second_stream,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "recovered from a protocol-complete aborted turn",
+                        "reasoning_content": "The previous grouped turn is closed.",
+                    },
+                    "finish_reason": "stop",
+                }]
+            }),
+        )
+        .await;
+    });
+
+    let mut first_input = conversation_context_input(vec![message(
+        "user",
+        "Request an approval call followed by an unknown call.",
+    )]);
+    first_input.api_url = format!("http://{address}/v1/chat/completions");
+    first_input.api_token = "test-token".to_string();
+    first_input.provider_profile_config = Some(profile.clone());
+    first_input.provider_protocol_key = Some(protocol.clone());
+    first_input.model = MODEL_ID.to_string();
+    first_input.stream = Some(false);
+    first_input.assistant_message_id = Some(FIRST_ASSISTANT_ID.to_string());
+    first_input.context = Some(AgentRunContext {
+        conversation_id: Some(CONVERSATION_ID.to_string()),
+        project_id: None,
+        workspace: Some(AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("DeepSeek abort workspace".to_string()),
+            root_path: Some(workspace.to_string_lossy().into_owned()),
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: Default::default(),
+        },
+    });
+    let snapshots = Arc::new(Mutex::new(Vec::<ConversationTraceSnapshot>::new()));
+    let snapshots_for_observer = Arc::clone(&snapshots);
+    let observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        snapshots_for_observer.lock().unwrap().push(snapshot);
+        Ok(None)
+    });
+    let first_error = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            first_input,
+            Some(FIRST_RUN_ID.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_storage(Arc::clone(&storage))
+                    .with_provider_continuation_vault(Arc::clone(&vault))
+                    .with_trace_observer(observer),
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        first_error.code(),
+        Some("agent.checkpoint_private_tool_arguments")
+    );
+    let failed_trace = first_error
+        .conversation_turn_trace()
+        .expect("terminal abort must retain a complete trace")
+        .clone();
+    failed_trace.validate().unwrap();
+    let trace_pairs = failed_trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => Some(("call", call_id.clone())),
+            ConversationTurnTraceItem::ToolResult { call_id, .. } => {
+                Some(("result", call_id.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(trace_pairs.len(), 4);
+    assert_eq!(trace_pairs[0].0, "call");
+    assert_eq!(trace_pairs[1], ("result", trace_pairs[0].1.clone()));
+    assert_eq!(trace_pairs[2].0, "call");
+    assert_eq!(trace_pairs[3], ("result", trace_pairs[2].1.clone()));
+    let persisted = vault
+        .list_replayable_for_conversation(CONVERSATION_ID, &protocol)
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].assistant_turn.provider_tool_calls().len(), 2);
+
+    let final_snapshot = snapshots
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("terminal abort must publish the protocol-complete model context");
+    let aborted_history = AgentChatMessage {
+        message_id: Some(FIRST_ASSISTANT_ID.to_string()),
+        role: "assistant".to_string(),
+        content: String::new(),
+        created_at: Some(2),
+        conversation_turn_trace: Some(failed_trace),
+        conversation_model_context_items: final_snapshot.model_context_items,
+    };
+    let mut recovery_input = conversation_context_input(vec![
+        message(
+            "user",
+            "Request an approval call followed by an unknown call.",
+        ),
+        aborted_history,
+        message("user", "Continue without repeating the skipped tools."),
+    ]);
+    recovery_input.api_url = format!("http://{address}/v1/chat/completions");
+    recovery_input.api_token = "test-token".to_string();
+    recovery_input.provider_profile_config = Some(profile);
+    recovery_input.provider_protocol_key = Some(protocol);
+    recovery_input.model = MODEL_ID.to_string();
+    recovery_input.stream = Some(false);
+    recovery_input.assistant_message_id = Some(SECOND_ASSISTANT_ID.to_string());
+    recovery_input.context = Some(AgentRunContext {
+        conversation_id: Some(CONVERSATION_ID.to_string()),
+        project_id: None,
+        workspace: Some(AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("DeepSeek recovery workspace".to_string()),
+            root_path: Some(workspace.to_string_lossy().into_owned()),
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: Default::default(),
+        },
+    });
+    let recovered = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            recovery_input,
+            Some(SECOND_RUN_ID.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_storage(storage)
+                    .with_provider_continuation_vault(vault),
+            ),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(recovered.status, AgentRunStatus::Completed);
+    assert_eq!(
+        recovered.content,
+        "recovered from a protocol-complete aborted turn"
+    );
+    let replayed = replayed_request.lock().unwrap().clone().unwrap();
+    let messages = replayed["messages"].as_array().unwrap();
+    let replayed_turn = messages
+        .iter()
+        .find(|message| message["reasoning_content"].as_str() == Some(REASONING))
+        .expect("the exact aborted Provider turn must replay");
+    let provider_ids = replayed_turn["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|call| call["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        provider_ids,
+        ["provider-approval-call", "provider-unknown-call"]
+    );
+    let result_ids = messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .map(|message| message["tool_call_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        result_ids,
+        ["provider-approval-call", "provider-unknown-call"]
+    );
+    assert!(messages
+        .iter()
+        .filter(|message| message["role"] == "tool")
+        .all(|message| message["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("groupedTurnAborted"))));
+}
+
+#[tokio::test]
+async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
+    use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
+    use crate::protocol::{
+        AgentCommandPermission, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::{
+        ProviderContinuationVaultFactory, ProviderProfileConfig, ProviderProtocolDialect,
+        ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::{timeout, Duration};
+
+    const CONVERSATION_ID: &str = "conversation-deepseek-runtime-e2e";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-deepseek-runtime-e2e";
+    const RUN_ID: &str = "run-deepseek-runtime-e2e";
+    const MODEL_ID: &str = "deepseek-v4-runtime-e2e";
+    const FIRST_REASONING: &str = "第一轮 reasoning：\n逐字保留  alpha  ";
+    const SECOND_REASONING: &str = "第二轮 reasoning：工具 1/2 都已完成。\n";
+
+    fn provider_tool_call(id: &str, command: &str) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": "run_command",
+                "arguments": serde_json::to_string(&json!({ "command": command })).unwrap()
+            }
+        })
+    }
+
+    fn matching_reasoning_turns<'a>(request: &'a Value, reasoning: &str) -> Vec<&'a Value> {
+        request["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|message| {
+                message["role"] == "assistant"
+                    && message["reasoning_content"].as_str() == Some(reasoning)
+            })
+            .collect()
+    }
+
+    fn validate_replayed_reasoning(request_index: usize, request: &Value) -> Result<(), String> {
+        let messages = request["messages"]
+            .as_array()
+            .ok_or_else(|| "messages must be an array".to_string())?;
+        let all_reasoning = messages
+            .iter()
+            .filter_map(|message| message.get("reasoning_content"))
+            .collect::<Vec<_>>();
+        let first_turns = matching_reasoning_turns(request, FIRST_REASONING);
+        let second_turns = matching_reasoning_turns(request, SECOND_REASONING);
+        let tool_result_ids = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .filter_map(|message| message["tool_call_id"].as_str())
+            .collect::<Vec<_>>();
+
+        match request_index {
+            0 if all_reasoning.is_empty() => Ok(()),
+            1 if first_turns.len() == 1 && second_turns.is_empty() => {
+                let provider_call_ids = first_turns[0]["tool_calls"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|call| call["id"].as_str())
+                    .collect::<Vec<_>>();
+                if all_reasoning.len() == 1
+                    && provider_call_ids == ["deepseek-provider-1a", "deepseek-provider-1b"]
+                    && tool_result_ids == ["deepseek-provider-1a", "deepseek-provider-1b"]
+                {
+                    Ok(())
+                } else {
+                    Err("request 2 did not replay one grouped first turn".to_string())
+                }
+            }
+            2 if first_turns.len() == 1 && second_turns.len() == 1 => {
+                let first_provider_call_ids = first_turns[0]["tool_calls"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|call| call["id"].as_str())
+                    .collect::<Vec<_>>();
+                let second_provider_call_ids = second_turns[0]["tool_calls"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|call| call["id"].as_str())
+                    .collect::<Vec<_>>();
+                if all_reasoning.len() == 2
+                    && first_provider_call_ids == ["deepseek-provider-1a", "deepseek-provider-1b"]
+                    && second_provider_call_ids == ["deepseek-provider-2"]
+                    && tool_result_ids
+                        == [
+                            "deepseek-provider-1a",
+                            "deepseek-provider-1b",
+                            "deepseek-provider-2",
+                        ]
+                {
+                    Ok(())
+                } else {
+                    Err("request 3 did not replay both exact grouped turns".to_string())
+                }
+            }
+            _ => Err(format!(
+                "request {} omitted or duplicated byte-exact reasoning_content",
+                request_index + 1
+            )),
+        }
+    }
+
+    async fn write_status_response(stream: &mut TcpStream, status: &str, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("runtime.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some(MODEL_ID.to_string()),
+            title: "DeepSeek Runtime E2E".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let credentials = Arc::new(InMemoryCredentialStore::default()) as Arc<dyn CredentialStore>;
+    let vault = Arc::new(
+        ProviderContinuationVaultFactory::open_or_provision(Arc::clone(&storage), credentials)
+            .unwrap(),
+    );
+    let mut provider_profile = ProviderProfileConfig::deepseek_v4_default();
+    provider_profile.reasoning = ReasoningPolicy {
+        mode: ReasoningMode::Enabled,
+        effort: ReasoningEffort::Max,
+    };
+    let provider_protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &provider_profile,
+        MODEL_ID,
+        None,
+    )
+    .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for request_index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            requests.push(request.clone());
+            if let Err(reason) = validate_replayed_reasoning(request_index, &request) {
+                write_status_response(
+                    &mut stream,
+                    "400 Bad Request",
+                    json!({ "error": { "message": reason } }),
+                )
+                .await;
+                return (requests, Some(reason), true);
+            }
+
+            let response = match request_index {
+                0 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": FIRST_REASONING,
+                            "tool_calls": [
+                                provider_tool_call("deepseek-provider-1a", "touch first-effect"),
+                                provider_tool_call("deepseek-provider-1b", "touch second-effect")
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                1 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": SECOND_REASONING,
+                            "tool_calls": [provider_tool_call(
+                                "deepseek-provider-2",
+                                "touch third-effect"
+                            )]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                _ => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "three persisted tool effects completed",
+                            "reasoning_content": "最终 reasoning 不应触发第四次请求。"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            };
+            write_status_response(&mut stream, "200 OK", response).await;
+        }
+
+        let no_extra_request = match timeout(Duration::from_millis(300), listener.accept()).await {
+            Ok(Ok((mut stream, _))) => {
+                requests.push(read_runtime_test_json_request(&mut stream).await);
+                write_status_response(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    json!({ "error": { "message": "unexpected fourth request" } }),
+                )
+                .await;
+                false
+            }
+            Ok(Err(error)) => panic!("fake provider accept failed: {error}"),
+            Err(_) => true,
+        };
+        (requests, None, no_extra_request)
+    });
+
+    let side_effects = Arc::new(AtomicUsize::new(0));
+    let persisted_before_effect = Arc::new(Mutex::new(Vec::<(String, usize)>::new()));
+    let executor_vault = Arc::clone(&vault);
+    let executor_protocol = provider_protocol.clone();
+    let executor_side_effects = Arc::clone(&side_effects);
+    let executor_checks = Arc::clone(&persisted_before_effect);
+    let host_executor: AgentHostActionExecutor = Arc::new(move |action, cancellation| {
+        if cancellation.is_cancelled() {
+            return Err(AgentError::new("unexpected cancellation"));
+        }
+        let AgentProposedAction::Command { command } = action else {
+            return Err(AgentError::new("expected a command side effect"));
+        };
+        let expected_persisted_turns = if command.command == "touch third-effect" {
+            2
+        } else {
+            1
+        };
+        let persisted_turns = executor_vault
+            .list_replayable_for_conversation(CONVERSATION_ID, &executor_protocol)
+            .map_err(|error| AgentError::new(error.to_string()))?;
+        executor_checks
+            .lock()
+            .unwrap()
+            .push((command.command.clone(), persisted_turns.len()));
+        if persisted_turns.len() != expected_persisted_turns {
+            return Err(AgentError::new(
+                "tool side effect reached the Host before its provider turn was persisted",
+            ));
+        }
+        executor_side_effects.fetch_add(1, Ordering::SeqCst);
+        Ok(AgentToolResult {
+            exact_archive_file: None,
+            call_id: command.id,
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "exitCode": 0,
+                "stdout": "fake side effect committed",
+                "stderr": ""
+            })),
+            error: None,
+        })
+    });
+
+    let input = AgentChatInput {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "deepseek-runtime-token".to_string(),
+        provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: Some(provider_profile),
+        provider_protocol_key: Some(provider_protocol.clone()),
+        model: MODEL_ID.to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
+        api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(128_000),
+        context_window_indicator_enabled: true,
+        max_tokens: Some(1_024),
+        temperature: Some(0.3),
+        stream: Some(false),
+        context: Some(AgentRunContext {
+            conversation_id: Some(CONVERSATION_ID.to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("DeepSeek E2E workspace".to_string()),
+                root_path: Some(workspace.to_string_lossy().into_owned()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::All,
+                write: AgentWritePermission::All,
+                command: AgentCommandPermission::AutoApprove,
+                command_safety: AgentCommandSafetyPolicy::FullAccess,
+                patch: Default::default(),
+            },
+        }),
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        assistant_message_id: Some(ASSISTANT_MESSAGE_ID.to_string()),
+        context_compaction_summary: None,
+        goal: None,
+        world_state_records: Vec::new(),
+        skill_activation: None,
+        skill_discovery: None,
+        messages: vec![message(
+            "user",
+            "Run three fake side effects across two DeepSeek tool turns, then finish.",
+        )],
+    };
+    let mut missing_reasoning_input = input.clone();
+    let runtime_result = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some(RUN_ID.to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_host_actions(host_executor, Arc::clone(&storage))
+                    .with_provider_continuation_vault(Arc::clone(&vault)),
+            ),
+        )
+        .await;
+    let output = runtime_result.unwrap();
+    assert_eq!(output.status, AgentRunStatus::Completed);
+    assert_eq!(output.content, "three persisted tool effects completed");
+    let (requests, provider_rejection, no_extra_request) = server.await.unwrap();
+
+    assert!(provider_rejection.is_none(), "{provider_rejection:?}");
+    assert_eq!(side_effects.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        persisted_before_effect.lock().unwrap().as_slice(),
+        [
+            ("touch first-effect".to_string(), 1),
+            ("touch second-effect".to_string(), 1),
+            ("touch third-effect".to_string(), 2),
+        ]
+    );
+    assert_eq!(requests.len(), 3);
+    assert!(
+        no_extra_request,
+        "runtime issued an unexpected fourth request"
+    );
+
+    let persisted_turns = vault
+        .list_replayable_for_conversation(CONVERSATION_ID, &provider_protocol)
+        .unwrap();
+    assert_eq!(persisted_turns.len(), 2);
+    assert_eq!(
+        persisted_turns[0]
+            .assistant_turn
+            .provider_tool_calls()
+            .len(),
+        2,
+        "one multi-call provider turn must have one continuation envelope"
+    );
+    assert_eq!(
+        persisted_turns[1]
+            .assistant_turn
+            .provider_tool_calls()
+            .len(),
+        1
+    );
+
+    const MISSING_CONVERSATION_ID: &str = "conversation-deepseek-missing-reasoning";
+    const MISSING_ASSISTANT_MESSAGE_ID: &str = "assistant-deepseek-missing-reasoning";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: MISSING_CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some(MODEL_ID.to_string()),
+            title: "DeepSeek missing reasoning".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: MISSING_ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 2,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 2,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let missing_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let missing_address = missing_listener.local_addr().unwrap();
+    let missing_server = tokio::spawn(async move {
+        let (mut stream, _) = missing_listener.accept().await.unwrap();
+        let request = read_runtime_test_json_request(&mut stream).await;
+        write_status_response(
+            &mut stream,
+            "200 OK",
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [provider_tool_call(
+                            "deepseek-provider-missing-reasoning",
+                            "touch must-not-run"
+                        )]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        )
+        .await;
+        let no_retry = timeout(Duration::from_millis(300), missing_listener.accept())
+            .await
+            .is_err();
+        (request, no_retry)
+    });
+    missing_reasoning_input.api_url = format!("http://{missing_address}/v1/chat/completions");
+    missing_reasoning_input
+        .context
+        .as_mut()
+        .unwrap()
+        .conversation_id = Some(MISSING_CONVERSATION_ID.to_string());
+    missing_reasoning_input.assistant_message_id = Some(MISSING_ASSISTANT_MESSAGE_ID.to_string());
+    missing_reasoning_input.messages = vec![message(
+        "user",
+        "Call one tool, but reject the response if its reasoning is missing.",
+    )];
+    let forbidden_side_effects = Arc::new(AtomicUsize::new(0));
+    let executor_forbidden_side_effects = Arc::clone(&forbidden_side_effects);
+    let forbidden_executor: AgentHostActionExecutor = Arc::new(move |action, _| {
+        executor_forbidden_side_effects.fetch_add(1, Ordering::SeqCst);
+        let AgentProposedAction::Command { command } = action else {
+            return Err(AgentError::new("expected command"));
+        };
+        Ok(AgentToolResult {
+            exact_archive_file: None,
+            call_id: command.id,
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({ "exitCode": 0 })),
+            error: None,
+        })
+    });
+    let missing_error = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            missing_reasoning_input,
+            Some("run-deepseek-missing-reasoning".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_host_actions(forbidden_executor, Arc::clone(&storage))
+                    .with_provider_continuation_vault(Arc::clone(&vault)),
+            ),
+        )
+        .await
+        .unwrap_err();
+    let (_, missing_no_retry) = missing_server.await.unwrap();
+    assert_eq!(missing_error.code(), Some("provider_reasoning_required"));
+    assert_eq!(forbidden_side_effects.load(Ordering::SeqCst), 0);
+    assert!(
+        missing_no_retry,
+        "missing reasoning must not trigger a retry"
+    );
+    assert!(vault
+        .list_replayable_for_conversation(MISSING_CONVERSATION_ID, &provider_protocol)
+        .unwrap()
+        .is_empty());
 }

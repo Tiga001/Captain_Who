@@ -28,6 +28,7 @@ pub(crate) struct AgentRunUsageContext {
     pub(crate) project_id: Option<String>,
     pub(crate) model_id: String,
     pub(crate) model_name: String,
+    pub(crate) provider_profile_id: ProviderProfileId,
     pub(crate) input_price: Option<String>,
     pub(crate) output_price: Option<String>,
     pub(crate) started_at: i64,

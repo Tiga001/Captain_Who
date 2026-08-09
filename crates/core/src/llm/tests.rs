@@ -1,4 +1,4 @@
-use super::adapter::ProviderAdapterRegistry;
+use super::adapter::{deepseek_reasoning_content, ProviderAdapterRegistry};
 use super::payload::build_payload;
 use super::response::extract_tool_calls;
 use super::transport::*;
@@ -46,13 +46,17 @@ fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
 }
 use crate::context::{
     format_message_created_at, ContextAssembler, ContextAssemblyInput, ContextAttachments,
-    ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
+    ContextCapacityDetector, ContextFrame, ContextGroup, ContextItem, ContextMetadata,
+    ContextRetention, ContextScope, ContextSource,
 };
 use crate::conversation_trace::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
     ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use crate::protocol::{AgentApprovalStatus, AgentChatMessage, AgentToolSafety};
+use crate::provider_profile::{
+    ProviderProfileRef, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+};
 use crate::usage::extract_usage;
 use crate::world_state::{
     WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
@@ -73,6 +77,19 @@ fn generic_provider_profile(api_style: AgentApiStyle) -> ProviderProfileConfig {
 fn generic_provider_protocol(api_style: AgentApiStyle, model: &str) -> ProviderProtocolKey {
     let profile = generic_provider_profile(api_style);
     ProviderProtocolKey::new(api_style.into(), &profile, model, None).unwrap()
+}
+
+fn deepseek_provider_profile(
+    mode: ReasoningMode,
+    effort: ReasoningEffort,
+) -> ProviderProfileConfig {
+    let mut profile = ProviderProfileConfig::deepseek_v4_default();
+    profile.reasoning = ReasoningPolicy { mode, effort };
+    profile
+}
+
+fn deepseek_provider_protocol(profile: &ProviderProfileConfig, model: &str) -> ProviderProtocolKey {
+    ProviderProtocolKey::new(AgentApiStyle::OpenAiCompatible.into(), profile, model, None).unwrap()
 }
 
 fn joined_text(events: &[LlmStreamEvent]) -> String {
@@ -138,6 +155,10 @@ fn request_with_messages(messages: Vec<LlmMessage>) -> LlmChatRequest {
 }
 
 async fn read_test_http_request(stream: &mut TcpStream) {
+    let _ = read_test_http_request_json(stream).await;
+}
+
+async fn read_test_http_request_json(stream: &mut TcpStream) -> Value {
     let mut request = Vec::new();
     let mut content_length = None;
     let mut body_start = None;
@@ -165,7 +186,7 @@ async fn read_test_http_request(stream: &mut TcpStream) {
 
         if let (Some(start), Some(length)) = (body_start, content_length) {
             if request.len() >= start + length {
-                return;
+                return serde_json::from_slice(&request[start..start + length]).unwrap();
             }
         }
     }
@@ -2521,7 +2542,7 @@ fn generic_adapters_preserve_legacy_grouped_multi_tool_wire_shape() {
 }
 
 #[test]
-fn adapter_registry_never_falls_back_from_profile_to_api_style() {
+fn adapter_registry_selects_deepseek_only_for_the_explicit_profile() {
     let provider_profile = ProviderProfileConfig::deepseek_v4_default();
     let provider_protocol = ProviderProtocolKey::new(
         AgentApiStyle::OpenAiCompatible.into(),
@@ -2542,10 +2563,1171 @@ fn adapter_registry_never_falls_back_from_profile_to_api_style() {
         tools: Vec::new(),
     };
 
-    let error = ProviderAdapterRegistry::resolve(&request)
-        .err()
-        .expect("unregistered provider profile must not use the Generic OpenAI adapter");
-    assert!(error.to_string().contains("没有注册"));
+    let adapter = ProviderAdapterRegistry::resolve(&request).unwrap();
+    assert_eq!(adapter.profile(), ProviderProfileRef::deepseek_v4_chat());
+
+    let mut mismatched = request;
+    mismatched.provider_profile = generic_provider_profile(AgentApiStyle::OpenAiCompatible);
+    assert!(ProviderAdapterRegistry::resolve(&mismatched).is_err());
+}
+
+#[test]
+fn deepseek_disabled_reasoning_maps_without_generic_tool_choice() {
+    let provider_profile =
+        deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol,
+        max_tokens: 512,
+        temperature: 0.7,
+        stream: false,
+        messages: vec![LlmMessage::text(LlmMessageRole::User, "hello")],
+        tools: vec![tool_definition()],
+    };
+
+    let payload = build_payload(&request);
+    assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+    assert!((payload["temperature"].as_f64().unwrap() - 0.7).abs() < f64::from(f32::EPSILON));
+    assert!(payload.get("reasoning_effort").is_none());
+    assert!(payload.get("tool_choice").is_none());
+    assert_eq!(payload["tools"][0]["function"]["name"], "read_file");
+}
+
+#[test]
+fn deepseek_nonstream_preserves_a_present_empty_reasoning_field() {
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let response = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Visible.",
+                    "reasoning_content": ""
+                },
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string(),
+        &provider_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+
+    assert_eq!(response.content(), "Visible.");
+    assert!(response.assistant_turn.reasoning().is_empty());
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &response.assistant_turn).unwrap(),
+        Some("")
+    );
+    assert_eq!(
+        response
+            .assistant_turn
+            .provider_continuation()
+            .unwrap()
+            .encoded_bytes(),
+        1
+    );
+}
+
+#[test]
+fn deepseek_disabled_tool_response_without_reasoning_preserves_absence() {
+    let provider_profile =
+        deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let response = parse_non_stream_response_with_profile(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "non-thinking-deepseek-call",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"src/lib.rs\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string(),
+        &provider_profile,
+        &provider_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+
+    assert!(response.assistant_turn.reasoning().is_empty());
+    assert!(response.assistant_turn.provider_continuation().is_none());
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &response.assistant_turn).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn deepseek_enabled_tool_response_missing_reasoning_fails_nonstream_and_stream() {
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let missing_reasoning_response = json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "missing-reasoning-call",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"src/lib.rs\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let nonstream_error = parse_non_stream_response_with_profile(
+        &missing_reasoning_response.to_string(),
+        &provider_profile,
+        &provider_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap_err();
+    assert_eq!(nonstream_error.code(), Some("provider_reasoning_required"));
+
+    let mut accumulator =
+        LlmStreamAccumulator::for_profile(&provider_profile, &provider_protocol).unwrap();
+    let missing_reasoning_stream_frame = json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "missing-reasoning-call",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"src/lib.rs\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    process_sse_frame(
+        &format!("data: {missing_reasoning_stream_frame}\n\n"),
+        &mut accumulator,
+        &mut |_| {},
+    )
+    .unwrap();
+    let stream_error = accumulator.finish().unwrap_err();
+    assert_eq!(stream_error.code(), Some("provider_reasoning_required"));
+}
+
+#[test]
+fn deepseek_provider_default_preserves_missing_and_explicit_empty_reasoning() {
+    let provider_profile = ProviderProfileConfig::deepseek_v4_default();
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-default");
+    let response = |reasoning_content: Option<&str>| {
+        let mut message = json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "default-reasoning-call",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"src/lib.rs\"}"
+                }
+            }]
+        });
+        if let Some(reasoning_content) = reasoning_content {
+            message["reasoning_content"] = json!(reasoning_content);
+        }
+        parse_non_stream_response_with_profile(
+            &json!({
+                "choices": [{
+                    "message": message,
+                    "finish_reason": "tool_calls"
+                }]
+            })
+            .to_string(),
+            &provider_profile,
+            &provider_protocol,
+            LlmResponseValidation::RequireModelAction,
+        )
+        .unwrap()
+    };
+
+    let missing = response(None);
+    assert!(missing.assistant_turn.provider_continuation().is_none());
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &missing.assistant_turn).unwrap(),
+        None
+    );
+
+    let explicit_empty = response(Some(""));
+    assert!(explicit_empty
+        .assistant_turn
+        .provider_continuation()
+        .is_some());
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &explicit_empty.assistant_turn).unwrap(),
+        Some("")
+    );
+}
+
+#[test]
+fn deepseek_disabled_reasoning_supports_multiple_tool_rounds_without_continuations() {
+    let provider_profile =
+        deepseek_provider_profile(ReasoningMode::Disabled, ReasoningEffort::ProviderDefault);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-disabled");
+    let parse_turn = |provider_call_id: &str| {
+        parse_non_stream_response_with_profile(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": provider_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"src/lib.rs\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })
+            .to_string(),
+            &provider_profile,
+            &provider_protocol,
+            LlmResponseValidation::RequireModelAction,
+        )
+        .unwrap()
+        .assistant_turn
+    };
+    let bind_turn = |turn: LlmAssistantTurn, request_index: usize| {
+        let provider_call = turn.provider_tool_calls()[0].clone();
+        let runtime_call = LlmToolCall {
+            id: model_response_tool_call_id(
+                "deepseek-disabled-run",
+                request_index,
+                0,
+                &provider_call.id,
+            ),
+            name: provider_call.name.clone(),
+            args: provider_call.args.clone(),
+        };
+        (
+            turn.with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+                0,
+                &provider_call,
+                runtime_call.clone(),
+            )])
+            .unwrap(),
+            runtime_call,
+        )
+    };
+    let (first_turn, first_runtime_call) = bind_turn(parse_turn("disabled-provider-1"), 0);
+    let (second_turn, second_runtime_call) = bind_turn(parse_turn("disabled-provider-2"), 1);
+    assert!(first_turn.provider_continuation().is_none());
+    assert!(second_turn.provider_continuation().is_none());
+
+    let request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol,
+        max_tokens: 512,
+        temperature: 0.7,
+        stream: false,
+        messages: vec![
+            LlmMessage::text(LlmMessageRole::User, "inspect"),
+            LlmMessage::from_assistant_turn(first_turn),
+            LlmMessage::tool_result(first_runtime_call.id, "first", false),
+            LlmMessage::from_assistant_turn(second_turn),
+            LlmMessage::tool_result(second_runtime_call.id, "second", false),
+        ],
+        tools: vec![tool_definition()],
+    };
+    let payload = build_payload(&request);
+    let tool_turns = payload["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_turns.len(), 2);
+    assert!(tool_turns
+        .iter()
+        .all(|message| message.get("reasoning_content").is_none()));
+    assert_eq!(tool_turns[0]["tool_calls"][0]["id"], "disabled-provider-1");
+    assert_eq!(tool_turns[1]["tool_calls"][0]["id"], "disabled-provider-2");
+}
+
+#[test]
+fn deepseek_stream_captures_reasoning_without_emitting_it_as_visible_text() {
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let mut accumulator = LlmStreamAccumulator::for_protocol(&provider_protocol).unwrap();
+    let mut events = Vec::new();
+
+    for frame in [
+        json!({
+            "choices": [{ "delta": { "reasoning_content": "private " } }]
+        }),
+        json!({
+            "choices": [{
+                "delta": {
+                    "reasoning_content": "reasoning",
+                    "content": "Checking. ",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "deepseek-provider-call-1",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"src/lib.rs\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_cache_hit_tokens": 3,
+                "prompt_cache_miss_tokens": 8,
+                "completion_tokens_details": { "reasoning_tokens": 5 }
+            }
+        }),
+    ] {
+        process_sse_frame(
+            &format!("data: {frame}\n\n"),
+            &mut accumulator,
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+    }
+
+    let response = accumulator.finish().unwrap();
+    assert_eq!(joined_text(&events), "Checking. ");
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        LlmStreamEvent::Delta(delta) if delta.contains("private") || delta.contains("reasoning")
+    )));
+    assert_eq!(
+        response.provider_tool_calls()[0].id,
+        "deepseek-provider-call-1"
+    );
+    assert!(response.assistant_turn.reasoning().is_empty());
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &response.assistant_turn).unwrap(),
+        Some("private reasoning")
+    );
+    assert_eq!(
+        response
+            .assistant_turn
+            .provider_continuation()
+            .unwrap()
+            .replay_scope(),
+        ProviderContinuationReplayScope::InteractionV1
+    );
+    let usage = response.usage.unwrap();
+    assert_eq!(usage.input_tokens, Some(11));
+    assert_eq!(usage.output_tokens, Some(2));
+    assert_eq!(usage.output_thinking_tokens, Some(5));
+    assert_eq!(usage.total_tokens, Some(18));
+    assert_eq!(usage.cached_input_tokens, Some(3));
+    assert_eq!(usage.cache_creation_input_tokens, Some(8));
+}
+
+#[test]
+fn deepseek_usage_fails_closed_when_visible_output_cannot_be_split() {
+    let profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let protocol = deepseek_provider_protocol(&profile, "deepseek-v4-pro");
+
+    let missing_details = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "visible" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 7,
+                "total_tokens": 17
+            }
+        })
+        .to_string(),
+        &protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap()
+    .usage
+    .unwrap();
+    assert_eq!(missing_details.output_tokens, None);
+    assert_eq!(missing_details.output_thinking_tokens, None);
+    assert_eq!(missing_details.total_tokens, Some(17));
+
+    let inconsistent_details = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "visible",
+                    "reasoning_content": "private"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 3,
+                "completion_tokens_details": { "reasoning_tokens": 5 },
+                "total_tokens": 13
+            }
+        })
+        .to_string(),
+        &protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap()
+    .usage
+    .unwrap();
+    assert_eq!(inconsistent_details.output_tokens, None);
+    assert_eq!(inconsistent_details.output_thinking_tokens, Some(5));
+    assert_eq!(inconsistent_details.total_tokens, Some(13));
+
+    let generic_protocol =
+        generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "generic-openai");
+    let generic = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "visible" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 7,
+                "completion_tokens_details": { "reasoning_tokens": 5 },
+                "total_tokens": 17
+            }
+        })
+        .to_string(),
+        &generic_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap()
+    .usage
+    .unwrap();
+    assert_eq!(generic.output_tokens, Some(7));
+    assert_eq!(generic.output_thinking_tokens, Some(5));
+    assert_eq!(generic.total_tokens, Some(17));
+}
+
+#[test]
+fn deepseek_continuation_estimate_measures_replayed_json_and_blocks_local_overflow() {
+    let profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
+    let protocol = deepseek_provider_protocol(&profile, "deepseek-v4-pro");
+    let reasoning = "大段中文 reasoning：\n\"quoted\" \\\\ slash\t".repeat(1_500);
+    let response = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": reasoning,
+                    "tool_calls": [{
+                        "id": "deepseek-estimate-provider-call",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"large.txt\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string(),
+        &protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+    let provider_call = response.provider_tool_calls()[0].clone();
+    let runtime_call = LlmToolCall {
+        id: model_response_tool_call_id("deepseek-estimate-run", 0, 0, &provider_call.id),
+        name: provider_call.name.clone(),
+        args: provider_call.args.clone(),
+    };
+    let turn = response
+        .assistant_turn
+        .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+            0,
+            &provider_call,
+            runtime_call.clone(),
+        )])
+        .unwrap();
+    let estimated = estimate_assistant_turn_continuation_tokens(&turn).unwrap();
+    assert!(
+        estimated > u64::try_from(reasoning.len()).unwrap().div_ceil(4),
+        "Unicode and JSON escaping must not fall back to opaque bytes/4"
+    );
+
+    let mut frame = ContextFrame::new(vec![
+        ContextItem::new(
+            LlmMessage::from_assistant_turn(turn),
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+        ),
+        ContextItem::tool_result(
+            runtime_call.id,
+            "result",
+            false,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+        ),
+    ]);
+    let detector =
+        ContextCapacityDetector::for_model("deepseek-v4-pro", AgentApiStyle::OpenAiCompatible, &[]);
+    let report = detector.inspect(&mut frame, Some(4_096), 512);
+    assert!(report.usage.breakdown.total.provider_continuation_tokens >= estimated);
+    let error = detector.ensure_sendable(report).unwrap_err();
+    assert_eq!(error.code(), Some("context_capacity_exceeded"));
+    assert!(error.to_string().contains("请求尚未发送"));
+}
+
+#[test]
+fn deepseek_groups_tool_history_and_moves_interstitial_context_after_results() {
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let response = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Both files are required.",
+                    "tool_calls": [
+                        {
+                            "id": "deepseek-raw-a",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"a.png\"}"
+                            }
+                        },
+                        {
+                            "id": "deepseek-raw-b",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"b.txt\"}"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string(),
+        &provider_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+    let provider_calls = response.provider_tool_calls().to_vec();
+    let runtime_calls = provider_calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| LlmToolCall {
+            id: model_response_tool_call_id("deepseek-interstitial-run", 0, index, &call.id),
+            name: call.name.clone(),
+            args: call.args.clone(),
+        })
+        .collect::<Vec<_>>();
+    let bindings = provider_calls
+        .iter()
+        .zip(runtime_calls.iter().cloned())
+        .enumerate()
+        .map(|(index, (provider_call, runtime_call))| {
+            LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
+        })
+        .collect();
+    let turn = response
+        .assistant_turn
+        .with_runtime_tool_bindings(bindings)
+        .unwrap();
+    let mut image_context = LlmMessage::text(LlmMessageRole::User, "First tool image");
+    image_context.images_mut().unwrap().push(LlmImage {
+        mime_type: "image/png".to_string(),
+        data_base64: "AA==".to_string(),
+    });
+    let extension_context = LlmMessage::text(
+        LlmMessageRole::Assistant,
+        "Runtime extension state updated.",
+    );
+    let request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol,
+        max_tokens: 512,
+        temperature: 0.0,
+        stream: false,
+        messages: vec![
+            LlmMessage::text(LlmMessageRole::User, "Read both files"),
+            LlmMessage::from_assistant_turn(turn),
+            LlmMessage::tool_result(runtime_calls[0].id.clone(), "first", false),
+            image_context,
+            extension_context,
+            LlmMessage::tool_result(runtime_calls[1].id.clone(), "second", false),
+        ],
+        tools: vec![tool_definition()],
+    };
+
+    validate_request(&request).unwrap();
+    let payload = build_payload(&request);
+    let messages = payload["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 6);
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["reasoning_content"], "Both files are required.");
+    assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 2);
+    assert_eq!(messages[1]["tool_calls"][0]["id"], "deepseek-raw-a");
+    assert_eq!(messages[1]["tool_calls"][1]["id"], "deepseek-raw-b");
+    assert_eq!(messages[2]["tool_call_id"], "deepseek-raw-a");
+    assert_eq!(messages[3]["tool_call_id"], "deepseek-raw-b");
+    assert_eq!(messages[4]["role"], "user");
+    assert_eq!(messages[4]["content"][1]["type"], "image_url");
+    assert_eq!(messages[5]["content"], "Runtime extension state updated.");
+    assert!(messages[5].get("reasoning_content").is_none());
+}
+
+#[test]
+fn deepseek_tool_history_without_a_compatible_continuation_requires_a_boundary() {
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let provider_call = LlmToolCall {
+        id: "legacy-provider-call".to_string(),
+        name: "read_file".to_string(),
+        args: json!({"path":"src/lib.rs"}),
+    };
+    let runtime_call = LlmToolCall {
+        id: model_response_tool_call_id("deepseek-boundary-run", 0, 0, &provider_call.id),
+        name: provider_call.name.clone(),
+        args: provider_call.args.clone(),
+    };
+    let legacy_turn = LlmAssistantTurn::from_legacy("", vec![provider_call.clone()])
+        .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+            0,
+            &provider_call,
+            runtime_call.clone(),
+        )])
+        .unwrap();
+    let request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol,
+        max_tokens: 512,
+        temperature: 0.0,
+        stream: false,
+        messages: vec![
+            LlmMessage::from_assistant_turn(legacy_turn),
+            LlmMessage::tool_result(runtime_call.id, "result", false),
+        ],
+        tools: vec![tool_definition()],
+    };
+
+    let error = validate_request(&request).unwrap_err();
+    assert_eq!(error.code(), Some("provider_context_boundary_required"));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details["reason"].as_str()),
+        Some("missingToolBearingContinuation")
+    );
+}
+
+#[test]
+fn deepseek_tool_history_from_another_frozen_key_requires_a_boundary() {
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let prior_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let current_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let prior_response = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Prior model reasoning.",
+                    "tool_calls": [{
+                        "id": "prior-deepseek-call",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"src/lib.rs\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string(),
+        &prior_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+    let provider_call = prior_response.provider_tool_calls()[0].clone();
+    let runtime_call = LlmToolCall {
+        id: model_response_tool_call_id("deepseek-cross-key-run", 0, 0, &provider_call.id),
+        name: provider_call.name.clone(),
+        args: provider_call.args.clone(),
+    };
+    let prior_turn = prior_response
+        .assistant_turn
+        .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+            0,
+            &provider_call,
+            runtime_call.clone(),
+        )])
+        .unwrap();
+    let request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol: current_protocol,
+        max_tokens: 512,
+        temperature: 0.0,
+        stream: false,
+        messages: vec![
+            LlmMessage::from_assistant_turn(prior_turn),
+            LlmMessage::tool_result(runtime_call.id, "result", false),
+        ],
+        tools: vec![tool_definition()],
+    };
+
+    let error = validate_request(&request).unwrap_err();
+    assert_eq!(error.code(), Some("provider_context_boundary_required"));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details["reason"].as_str()),
+        Some("incompatibleToolBearingContinuation")
+    );
+}
+
+#[test]
+fn deepseek_does_not_replay_reasoning_from_an_ordinary_prior_model_turn() {
+    const PRIOR_REASONING: &str = "PRIOR_NO_TOOL_REASONING_MUST_NOT_REPLAY";
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let prior_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let current_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let prior_response = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Prior visible answer.",
+                    "reasoning_content": PRIOR_REASONING
+                },
+                "finish_reason": "stop"
+            }]
+        })
+        .to_string(),
+        &prior_protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap();
+    let request = LlmChatRequest {
+        api_url: "https://api.deepseek.test/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol: current_protocol,
+        max_tokens: 512,
+        temperature: 0.0,
+        stream: false,
+        messages: vec![
+            LlmMessage::from_assistant_turn(prior_response.assistant_turn),
+            LlmMessage::text(LlmMessageRole::User, "New user turn"),
+        ],
+        tools: Vec::new(),
+    };
+
+    validate_request(&request).unwrap();
+    let encoded = serde_json::to_string(&build_payload(&request)).unwrap();
+    assert!(!encoded.contains(PRIOR_REASONING));
+    assert!(!encoded.contains("reasoning_content"));
+}
+
+#[tokio::test]
+async fn fake_deepseek_provider_round_trips_reasoning_and_raw_tool_identity() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for response_index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(read_test_http_request_json(&mut stream).await);
+            let body = match response_index {
+                0 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "I should inspect the file first.",
+                            "tool_calls": [{
+                                "id": "deepseek-raw-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"src/lib.rs\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 6,
+                        "total_tokens": 16,
+                        "prompt_cache_hit_tokens": 4,
+                        "prompt_cache_miss_tokens": 6,
+                        "completion_tokens_details": { "reasoning_tokens": 4 }
+                    }
+                }),
+                1 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "I should inspect one more file.",
+                            "tool_calls": [{
+                                "id": "deepseek-raw-call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": "{\"path\":\"src/main.rs\"}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 18,
+                        "completion_tokens": 5,
+                        "total_tokens": 23,
+                        "completion_tokens_details": { "reasoning_tokens": 3 }
+                    }
+                }),
+                2 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "The file is ready.",
+                            "reasoning_content": "The tool result is sufficient."
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 18,
+                        "completion_tokens": 5,
+                        "total_tokens": 23,
+                        "completion_tokens_details": { "reasoning_tokens": 3 }
+                    }
+                }),
+                _ => unreachable!(),
+            };
+            write_test_http_response(&mut stream, "200 OK", body).await;
+        }
+        requests
+    });
+
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::Max);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-pro");
+    let first_request = LlmChatRequest {
+        api_url: format!("http://{address}/chat/completions"),
+        api_token: "deepseek-fake-token".to_string(),
+        provider_profile: provider_profile.clone(),
+        provider_protocol: provider_protocol.clone(),
+        max_tokens: 1_024,
+        temperature: 0.3,
+        stream: false,
+        messages: vec![LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs")],
+        tools: vec![tool_definition()],
+    };
+    let first_response = complete_chat(first_request, AgentCancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(first_response.content(), "");
+    assert_eq!(first_response.provider_tool_calls().len(), 1);
+    assert_eq!(
+        first_response.usage.as_ref().unwrap().input_tokens,
+        Some(10)
+    );
+    assert_eq!(
+        first_response
+            .usage
+            .as_ref()
+            .unwrap()
+            .output_thinking_tokens,
+        Some(4)
+    );
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &first_response.assistant_turn).unwrap(),
+        Some("I should inspect the file first.")
+    );
+
+    let provider_call = first_response.provider_tool_calls()[0].clone();
+    let runtime_call = LlmToolCall {
+        id: model_response_tool_call_id("deepseek-fake-run", 0, 0, &provider_call.id),
+        name: provider_call.name.clone(),
+        args: provider_call.args.clone(),
+    };
+    let first_turn = first_response
+        .assistant_turn
+        .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+            0,
+            &provider_call,
+            runtime_call.clone(),
+        )])
+        .unwrap();
+    let first_turn_message = LlmMessage::from_assistant_turn(first_turn);
+    let first_result_message =
+        LlmMessage::tool_result(runtime_call.id.clone(), "{\"ok\":true}", false);
+    let second_request = LlmChatRequest {
+        api_url: format!("http://{address}/chat/completions"),
+        api_token: "deepseek-fake-token".to_string(),
+        provider_profile: provider_profile.clone(),
+        provider_protocol: provider_protocol.clone(),
+        max_tokens: 1_024,
+        temperature: 0.3,
+        stream: false,
+        messages: vec![
+            LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs"),
+            first_turn_message.clone(),
+            first_result_message.clone(),
+        ],
+        tools: vec![tool_definition()],
+    };
+    let second_response = complete_chat(second_request, AgentCancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(second_response.content(), "");
+    assert_eq!(second_response.provider_tool_calls().len(), 1);
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &second_response.assistant_turn).unwrap(),
+        Some("I should inspect one more file.")
+    );
+
+    let second_provider_call = second_response.provider_tool_calls()[0].clone();
+    let second_runtime_call = LlmToolCall {
+        id: model_response_tool_call_id("deepseek-fake-run", 1, 0, &second_provider_call.id),
+        name: second_provider_call.name.clone(),
+        args: second_provider_call.args.clone(),
+    };
+    let second_turn = second_response
+        .assistant_turn
+        .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+            0,
+            &second_provider_call,
+            second_runtime_call.clone(),
+        )])
+        .unwrap();
+    let third_request = LlmChatRequest {
+        api_url: format!("http://{address}/chat/completions"),
+        api_token: "deepseek-fake-token".to_string(),
+        provider_profile,
+        provider_protocol: provider_protocol.clone(),
+        max_tokens: 1_024,
+        temperature: 0.3,
+        stream: false,
+        messages: vec![
+            LlmMessage::text(LlmMessageRole::User, "Inspect src/lib.rs"),
+            first_turn_message,
+            first_result_message,
+            LlmMessage::from_assistant_turn(second_turn),
+            LlmMessage::tool_result(second_runtime_call.id, "{\"ok\":true}", false),
+        ],
+        tools: vec![tool_definition()],
+    };
+    let third_response = complete_chat(third_request, AgentCancellationToken::new())
+        .await
+        .unwrap();
+    let requests = server.await.unwrap();
+
+    assert_eq!(third_response.content(), "The file is ready.");
+    assert_eq!(
+        third_response
+            .assistant_turn
+            .provider_continuation()
+            .unwrap()
+            .replay_scope(),
+        ProviderContinuationReplayScope::AssistantTurnV1
+    );
+    assert_eq!(requests[0]["thinking"], json!({ "type": "enabled" }));
+    assert_eq!(requests[0]["reasoning_effort"], "max");
+    assert!(requests[0].get("temperature").is_none());
+    assert!(requests[0].get("tool_choice").is_none());
+    assert_eq!(requests[1]["messages"][1]["role"], "assistant");
+    assert_eq!(requests[1]["messages"][1]["content"], "");
+    assert_eq!(
+        requests[1]["messages"][1]["reasoning_content"],
+        "I should inspect the file first."
+    );
+    assert_eq!(
+        requests[1]["messages"][1]["tool_calls"][0]["id"],
+        "deepseek-raw-call-1"
+    );
+    assert_eq!(
+        requests[1]["messages"][2]["tool_call_id"],
+        "deepseek-raw-call-1"
+    );
+    assert_eq!(
+        requests[2]["messages"][1]["reasoning_content"],
+        "I should inspect the file first."
+    );
+    assert_eq!(
+        requests[2]["messages"][3]["reasoning_content"],
+        "I should inspect one more file."
+    );
+    assert_eq!(
+        requests[2]["messages"][3]["tool_calls"][0]["id"],
+        "deepseek-raw-call-2"
+    );
+    assert_eq!(
+        requests[2]["messages"][4]["tool_call_id"],
+        "deepseek-raw-call-2"
+    );
+}
+
+#[tokio::test]
+async fn deepseek_stream_retry_discards_failed_attempt_reasoning() {
+    const STALE: &str = "STALE_DEEPSEEK_REASONING";
+    const FRESH: &str = "FRESH_DEEPSEEK_REASONING";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            if attempt == 0 {
+                stream
+                    .write_all(
+                        format!(
+                            "data: {}\n\ndata: {{invalid-json\n\n",
+                            json!({
+                                "choices":[{"delta":{"reasoning_content":STALE}}],
+                                "usage": {
+                                    "prompt_tokens": 3,
+                                    "completion_tokens": 3,
+                                    "total_tokens": 6,
+                                    "completion_tokens_details": { "reasoning_tokens": 2 }
+                                }
+                            })
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                stream
+                    .write_all(
+                        format!(
+                            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                            json!({"choices":[{"delta":{"reasoning_content":FRESH}}]}),
+                            json!({
+                                "choices":[{
+                                    "delta":{"content":"Recovered."},
+                                    "finish_reason":"stop"
+                                }],
+                                "usage": {
+                                    "prompt_tokens": 2,
+                                    "completion_tokens": 2,
+                                    "total_tokens": 4
+                                }
+                            })
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+
+    let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
+    let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+    let request = LlmChatRequest {
+        api_url: format!("http://{address}/chat/completions"),
+        api_token: "deepseek-stream-retry-token".to_string(),
+        provider_profile,
+        provider_protocol: provider_protocol.clone(),
+        max_tokens: 128,
+        temperature: 0.0,
+        stream: true,
+        messages: vec![LlmMessage::text(LlmMessageRole::User, "hello")],
+        tools: Vec::new(),
+    };
+    let mut events = Vec::new();
+    let response = complete_chat_streaming(request, AgentCancellationToken::new(), |event| {
+        events.push(event);
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(response.content(), "Recovered.");
+    let usage = response.usage.as_ref().expect("retry usage");
+    assert_eq!(usage.input_tokens, Some(5));
+    assert_eq!(usage.total_tokens, Some(10));
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.output_thinking_tokens, None);
+    assert_eq!(usage.billable_request_count, Some(2));
+    assert_eq!(
+        deepseek_reasoning_content(&provider_protocol, &response.assistant_turn).unwrap(),
+        Some(FRESH)
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        LlmStreamEvent::Delta(delta) if delta.contains(STALE) || delta.contains(FRESH)
+    )));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, LlmStreamEvent::AttemptStarted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, LlmStreamEvent::AttemptReset { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]

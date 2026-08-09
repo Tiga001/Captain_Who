@@ -917,6 +917,224 @@ fn test_mcp_resume_checkpoint(
     .unwrap()
 }
 
+fn freeze_deepseek_tool_checkpoint(
+    input: &mut AgentChatInput,
+    provider_continuation_refs: Vec<mycopilot_core::ProviderContinuationRef>,
+) {
+    let mut profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+    profile.reasoning = mycopilot_core::ReasoningPolicy {
+        mode: mycopilot_core::ReasoningMode::Disabled,
+        effort: mycopilot_core::ReasoningEffort::ProviderDefault,
+    };
+    let key = mycopilot_core::ProviderProtocolKey::new(
+        mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        input.model.clone(),
+        input.provider_configuration_revision.clone(),
+    )
+    .unwrap();
+    input.provider_profile_config = Some(profile.clone());
+    input.provider_protocol_key = Some(key.clone());
+    let checkpoint = input.resume_checkpoint.as_mut().unwrap();
+    checkpoint.provider_profile_config = profile;
+    checkpoint.provider_protocol_key = key;
+    checkpoint.provider_continuation_refs = provider_continuation_refs;
+}
+
+fn seed_tampered_provider_continuation(
+    database_path: &std::path::Path,
+    continuation_ref: &mycopilot_core::ProviderContinuationRef,
+    protocol: &mycopilot_core::ProviderProtocolKey,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    runtime_call_id: &str,
+) {
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO conversations (
+                id, project_id, model_id, title, created_at, updated_at,
+                pinned_at, archived_at, unread_at
+             ) VALUES (?1, NULL, ?2, 'tampered continuation', 1, 1, NULL, NULL, NULL)",
+            rusqlite::params![conversation_id, &protocol.model_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json,
+                ui_state_json, created_at, position
+             ) VALUES (?1, ?2, 'assistant', 'visible', 'pending', NULL, NULL, 1, 0)",
+            rusqlite::params![assistant_message_id, conversation_id],
+        )
+        .unwrap();
+    let protocol_digest = {
+        let digest = Sha256::digest(serde_json::to_vec(protocol).unwrap());
+        format!("sha256:{digest:x}")
+    };
+    connection
+        .execute(
+            "INSERT INTO provider_continuations (
+                continuation_id, schema_version, envelope_version,
+                conversation_id, assistant_message_id, run_id, request_index,
+                assistant_turn_id, assistant_turn_digest, provider_protocol_digest,
+                state, superseded_by, compression, encryption, payload_digest,
+                nonce, ciphertext, decoded_bytes, compressed_bytes,
+                created_at, updated_at, released_at
+             ) VALUES (
+                ?1, 1, 1, ?2, ?3, ?4, 0,
+                ?5, ?6, ?7, 'active', NULL, 'zstd_binary_v1',
+                'chacha20_poly1305_v1', ?8, ?9, ?10, 1, 1, 2, 2, NULL
+             )",
+            rusqlite::params![
+                &continuation_ref.id,
+                conversation_id,
+                assistant_message_id,
+                run_id,
+                format!("at1_{}", "a".repeat(64)),
+                format!("sha256:{}", "b".repeat(64)),
+                protocol_digest,
+                format!("sha256:{}", "c".repeat(64)),
+                vec![7_u8; 12],
+                vec![9_u8; 17],
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO provider_continuation_tool_calls (
+                continuation_id, provider_tool_index, runtime_call_id
+             ) VALUES (?1, 0, ?2)",
+            rusqlite::params![&continuation_ref.id, runtime_call_id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatch() {
+    for scenario in ["empty", "missing", "tampered"] {
+        let fixture = tempdir().unwrap();
+        let database_path = fixture
+            .path()
+            .join(format!("provider-preflight-{scenario}.sqlite"));
+        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        save_test_pending_provider(
+            &storage,
+            "test-model",
+            "https://example.test/v1/chat/completions",
+            "test-token",
+            "disabled",
+            "",
+        );
+        let mut provider_settings = storage.load_model_settings().unwrap().unwrap();
+        let mut deepseek_profile = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        deepseek_profile.reasoning = mycopilot_core::ReasoningPolicy {
+            mode: mycopilot_core::ReasoningMode::Disabled,
+            effort: mycopilot_core::ReasoningEffort::ProviderDefault,
+        };
+        provider_settings.models[0].provider_profile_config = Some(deepseek_profile);
+        storage.save_model_settings(provider_settings).unwrap();
+        let credentials =
+            Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
+        let vault = Arc::new(
+            mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
+                Arc::clone(&storage),
+                credentials.clone(),
+            )
+            .unwrap(),
+        );
+        let invoker = Arc::new(RecoverableApprovalRaceInvoker::default());
+        let service =
+            AgentService::try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
+                Arc::clone(&storage),
+                Some(vault),
+            )
+            .unwrap();
+        let run_id = format!("provider-preflight-{scenario}-run");
+        let conversation_id = format!("provider-preflight-{scenario}-conversation");
+        let assistant_message_id = format!("provider-preflight-{scenario}-assistant");
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let invocation_id = uuid::Uuid::new_v4().to_string();
+        let mut input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "test-token",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, &run_id, &action_id));
+        freeze_test_pending_provider_configuration(&storage, &mut input);
+        let refs = if scenario == "empty" {
+            Vec::new()
+        } else {
+            vec![mycopilot_core::ProviderContinuationRef::new()]
+        };
+        freeze_deepseek_tool_checkpoint(&mut input, refs.clone());
+        if scenario == "tampered" {
+            let checkpoint = input.resume_checkpoint.as_ref().unwrap();
+            seed_tampered_provider_continuation(
+                &database_path,
+                &refs[0],
+                &checkpoint.provider_protocol_key,
+                &conversation_id,
+                &assistant_message_id,
+                &run_id,
+                &checkpoint.pending_tool_call_id,
+            );
+        }
+        assert!(service
+            .store_pending_action(
+                &run_id,
+                &conversation_id,
+                &assistant_message_id,
+                test_mcp_pending_action(
+                    &run_id,
+                    &action_id,
+                    &invocation_id,
+                    mycopilot_core::storage::now_ms(),
+                ),
+                input,
+            )
+            .unwrap());
+        drop(service);
+        drop(storage);
+
+        let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let reopened_vault = Arc::new(
+            mycopilot_core::ProviderContinuationVaultFactory::open_or_provision(
+                Arc::clone(&reopened_storage),
+                credentials,
+            )
+            .unwrap(),
+        );
+        let restarted =
+            AgentService::try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
+                reopened_storage,
+                Some(reopened_vault),
+            )
+            .unwrap()
+            .with_mcp_tool_invoker(invoker.clone() as Arc<dyn McpToolInvoker>);
+
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let error = restarted
+            .approve_action(&run_id, &action_id, notifications)
+            .unwrap_err();
+        assert!(
+            error.contains("provider_continuation"),
+            "unexpected preflight error for {scenario}: {error}"
+        );
+        assert_eq!(
+            invoker
+                .invocations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{scenario} continuation state must block dispatch before the executor"
+        );
+        assert!(restarted.list_pending_actions().is_empty());
+    }
+}
+
 fn test_mcp_envelope(
     invocation_id: &str,
     action_id: &str,
@@ -2651,12 +2869,11 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     }
 
     // A broad settings save during the approval pause changes the global revision but not this
-    // model's effective connection or search connection. Restart must retain the run's original
-    // profile/key instead of recomputing them from the edited model.
+    // model's effective wire protocol or search connection. Restart must retain the run's
+    // original profile/key instead of recomputing provenance from the broad save revision.
     let mut edited = storage.load_model_settings().unwrap().unwrap();
     edited.models[0].context_window_tokens = Some(256_000);
-    edited.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+    edited.models[0].input_price = "1.5".to_string();
     edited.models.push(ModelConfigRecord {
         id: "unrelated-restart-model".to_string(),
         display_name: "Unrelated Restart Model".to_string(),
@@ -2705,7 +2922,7 @@ fn frozen_provider_resume_input(
     search_key: Option<&str>,
 ) -> DecodedPersistedAgentResumeInput {
     let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
-    let revision = snapshot.configuration_revision.clone();
+    let protocol_revision = snapshot.provider_protocol_revisions["test-model"].clone();
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": api_url,
         "apiToken": api_token,
@@ -2719,14 +2936,9 @@ fn frozen_provider_resume_input(
         "messages": []
     }))
     .unwrap();
-    freeze_generic_provider_protocol(&mut input, revision);
-    input.provider_connection_revision = Some(
-        snapshot
-            .provider_connection_revisions
-            .get("test-model")
-            .unwrap()
-            .clone(),
-    );
+    freeze_generic_provider_protocol(&mut input, protocol_revision);
+    input.provider_connection_revision =
+        Some(snapshot.provider_connection_revisions["test-model"].clone());
     input.search_connection_revision = Some(snapshot.search_connection_revision);
     PersistedAgentResumeInput::decode(
         &PersistedAgentResumeInput::from_agent_input(&input)
@@ -2787,7 +2999,7 @@ fn pending_resume_rejects_tokenless_to_token_presence_drift() {
 }
 
 #[test]
-fn pending_resume_preserves_frozen_profile_across_unrelated_model_settings_edits() {
+fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edits() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let endpoint = "https://provider-model.example/v1";
@@ -2806,8 +3018,6 @@ fn pending_resume_preserves_frozen_profile_across_unrelated_model_settings_edits
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     settings.models[0].context_window_tokens = Some(256_000);
     settings.models[0].input_price = "1.5".to_string();
-    settings.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
     settings.models.push(ModelConfigRecord {
         id: "unrelated-model".to_string(),
         display_name: "Unrelated Model".to_string(),
@@ -2830,6 +3040,31 @@ fn pending_resume_preserves_frozen_profile_across_unrelated_model_settings_edits
     assert_eq!(restored.provider_protocol_key.as_ref(), Some(&frozen_key));
     assert_eq!(restored.context_window_tokens, Some(128_000));
     assert_eq!(restored.api_token, "fixed-model-token");
+}
+
+#[test]
+fn pending_resume_rejects_selected_models_provider_profile_change() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let endpoint = "https://provider-profile-change.example/v1";
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        endpoint,
+        "fixed-model-token",
+        "disabled",
+        "",
+    );
+    let frozen =
+        frozen_provider_resume_input(&storage, endpoint, "fixed-model-token", "disabled", None);
+
+    let mut settings = storage.load_model_settings().unwrap().unwrap();
+    settings.models[0].provider_profile_config =
+        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+    storage.save_model_settings(settings).unwrap();
+
+    let error = restore_agent_input_secrets(&storage, frozen).unwrap_err();
+    assert!(error.contains("no longer matches"));
 }
 
 #[test]
@@ -3189,6 +3424,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         provider_profile_config,
         provider_protocol_key,
         assistant_turn_identity: crate::test_assistant_turn_identity(&["action-skill-redaction"]),
+        provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "action-skill-redaction".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -3414,6 +3650,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
+        provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -3504,6 +3741,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
+        provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -3596,6 +3834,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
+            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
             input_price: None,
             output_price: None,
             started_at: 1,
@@ -3631,6 +3870,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
+        provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -3717,6 +3957,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
+            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
             input_price: None,
             output_price: None,
             started_at: 1,
@@ -3788,6 +4029,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
         assistant_turn_identity: crate::test_assistant_turn_identity(&[action_id]),
+        provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: action_id.to_string(),
         conversation_model_context_items: Vec::new(),

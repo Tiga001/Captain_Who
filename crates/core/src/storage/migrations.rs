@@ -1166,6 +1166,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             context_window_tokens INTEGER,
             provider_profile_config_json TEXT,
             provider_connection_revision TEXT,
+            provider_protocol_revision TEXT,
             input_price TEXT NOT NULL,
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
@@ -1183,6 +1184,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             context_window_tokens,
             provider_profile_config_json,
             provider_connection_revision,
+            provider_protocol_revision,
             input_price,
             output_price,
             enabled,
@@ -1202,6 +1204,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             model.context_window_tokens,
             model.provider_profile_config_json,
             model.provider_connection_revision,
+            model.provider_protocol_revision,
             model.input_price,
             model.output_price,
             model.enabled,
@@ -2146,6 +2149,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             context_window_tokens INTEGER,
             provider_profile_config_json TEXT,
             provider_connection_revision TEXT,
+            provider_protocol_revision TEXT,
             input_price TEXT NOT NULL,
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
@@ -2325,6 +2329,102 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             CHECK (expires_at > created_at)
         );
 
+        -- Private encrypted replay state for provider-native Assistant Turns. The ordinary
+        -- message, trace, archive and pending-action tables never receive plaintext reasoning or
+        -- provider continuation bytes. `active` and `superseded` remain replayable; an explicit
+        -- lifecycle release atomically erases every payload-bearing column.
+        CREATE TABLE IF NOT EXISTS provider_continuations (
+            continuation_id TEXT PRIMARY KEY CHECK (
+                length(continuation_id) = 61
+                AND substr(continuation_id, 1, 25) = 'provider-continuation-v1:'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            envelope_version INTEGER NOT NULL CHECK (envelope_version = 1),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (
+                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            request_index INTEGER NOT NULL CHECK (request_index >= 0),
+            assistant_turn_id TEXT NOT NULL CHECK (
+                length(assistant_turn_id) = 68
+                AND substr(assistant_turn_id, 1, 4) = 'at1_'
+                AND substr(assistant_turn_id, 5) NOT GLOB '*[^0-9a-f]*'
+            ),
+            assistant_turn_digest TEXT NOT NULL CHECK (
+                length(assistant_turn_digest) = 71
+                AND substr(assistant_turn_digest, 1, 7) = 'sha256:'
+                AND substr(assistant_turn_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            provider_protocol_digest TEXT NOT NULL CHECK (
+                length(provider_protocol_digest) = 71
+                AND substr(provider_protocol_digest, 1, 7) = 'sha256:'
+                AND substr(provider_protocol_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            state TEXT NOT NULL CHECK (state IN ('active', 'superseded', 'released')),
+            superseded_by TEXT,
+            compression TEXT,
+            encryption TEXT,
+            payload_digest TEXT,
+            nonce BLOB,
+            ciphertext BLOB,
+            decoded_bytes INTEGER,
+            compressed_bytes INTEGER,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            released_at INTEGER CHECK (released_at IS NULL OR released_at >= created_at),
+            activated_at INTEGER CHECK (activated_at IS NULL OR activated_at >= created_at),
+            UNIQUE (conversation_id, assistant_message_id, run_id, request_index),
+            CHECK (
+                (
+                    state IN ('active', 'superseded')
+                    AND compression = 'zstd_binary_v1'
+                    AND encryption = 'chacha20_poly1305_v1'
+                    AND payload_digest IS NOT NULL
+                    AND length(payload_digest) = 71
+                    AND substr(payload_digest, 1, 7) = 'sha256:'
+                    AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
+                    AND nonce IS NOT NULL
+                    AND length(nonce) = 12
+                    AND ciphertext IS NOT NULL
+                    AND length(ciphertext) > 16
+                    AND length(ciphertext) <= 2097152
+                    AND decoded_bytes BETWEEN 1 AND 8388608
+                    AND compressed_bytes BETWEEN 1 AND 2097152
+                    AND length(ciphertext) = compressed_bytes + 16
+                    AND released_at IS NULL
+                ) OR (
+                    state = 'released'
+                    AND superseded_by IS NULL
+                    AND compression = 'zstd_binary_v1'
+                    AND encryption = 'chacha20_poly1305_v1'
+                    AND payload_digest IS NULL
+                    AND nonce IS NULL
+                    AND ciphertext IS NULL
+                    AND decoded_bytes IS NULL
+                    AND compressed_bytes IS NULL
+                    AND released_at IS NOT NULL
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        -- Safe runtime Tool identities used only to release an encrypted provider turn when every
+        -- Tool Exchange in that exact turn has crossed a durable compaction boundary. Provider
+        -- call ids and opaque continuation bytes remain inside the authenticated ciphertext.
+        CREATE TABLE IF NOT EXISTS provider_continuation_tool_calls (
+            continuation_id TEXT NOT NULL,
+            provider_tool_index INTEGER NOT NULL CHECK (provider_tool_index >= 0),
+            runtime_call_id TEXT NOT NULL CHECK (
+                length(CAST(runtime_call_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            PRIMARY KEY (continuation_id, provider_tool_index),
+            UNIQUE (continuation_id, runtime_call_id),
+            FOREIGN KEY (continuation_id)
+                REFERENCES provider_continuations(continuation_id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS agent_file_drafts (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
@@ -2390,6 +2490,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "models", "api_token_override", "TEXT")?;
     add_column_if_missing(connection, "models", "provider_profile_config_json", "TEXT")?;
     add_column_if_missing(connection, "models", "provider_connection_revision", "TEXT")?;
+    add_column_if_missing(connection, "models", "provider_protocol_revision", "TEXT")?;
     add_column_if_missing(connection, "conversations", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "archived_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "unread_at", "INTEGER")?;
@@ -3078,6 +3179,14 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             ON mcp_approval_payload_envelopes(expires_at);
         CREATE INDEX IF NOT EXISTS idx_mcp_approval_payload_envelopes_action_id
             ON mcp_approval_payload_envelopes(action_id);
+        CREATE INDEX IF NOT EXISTS idx_provider_continuations_replay_scope
+            ON provider_continuations(
+                conversation_id, assistant_message_id, run_id, request_index
+            );
+        CREATE INDEX IF NOT EXISTS idx_provider_continuations_state
+            ON provider_continuations(state, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_continuation_tool_calls_runtime
+            ON provider_continuation_tool_calls(runtime_call_id, continuation_id);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_conversation_status ON agent_file_drafts(conversation_id, status);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
@@ -3176,6 +3285,24 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             ON conversation_turn_traces(conversation_id, updated_at);
         ",
     )?;
+
+    // Provider continuations created before two-phase publication were already replayable. Only
+    // that one-time migration backfills activation; rows staged after the column exists must stay
+    // invisible across a crash until their complete ToolCall trace is durably observable.
+    if !table_has_column(connection, "provider_continuations", "activated_at")? {
+        add_column_if_missing(
+            connection,
+            "provider_continuations",
+            "activated_at",
+            "INTEGER",
+        )?;
+        connection.execute(
+            "UPDATE provider_continuations
+             SET activated_at = created_at
+             WHERE state IN ('active', 'superseded')",
+            [],
+        )?;
+    }
 
     add_column_if_missing(connection, "messages", "agent_run_json", "TEXT")?;
     add_column_if_missing(connection, "messages", "ui_state_json", "TEXT")?;
@@ -3308,6 +3435,22 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             lower(hex(randomblob(6)))
         WHERE provider_connection_revision IS NULL
            OR provider_connection_revision = ''
+        ",
+        [],
+    )?;
+    // Preserve the exact provenance used by pre-upgrade ProviderProtocolKeys. Once present, each
+    // model's protocol revision is preserved across equivalent/unrelated saves and rotates only
+    // when that model's effective wire contract changes.
+    connection.execute(
+        "
+        UPDATE models
+        SET provider_protocol_revision = (
+            SELECT configuration_revision
+            FROM model_provider_settings
+            WHERE id = 'default'
+        )
+        WHERE provider_protocol_revision IS NULL
+           OR provider_protocol_revision = ''
         ",
         [],
     )?;
@@ -3529,7 +3672,7 @@ mod tests {
 
     #[test]
     fn backfills_a_canonical_random_revision_for_legacy_model_settings() {
-        let connection = Connection::open_in_memory().unwrap();
+        let mut connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
                 "
@@ -3583,11 +3726,12 @@ mod tests {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .unwrap();
-        let provider_revision = connection
+        let (provider_revision, provider_protocol_revision) = connection
             .query_row(
-                "SELECT provider_connection_revision FROM models WHERE id = 'legacy-model'",
+                "SELECT provider_connection_revision, provider_protocol_revision
+                 FROM models WHERE id = 'legacy-model'",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .unwrap();
 
@@ -3595,6 +3739,32 @@ mod tests {
         assert!(crate::storage::config_repository::is_search_connection_revision(&search_revision));
         assert!(
             crate::storage::config_repository::is_provider_connection_revision(&provider_revision)
+        );
+        assert_eq!(provider_protocol_revision, revision);
+        assert!(
+            crate::storage::config_repository::is_provider_protocol_revision(
+                &provider_protocol_revision
+            )
+        );
+
+        let settings = crate::storage::config_repository::load_model_settings(&mut connection)
+            .unwrap()
+            .unwrap();
+        crate::storage::config_repository::save_model_settings(&mut connection, settings).unwrap();
+        let (next_global_revision, next_protocol_revision) = connection
+            .query_row(
+                "SELECT settings.configuration_revision, model.provider_protocol_revision
+                 FROM model_provider_settings AS settings
+                 JOIN models AS model ON model.id = 'legacy-model'
+                 WHERE settings.id = 'default'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_ne!(next_global_revision, revision);
+        assert_eq!(
+            next_protocol_revision, provider_protocol_revision,
+            "an equivalent first save after migration must retain pre-upgrade continuation provenance"
         );
     }
 

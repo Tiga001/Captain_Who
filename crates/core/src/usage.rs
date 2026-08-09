@@ -68,6 +68,24 @@ pub(crate) fn merge_stream_usage(target: &mut Option<AgentUsage>, next: Option<A
 }
 
 pub(crate) fn merge_total_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsage>) {
+    merge_total_usage_with_output_breakdown(total, next, false);
+}
+
+/// Merges request usage for a profile whose visible output and private reasoning output are
+/// disjoint fields. Once either component is unknown for one billable request, the aggregate
+/// component remains unknown; keeping a partial subtotal would present it as complete.
+pub(crate) fn merge_total_usage_with_disjoint_reasoning(
+    total: &mut Option<AgentUsage>,
+    next: Option<AgentUsage>,
+) {
+    merge_total_usage_with_output_breakdown(total, next, true);
+}
+
+fn merge_total_usage_with_output_breakdown(
+    total: &mut Option<AgentUsage>,
+    next: Option<AgentUsage>,
+    require_complete_output_breakdown: bool,
+) {
     let Some(next) = next else {
         return;
     };
@@ -75,9 +93,16 @@ pub(crate) fn merge_total_usage(total: &mut Option<AgentUsage>, next: Option<Age
     match total {
         Some(total) => {
             total.input_tokens = sum_optional(total.input_tokens, next.input_tokens);
-            total.output_tokens = sum_optional(total.output_tokens, next.output_tokens);
-            total.output_thinking_tokens =
-                sum_optional(total.output_thinking_tokens, next.output_thinking_tokens);
+            total.output_tokens = if require_complete_output_breakdown {
+                sum_optional_complete(total.output_tokens, next.output_tokens)
+            } else {
+                sum_optional(total.output_tokens, next.output_tokens)
+            };
+            total.output_thinking_tokens = if require_complete_output_breakdown {
+                sum_optional_complete(total.output_thinking_tokens, next.output_thinking_tokens)
+            } else {
+                sum_optional(total.output_thinking_tokens, next.output_thinking_tokens)
+            };
             total.total_tokens = sum_optional(total.total_tokens, next.total_tokens);
             total.cached_input_tokens =
                 sum_optional(total.cached_input_tokens, next.cached_input_tokens);
@@ -196,6 +221,11 @@ fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
+fn sum_optional_complete(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    left.zip(right)
+        .and_then(|(left, right)| left.checked_add(right))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +342,54 @@ mod tests {
         assert_eq!(total.cached_input_tokens, Some(2));
         assert_eq!(total.cache_creation_input_tokens, Some(3));
         assert_eq!(total.billable_request_count, Some(2));
+    }
+
+    #[test]
+    fn disjoint_reasoning_breakdown_stays_unknown_when_any_request_cannot_split_output() {
+        let mut total = None;
+        merge_total_usage_with_disjoint_reasoning(
+            &mut total,
+            Some(AgentUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(20),
+                output_thinking_tokens: Some(80),
+                total_tokens: Some(200),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(1),
+            }),
+        );
+        merge_total_usage_with_disjoint_reasoning(
+            &mut total,
+            Some(AgentUsage {
+                input_tokens: Some(120),
+                output_tokens: None,
+                output_thinking_tokens: None,
+                total_tokens: Some(170),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(1),
+            }),
+        );
+        merge_total_usage_with_disjoint_reasoning(
+            &mut total,
+            Some(AgentUsage {
+                input_tokens: Some(140),
+                output_tokens: Some(10),
+                output_thinking_tokens: Some(30),
+                total_tokens: Some(180),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(1),
+            }),
+        );
+
+        let total = total.unwrap();
+        assert_eq!(total.input_tokens, Some(360));
+        assert_eq!(total.total_tokens, Some(550));
+        assert_eq!(total.output_tokens, None);
+        assert_eq!(total.output_thinking_tokens, None);
+        assert_eq!(total.billable_request_count, Some(3));
     }
 
     #[test]

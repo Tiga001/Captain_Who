@@ -4,7 +4,7 @@
 //! `ContextFrame` uses that identity to invalidate item caches safely when a run switches to a
 //! different tokenizer. Persisted checkpoints intentionally exclude these derived measurements.
 
-use crate::llm::{LlmMessage, LlmMessageRole};
+use crate::llm::{LlmAssistantTurn, LlmMessage, LlmMessageRole};
 use crate::protocol::AgentToolDefinition;
 use crate::provider_profile::ProviderProfileId;
 use std::fmt::Debug;
@@ -82,6 +82,9 @@ pub(crate) struct ContextMessageEstimate {
     pub(crate) message_content_tokens: u64,
     pub(crate) message_structure_tokens: u64,
     pub(crate) tool_call_tokens: u64,
+    /// Provider-owned opaque continuation bytes that will be projected onto the wire. Kept
+    /// separate from Tool Call JSON so diagnostics can identify hidden protocol-state cost.
+    pub(crate) provider_continuation_tokens: u64,
     pub(crate) image_tokens: u64,
     pub(crate) image_count: usize,
 }
@@ -91,6 +94,7 @@ impl ContextMessageEstimate {
         self.message_content_tokens
             .saturating_add(self.message_structure_tokens)
             .saturating_add(self.tool_call_tokens)
+            .saturating_add(self.provider_continuation_tokens)
             .saturating_add(self.image_tokens)
     }
 
@@ -102,6 +106,9 @@ impl ContextMessageEstimate {
             .message_structure_tokens
             .saturating_add(other.message_structure_tokens);
         self.tool_call_tokens = self.tool_call_tokens.saturating_add(other.tool_call_tokens);
+        self.provider_continuation_tokens = self
+            .provider_continuation_tokens
+            .saturating_add(other.provider_continuation_tokens);
         self.image_tokens = self.image_tokens.saturating_add(other.image_tokens);
         self.image_count = self.image_count.saturating_add(other.image_count);
     }
@@ -255,20 +262,50 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
     }
 
     fn estimate_message(&self, message: &LlmMessage) -> ContextMessageEstimate {
-        let message_content_tokens = self.estimate_text(message.content());
+        let deepseek_turn = message.assistant_turn().filter(|turn| {
+            turn.provider_protocol()
+                .is_some_and(|key| key.profile.id == ProviderProfileId::DeepSeekV4Chat)
+        });
+        let message_content_tokens = self.estimate_text(
+            deepseek_turn
+                .map(LlmAssistantTurn::provider_visible_text)
+                .unwrap_or_else(|| message.content()),
+        );
         let mut message_structure_tokens =
             MESSAGE_STRUCTURE_TOKENS.saturating_add(self.estimate_text(message.role().as_str()));
         if let Some(tool_call_id) = message.tool_call_id() {
             message_structure_tokens =
                 message_structure_tokens.saturating_add(self.estimate_text(tool_call_id));
         }
-        let mut tool_call_tokens = message.tool_calls().fold(0_u64, |total, call| {
-            total
-                .saturating_add(TOOL_CALL_STRUCTURE_TOKENS)
-                .saturating_add(self.estimate_text(&call.id))
-                .saturating_add(self.estimate_text(&call.name))
-                .saturating_add(estimate_json_tokens(&call.args))
-        });
+        let mut tool_call_tokens = if let Some(turn) = deepseek_turn {
+            turn.provider_tool_calls()
+                .iter()
+                .fold(0_u64, |total, call| {
+                    total
+                        .saturating_add(TOOL_CALL_STRUCTURE_TOKENS)
+                        .saturating_add(self.estimate_text(&call.id))
+                        .saturating_add(self.estimate_text(&call.name))
+                        .saturating_add(estimate_json_tokens(&call.args))
+                })
+        } else {
+            message.tool_calls().fold(0_u64, |total, call| {
+                total
+                    .saturating_add(TOOL_CALL_STRUCTURE_TOKENS)
+                    .saturating_add(self.estimate_text(&call.id))
+                    .saturating_add(self.estimate_text(&call.name))
+                    .saturating_add(estimate_json_tokens(&call.args))
+            })
+        };
+        if let Some(turn) = deepseek_turn {
+            // DeepSeek tool results replay the original provider call id. Context stores the
+            // bounded runtime id, so reserve the positive difference here for every result.
+            for binding in turn.runtime_tool_bindings().unwrap_or_default() {
+                let provider_id_tokens = self.estimate_text(&binding.provider_call_id);
+                let runtime_id_tokens = self.estimate_text(&binding.runtime_call.id);
+                tool_call_tokens = tool_call_tokens
+                    .saturating_add(provider_id_tokens.saturating_sub(runtime_id_tokens));
+            }
+        }
         if let Some(turn) = message.assistant_turn() {
             let effective_call_count = turn.effective_tool_calls().len();
             let uses_legacy_split_projection = turn.provider_protocol().is_none_or(|key| {
@@ -289,10 +326,10 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
                 message_structure_tokens = message_structure_tokens
                     .saturating_add(extra_assistant_messages.saturating_mul(per_message));
             }
-            tool_call_tokens = tool_call_tokens.saturating_add(
-                crate::llm::estimate_assistant_turn_continuation_tokens(turn).unwrap_or(u64::MAX),
-            );
         }
+        let provider_continuation_tokens = message.assistant_turn().map_or(0, |turn| {
+            crate::llm::estimate_assistant_turn_continuation_tokens(turn).unwrap_or(u64::MAX)
+        });
         let image_count = message.images().len();
         let image_tokens = u64::try_from(image_count)
             .unwrap_or(u64::MAX)
@@ -302,6 +339,7 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
             message_content_tokens,
             message_structure_tokens,
             tool_call_tokens,
+            provider_continuation_tokens,
             image_tokens,
             image_count,
         }
@@ -494,6 +532,61 @@ mod tests {
         assert!(
             estimator.estimate_message(&grouped).total_tokens()
                 < estimator.estimate_message(&generic_live).total_tokens()
+        );
+    }
+
+    #[test]
+    fn deepseek_estimate_uses_original_provider_calls_and_result_ids() {
+        let profile = ProviderProfileConfig::deepseek_v4_default();
+        let key = ProviderProtocolKey::new(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+            &profile,
+            "deepseek-v4",
+            None,
+        )
+        .unwrap();
+        let provider_call = LlmToolCall {
+            id: format!("provider-{}", "x".repeat(8_000)),
+            name: "run_command".to_string(),
+            args: json!({
+                "command": serde_json::to_string(&json!({
+                    "script": "\\\"quoted\\\"\n".repeat(1_000)
+                })).unwrap()
+            }),
+        };
+        let runtime_call = LlmToolCall {
+            id: "runtime-fixed-id".to_string(),
+            name: "run_command".to_string(),
+            args: json!({"command": "normalized"}),
+        };
+        let provider_text = "必须仍计入 Provider wire 的可见正文。".repeat(1_000);
+        let mut turn = LlmAssistantTurn::from_provider(
+            key,
+            provider_text.clone(),
+            vec![provider_call.clone()],
+        )
+        .unwrap()
+        .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
+            0,
+            &provider_call,
+            runtime_call.clone(),
+        )])
+        .unwrap();
+        turn.set_runtime_visible_text("");
+        let deepseek = LlmMessage::from_assistant_turn(turn);
+        let runtime_only = LlmMessage::assistant("", vec![runtime_call]);
+        let estimator = HeuristicTokenEstimator;
+        let deepseek_estimate = estimator.estimate_message(&deepseek);
+        let runtime_estimate = estimator.estimate_message(&runtime_only);
+
+        assert!(deepseek_estimate.tool_call_tokens > runtime_estimate.tool_call_tokens + 5_000);
+        assert!(
+            deepseek_estimate.message_content_tokens >= estimator.estimate_text(&provider_text)
+        );
+        assert!(
+            deepseek_estimate.tool_call_tokens
+                >= estimate_json_tokens(&provider_call.args)
+                    .saturating_add(estimator.estimate_text(&provider_call.id).saturating_mul(2))
         );
     }
 }

@@ -2,10 +2,14 @@
 use super::adapter::{ProviderAdapter, ProviderAdapterRegistry};
 use super::provider_error::LlmProviderFailure;
 use super::response::{extract_api_error, parse_tool_arguments};
-use super::{LlmAssistantTurn, LlmChatResponse, LlmStreamEvent, LlmToolCall};
+use super::{
+    LlmAssistantTurn, LlmChatResponse, LlmStreamEvent, LlmToolCall, MAX_PROVIDER_CONTINUATION_BYTES,
+};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
-use crate::provider_profile::ProviderProtocolKey;
+#[cfg(test)]
+use crate::provider_profile::ProviderProfileId;
+use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::usage::{extract_anthropic_stream_usage, extract_usage, merge_stream_usage};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -14,6 +18,7 @@ use std::collections::BTreeMap;
 
 pub(super) async fn parse_sse_response<F>(
     response: reqwest::Response,
+    provider_profile: &ProviderProfileConfig,
     provider_protocol: &ProviderProtocolKey,
     cancellation_token: AgentCancellationToken,
     mut on_delta: F,
@@ -23,7 +28,7 @@ where
 {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::<u8>::new();
-    let mut accumulator = LlmStreamAccumulator::for_protocol(provider_protocol)?;
+    let mut accumulator = LlmStreamAccumulator::for_profile(provider_profile, provider_protocol)?;
 
     loop {
         cancellation_token.check()?;
@@ -152,19 +157,39 @@ fn find_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
 pub(super) enum ProviderStreamState {
     OpenAi(OpenAiStreamAccumulator),
     Anthropic(AnthropicStreamAccumulator),
+    DeepSeek(Box<DeepSeekStreamAccumulator>),
 }
 
 pub(super) struct LlmStreamAccumulator {
     adapter: &'static dyn ProviderAdapter,
+    provider_profile: ProviderProfileConfig,
     provider_protocol: ProviderProtocolKey,
     state: ProviderStreamState,
 }
 
 impl LlmStreamAccumulator {
+    #[cfg(test)]
     pub(super) fn for_protocol(provider_protocol: &ProviderProtocolKey) -> AgentResult<Self> {
+        let provider_profile = match provider_protocol.profile.id {
+            ProviderProfileId::GenericOpenAiChat | ProviderProfileId::GenericAnthropicMessages => {
+                ProviderProfileConfig::generic_for_dialect(provider_protocol.dialect)
+            }
+            ProviderProfileId::DeepSeekV4Chat => ProviderProfileConfig::deepseek_v4_default(),
+        };
+        Self::for_profile(&provider_profile, provider_protocol)
+    }
+
+    pub(super) fn for_profile(
+        provider_profile: &ProviderProfileConfig,
+        provider_protocol: &ProviderProtocolKey,
+    ) -> AgentResult<Self> {
+        provider_protocol
+            .validate_against_config(provider_profile)
+            .map_err(|error| AgentError::new(format!("Provider profile 设置无效：{error}")))?;
         let adapter = ProviderAdapterRegistry::resolve_key(provider_protocol)?;
         Ok(Self {
             adapter,
+            provider_profile: provider_profile.clone(),
             provider_protocol: provider_protocol.clone(),
             state: adapter.new_stream_state(),
         })
@@ -197,15 +222,90 @@ impl LlmStreamAccumulator {
     }
 
     pub(super) fn finish(self) -> AgentResult<LlmChatResponse> {
-        self.adapter
-            .finalize_assistant_turn(&self.provider_protocol, self.state)
+        self.adapter.finalize_assistant_turn(
+            &self.provider_profile,
+            &self.provider_protocol,
+            self.state,
+        )
     }
 
     fn usage(&self) -> Option<&AgentUsage> {
         match &self.state {
             ProviderStreamState::OpenAi(accumulator) => accumulator.usage.as_ref(),
             ProviderStreamState::Anthropic(accumulator) => accumulator.usage.as_ref(),
+            ProviderStreamState::DeepSeek(accumulator) => accumulator.projected_usage.as_ref(),
         }
+    }
+}
+
+/// DeepSeek's Chat Completion stream is OpenAI-compatible except that private reasoning is
+/// delivered separately in `delta.reasoning_content`. Keep it out of visible delta events while
+/// preserving it exactly for the provider continuation attached during finalization.
+#[derive(Default)]
+pub(super) struct DeepSeekStreamAccumulator {
+    openai: OpenAiStreamAccumulator,
+    reasoning_content: String,
+    saw_reasoning_content: bool,
+    raw_usage: Option<AgentUsage>,
+    projected_usage: Option<AgentUsage>,
+}
+
+impl DeepSeekStreamAccumulator {
+    pub(super) fn process(
+        &mut self,
+        value: &Value,
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) -> AgentResult<()> {
+        merge_stream_usage(&mut self.raw_usage, extract_usage(value));
+        self.projected_usage = self
+            .raw_usage
+            .clone()
+            .map(super::adapter::project_deepseek_usage);
+        if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+            for choice in choices {
+                let Some(reasoning) = choice
+                    .get("delta")
+                    .and_then(|delta| delta.get("reasoning_content"))
+                else {
+                    continue;
+                };
+                match reasoning {
+                    Value::Null => {}
+                    Value::String(reasoning) => {
+                        self.saw_reasoning_content = true;
+                        let next_length = self
+                            .reasoning_content
+                            .len()
+                            .checked_add(reasoning.len())
+                            .ok_or_else(|| {
+                                AgentError::new("DeepSeek reasoning_content 大小溢出。")
+                            })?;
+                        if next_length >= MAX_PROVIDER_CONTINUATION_BYTES {
+                            return Err(AgentError::new(format!(
+                                "DeepSeek reasoning_content 连同协议版本标记超过 {} 字节上限。",
+                                MAX_PROVIDER_CONTINUATION_BYTES,
+                            )));
+                        }
+                        self.reasoning_content.push_str(reasoning);
+                    }
+                    _ => {
+                        return Err(AgentError::new(
+                            "DeepSeek 流式响应中的 reasoning_content 不是字符串。",
+                        ));
+                    }
+                }
+            }
+        }
+        self.openai.process(value, on_delta)
+    }
+
+    pub(super) fn finish(
+        self,
+        provider_protocol: &ProviderProtocolKey,
+    ) -> AgentResult<(LlmChatResponse, Option<String>)> {
+        let response = self.openai.finish(provider_protocol)?;
+        let reasoning_content = self.saw_reasoning_content.then_some(self.reasoning_content);
+        Ok((response, reasoning_content))
     }
 }
 

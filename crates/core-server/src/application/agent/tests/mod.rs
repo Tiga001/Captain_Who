@@ -266,9 +266,9 @@ fn freeze_test_pending_provider_configuration(
         .load_model_settings_snapshot()
         .unwrap()
         .expect("test Provider settings snapshot");
-    let (configuration_revision, config, key) =
+    let (provider_protocol_revision, config, key) =
         test_frozen_provider_protocol(storage, &input.model, input.api_style);
-    input.provider_configuration_revision = Some(configuration_revision);
+    input.provider_configuration_revision = Some(provider_protocol_revision);
     input.provider_connection_revision = Some(
         snapshot
             .provider_connection_revisions
@@ -316,14 +316,19 @@ fn test_frozen_provider_protocol(
     let config = model
         .resolved_provider_profile_config(dialect)
         .expect("test Provider Profile");
+    let provider_protocol_revision = snapshot
+        .provider_protocol_revisions
+        .get(model_id)
+        .expect("test Provider protocol revision")
+        .clone();
     let key = mycopilot_core::ProviderProtocolKey::new(
         dialect,
         &config,
         model.id.clone(),
-        Some(snapshot.configuration_revision.clone()),
+        Some(provider_protocol_revision.clone()),
     )
     .expect("test Provider Protocol key");
-    (snapshot.configuration_revision, config, key)
+    (provider_protocol_revision, config, key)
 }
 
 fn write_test_skill(workspace: &Path, body: &str) {

@@ -21,11 +21,12 @@ const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 5;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PersistedAgentResumeInput {
     resume_input_schema_version: u32,
-    /// Opaque, random identity of the exact settings save used by the Host. It contains no
-    /// credential-derived material and is intentionally unavailable to Renderer.
+    /// Opaque identity of the selected model's effective provider wire protocol. Legacy rows may
+    /// carry the broad settings-save revision; migration seeds the per-model identity from that
+    /// value before later wire changes rotate it independently.
     provider_configuration_revision: String,
     /// Stable identity of the selected model's effective endpoint/token pair. It is random and
-    /// contains no credential-derived material.
+    /// contains no credential material.
     provider_connection_revision: String,
     /// Stable identity of the effective search mode/credential pair.
     search_connection_revision: String,
@@ -104,7 +105,7 @@ impl PersistedAgentResumeInput {
             .ok_or_else(|| {
                 "pending Agent input is missing its frozen provider settings revision".to_string()
             })?;
-        if !mycopilot_core::storage::config_repository::is_model_settings_revision(
+        if !mycopilot_core::storage::config_repository::is_provider_protocol_revision(
             &provider_configuration_revision,
         ) {
             return Err(
@@ -235,7 +236,7 @@ impl PersistedAgentResumeInput {
         if !is_sha256_digest(&self.provider_endpoint_digest) {
             return Err(PersistedAgentResumeInputError::SecretMaterialPresent);
         }
-        if !mycopilot_core::storage::config_repository::is_model_settings_revision(
+        if !mycopilot_core::storage::config_repository::is_provider_protocol_revision(
             &self.provider_configuration_revision,
         ) {
             return Err(PersistedAgentResumeInputError::InvalidShape);
@@ -409,7 +410,8 @@ mod tests {
             }]
         }))
         .unwrap();
-        let provider_configuration_revision = format!("model-settings-v1:{}", uuid::Uuid::new_v4());
+        let provider_configuration_revision =
+            format!("provider-protocol-v1:{}", uuid::Uuid::new_v4());
         let provider_profile_config = ProviderProfileConfig::generic_for_dialect(
             mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
         );
@@ -421,7 +423,7 @@ mod tests {
         )
         .unwrap();
         input.resume_checkpoint = Some(checkpoint(&provider_configuration_revision));
-        input.provider_configuration_revision = Some(provider_configuration_revision);
+        input.provider_configuration_revision = Some(provider_configuration_revision.clone());
         input.provider_connection_revision =
             Some(format!("provider-connection-v1:{}", uuid::Uuid::new_v4()));
         input.search_connection_revision =
@@ -522,6 +524,26 @@ mod tests {
         assert_eq!(
             PersistedAgentResumeInput::decode(&value.to_string()).unwrap_err(),
             PersistedAgentResumeInputError::LegacyOrUnsupported
+        );
+    }
+
+    #[test]
+    fn legacy_broad_provider_revision_remains_decodable_for_host_revalidation() {
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input())
+            .unwrap()
+            .encode();
+        let mut legacy = serde_json::from_str::<Value>(&encoded).unwrap();
+        let legacy_revision = format!("model-settings-v1:{}", uuid::Uuid::new_v4());
+        legacy["providerConfigurationRevision"] = Value::String(legacy_revision.clone());
+        legacy["providerProtocolKey"]["providerConfigurationRevision"] =
+            Value::String(legacy_revision.clone());
+        legacy["resumeCheckpoint"]["providerProtocolKey"]["providerConfigurationRevision"] =
+            Value::String(legacy_revision.clone());
+
+        let restored = PersistedAgentResumeInput::decode(&legacy.to_string()).unwrap();
+        assert_eq!(
+            restored.provider_configuration_revision, legacy_revision,
+            "legacy provenance remains readable but is checked against effective state on resume"
         );
     }
 

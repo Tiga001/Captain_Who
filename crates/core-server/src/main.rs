@@ -130,7 +130,8 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AgentCommandSessionGetInput, AgentCommandSessionListInput, AgentSteerRunInput,
-    AgentUsageClearInput, AgentUsageSummaryInput,
+    AgentUsageClearInput, AgentUsageSummaryInput, ProviderContinuationVaultFactory,
+    PROVIDER_CONTINUATION_CREDENTIAL_SERVICE,
 };
 use mycopilot_mcp_client::{McpConnectionManager, McpConnector, McpManagerPolicy};
 use mycopilot_protocol_rs::{

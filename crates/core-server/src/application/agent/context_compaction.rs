@@ -366,8 +366,13 @@ impl AgentService {
             )?);
         }
 
-        let mut state =
-            create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
+        let host_services = self.context_window_provider_host_services();
+        let mut state = create_conversation_context_state_with_host_services(
+            preview_input,
+            conversation_id,
+            &host_services,
+        )
+        .map_err(|error| error.to_string())?;
         let committed_activity_items = match active_trace {
             Some(trace) => {
                 let model_context_items = full_model_context_logs
@@ -486,6 +491,13 @@ impl AgentService {
                 created_at,
                 now_ms(),
             )?;
+        if provider_native_tool_trace_is_in_progress(agent_input, &context_trace) {
+            // The Runtime already owns the exact grouped Provider turn in memory/checkpoint.
+            // Returning no replacement baseline prevents a partial durable approval prefix from
+            // splitting that turn or requiring later queued calls before they are published.
+            self.invalidate_conversation_context_state(conversation_id);
+            return Ok(None);
+        }
         let update = self.update_running_conversation_context_state(
             UpdateRunningConversationContextStateRequest {
                 agent_input,
@@ -848,6 +860,10 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(run_id.to_string(), snapshot);
+        if provider_native_tool_trace_is_in_progress(&record.agent_input, &trace) {
+            self.invalidate_conversation_context_state(conversation_id);
+            return Ok(());
+        }
         match self.update_running_conversation_context_state(
             UpdateRunningConversationContextStateRequest {
                 agent_input: &record.agent_input,
@@ -1166,6 +1182,21 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner())
             .remove(run_id);
     }
+}
+
+fn provider_native_tool_trace_is_in_progress(
+    agent_input: &AgentChatInput,
+    trace: &ConversationTurnTrace,
+) -> bool {
+    trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+        && agent_input
+            .provider_profile_config
+            .as_ref()
+            .is_some_and(|profile| profile.profile.id == ProviderProfileId::DeepSeekV4Chat)
+        && trace
+            .items
+            .iter()
+            .any(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
 }
 
 fn validate_continuation_result_identity(

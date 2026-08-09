@@ -65,15 +65,27 @@ pub(super) async fn complete_chat_with_validation(
         };
         match result {
             Ok(mut response) => {
-                merge_total_usage(&mut total_usage, response.usage.take());
+                merge_provider_attempt_usage(
+                    &mut total_usage,
+                    response.usage.take(),
+                    request.provider_protocol.profile.id,
+                );
                 response.usage = total_usage;
                 return Ok(response);
             }
             Err(error) if error.is_cancelled() => {
-                return Err(merge_error_usage(error, &mut total_usage));
+                return Err(merge_error_usage(
+                    error,
+                    &mut total_usage,
+                    request.provider_protocol.profile.id,
+                ));
             }
             Err(error) => {
-                let error = merge_error_usage(error, &mut total_usage);
+                let error = merge_error_usage(
+                    error,
+                    &mut total_usage,
+                    request.provider_protocol.profile.id,
+                );
                 let Some(plan) = retry_plan(
                     &error,
                     attempt,
@@ -104,6 +116,7 @@ pub(super) async fn complete_chat_once(
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
     let provider_protocol = request.provider_protocol.clone();
+    let provider_profile = request.provider_profile.clone();
     validate_request(request)?;
     let response = send_llm_request(request, cancellation_token.clone())
         .await
@@ -111,7 +124,7 @@ pub(super) async fn complete_chat_once(
     let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
         .await
         .map_err(with_request_usage)?;
-    parse_non_stream_response(&body, &provider_protocol, validation)
+    parse_non_stream_response_with_profile(&body, &provider_profile, &provider_protocol, validation)
 }
 
 pub(crate) async fn complete_chat_streaming<F>(
@@ -191,16 +204,28 @@ where
 
         match result {
             Ok(mut response) => {
-                merge_total_usage(&mut total_usage, response.usage.take());
+                merge_provider_attempt_usage(
+                    &mut total_usage,
+                    response.usage.take(),
+                    request.provider_protocol.profile.id,
+                );
                 response.usage = total_usage;
                 on_event(LlmStreamEvent::Committed);
                 return Ok(response);
             }
             Err(error) if error.is_cancelled() => {
-                return Err(merge_error_usage(error, &mut total_usage));
+                return Err(merge_error_usage(
+                    error,
+                    &mut total_usage,
+                    request.provider_protocol.profile.id,
+                ));
             }
             Err(error) => {
-                let error = merge_error_usage(error, &mut total_usage);
+                let error = merge_error_usage(
+                    error,
+                    &mut total_usage,
+                    request.provider_protocol.profile.id,
+                );
                 let reason = safe_retry_reason(&error);
                 on_event(LlmStreamEvent::AttemptReset {
                     reason: reason.clone(),
@@ -254,6 +279,7 @@ where
     F: FnMut(LlmStreamEvent) + Send,
 {
     let provider_protocol = request.provider_protocol.clone();
+    let provider_profile = request.provider_profile.clone();
     validate_request(request)?;
     let response = send_llm_request(request, cancellation_token.clone())
         .await
@@ -262,17 +288,27 @@ where
         let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
             .await
             .map_err(with_request_usage)?;
-        let parsed = parse_non_stream_response(&body, &provider_protocol, validation)?;
+        let parsed = parse_non_stream_response_with_profile(
+            &body,
+            &provider_profile,
+            &provider_protocol,
+            validation,
+        )?;
         if !parsed.content().is_empty() {
             on_delta(LlmStreamEvent::Delta(parsed.content().to_string()));
         }
         return Ok(parsed);
     }
 
-    let mut streamed =
-        parse_sse_response(response, &provider_protocol, cancellation_token, on_delta)
-            .await
-            .map_err(with_request_usage)?;
+    let mut streamed = parse_sse_response(
+        response,
+        &provider_profile,
+        &provider_protocol,
+        cancellation_token,
+        on_delta,
+    )
+    .await
+    .map_err(with_request_usage)?;
     streamed.usage = Some(usage_for_request(streamed.usage));
 
     let diagnostic = streaming_response_diagnostic(&streamed);
@@ -287,11 +323,35 @@ where
     Ok(streamed)
 }
 
+#[cfg(test)]
 pub(super) fn parse_non_stream_response(
     body: &str,
     provider_protocol: &ProviderProtocolKey,
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
+    let provider_profile = match provider_protocol.profile.id {
+        crate::provider_profile::ProviderProfileId::GenericOpenAiChat
+        | crate::provider_profile::ProviderProfileId::GenericAnthropicMessages => {
+            crate::provider_profile::ProviderProfileConfig::generic_for_dialect(
+                provider_protocol.dialect,
+            )
+        }
+        crate::provider_profile::ProviderProfileId::DeepSeekV4Chat => {
+            crate::provider_profile::ProviderProfileConfig::deepseek_v4_default()
+        }
+    };
+    parse_non_stream_response_with_profile(body, &provider_profile, provider_protocol, validation)
+}
+
+pub(super) fn parse_non_stream_response_with_profile(
+    body: &str,
+    provider_profile: &crate::provider_profile::ProviderProfileConfig,
+    provider_protocol: &ProviderProtocolKey,
+    validation: LlmResponseValidation,
+) -> AgentResult<LlmChatResponse> {
+    provider_protocol
+        .validate_against_config(provider_profile)
+        .map_err(|error| AgentError::new(format!("Provider profile 设置无效：{error}")))?;
     let value: Value = serde_json::from_str(body).map_err(|error| {
         with_request_usage(
             LlmProviderFailure::from_local_transport_failure(&format!(
@@ -314,7 +374,7 @@ pub(super) fn parse_non_stream_response(
     }
 
     let assistant_turn = adapter
-        .parse_non_streaming_response(provider_protocol, &value)
+        .parse_non_streaming_response(provider_profile, provider_protocol, &value)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
     let finish_reason = extract_finish_reason(&value);
     validate_llm_response(
@@ -338,8 +398,24 @@ pub(super) fn with_request_usage(error: AgentError) -> AgentError {
     error.with_usage(Some(usage))
 }
 
-pub(super) fn merge_error_usage(error: AgentError, total: &mut Option<AgentUsage>) -> AgentError {
-    merge_total_usage(total, error.usage().cloned());
+fn merge_provider_attempt_usage(
+    total: &mut Option<AgentUsage>,
+    next: Option<AgentUsage>,
+    profile_id: ProviderProfileId,
+) {
+    if profile_id == ProviderProfileId::DeepSeekV4Chat {
+        merge_total_usage_with_disjoint_reasoning(total, next);
+    } else {
+        merge_total_usage(total, next);
+    }
+}
+
+pub(super) fn merge_error_usage(
+    error: AgentError,
+    total: &mut Option<AgentUsage>,
+    profile_id: ProviderProfileId,
+) -> AgentError {
+    merge_provider_attempt_usage(total, error.usage().cloned(), profile_id);
     error.with_usage(total.clone())
 }
 

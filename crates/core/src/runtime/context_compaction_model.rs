@@ -77,6 +77,9 @@ pub struct AgentContextCompactionModelGenerator {
     context_window_tokens: Option<u32>,
     maximum_output_tokens: u32,
     stream: bool,
+    provider_configuration_revision: Option<String>,
+    provider_profile_config: Option<ProviderProfileConfig>,
+    provider_protocol_key: Option<ProviderProtocolKey>,
 }
 
 impl AgentContextCompactionModelGenerator {
@@ -91,6 +94,9 @@ impl AgentContextCompactionModelGenerator {
             context_window_tokens: input.context_window_tokens,
             maximum_output_tokens: super::tool_flow::sanitize_max_tokens(input.max_tokens),
             stream: input.stream.unwrap_or(false),
+            provider_configuration_revision: input.provider_configuration_revision.clone(),
+            provider_profile_config: input.provider_profile_config.clone(),
+            provider_protocol_key: input.provider_protocol_key.clone(),
         }
     }
 
@@ -168,12 +174,24 @@ impl AgentContextCompactionModelGenerator {
         );
 
         let dialect = ProviderProtocolDialect::from(self.api_style);
-        let provider_profile = ProviderProfileConfig::generic_for_dialect(dialect);
-        let provider_protocol =
-            ProviderProtocolKey::new(dialect, &provider_profile, self.model.clone(), None)
+        let provider_profile =
+            ProviderProfileConfig::resolve(self.provider_profile_config.as_ref(), dialect)
                 .map_err(|error| {
                     AgentError::new(format!("上下文压缩 Provider 配置无效：{error}"))
                 })?;
+        let provider_protocol = match self.provider_protocol_key.as_ref() {
+            Some(key) => key.clone(),
+            None => ProviderProtocolKey::new(
+                dialect,
+                &provider_profile,
+                self.model.clone(),
+                self.provider_configuration_revision.clone(),
+            )
+            .map_err(|error| AgentError::new(format!("上下文压缩 Provider 配置无效：{error}")))?,
+        };
+        provider_protocol
+            .validate_against_config(&provider_profile)
+            .map_err(|error| AgentError::new(format!("上下文压缩 Provider 配置无效：{error}")))?;
         let llm_request = LlmChatRequest {
             api_url: self.api_url.clone(),
             api_token: self.api_token.clone(),
@@ -903,6 +921,72 @@ mod tests {
                 .and_then(|usage| usage.raw.billable_request_count),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn deepseek_compaction_keeps_the_frozen_profile_and_disjoint_usage() {
+        let (address, request_receiver, server) = mock_json_server(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "private compaction reasoning",
+                    "content": "The visible compacted history is retained."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 900,
+                "completion_tokens": 80,
+                "total_tokens": 980,
+                "completion_tokens_details": { "reasoning_tokens": 60 }
+            }
+        }))
+        .await;
+        let mut input = chat_input(
+            format!("http://{address}/v1/chat/completions"),
+            AgentApiStyle::OpenAiCompatible,
+        );
+        input.stream = Some(false);
+        let profile = ProviderProfileConfig {
+            schema_version: crate::provider_profile::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+            profile: crate::provider_profile::ProviderProfileRef::deepseek_v4_chat(),
+            reasoning: crate::provider_profile::ReasoningPolicy {
+                mode: crate::provider_profile::ReasoningMode::Enabled,
+                effort: crate::provider_profile::ReasoningEffort::High,
+            },
+        };
+        input.provider_configuration_revision = Some("configuration-1".to_string());
+        input.provider_protocol_key = Some(
+            ProviderProtocolKey::new(
+                ProviderProtocolDialect::OpenAiChatCompletions,
+                &profile,
+                input.model.clone(),
+                input.provider_configuration_revision.clone(),
+            )
+            .unwrap(),
+        );
+        input.provider_profile_config = Some(profile);
+        let generator = AgentContextCompactionModelGenerator::from_chat_input(&input);
+
+        let output = generator
+            .generate(generation_request(), AgentCancellationToken::new())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let payload = request_receiver.await.unwrap();
+
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["reasoning_effort"], "high");
+        assert!(payload.get("temperature").is_none());
+        assert_eq!(
+            output.draft.content,
+            "The visible compacted history is retained."
+        );
+        let usage = output.observation.actual_usage.unwrap().raw;
+        assert_eq!(usage.input_tokens, Some(900));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.output_thinking_tokens, Some(60));
+        assert_eq!(usage.total_tokens, Some(980));
     }
 
     #[tokio::test]

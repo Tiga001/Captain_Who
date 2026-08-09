@@ -19,11 +19,13 @@ pub(crate) use transport::{
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{
     AgentApiStyle, AgentAssistantTurnCheckpointIdentity, AgentError, AgentProviderToolCallIdentity,
-    AgentResult, AgentToolDefinition, AgentUsage,
+    AgentResult, AgentToolDefinition, AgentUsage, ProviderContinuationRef,
 };
-use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
+use crate::provider_profile::{ProviderProfileConfig, ProviderProfileId, ProviderProtocolKey};
 use crate::tools::schema::validate_portable_tool_input_schema;
-use crate::usage::{merge_total_usage, usage_for_request};
+use crate::usage::{
+    merge_total_usage, merge_total_usage_with_disjoint_reasoning, usage_for_request,
+};
 use adapter::ProviderAdapterRegistry;
 use payload::is_sse_response;
 use provider_cooldown::{
@@ -633,6 +635,9 @@ pub(crate) struct LlmAssistantTurn {
     runtime_tool_bindings: Option<Vec<LlmRuntimeToolCallBinding>>,
     reasoning: Vec<ReasoningProjection>,
     provider_continuation: Option<ProviderContinuation>,
+    /// Safe durable handle for the raw continuation held by the Host vault. The handle is not
+    /// provider wire state and therefore never participates in the assistant-turn digest.
+    provider_continuation_ref: Option<ProviderContinuationRef>,
 }
 
 impl LlmAssistantTurn {
@@ -655,6 +660,7 @@ impl LlmAssistantTurn {
             runtime_tool_bindings: None,
             reasoning: Vec::new(),
             provider_continuation: None,
+            provider_continuation_ref: None,
         })
     }
 
@@ -670,6 +676,7 @@ impl LlmAssistantTurn {
             runtime_tool_bindings: None,
             reasoning: Vec::new(),
             provider_continuation: None,
+            provider_continuation_ref: None,
         }
     }
 
@@ -685,6 +692,10 @@ impl LlmAssistantTurn {
 
     pub(crate) fn provider_visible_text(&self) -> &str {
         &self.provider_visible_text
+    }
+
+    pub(crate) fn runtime_visible_text(&self) -> Option<&str> {
+        self.runtime_visible_text.as_deref()
     }
 
     pub(crate) fn set_runtime_visible_text(&mut self, visible_text: impl Into<String>) {
@@ -707,6 +718,10 @@ impl LlmAssistantTurn {
 
     pub(crate) fn provider_continuation(&self) -> Option<&ProviderContinuation> {
         self.provider_continuation.as_ref()
+    }
+
+    pub(crate) fn provider_continuation_ref(&self) -> Option<&ProviderContinuationRef> {
+        self.provider_continuation_ref.as_ref()
     }
 
     pub(crate) fn effective_tool_calls(&self) -> LlmEffectiveToolCalls<'_> {
@@ -790,6 +805,22 @@ impl LlmAssistantTurn {
         })?;
         continuation.validate_for(provider_protocol, self.digest())?;
         self.provider_continuation = Some(continuation);
+        Ok(self)
+    }
+
+    pub(crate) fn with_provider_continuation_ref(
+        mut self,
+        continuation_ref: ProviderContinuationRef,
+    ) -> AgentResult<Self> {
+        continuation_ref
+            .validate()
+            .map_err(|error| AgentError::new(format!("Provider continuation ref 无效：{error}")))?;
+        if self.provider_protocol.is_none() {
+            return Err(AgentError::new(
+                "Legacy assistant turn 不能引用 provider continuation。",
+            ));
+        }
+        self.provider_continuation_ref = Some(continuation_ref);
         Ok(self)
     }
 
@@ -879,6 +910,13 @@ impl LlmAssistantTurn {
                 hasher.update(continuation.assistant_turn_digest.0);
                 hasher.update(continuation.payload_digest);
                 hasher.update((continuation.encoded_bytes as u64).to_be_bytes());
+            }
+            None => hasher.update([0]),
+        }
+        match &self.provider_continuation_ref {
+            Some(continuation_ref) => {
+                hasher.update([1]);
+                hash_len_prefixed(&mut hasher, continuation_ref.id.as_bytes());
             }
             None => hasher.update([0]),
         }

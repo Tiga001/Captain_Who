@@ -216,9 +216,37 @@ pub(crate) fn is_terminal_run_status(status: AgentRunStatus) -> bool {
 }
 
 pub(crate) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsage>) {
+    merge_usage_with_output_breakdown(total, next, false);
+}
+
+pub(crate) fn merge_usage_with_disjoint_reasoning(
+    total: &mut Option<AgentUsage>,
+    next: Option<AgentUsage>,
+) {
+    merge_usage_with_output_breakdown(total, next, true);
+}
+
+fn merge_usage_with_output_breakdown(
+    total: &mut Option<AgentUsage>,
+    next: Option<AgentUsage>,
+    require_complete_output_breakdown: bool,
+) {
     let Some(next) = next else {
         return;
     };
+    if total.is_none() {
+        *total = Some(AgentUsage {
+            billable_request_count: next.billable_request_count.or_else(|| {
+                (next.input_tokens.is_some()
+                    || next.output_tokens.is_some()
+                    || next.output_thinking_tokens.is_some()
+                    || next.total_tokens.is_some())
+                .then_some(1)
+            }),
+            ..next
+        });
+        return;
+    }
     let total_usage = total.get_or_insert(AgentUsage {
         input_tokens: None,
         output_tokens: None,
@@ -230,11 +258,22 @@ pub(crate) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsag
     });
 
     total_usage.input_tokens = add_optional(total_usage.input_tokens, next.input_tokens);
-    total_usage.output_tokens = add_optional(total_usage.output_tokens, next.output_tokens);
-    total_usage.output_thinking_tokens = add_optional(
-        total_usage.output_thinking_tokens,
-        next.output_thinking_tokens,
-    );
+    total_usage.output_tokens = if require_complete_output_breakdown {
+        add_optional_complete(total_usage.output_tokens, next.output_tokens)
+    } else {
+        add_optional(total_usage.output_tokens, next.output_tokens)
+    };
+    total_usage.output_thinking_tokens = if require_complete_output_breakdown {
+        add_optional_complete(
+            total_usage.output_thinking_tokens,
+            next.output_thinking_tokens,
+        )
+    } else {
+        add_optional(
+            total_usage.output_thinking_tokens,
+            next.output_thinking_tokens,
+        )
+    };
     total_usage.total_tokens = add_optional(total_usage.total_tokens, next.total_tokens);
     total_usage.cached_input_tokens =
         add_optional(total_usage.cached_input_tokens, next.cached_input_tokens);
@@ -252,6 +291,11 @@ pub(crate) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsag
             .then_some(1)
         }),
     );
+}
+
+fn add_optional_complete(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    left.zip(right)
+        .map(|(left, right)| left.saturating_add(right))
 }
 
 pub(crate) fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {

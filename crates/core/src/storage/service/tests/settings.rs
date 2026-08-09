@@ -47,6 +47,23 @@ fn every_model_settings_save_rotates_an_opaque_host_revision() {
         first.provider_connection_revisions, second.provider_connection_revisions,
         "an identical save must preserve each effective provider connection identity"
     );
+    assert!(first
+        .provider_connection_revisions
+        .values()
+        .all(
+            |revision| crate::storage::config_repository::is_provider_connection_revision(revision)
+        ));
+    assert_eq!(
+        first.provider_protocol_revisions, second.provider_protocol_revisions,
+        "an identical save must preserve each effective provider protocol identity"
+    );
+    assert!(first.provider_protocol_revisions.values().all(|revision| {
+        crate::storage::config_repository::is_provider_protocol_revision(revision)
+    }));
+    assert!(first
+        .provider_protocol_revisions
+        .values()
+        .all(|revision| revision.starts_with("provider-protocol-v1:")));
     assert_eq!(
         first.search_connection_revision, second.search_connection_revision,
         "an identical save must preserve the search connection identity"
@@ -130,6 +147,10 @@ fn profile_price_and_search_edits_rotate_only_their_owned_connection_identity() 
         metadata_edit.provider_connection_revisions
     );
     assert_eq!(
+        initial.provider_protocol_revisions, metadata_edit.provider_protocol_revisions,
+        "omitted Generic and explicit Generic are the same effective protocol"
+    );
+    assert_eq!(
         initial.search_connection_revision,
         metadata_edit.search_connection_revision
     );
@@ -142,9 +163,113 @@ fn profile_price_and_search_edits_rotate_only_their_owned_connection_identity() 
         metadata_edit.provider_connection_revisions,
         search_edit.provider_connection_revisions
     );
+    assert_eq!(
+        metadata_edit.provider_protocol_revisions,
+        search_edit.provider_protocol_revisions
+    );
     assert_ne!(
         metadata_edit.search_connection_revision,
         search_edit.search_connection_revision
+    );
+}
+
+#[test]
+fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_contract() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models.push(ModelConfigRecord {
+        id: "other-model".to_string(),
+        display_name: "Other Model".to_string(),
+        api_url_override: Some("https://other.example/v1".to_string()),
+        api_token_override: Some("other-token".to_string()),
+        supports_image: false,
+        context_window_tokens: Some(64_000),
+        provider_profile_config: None,
+        input_price: "0".to_string(),
+        output_price: "0".to_string(),
+        enabled: true,
+    });
+    service.save_model_settings(settings.clone()).unwrap();
+    let initial = service.load_model_settings_snapshot().unwrap().unwrap();
+    let selected_initial = initial.provider_protocol_revisions["revision-model"].clone();
+
+    settings.models[0].display_name = "Renamed only".to_string();
+    settings.models[0].supports_image = true;
+    settings.models[0].context_window_tokens = Some(256_000);
+    settings.models[0].input_price = "1.25".to_string();
+    settings.models[0].output_price = "2.5".to_string();
+    settings.search_mode = "tavily".to_string();
+    settings.tavily_api_key = "search-only-token".to_string();
+    settings.models[1].api_url_override =
+        Some("https://other-changed.example/v1/chat/completions".to_string());
+    settings.models[1].api_token_override = Some("other-changed-token".to_string());
+    settings.models[1].provider_profile_config =
+        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+    service.save_model_settings(settings.clone()).unwrap();
+    let metadata_and_other_model = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_eq!(
+        metadata_and_other_model.provider_protocol_revisions["revision-model"], selected_initial,
+        "metadata, search and another model must not rotate this model's protocol identity"
+    );
+    assert_ne!(
+        metadata_and_other_model.provider_protocol_revisions["other-model"],
+        initial.provider_protocol_revisions["other-model"]
+    );
+
+    settings.models[0].provider_profile_config =
+        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+    service.save_model_settings(settings.clone()).unwrap();
+    let deepseek_default = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_ne!(
+        deepseek_default.provider_protocol_revisions["revision-model"], selected_initial,
+        "changing the selected Profile must rotate its protocol identity"
+    );
+
+    let mut thinking = crate::ProviderProfileConfig::deepseek_v4_default();
+    thinking.reasoning.mode = crate::ReasoningMode::Enabled;
+    thinking.reasoning.effort = crate::ReasoningEffort::High;
+    settings.models[0].provider_profile_config = Some(thinking);
+    service.save_model_settings(settings.clone()).unwrap();
+    let deepseek_thinking = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_ne!(
+        deepseek_thinking.provider_protocol_revisions["revision-model"],
+        deepseek_default.provider_protocol_revisions["revision-model"],
+        "changing reasoning controls must rotate the protocol identity"
+    );
+
+    settings.api_token = " rotated-provider-token ".to_string();
+    service.save_model_settings(settings.clone()).unwrap();
+    let connection_changed = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_ne!(
+        connection_changed.provider_protocol_revisions["revision-model"],
+        deepseek_thinking.provider_protocol_revisions["revision-model"],
+        "changing the effective provider credential must rotate the protocol identity"
+    );
+
+    settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
+    settings.models[0].provider_profile_config =
+        Some(crate::ProviderProfileConfig::generic_for_dialect(
+            crate::ProviderProtocolDialect::AnthropicMessages,
+        ));
+    service.save_model_settings(settings.clone()).unwrap();
+    let endpoint_and_dialect_changed = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_ne!(
+        endpoint_and_dialect_changed.provider_protocol_revisions["revision-model"],
+        connection_changed.provider_protocol_revisions["revision-model"],
+        "changing the endpoint/dialect must rotate the protocol identity"
+    );
+
+    settings.models[0].id = "revision-model-v2".to_string();
+    service.save_model_settings(settings).unwrap();
+    let wire_model_changed = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert!(!wire_model_changed
+        .provider_protocol_revisions
+        .contains_key("revision-model"));
+    assert_ne!(
+        wire_model_changed.provider_protocol_revisions["revision-model-v2"],
+        endpoint_and_dialect_changed.provider_protocol_revisions["revision-model"],
+        "changing the provider wire model id must create a new protocol identity"
     );
 }
 
@@ -224,6 +349,26 @@ fn invalid_persisted_provider_profile_fails_closed() {
         .unwrap();
 
     assert!(service.load_model_settings().is_err());
+}
+
+#[test]
+fn invalid_persisted_provider_protocol_revision_fails_closed() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_model_settings(revision_test_settings())
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE models SET provider_protocol_revision = 'provider-protocol-v1:not-a-uuid'
+             WHERE id = 'revision-model'",
+            [],
+        )
+        .unwrap();
+
+    assert!(service.load_model_settings_snapshot().is_err());
 }
 
 #[test]

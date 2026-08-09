@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::{migrations, world_state_repository};
+use crate::storage::{migrations, provider_continuation_repository, world_state_repository};
 use crate::{
     AgentApprovalStatus, AgentCommandSessionStatus, ConversationCommandSessionLifecycle,
     ConversationCommandSessionLifecyclePhase, ConversationTraceToolResultStatus,
@@ -86,6 +86,57 @@ fn draft(prefix: &ContextCompactionPrefix, id: &str) -> ContextCompactionSummary
         replacement_input_tokens: 30,
         created_at: 10,
     }
+}
+
+fn provider_continuation_record(
+    assistant_message_id: &str,
+    run_id: &str,
+    request_index: u64,
+    runtime_call_ids: &[&str],
+) -> provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+    provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+        continuation_id: format!(
+            "{}{}",
+            provider_continuation_repository::PROVIDER_CONTINUATION_REF_PREFIX,
+            uuid::Uuid::new_v4().hyphenated()
+        ),
+        conversation_id: "conversation-1".to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        run_id: run_id.to_string(),
+        request_index,
+        assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+        assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+        provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+        payload_digest: format!("sha256:{}", "d".repeat(64)),
+        nonce: vec![7; 12],
+        ciphertext: vec![9; 17],
+        decoded_bytes: 1,
+        compressed_bytes: 1,
+        created_at: 2,
+        runtime_tool_calls: runtime_call_ids
+            .iter()
+            .enumerate()
+            .map(|(provider_tool_index, runtime_call_id)| {
+                provider_continuation_repository::ProviderContinuationRuntimeToolIdentity {
+                    provider_tool_index,
+                    runtime_call_id: (*runtime_call_id).to_string(),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn provider_continuation_state(
+    connection: &Connection,
+    continuation_id: &str,
+) -> (String, Option<Vec<u8>>) {
+    connection
+        .query_row(
+            "SELECT state, ciphertext FROM provider_continuations WHERE continuation_id = ?1",
+            [continuation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
 }
 
 fn planned_receipt() -> ContextCompactionReceipt {
@@ -285,6 +336,249 @@ fn summary_commit_atomically_rebases_existing_world_state() {
         .len(),
         2,
         "the previous epoch remains as durable audit history"
+    );
+}
+
+#[test]
+fn summary_commit_releases_covered_provider_continuation_in_the_same_transaction() {
+    let mut connection = setup();
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    let uncovered = provider_continuation_record("assistant-2", "run-2", 1, &["call-2"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    provider_continuation_repository::store_active_in_connection(&connection, &uncovered).unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-provider-release"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &covered.continuation_id),
+        ("released".to_string(), None)
+    );
+    assert_eq!(
+        provider_continuation_state(&connection, &uncovered.continuation_id).0,
+        "active"
+    );
+}
+
+#[test]
+fn rolled_back_summary_transaction_preserves_provider_continuation_ciphertext() {
+    let mut connection = setup();
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    let original_ciphertext = provider_continuation_state(&connection, &covered.continuation_id)
+        .1
+        .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+
+    let transaction = connection.transaction().unwrap();
+    commit_prefix_replacement_in_transaction(
+        &transaction,
+        &prefix,
+        draft(&prefix, "summary-provider-rollback"),
+        "assistant-2",
+    )
+    .unwrap();
+    assert_eq!(
+        provider_continuation_state(&transaction, &covered.continuation_id),
+        ("released".to_string(), None)
+    );
+    transaction.rollback().unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &covered.continuation_id),
+        ("active".to_string(), Some(original_ciphertext))
+    );
+    assert!(get_active_summary(&connection, "conversation-1")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn trace_item_compaction_keeps_a_turn_with_an_uncovered_call() {
+    let mut connection = setup();
+    let partial = provider_continuation_record("assistant-2", "run-2", 0, &["call-1", "call-2"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &partial).unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-trace-provider-release"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &partial.continuation_id).0,
+        "active",
+        "one covered ToolResult cannot release a Provider turn that also owns a later call"
+    );
+}
+
+#[test]
+fn summary_rollback_fails_closed_after_provider_replay_was_released() {
+    let mut connection = setup();
+    let first_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("user-1"),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &first_prefix,
+        draft(&first_prefix, "summary-before-provider-turn"),
+        "assistant-1",
+    )
+    .unwrap();
+
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    let provider_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &provider_prefix,
+        draft(&provider_prefix, "summary-after-provider-turn"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    let error = rollback_active_summary(
+        &mut connection,
+        "conversation-1",
+        "summary-after-provider-turn",
+        20,
+    )
+    .unwrap_err();
+    assert!(error.is_stale());
+    assert!(error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+    assert_eq!(
+        get_active_summary(&connection, "conversation-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        "summary-after-provider-turn",
+        "a rejected rollback must leave the active head unchanged"
+    );
+    assert_eq!(
+        provider_continuation_state(&connection, &covered.continuation_id),
+        ("released".to_string(), None)
+    );
+}
+
+#[test]
+fn multi_level_summary_rollback_stops_at_released_provider_boundary() {
+    let mut connection = setup();
+    let first_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("user-1"),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &first_prefix,
+        draft(&first_prefix, "summary-level-1"),
+        "assistant-1",
+    )
+    .unwrap();
+
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    let provider_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &provider_prefix,
+        draft(&provider_prefix, "summary-level-2-provider"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    connection
+        .execute(
+            "INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json,
+                ui_state_json, created_at, position
+             ) VALUES (
+                'user-3', 'conversation-1', 'user', 'later request', 'sent',
+                NULL, NULL, 5, 4
+             )",
+            [],
+        )
+        .unwrap();
+    let later_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("user-3"),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &later_prefix,
+        draft(&later_prefix, "summary-level-3-generic"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    let restored = rollback_active_summary(
+        &mut connection,
+        "conversation-1",
+        "summary-level-3-generic",
+        20,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(restored.id, "summary-level-2-provider");
+
+    let error = rollback_active_summary(
+        &mut connection,
+        "conversation-1",
+        "summary-level-2-provider",
+        21,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+    assert_eq!(
+        get_active_summary(&connection, "conversation-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        "summary-level-2-provider"
     );
 }
 
@@ -1009,6 +1303,49 @@ fn mutation_inside_covered_raw_prefix_drops_the_derived_head() {
 }
 
 #[test]
+fn mutation_cannot_drop_a_summary_after_provider_replay_was_released() {
+    let mut connection = setup();
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &prefix,
+        draft(&prefix, "summary-provider-mutation-boundary"),
+        "assistant-2",
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE messages SET content = 'edited request' WHERE id = 'user-1'",
+            [],
+        )
+        .unwrap();
+
+    let error = get_active_summary(&connection, "conversation-1").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT summary_id FROM conversation_context_compaction_heads
+                 WHERE conversation_id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "summary-provider-mutation-boundary",
+        "fail-closed invalidation must leave the summary head intact"
+    );
+}
+
+#[test]
 fn deleting_a_turn_removes_the_summary_generated_by_that_turn() {
     let mut connection = setup();
     let prefix = prepare_prefix(
@@ -1126,4 +1463,70 @@ fn deleting_a_turn_restores_the_summary_active_before_that_turn() {
             .unwrap()
     };
     assert_eq!(summaries, vec!["summary-before-run"]);
+}
+
+#[test]
+fn deleting_a_summary_owner_cannot_expose_released_provider_history() {
+    let mut connection = setup();
+    let previous_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("user-1"),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &previous_prefix,
+        draft(&previous_prefix, "summary-before-provider-delete"),
+        "assistant-1",
+    )
+    .unwrap();
+
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    let provider_prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+    commit_prefix_replacement(
+        &mut connection,
+        &provider_prefix,
+        draft(&provider_prefix, "summary-owned-by-deleted-turn"),
+        "assistant-2",
+    )
+    .unwrap();
+
+    let error = crate::storage::chat_repository::delete_messages(
+        &mut connection,
+        "conversation-1",
+        &["user-2".to_string(), "assistant-2".to_string()],
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+    assert_eq!(
+        get_active_summary(&connection, "conversation-1")
+            .unwrap()
+            .unwrap()
+            .id,
+        "summary-owned-by-deleted-turn"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE id IN ('user-2', 'assistant-2')",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        2,
+        "the rejected edit/delete transaction must not remove either message"
+    );
+    assert_eq!(
+        provider_continuation_state(&connection, &covered.continuation_id),
+        ("released".to_string(), None)
+    );
 }

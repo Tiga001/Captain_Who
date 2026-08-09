@@ -783,6 +783,7 @@ mod tests {
                         runtime_call_id: "call-1".to_string(),
                     }],
                 },
+                provider_continuation_refs: Vec::new(),
                 run_world_state: crate::world_state::WorldStateSnapshot::new(
                     "approval-event-test",
                     0,

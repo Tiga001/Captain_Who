@@ -5,7 +5,8 @@ use crate::context::{
     ContextJournalCursor,
 };
 use crate::storage::{
-    context_compaction_receipt_repository, conversation_trace_repository, world_state_repository,
+    context_compaction_receipt_repository, conversation_trace_repository,
+    provider_continuation_repository, world_state_repository,
 };
 use crate::{ContextCompactionReceipt, ContextCompactionReceiptStatus, ModelRequestObservation};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -153,6 +154,27 @@ pub(crate) fn prepare_message_deletion_compaction_rewind(
             None => (None, false, 0),
         };
 
+    if restore_active_head {
+        let active_summary_id = active_head
+            .as_ref()
+            .map(|(summary_id, _)| summary_id.as_str())
+            .ok_or_else(|| {
+                ContextCompactionRepositoryError::Stale(
+                    "待回退的 active summary 已不存在。".to_string(),
+                )
+            })?;
+        let active_summary = load_summary(connection, active_summary_id)?;
+        let restored_summary = restore_summary_id
+            .as_deref()
+            .map(|summary_id| load_summary(connection, summary_id))
+            .transpose()?;
+        ensure_provider_replay_survives_summary_rollback(
+            connection,
+            &active_summary,
+            restored_summary.as_ref(),
+        )?;
+    }
+
     Ok(MessageDeletionCompactionRewind {
         conversation_id: conversation_id.to_string(),
         generated_summary_ids,
@@ -243,6 +265,18 @@ pub fn get_active_summary(
     if !summary_matches_current_raw_prefix(connection, &summary)?
         || !continuity_refs_exist(connection, &summary)?
     {
+        if provider_continuation_repository::has_released_for_conversation(
+            connection,
+            conversation_id,
+        )? {
+            // Invalidating the summary would make its raw prefix model-visible again. A released
+            // tombstone proves at least one provider-native Tool turn in this conversation can no
+            // longer be reconstructed, so falling back to the split durable log is unsafe.
+            return Err(ContextCompactionRepositoryError::Stale(
+                "provider_context_boundary_required: active summary 已失效，但其 Provider replay 已安全释放，拒绝暴露残缺 Tool Exchange。"
+                    .to_string(),
+            ));
+        }
         // Raw history remains authoritative. An edit, delete or rollback invalidates only the
         // derived summaries; later requests immediately fall back to the remaining raw log.
         connection.execute(
@@ -473,6 +507,30 @@ fn commit_prefix_replacement_in_transaction(
             summary.created_at,
         ],
     )?;
+    // Release only an exact Provider turn whose complete runtime Tool-call set appears as closed
+    // ToolResult items in this newly replaced prefix. Message identity is too coarse: one
+    // assistant message/run may contain several Provider requestIndex turns, and a trace cursor
+    // can cover the first exchange while a later exchange remains live. Any later transaction
+    // failure restores both summary state and ciphertext.
+    let covered_runtime_tool_calls = expected_prefix
+        .source_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextCompactionSourceItem::TraceItem { run_id, item, .. } => match item.as_ref() {
+                crate::ConversationTurnTraceItem::ToolResult { call_id, .. } => {
+                    Some((run_id.clone(), call_id.clone()))
+                }
+                _ => None,
+            },
+            ContextCompactionSourceItem::Message { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    provider_continuation_repository::release_for_covered_runtime_tool_calls(
+        transaction,
+        &summary.conversation_id,
+        &covered_runtime_tool_calls,
+        summary.created_at,
+    )?;
     Ok(summary)
 }
 
@@ -565,6 +623,7 @@ pub fn rollback_active_summary(
         .as_deref()
         .map(|summary_id| load_summary(&transaction, summary_id))
         .transpose()?;
+    ensure_provider_replay_survives_summary_rollback(&transaction, &active, restored.as_ref())?;
     rollback_world_state_epoch_for_summary(
         &transaction,
         conversation_id,
@@ -599,6 +658,64 @@ pub fn rollback_active_summary(
     }
     transaction.commit()?;
     Ok(restored)
+}
+
+fn ensure_provider_replay_survives_summary_rollback(
+    connection: &Connection,
+    active: &ContextCompactionSummary,
+    restored: Option<&ContextCompactionSummary>,
+) -> Result<(), ContextCompactionRepositoryError> {
+    if restored.is_some_and(|summary| summary.conversation_id != active.conversation_id) {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "待恢复摘要属于其他会话。".to_string(),
+        ));
+    }
+    let entries = list_journal_entries(connection, &active.conversation_id)?;
+    let active_index = cursor_index(&entries, &active.covered_through).ok_or_else(|| {
+        ContextCompactionRepositoryError::Stale(
+            "active summary 的日志游标已不存在，无法安全验证 Provider replay。".to_string(),
+        )
+    })?;
+    let source_start = match restored {
+        Some(summary) => {
+            let restored_index =
+                cursor_index(&entries, &summary.covered_through).ok_or_else(|| {
+                    ContextCompactionRepositoryError::Stale(
+                        "待恢复摘要的日志游标已不存在，无法安全验证 Provider replay。".to_string(),
+                    )
+                })?;
+            if restored_index >= active_index {
+                return Err(ContextCompactionRepositoryError::Invalid(
+                    "摘要回滚边界没有严格后退。".to_string(),
+                ));
+            }
+            restored_index + 1
+        }
+        None => 0,
+    };
+    let covered_runtime_tool_calls = entries[source_start..=active_index]
+        .iter()
+        .filter_map(|item| match item {
+            ContextCompactionSourceItem::TraceItem { run_id, item, .. } => match item.as_ref() {
+                crate::ConversationTurnTraceItem::ToolResult { call_id, .. } => {
+                    Some((run_id.clone(), call_id.clone()))
+                }
+                _ => None,
+            },
+            ContextCompactionSourceItem::Message { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    if provider_continuation_repository::has_released_for_covered_runtime_tool_calls(
+        connection,
+        &active.conversation_id,
+        &covered_runtime_tool_calls,
+    )? {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "provider_context_boundary_required: 摘要覆盖范围内的 Provider replay 已安全释放，拒绝恢复残缺 Tool Exchange。"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn rollback_world_state_epoch_for_summary(
@@ -773,6 +890,34 @@ fn cursor_index(
     cursor: &ContextJournalCursor,
 ) -> Option<usize> {
     entries.iter().position(|entry| entry.cursor() == cursor)
+}
+
+/// Returns the exact closed runtime Tool calls hidden by a durable summary boundary.
+///
+/// Fork planning uses this to distinguish released Provider turns that remain visible in the
+/// target's raw tail from turns whose complete Tool Exchange is represented by the cloned active
+/// summary. Only the latter may be omitted without restoring destroyed Provider state.
+pub(crate) fn covered_runtime_tool_calls_through_cursor(
+    connection: &Connection,
+    conversation_id: &str,
+    covered_through: &ContextJournalCursor,
+) -> Result<Vec<(String, String)>, ContextCompactionRepositoryError> {
+    let entries = list_journal_entries(connection, conversation_id)?;
+    let boundary_index = cursor_index(&entries, covered_through).ok_or_else(|| {
+        ContextCompactionRepositoryError::Invalid("摘要覆盖游标不属于目标会话日志。".to_string())
+    })?;
+    Ok(entries[..=boundary_index]
+        .iter()
+        .filter_map(|item| match item {
+            ContextCompactionSourceItem::TraceItem { run_id, item, .. } => match item.as_ref() {
+                crate::ConversationTurnTraceItem::ToolResult { call_id, .. } => {
+                    Some((run_id.clone(), call_id.clone()))
+                }
+                _ => None,
+            },
+            ContextCompactionSourceItem::Message { .. } => None,
+        })
+        .collect())
 }
 
 pub(crate) fn source_revision_for_cursor(

@@ -175,6 +175,245 @@ impl ContextFrame {
         Ok(())
     }
 
+    /// Returns the ordered, payload-free Provider continuation handles retained by this frame.
+    ///
+    /// Duplicate handles would mean the same provider-owned turn was projected into the model
+    /// timeline more than once, so checkpoint creation fails closed instead of silently deduping.
+    pub(crate) fn provider_continuation_refs(
+        &self,
+    ) -> AgentResult<Vec<crate::protocol::ProviderContinuationRef>> {
+        let mut seen = BTreeSet::new();
+        let mut refs = Vec::new();
+        for item in self.iter_items() {
+            let Some(continuation_ref) = item
+                .message
+                .assistant_turn()
+                .and_then(LlmAssistantTurn::provider_continuation_ref)
+            else {
+                continue;
+            };
+            continuation_ref.validate().map_err(|error| {
+                AgentError::new(format!(
+                    "模型上下文中的 Provider continuation ref 无效：{error}"
+                ))
+            })?;
+            if !seen.insert(continuation_ref.id.as_str()) {
+                return Err(AgentError::new(
+                    "模型上下文重复引用同一个 Provider continuation。",
+                ));
+            }
+            refs.push(continuation_ref.clone());
+        }
+        Ok(refs)
+    }
+
+    pub(crate) fn contains_trace_for_assistant_message(&self, assistant_message_id: &str) -> bool {
+        self.iter_items().any(|item| {
+            item.metadata
+                .origin()
+                .and_then(ContextOrigin::journal_cursor)
+                .is_some_and(|cursor| cursor.message_id() == assistant_message_id)
+        })
+    }
+
+    pub(crate) fn has_tool_bearing_assistant_turns(&self) -> bool {
+        self.iter_items().any(|item| {
+            item.message.role() == LlmMessageRole::Assistant
+                && item.message.tool_calls().next().is_some()
+        })
+    }
+
+    pub(crate) fn ensure_tool_bearing_turns_replayable(
+        &self,
+        protocol: &crate::provider_profile::ProviderProtocolKey,
+        reasoning_mode: crate::provider_profile::ReasoningMode,
+    ) -> AgentResult<()> {
+        for item in self.iter_items() {
+            let Some(turn) = item.message.assistant_turn() else {
+                continue;
+            };
+            if turn.effective_tool_calls().is_empty() {
+                continue;
+            }
+            let continuation_is_compatible = match turn.provider_continuation() {
+                Some(continuation) => continuation.validate_for(protocol, turn.digest()).is_ok(),
+                None => reasoning_mode != crate::provider_profile::ReasoningMode::Enabled,
+            };
+            let compatible = turn.provider_protocol() == Some(protocol)
+                && turn.provider_continuation_ref().is_some()
+                && continuation_is_compatible;
+            if !compatible {
+                return Err(AgentError::structured(
+                    "provider_context_boundary_required",
+                    "当前 Provider Profile 无法安全回放历史工具上下文；请先压缩该历史边界。",
+                    serde_json::json!({
+                        "type": "providerContextBoundary",
+                        "recovery": "compactIncompatibleToolHistory"
+                    }),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Replaces the durable Generic one-call projection of one Assistant Turn with the exact
+    /// provider-owned turn loaded from the encrypted continuation vault.
+    ///
+    /// The durable Trace remains split for compatibility. This transformation is confined to the
+    /// in-memory provider context and unifies all matching Tool results under one semantic group.
+    pub(crate) fn restore_provider_assistant_turn(
+        &mut self,
+        assistant_message_id: &str,
+        turn: LlmAssistantTurn,
+    ) -> AgentResult<()> {
+        if assistant_message_id.trim().is_empty() || turn.provider_continuation_ref().is_none() {
+            return Err(provider_turn_restore_error(
+                "provider_continuation_corrupt",
+                "Provider Assistant Turn 恢复绑定无效。",
+            ));
+        }
+        let bindings = turn
+            .runtime_tool_bindings()
+            .ok_or_else(|| {
+                provider_turn_restore_error(
+                    "provider_continuation_corrupt",
+                    "Provider Assistant Turn 缺少 Runtime Tool Call 映射。",
+                )
+            })?
+            .to_vec();
+        if bindings.is_empty() {
+            return Err(provider_turn_restore_error(
+                "provider_continuation_corrupt",
+                "可回放 Provider Assistant Turn 不含 Tool Call。",
+            ));
+        }
+        let expected_ids = bindings
+            .iter()
+            .map(|binding| binding.runtime_call.id.clone())
+            .collect::<Vec<_>>();
+        let expected_id_set = expected_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if expected_id_set.len() != expected_ids.len() {
+            return Err(provider_turn_restore_error(
+                "provider_continuation_corrupt",
+                "Provider Assistant Turn 的 Runtime Tool Call 重复。",
+            ));
+        }
+
+        self.materialize_baseline();
+        let group = ContextGroup::tool_exchange(format!("provider-turn:{}", turn.stable_id()));
+        let mut retained = Vec::with_capacity(self.items.len());
+        let mut insertion_index = None;
+        let mut assistant_metadata = None;
+        let mut observed_ids = Vec::new();
+        let mut checkpoint_calls = Vec::new();
+
+        for mut item in self.items.clone() {
+            let belongs_to_message = item
+                .metadata
+                .origin()
+                .and_then(ContextOrigin::journal_cursor)
+                .is_some_and(|cursor| cursor.message_id() == assistant_message_id);
+            if belongs_to_message && item.message.role() == LlmMessageRole::Assistant {
+                let call_ids = item
+                    .message
+                    .tool_calls()
+                    .map(|call| call.id.as_str())
+                    .collect::<Vec<_>>();
+                if !call_ids.is_empty()
+                    && call_ids
+                        .iter()
+                        .all(|call_id| expected_id_set.contains(call_id))
+                {
+                    let checkpoint_message =
+                        item.checkpoint_message.as_ref().unwrap_or(&item.message);
+                    for call_id in &call_ids {
+                        let checkpoint_call = checkpoint_message
+                            .tool_calls()
+                            .find(|call| call.id == **call_id)
+                            .cloned()
+                            .ok_or_else(|| {
+                                provider_turn_restore_error(
+                                    "provider_continuation_corrupt",
+                                    "Provider Assistant Turn 的安全 Checkpoint 投影不完整。",
+                                )
+                            })?;
+                        checkpoint_calls.push(checkpoint_call);
+                    }
+                    insertion_index.get_or_insert(retained.len());
+                    if assistant_metadata.is_none() {
+                        assistant_metadata = Some(item.metadata.clone());
+                    }
+                    observed_ids.extend(call_ids.into_iter().map(str::to_string));
+                    continue;
+                }
+            }
+            if belongs_to_message
+                && item.message.role() == LlmMessageRole::Tool
+                && item
+                    .message
+                    .tool_call_id()
+                    .is_some_and(|call_id| expected_id_set.contains(call_id))
+            {
+                item.metadata.group = Some(group.clone());
+            }
+            retained.push(item);
+        }
+
+        if observed_ids != expected_ids {
+            return Err(provider_turn_restore_error(
+                "provider_continuation_missing",
+                "模型历史缺少 Provider Assistant Turn 的完整 Tool Call 投影。",
+            ));
+        }
+        let insertion_index = insertion_index.ok_or_else(|| {
+            provider_turn_restore_error(
+                "provider_continuation_missing",
+                "模型历史中不存在 Provider Assistant Turn。",
+            )
+        })?;
+        let metadata = assistant_metadata
+            .ok_or_else(|| {
+                provider_turn_restore_error(
+                    "provider_continuation_corrupt",
+                    "Provider Assistant Turn 缺少模型上下文元数据。",
+                )
+            })?
+            .with_group(group);
+        let mut checkpoint_turn = turn.without_raw_continuation_for_checkpoint();
+        let checkpoint_bindings = bindings
+            .iter()
+            .zip(checkpoint_calls)
+            .map(|(binding, runtime_call)| -> AgentResult<_> {
+                let provider_call = checkpoint_turn
+                    .provider_tool_calls()
+                    .get(binding.provider_tool_index)
+                    .ok_or_else(|| {
+                        provider_turn_restore_error(
+                            "provider_continuation_corrupt",
+                            "Provider Assistant Turn 的 Checkpoint 映射越界。",
+                        )
+                    })?;
+                Ok(crate::llm::LlmRuntimeToolCallBinding::new(
+                    binding.provider_tool_index,
+                    provider_call,
+                    runtime_call,
+                ))
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+        checkpoint_turn.set_runtime_tool_bindings(checkpoint_bindings)?;
+        let restored_item = ContextItem::new(LlmMessage::from_assistant_turn(turn), metadata)
+            .with_checkpoint_message(LlmMessage::from_assistant_turn(checkpoint_turn));
+        retained.insert(insertion_index, restored_item);
+        self.items = retained;
+        self.measurement = None;
+        self.revision = self.revision.saturating_add(1);
+        self.persistent_revision = persistent_frame_revision(&self.items);
+        Ok(())
+    }
+
     pub(crate) fn from_measured_baseline(baseline: MeasuredContextBaseline) -> Self {
         Self {
             revision: baseline.revision,
@@ -879,6 +1118,17 @@ impl ContextFrame {
         items.append(&mut self.items);
         self.items = items;
     }
+}
+
+fn provider_turn_restore_error(code: &'static str, message: &'static str) -> AgentError {
+    AgentError::structured(
+        code,
+        message,
+        serde_json::json!({
+            "type": "providerContinuation",
+            "recovery": "restartFromSafeContextBoundary"
+        }),
+    )
 }
 
 impl MeasuredContextBaseline {

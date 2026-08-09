@@ -1,7 +1,15 @@
 use super::*;
 use crate::context::ContextCapacityDetector;
 use crate::llm::LlmImage;
-use crate::protocol::AgentApiStyle;
+use crate::llm::{
+    LlmAssistantTurn, LlmRuntimeToolCallBinding, ProviderContinuation,
+    ProviderContinuationAttachment, ProviderContinuationFragment, ProviderContinuationPosition,
+    ProviderContinuationReplayScope,
+};
+use crate::protocol::{AgentApiStyle, ProviderContinuationRef};
+use crate::provider_profile::{
+    ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
+};
 use serde_json::json;
 
 #[test]
@@ -70,6 +78,124 @@ fn checkpoint_round_trip_preserves_messages_images_and_metadata() {
         serde_json::to_value(frame.manifest()).unwrap(),
         serde_json::to_value(restored.manifest()).unwrap()
     );
+}
+
+#[test]
+fn encrypted_provider_turn_replaces_split_durable_projection_without_leaking_payload() {
+    let profile = ProviderProfileConfig::deepseek_v4_default();
+    let protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        "deepseek-v4-flash",
+        Some("provider-revision-1".to_string()),
+    )
+    .unwrap();
+    let provider_calls = vec![
+        LlmToolCall {
+            id: "provider-call-a".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "a.txt" }),
+        },
+        LlmToolCall {
+            id: "provider-call-b".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "b.txt" }),
+        },
+    ];
+    let runtime_calls = [
+        LlmToolCall {
+            id: "runtime-call-a".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "a.txt" }),
+        },
+        LlmToolCall {
+            id: "runtime-call-b".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "b.txt" }),
+        },
+    ];
+    let mut turn = LlmAssistantTurn::from_provider(protocol.clone(), "", provider_calls.clone())
+        .unwrap()
+        .with_runtime_tool_bindings(
+            provider_calls
+                .iter()
+                .zip(runtime_calls.iter().cloned())
+                .enumerate()
+                .map(|(index, (provider_call, runtime_call))| {
+                    LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
+                })
+                .collect(),
+        )
+        .unwrap();
+    let position =
+        ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn);
+    let continuation = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::InteractionV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            position,
+            b"\x01private-reasoning-canary".to_vec(),
+        )],
+    )
+    .unwrap();
+    turn = turn
+        .with_provider_continuation(continuation)
+        .unwrap()
+        .with_provider_continuation_ref(ProviderContinuationRef::new())
+        .unwrap();
+
+    let metadata = |sequence| {
+        ContextMetadata::new(
+            ContextSource::ConversationTrace,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        )
+        .with_origin(ContextOrigin::conversation_trace_item(
+            "assistant-deepseek",
+            sequence,
+        ))
+    };
+    let mut frame = ContextFrame::new(vec![
+        ContextItem::assistant(
+            "",
+            vec![runtime_calls[0].clone()],
+            metadata(1).with_group(ContextGroup::tool_exchange("split-a")),
+        ),
+        ContextItem::tool_result(
+            "runtime-call-a",
+            "a",
+            false,
+            metadata(2).with_group(ContextGroup::tool_exchange("split-a")),
+        ),
+        ContextItem::assistant(
+            "",
+            vec![runtime_calls[1].clone()],
+            metadata(3).with_group(ContextGroup::tool_exchange("split-b")),
+        ),
+        ContextItem::tool_result(
+            "runtime-call-b",
+            "b",
+            false,
+            metadata(4).with_group(ContextGroup::tool_exchange("split-b")),
+        ),
+    ]);
+
+    frame
+        .restore_provider_assistant_turn("assistant-deepseek", turn)
+        .unwrap();
+    frame.validate_complete_tool_protocol().unwrap();
+    let messages = frame.to_messages();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].tool_calls().count(), 2);
+    assert!(messages[0]
+        .assistant_turn()
+        .unwrap()
+        .provider_continuation()
+        .is_some());
+    assert_eq!(frame.provider_continuation_refs().unwrap().len(), 1);
+    let checkpoint_json = serde_json::to_string(&frame.checkpoint_items().unwrap()).unwrap();
+    assert!(!checkpoint_json.contains("private-reasoning-canary"));
 }
 
 #[test]

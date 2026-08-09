@@ -206,6 +206,8 @@ pub struct ModelRequestEstimate {
     #[serde(default)]
     pub todo_tokens: u64,
     #[serde(default)]
+    pub provider_continuation_tokens: u64,
+    #[serde(default)]
     pub recent_history_tokens: u64,
     #[serde(default)]
     pub total_input_tokens: u64,
@@ -239,6 +241,7 @@ impl ModelRequestEstimate {
             world_state_tokens: costs.world_state_tokens,
             goal_tokens: costs.goal_tokens,
             todo_tokens: costs.todo_tokens,
+            provider_continuation_tokens: costs.provider_continuation_tokens,
             recent_history_tokens: costs.recent_history_tokens,
             total_input_tokens: costs.total_input_tokens,
             context_window_tokens: report.context_window_tokens,
@@ -276,6 +279,7 @@ impl ModelRequestEstimate {
                 .saturating_add(self.world_state_tokens)
                 .saturating_add(self.goal_tokens)
                 .saturating_add(self.todo_tokens)
+                .saturating_add(self.provider_continuation_tokens)
                 .saturating_add(self.recent_history_tokens);
             if semantic_total != self.additive_input_tokens
                 || self.total_input_tokens != self.estimated_input_tokens

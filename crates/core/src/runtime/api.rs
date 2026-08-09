@@ -324,6 +324,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) model_request_observer: Option<AgentModelRequestObserver>,
     pub(super) context_window_observer: Option<AgentContextWindowObserver>,
     pub(super) context_compaction_services: Option<AgentContextCompactionServices>,
+    pub(super) provider_continuation_vault: Option<Arc<crate::ProviderContinuationVault>>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
@@ -380,6 +381,16 @@ impl AgentRuntimeHostServices {
 
     pub fn with_context_compaction(mut self, services: AgentContextCompactionServices) -> Self {
         self.context_compaction_services = Some(services);
+        self
+    }
+
+    /// Supplies the Host-private encrypted vault used by provider-native Assistant Turn replay.
+    /// Raw continuation state never crosses this runtime service boundary.
+    pub fn with_provider_continuation_vault(
+        mut self,
+        vault: Arc<crate::ProviderContinuationVault>,
+    ) -> Self {
+        self.provider_continuation_vault = Some(vault);
         self
     }
 
@@ -717,6 +728,89 @@ pub fn create_conversation_context_state(
         assembled.frame,
         assembled.timing,
     ))
+}
+
+/// Rebuilds a durable conversation context and privately restores provider-native Assistant
+/// Turns before any context-window measurement is exposed to the Host.
+///
+/// The frozen Profile and protocol key remain Host-only. Raw continuation state is loaded through
+/// `AgentRuntimeHostServices` and attached directly to the in-memory context frame; it never
+/// crosses `AgentChatInput`, checkpoint, Trace, or message serialization boundaries.
+pub fn create_conversation_context_state_with_host_services(
+    input: AgentChatInput,
+    conversation_id: &str,
+    host_services: &AgentRuntimeHostServices,
+) -> AgentResult<AgentConversationContextState> {
+    let conversation_id = conversation_id.trim();
+    if conversation_id.is_empty() {
+        return Err(AgentError::new(
+            "Provider continuation preview requires a conversation id.",
+        ));
+    }
+    let input_conversation_id = input
+        .context
+        .as_ref()
+        .and_then(|context| context.conversation_id.as_deref())
+        .map(str::trim);
+    if input_conversation_id != Some(conversation_id) {
+        return Err(AgentError::new(
+            "Provider continuation preview conversation identity does not match Agent input.",
+        ));
+    }
+    let api_style = input
+        .api_style
+        .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
+    let provider_dialect = crate::provider_profile::ProviderProtocolDialect::from(api_style);
+    let provider_profile_config = crate::provider_profile::ProviderProfileConfig::resolve(
+        input.provider_profile_config.as_ref(),
+        provider_dialect,
+    )
+    .map_err(|error| {
+        AgentError::new(format!(
+            "Provider profile configuration is invalid: {error}"
+        ))
+    })?;
+    let provider_protocol_key = match input.provider_protocol_key.clone() {
+        Some(key) => {
+            key.validate_against_config(&provider_profile_config)
+                .map_err(|error| {
+                    AgentError::new(format!("Provider protocol key is invalid: {error}"))
+                })?;
+            if key.model_id != input.model.trim() {
+                return Err(AgentError::new(
+                    "Provider protocol key does not match the selected model.",
+                ));
+            }
+            if key.provider_configuration_revision != input.provider_configuration_revision {
+                return Err(AgentError::new(
+                    "Provider protocol key does not match the selected provider configuration revision.",
+                ));
+            }
+            key
+        }
+        None => crate::provider_profile::ProviderProtocolKey::new(
+            provider_dialect,
+            &provider_profile_config,
+            input.model.trim(),
+            input.provider_configuration_revision.clone(),
+        )
+        .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?,
+    };
+
+    let mut state = create_conversation_context_state(input)?;
+    super::hydrate_provider_continuation_history(
+        state.provider_hydration_frame_mut(),
+        &provider_profile_config,
+        &provider_protocol_key,
+        Some(conversation_id),
+        host_services.storage.as_deref(),
+        host_services.provider_continuation_vault.as_deref(),
+        super::ProviderContinuationResumeRequirement {
+            required_refs: None,
+            current_assistant_turn_id: None,
+        },
+    )?;
+    Ok(state)
 }
 
 pub(super) struct PreparedConversationContext {

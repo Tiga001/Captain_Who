@@ -57,7 +57,8 @@ use crate::protocol::{
     AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
 use crate::provider_profile::{
-    ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
+    ProviderProfileConfig, ProviderProfileId, ProviderProtocolDialect, ProviderProtocolKey,
+    ReasoningMode,
 };
 use crate::revision::content_revision;
 use crate::storage::conversation_history_archive_repository::{
@@ -66,15 +67,15 @@ use crate::storage::conversation_history_archive_repository::{
 use crate::storage::now_ms;
 use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
-use crate::usage::merge_total_usage;
+use crate::usage::{merge_total_usage, merge_total_usage_with_disjoint_reasoning};
 use crate::{
     ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
     continuation_result_sequence, create_run_checkpoint,
-    restore_run_checkpoint_with_model_projection, RestoredRunCheckpoint, RunCheckpointState,
-    ToolCallBatch, ToolCallBatchClaim,
+    restore_run_checkpoint_with_model_projection, QueuedToolCall, RestoredRunCheckpoint,
+    RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{
@@ -107,6 +108,161 @@ const MAX_MAX_TOKENS: u32 = 128_000;
 const DEFAULT_TEMPERATURE: f32 = 0.6;
 const MAX_TOOL_ITERATIONS: usize = 10_000;
 const MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST: usize = 3;
+
+fn merge_provider_usage(
+    total: &mut Option<crate::protocol::AgentUsage>,
+    next: Option<crate::protocol::AgentUsage>,
+    profile_id: ProviderProfileId,
+) {
+    if profile_id == ProviderProfileId::DeepSeekV4Chat {
+        merge_total_usage_with_disjoint_reasoning(total, next);
+    } else {
+        merge_total_usage(total, next);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProviderContinuationResumeRequirement<'a> {
+    required_refs: Option<&'a [crate::protocol::ProviderContinuationRef]>,
+    current_assistant_turn_id: Option<&'a str>,
+}
+
+fn hydrate_provider_continuation_history(
+    context: &mut ContextFrame,
+    profile: &ProviderProfileConfig,
+    protocol: &ProviderProtocolKey,
+    conversation_id: Option<&str>,
+    storage: Option<&crate::storage::service::StorageService>,
+    vault: Option<&crate::ProviderContinuationVault>,
+    resume: ProviderContinuationResumeRequirement<'_>,
+) -> AgentResult<Option<crate::llm::LlmAssistantTurn>> {
+    let ProviderContinuationResumeRequirement {
+        required_refs,
+        current_assistant_turn_id,
+    } = resume;
+    if protocol.profile.id != ProviderProfileId::DeepSeekV4Chat {
+        let has_provider_state = match (conversation_id, vault, storage) {
+            (Some(conversation_id), Some(vault), _) => vault
+                .has_replayable_for_conversation(conversation_id)
+                .map_err(provider_continuation_runtime_error)?,
+            (Some(conversation_id), None, Some(storage)) => storage
+                .has_replayable_provider_continuations_for_conversation(conversation_id)
+                .map_err(|_| {
+                    provider_continuation_runtime_error(
+                        crate::ProviderContinuationStoreError::RepositoryUnavailable,
+                    )
+                })?,
+            _ => false,
+        };
+        if required_refs.is_none_or(|refs| refs.is_empty()) && !has_provider_state {
+            return Ok(None);
+        }
+        return Err(AgentError::structured(
+            "provider_context_boundary_required",
+            "冻结的 Provider continuation 不能通过当前 Profile 回放。",
+            json!({ "type": "providerContextBoundary" }),
+        ));
+    }
+    if !context.has_tool_bearing_assistant_turns() {
+        if required_refs.is_none_or(|refs| refs.is_empty()) {
+            return Ok(None);
+        }
+        return Err(provider_continuation_runtime_error(
+            crate::ProviderContinuationStoreError::PayloadNotFound,
+        ));
+    }
+    let conversation_id = conversation_id.ok_or_else(|| {
+        provider_continuation_runtime_error(crate::ProviderContinuationStoreError::InvalidBinding)
+    })?;
+    let vault = vault.ok_or_else(|| {
+        provider_continuation_runtime_error(
+            crate::ProviderContinuationStoreError::CredentialUnavailable,
+        )
+    })?;
+    let loaded = vault
+        .list_replayable_for_conversation(conversation_id, protocol)
+        .map_err(provider_continuation_runtime_error)?;
+    let mut restored_refs = std::collections::BTreeSet::new();
+    let mut current_assistant_turn = None;
+    for loaded_turn in loaded {
+        if !context.contains_trace_for_assistant_message(&loaded_turn.assistant_message_id) {
+            continue;
+        }
+        restored_refs.insert(loaded_turn.continuation_ref.id.clone());
+        if current_assistant_turn_id == Some(loaded_turn.assistant_turn.stable_id().as_str()) {
+            current_assistant_turn = Some(loaded_turn.assistant_turn.clone());
+        }
+        context.restore_provider_assistant_turn(
+            &loaded_turn.assistant_message_id,
+            loaded_turn.assistant_turn,
+        )?;
+    }
+    if let Some(required_refs) = required_refs {
+        let required_ref_ids = required_refs
+            .iter()
+            .map(|continuation_ref| continuation_ref.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let restored_ref_ids = restored_refs
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        if required_ref_ids != restored_ref_ids {
+            return Err(provider_continuation_runtime_error(
+                crate::ProviderContinuationStoreError::PayloadNotFound,
+            ));
+        }
+    }
+    context.ensure_tool_bearing_turns_replayable(protocol, profile.reasoning.mode)?;
+    if current_assistant_turn_id.is_some() && current_assistant_turn.is_none() {
+        return Err(provider_continuation_runtime_error(
+            crate::ProviderContinuationStoreError::CheckpointStateMissing,
+        ));
+    }
+    Ok(current_assistant_turn)
+}
+
+fn provider_continuation_runtime_error(error: crate::ProviderContinuationStoreError) -> AgentError {
+    use crate::ProviderContinuationStoreError as StoreError;
+    let (code, message, recovery) = match error {
+        StoreError::PayloadNotFound
+        | StoreError::PayloadReleased
+        | StoreError::CheckpointStateMissing => (
+            "provider_continuation_missing",
+            "Provider continuation 不存在，已停止工具执行和模型请求。",
+            "restartFromSafeContextBoundary",
+        ),
+        StoreError::InvalidBinding | StoreError::PayloadConflict => (
+            "provider_context_boundary_required",
+            "Provider continuation 与当前冻结协议不兼容。",
+            "compactIncompatibleToolHistory",
+        ),
+        StoreError::InvalidReference
+        | StoreError::InvalidTurn
+        | StoreError::PayloadTooLarge
+        | StoreError::InvalidEnvelope
+        | StoreError::AuthenticationFailed
+        | StoreError::CompressionFailed => (
+            "provider_continuation_corrupt",
+            "Provider continuation 无法通过完整性校验，已停止工具执行和模型请求。",
+            "restartFromSafeContextBoundary",
+        ),
+        StoreError::CredentialUnavailable
+        | StoreError::RepositoryUnavailable
+        | StoreError::RandomnessUnavailable => (
+            "provider_continuation_unavailable",
+            "Provider continuation 私有存储当前不可用，已停止工具执行和模型请求。",
+            "retryWhenPrivateStoreIsAvailable",
+        ),
+    };
+    AgentError::structured(
+        code,
+        message,
+        json!({
+            "type": "providerContinuation",
+            "recovery": recovery
+        }),
+    )
+}
 
 struct LlmRequestTemplate {
     api_url: String,
@@ -152,6 +308,7 @@ struct PreparedLlmRequest {
     next_model_request_index: usize,
     tool_batch: ToolCallBatch,
     conversation_trace: ConversationTraceRecorder,
+    provider_continuation_refs: Option<Vec<crate::protocol::ProviderContinuationRef>>,
 }
 
 struct PreparedRuntimeCapabilities {
@@ -236,6 +393,7 @@ impl AgentRuntime {
             model_request_observer,
             context_window_observer,
             context_compaction_services,
+            provider_continuation_vault,
             skill_resources,
             skill_activation_resolver,
             office_engine,
@@ -437,6 +595,7 @@ impl AgentRuntime {
             mut next_model_request_index,
             mut tool_batch,
             conversation_trace,
+            provider_continuation_refs: required_provider_continuation_refs,
         } = build_llm_request(
             input,
             effective_tool_set.stable_definitions(),
@@ -453,6 +612,43 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        let checkpoint_assistant_turn_id = tool_batch
+            .checkpoint_assistant_turn_id()
+            .map(str::to_string);
+        let restored_provider_turn = hydrate_provider_continuation_history(
+            &mut active_context,
+            &llm_request.provider_profile_config,
+            &llm_request.provider_protocol_key,
+            trace_conversation_id.as_deref(),
+            storage.as_deref(),
+            provider_continuation_vault.as_deref(),
+            ProviderContinuationResumeRequirement {
+                required_refs: required_provider_continuation_refs.as_deref(),
+                current_assistant_turn_id: checkpoint_assistant_turn_id.as_deref(),
+            },
+        )?;
+        if let Some(restored_provider_turn) = restored_provider_turn.as_ref() {
+            tool_batch.rehydrate_queued_calls_from_provider_turn(
+                restored_provider_turn,
+                |call| {
+                    let projected = tool_registry.checkpoint_call_projection(&AgentToolCall {
+                        id: call.id.clone(),
+                        tool: call.name.clone(),
+                        args: call.args.clone(),
+                        approval_status: AgentApprovalStatus::NotRequired,
+                        reason: None,
+                    });
+                    (
+                        crate::llm::LlmToolCall {
+                            id: projected.id,
+                            name: projected.tool,
+                            args: projected.args,
+                        },
+                        tool_registry.checkpoint_persistence(&call.name),
+                    )
+                },
+            )?;
+        }
         if resumed_world_state_epoch {
             // The exact checkpoint context remains an immutable prefix. Resume establishes a new
             // run-state epoch only after the frozen pending Tool exchange has been closed, avoiding
@@ -499,8 +695,29 @@ impl AgentRuntime {
         if let Some(detector) = &context_capacity_detector {
             detector.prepare_frame(&mut active_context);
         }
+        let mut pending_provider_continuation_handoff = None;
         let result: AgentResult<AgentChatOutput> = async {
             if cancellation_token.is_cancelled() {
+                if llm_request.provider_protocol_key.profile.id
+                    == ProviderProfileId::DeepSeekV4Chat
+                    && !tool_batch.is_empty()
+                {
+                    let mut pending_assistant_context =
+                        take_pending_assistant_tool_context(&mut tool_batch)?;
+                    settle_cancelled_deepseek_tool_batch(
+                        None,
+                        &mut tool_batch,
+                        &mut pending_assistant_context,
+                        &mut active_context,
+                        &conversation_trace,
+                        trace_observer.as_ref(),
+                        &mut event_stream,
+                        tool_registry.as_ref(),
+                        &model_tool_result_gate,
+                        trace_assistant_message_id.as_deref(),
+                        &run_id,
+                    )?;
+                }
                 return Ok(cancelled_output(
                     run_id,
                     event_stream,
@@ -513,6 +730,26 @@ impl AgentRuntime {
 
             let final_content = 'agent_loop: loop {
                 if cancellation_token.is_cancelled() {
+                    if llm_request.provider_protocol_key.profile.id
+                        == ProviderProfileId::DeepSeekV4Chat
+                        && !tool_batch.is_empty()
+                    {
+                        let mut pending_assistant_context =
+                            take_pending_assistant_tool_context(&mut tool_batch)?;
+                        settle_cancelled_deepseek_tool_batch(
+                            None,
+                            &mut tool_batch,
+                            &mut pending_assistant_context,
+                            &mut active_context,
+                            &conversation_trace,
+                            trace_observer.as_ref(),
+                            &mut event_stream,
+                            tool_registry.as_ref(),
+                            &model_tool_result_gate,
+                            trace_assistant_message_id.as_deref(),
+                            &run_id,
+                        )?;
+                    }
                     return Ok(cancelled_output(
                         run_id,
                         event_stream,
@@ -705,7 +942,11 @@ impl AgentRuntime {
                                                 baseline,
                                                 usage: compaction_usage,
                                             }) => {
-                                                merge_total_usage(&mut usage, compaction_usage);
+                                                merge_provider_usage(
+                                                    &mut usage,
+                                                    compaction_usage,
+                                                    llm_request.provider_protocol_key.profile.id,
+                                                );
                                                 active_context = (*baseline)
                                                     .replace_compacted_model_history(active_context);
                                                 detector.prepare_frame(&mut active_context);
@@ -718,9 +959,10 @@ impl AgentRuntime {
                                                 continue;
                                             }
                                             Err(error) if error.is_cancelled() => {
-                                                merge_total_usage(
+                                                merge_provider_usage(
                                                     &mut usage,
                                                     error.usage().cloned(),
+                                                    llm_request.provider_protocol_key.profile.id,
                                                 );
                                                 return Ok(cancelled_output(
                                                     run_id,
@@ -732,9 +974,10 @@ impl AgentRuntime {
                                                 ));
                                             }
                                             Err(error) => {
-                                                merge_total_usage(
+                                                merge_provider_usage(
                                                     &mut usage,
                                                     error.usage().cloned(),
+                                                    llm_request.provider_protocol_key.profile.id,
                                                 );
                                                 return Err(error.with_usage(usage));
                                             }
@@ -960,7 +1203,11 @@ impl AgentRuntime {
                                 observer(observation);
                             }
                             if error.is_cancelled() {
-                                merge_total_usage(&mut usage, error.usage().cloned());
+                                merge_provider_usage(
+                                    &mut usage,
+                                    error.usage().cloned(),
+                                    llm_request.provider_protocol_key.profile.id,
+                                );
                                 return Ok(cancelled_output(
                                     run_id,
                                     event_stream,
@@ -970,7 +1217,11 @@ impl AgentRuntime {
                                     finish_reason,
                                 ));
                             }
-                            merge_total_usage(&mut usage, error.usage().cloned());
+                            merge_provider_usage(
+                                &mut usage,
+                                error.usage().cloned(),
+                                llm_request.provider_protocol_key.profile.id,
+                            );
                             if is_repairable_empty_model_action(&error)
                                 && !empty_model_action_repair_pending
                             {
@@ -983,7 +1234,11 @@ impl AgentRuntime {
                     empty_model_action_repair_pending = false;
                     let response_content = llm_response.content().to_string();
                     let provider_tool_calls = llm_response.provider_tool_calls().to_vec();
-                    merge_total_usage(&mut usage, llm_response.usage);
+                    merge_provider_usage(
+                        &mut usage,
+                        llm_response.usage,
+                        llm_request.provider_protocol_key.profile.id,
+                    );
                     finish_reason = llm_response.finish_reason;
                     let mut assistant_turn = llm_response.assistant_turn;
                     can_drain_steer_input = true;
@@ -994,8 +1249,24 @@ impl AgentRuntime {
                         &run_id,
                         model_request_index,
                     );
+                    let deepseek_skill_activation_barrier =
+                        llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                            && tool_bindings
+                                .iter()
+                                .any(|binding| binding.runtime_call.name == "skills_activate");
                     let (tool_bindings, deferred_for_skill_activation) =
-                        enforce_skill_activation_binding_barrier(tool_bindings);
+                        if deepseek_skill_activation_barrier {
+                            let deferred = tool_bindings
+                                .iter()
+                                .filter(|binding| {
+                                    binding.runtime_call.name != "skills_activate"
+                                })
+                                .count();
+                            (tool_bindings, deferred)
+                        } else {
+                            enforce_skill_activation_binding_barrier(tool_bindings)
+                        };
                     let tool_requests = tool_bindings
                         .iter()
                         .map(|binding| binding.runtime_call.clone())
@@ -1137,6 +1408,18 @@ impl AgentRuntime {
                     assistant_turn.set_runtime_visible_text(retained_assistant_content);
                     if assistant_turn.provider_tool_calls().is_empty() && !tool_bindings.is_empty()
                     {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            return Err(AgentError::structured(
+                                "provider_context_boundary_required",
+                                "DeepSeek Profile 只能执行 Provider 原生 Tool Call，不能把文本猜测为工具协议。",
+                                json!({
+                                    "type": "providerContextBoundary",
+                                    "recovery": "requestNativeProviderToolCalls"
+                                }),
+                            ));
+                        }
                         let provider_protocol = assistant_turn
                             .provider_protocol()
                             .cloned()
@@ -1190,6 +1473,20 @@ impl AgentRuntime {
                         })
                         .collect::<AgentResult<Vec<_>>>()?;
                     assistant_turn.set_runtime_tool_bindings(context_bindings)?;
+                    let deepseek_tool_turn = llm_request.provider_protocol_key.profile.id
+                        == ProviderProfileId::DeepSeekV4Chat
+                        && !assistant_turn.provider_tool_calls().is_empty();
+                    if deepseek_tool_turn
+                        && llm_request.provider_profile_config.reasoning.mode
+                            == ReasoningMode::Enabled
+                        && assistant_turn.provider_continuation().is_none()
+                    {
+                        return Err(provider_continuation_runtime_error(
+                            crate::ProviderContinuationStoreError::InvalidTurn,
+                        ));
+                    }
+                    let has_provider_continuation =
+                        assistant_turn.provider_continuation().is_some();
                     tool_batch = ToolCallBatch::from_provider_response(
                         &run_id,
                         model_request_index,
@@ -1215,30 +1512,125 @@ impl AgentRuntime {
                             )
                         },
                     )?;
+                    if has_provider_continuation || deepseek_tool_turn {
+                        let vault = provider_continuation_vault.as_ref().cloned().ok_or_else(|| {
+                            provider_continuation_runtime_error(
+                                crate::ProviderContinuationStoreError::CredentialUnavailable,
+                            )
+                        })?;
+                        let conversation_id = trace_conversation_id.as_deref().ok_or_else(|| {
+                            provider_continuation_runtime_error(
+                                crate::ProviderContinuationStoreError::InvalidBinding,
+                            )
+                        })?;
+                        let assistant_message_id = trace_assistant_message_id
+                            .as_deref()
+                            .ok_or_else(|| {
+                                provider_continuation_runtime_error(
+                                    crate::ProviderContinuationStoreError::InvalidBinding,
+                                )
+                            })?;
+                        let request_index = u64::try_from(model_request_index).map_err(|_| {
+                            provider_continuation_runtime_error(
+                                crate::ProviderContinuationStoreError::InvalidBinding,
+                            )
+                        })?;
+                        let persisted_turn = tool_batch.assistant_turn().ok_or_else(|| {
+                            provider_continuation_runtime_error(
+                                crate::ProviderContinuationStoreError::InvalidTurn,
+                            )
+                        })?;
+                        let assistant_turn_id = persisted_turn.stable_id();
+                        let assistant_turn_digest = persisted_turn.stable_digest();
+                        let binding =
+                            crate::provider_continuation_store::ProviderContinuationBinding {
+                                conversation_id,
+                                assistant_message_id,
+                                run_id: &run_id,
+                                request_index,
+                                assistant_turn_id: &assistant_turn_id,
+                                assistant_turn_digest: &assistant_turn_digest,
+                                provider_protocol: &llm_request.provider_protocol_key,
+                            };
+                        let continuation_ref = vault
+                            .persist_staged(binding, persisted_turn)
+                            .map_err(provider_continuation_runtime_error)?
+                            .ok_or_else(|| {
+                                provider_continuation_runtime_error(
+                                    crate::ProviderContinuationStoreError::PayloadNotFound,
+                                )
+                            })?;
+                        if let Err(error) = tool_batch
+                            .attach_provider_continuation_ref(continuation_ref.clone())
+                        {
+                            let _ = vault.release(
+                                &continuation_ref,
+                                crate::provider_continuation_store::ProviderContinuationOwner {
+                                    conversation_id,
+                                    assistant_message_id,
+                                    run_id: &run_id,
+                                },
+                                now_ms(),
+                            );
+                            return Err(error);
+                        }
+                        pending_provider_continuation_handoff =
+                            Some(PendingProviderContinuationHandoff {
+                                vault,
+                                continuation_ref,
+                                conversation_id: conversation_id.to_string(),
+                                assistant_message_id: assistant_message_id.to_string(),
+                                run_id: run_id.clone(),
+                                request_index,
+                                assistant_turn_id,
+                                assistant_turn_digest,
+                                provider_protocol: llm_request.provider_protocol_key.clone(),
+                            });
+                    }
+                    if deepseek_skill_activation_barrier {
+                        tool_batch.mark_skill_activation_barrier();
+                    }
                 }
 
-                let checkpoint_assistant_message = tool_batch.checkpoint_assistant_message()?;
-                let pending_assistant_context = match (
-                    tool_batch.take_assistant_turn(),
-                    checkpoint_assistant_message,
-                    tool_batch.context_group(),
-                ) {
-                    (Some(turn), Some(checkpoint_message), Some(group)) => Some((
-                        LlmMessage::from_assistant_turn(turn),
-                        checkpoint_message,
-                        group,
-                    )),
-                    (None, None, _) => None,
-                    _ => {
-                        return Err(AgentError::new(
-                            "Tool Call 批次的完整 Assistant Turn 与执行队列不一致。",
-                        ));
-                    }
-                };
-                let mut pending_assistant_context = pending_assistant_context;
+                let mut pending_assistant_context =
+                    match take_pending_assistant_tool_context(&mut tool_batch) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            release_pending_provider_continuation(
+                                &mut pending_provider_continuation_handoff,
+                            )?;
+                            return Err(error);
+                        }
+                    };
 
                 while let Some(queued_tool_call) = tool_batch.pop_front() {
                     if cancellation_token.is_cancelled() {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            settle_cancelled_deepseek_tool_batch(
+                                Some(TerminalToolCallSettlement {
+                                    queued: queued_tool_call,
+                                    call: None,
+                                    announced: false,
+                                    dispatch_started: false,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                }),
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                            promote_pending_provider_continuation(
+                                &mut pending_provider_continuation_handoff,
+                            )?;
+                        }
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
@@ -1248,7 +1640,10 @@ impl AgentRuntime {
                             finish_reason,
                         ));
                     }
+                    let cancellation_queued_tool_call = queued_tool_call.clone();
                     let batch_claim = tool_batch.claim(&queued_tool_call.call);
+                    let deferred_by_skill_activation =
+                        queued_tool_call.deferred_by_skill_activation;
                     let tool_exchange_group = queued_tool_call.context_group();
                     // Durable model context intentionally keeps the Generic adapter's historical
                     // one-assistant-per-call wire shape. The live Context owns one complete Turn,
@@ -1288,6 +1683,27 @@ impl AgentRuntime {
                         batch_claim,
                         ToolCallBatchClaim::Duplicate { .. }
                     );
+                    let tool_identity = tool_registry.identity(&call.tool).cloned();
+                    let is_mcp_tool =
+                        matches!(tool_identity.as_ref(), Some(AgentToolIdentity::Mcp { .. }));
+
+                    if deferred_by_skill_activation {
+                        policy_preflight_failure = Some(failed_tool_call_result(
+                            &call,
+                            AgentError::structured(
+                                "agent.skill_activation_boundary",
+                                "该工具调用与 Skill 激活出现在同一响应中，未执行；请在读取完整 Skill 指令后重新评估。",
+                                json!({
+                                    "type": "runtimeGuard",
+                                    "code": "skillActivationBoundary",
+                                    "recovery": "reEvaluateAfterSkillActivation",
+                                    "executed": false
+                                }),
+                            ),
+                        ));
+                        requires_approval = false;
+                        call.approval_status = AgentApprovalStatus::NotRequired;
+                    }
 
                     if let ToolCallBatchClaim::Duplicate {
                         semantic_fingerprint,
@@ -1436,11 +1852,20 @@ impl AgentRuntime {
                             };
                         }
                     }
+                    if pending_assistant_context
+                        .as_ref()
+                        .is_some_and(|(_, _, batch_group)| batch_group != &tool_exchange_group)
+                    {
+                        let error = AgentError::new(
+                            "Tool Call 批次的 Assistant Turn 与结果分组不一致。",
+                        );
+                        release_pending_provider_continuation(
+                            &mut pending_provider_continuation_handoff,
+                        )?;
+                        return Err(error);
+                    }
                     let trace_call = tool_registry.trace_call_projection(&call);
                     let checkpoint_call = tool_registry.checkpoint_call_projection(&call);
-                    let tool_identity = tool_registry.identity(&call.tool).cloned();
-                    let is_mcp_tool =
-                        matches!(tool_identity.as_ref(), Some(AgentToolIdentity::Mcp { .. }));
                     let call_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
@@ -1462,11 +1887,7 @@ impl AgentRuntime {
                     if let Some((live_message, checkpoint_message, batch_group)) =
                         pending_assistant_context.take()
                     {
-                        if batch_group != tool_exchange_group {
-                            return Err(AgentError::new(
-                                "Tool Call 批次的 Assistant Turn 与结果分组不一致。",
-                            ));
-                        }
+                        debug_assert_eq!(batch_group, tool_exchange_group);
                         active_context.push(
                             ContextItem::new(
                                 live_message,
@@ -1484,7 +1905,67 @@ impl AgentRuntime {
                             .with_checkpoint_message(checkpoint_message),
                         );
                     }
-                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                    if let Err(error) =
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
+                    {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            settle_aborted_deepseek_tool_batch(
+                                &error,
+                                Some(TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: false,
+                                    dispatch_started: false,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                }),
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                None,
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                        }
+                        return Err(error);
+                    }
+                    if let Err(error) = promote_pending_provider_continuation(
+                        &mut pending_provider_continuation_handoff,
+                    ) {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            settle_aborted_deepseek_tool_batch(
+                                &error,
+                                Some(TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: false,
+                                    dispatch_started: false,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                }),
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                            promote_pending_provider_continuation(
+                                &mut pending_provider_continuation_handoff,
+                            )?;
+                        }
+                        return Err(error);
+                    }
                     if !is_mcp_tool {
                         let event_call = tool_registry.event_call_projection(&call);
                         event_stream.emit(AgentEvent::ToolCall {
@@ -1493,6 +1974,29 @@ impl AgentRuntime {
                         });
                     }
                     if cancellation_token.is_cancelled() {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            settle_cancelled_deepseek_tool_batch(
+                                Some(TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: false,
+                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                }),
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                        }
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
@@ -1525,6 +2029,30 @@ impl AgentRuntime {
                                     trace_observer.as_ref(),
                                 ) {
                                     let _ = tool_registry.invalidate_proposed_action(&action);
+                                    if llm_request.provider_protocol_key.profile.id
+                                        == ProviderProfileId::DeepSeekV4Chat
+                                    {
+                                        settle_aborted_deepseek_tool_batch(
+                                            &error,
+                                            Some(TerminalToolCallSettlement {
+                                                queued: cancellation_queued_tool_call.clone(),
+                                                call: Some(call.clone()),
+                                                announced: true,
+                                                dispatch_started: false,
+                                                outcome: TerminalToolCallOutcome::Synthetic,
+                                            }),
+                                            &mut tool_batch,
+                                            &mut pending_assistant_context,
+                                            &mut active_context,
+                                            &conversation_trace,
+                                            None,
+                                            &mut event_stream,
+                                            tool_registry.as_ref(),
+                                            &model_tool_result_gate,
+                                            trace_assistant_message_id.as_deref(),
+                                            &run_id,
+                                        )?;
+                                    }
                                     return Err(error);
                                 }
                                 action
@@ -1556,13 +2084,42 @@ impl AgentRuntime {
                                     } else {
                                         ConversationHistoryArchiveTraceMetadata::default()
                                     };
-                                let model_observation = finalize_model_tool_observation(
+                                let model_observation = match finalize_model_tool_observation(
                                     &model_tool_result_gate,
                                     &call.id,
                                     true,
                                     &llm_result,
                                     &archive_metadata,
-                                )?;
+                                ) {
+                                    Ok(observation) => observation,
+                                    Err(error) => {
+                                        if llm_request.provider_protocol_key.profile.id
+                                            == ProviderProfileId::DeepSeekV4Chat
+                                        {
+                                            settle_aborted_deepseek_tool_batch(
+                                                &error,
+                                                Some(TerminalToolCallSettlement {
+                                                    queued: cancellation_queued_tool_call.clone(),
+                                                    call: Some(call.clone()),
+                                                    announced: true,
+                                                    dispatch_started: false,
+                                                    outcome: TerminalToolCallOutcome::Synthetic,
+                                                }),
+                                                &mut tool_batch,
+                                                &mut pending_assistant_context,
+                                                &mut active_context,
+                                                &conversation_trace,
+                                                trace_observer.as_ref(),
+                                                &mut event_stream,
+                                                tool_registry.as_ref(),
+                                                &model_tool_result_gate,
+                                                trace_assistant_message_id.as_deref(),
+                                                &run_id,
+                                            )?;
+                                        }
+                                        return Err(error);
+                                    }
+                                };
                                 let recorded_result_sequence = {
                                     let mut recorder = conversation_trace
                                         .lock()
@@ -1570,7 +2127,7 @@ impl AgentRuntime {
                                     let sequence = recorder.record_tool_result_with_archive(
                                         &call,
                                         &checkpoint_result,
-                                        archive_metadata,
+                                        archive_metadata.clone(),
                                     );
                                     if let Some(sequence) = sequence {
                                         recorder.record_model_message(
@@ -1585,10 +2142,48 @@ impl AgentRuntime {
                                     }
                                     sequence
                                 };
-                                publish_trace_snapshot(
+                                if let Err(error) = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
-                                )?;
+                                ) {
+                                    if llm_request.provider_protocol_key.profile.id
+                                        == ProviderProfileId::DeepSeekV4Chat
+                                    {
+                                        settle_aborted_deepseek_tool_batch(
+                                            &error,
+                                            Some(TerminalToolCallSettlement {
+                                                queued: cancellation_queued_tool_call.clone(),
+                                                call: Some(call.clone()),
+                                                announced: true,
+                                                dispatch_started: false,
+                                                outcome: TerminalToolCallOutcome::Settled(Box::new(
+                                                    SettledTerminalToolCallOutcome {
+                                                        result: result.clone(),
+                                                        checkpoint_result:
+                                                            checkpoint_result.clone(),
+                                                        model_observation:
+                                                            model_observation.clone(),
+                                                        checkpoint_observation:
+                                                            model_observation.clone(),
+                                                        archive_metadata:
+                                                            archive_metadata.clone(),
+                                                    },
+                                                )),
+                                            }),
+                                            &mut tool_batch,
+                                            &mut pending_assistant_context,
+                                            &mut active_context,
+                                            &conversation_trace,
+                                            None,
+                                            &mut event_stream,
+                                            tool_registry.as_ref(),
+                                            &model_tool_result_gate,
+                                            trace_assistant_message_id.as_deref(),
+                                            &run_id,
+                                        )?;
+                                    }
+                                    return Err(error);
+                                }
                                 if !is_mcp_tool {
                                     event_stream.emit(AgentEvent::ToolResult {
                                         run_id: run_id.clone(),
@@ -1617,6 +2212,29 @@ impl AgentRuntime {
                         };
                         if cancellation_token.is_cancelled() {
                             let _ = tool_registry.invalidate_proposed_action(&action);
+                            if llm_request.provider_protocol_key.profile.id
+                                == ProviderProfileId::DeepSeekV4Chat
+                            {
+                                settle_cancelled_deepseek_tool_batch(
+                                    Some(TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: false,
+                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                    }),
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                            }
                             return Ok(cancelled_output(
                                 run_id,
                                 event_stream,
@@ -1632,7 +2250,10 @@ impl AgentRuntime {
                                 diff: diff.clone(),
                             });
                         }
-                        if matches!(&action, AgentProposedAction::McpToolCall { .. }) {
+                        if matches!(&action, AgentProposedAction::McpToolCall { .. })
+                            && llm_request.provider_protocol_key.profile.id
+                                != ProviderProfileId::DeepSeekV4Chat
+                        {
                             let deferred_calls = tool_batch.defer_external_calls(|queued| {
                                 matches!(
                                     tool_registry.identity(&queued.call.name),
@@ -1660,6 +2281,30 @@ impl AgentRuntime {
                             Ok(snapshots) => snapshots,
                             Err(error) => {
                                 let _ = tool_registry.invalidate_proposed_action(&action);
+                                if llm_request.provider_protocol_key.profile.id
+                                    == ProviderProfileId::DeepSeekV4Chat
+                                {
+                                    settle_aborted_deepseek_tool_batch(
+                                        &error,
+                                        Some(TerminalToolCallSettlement {
+                                            queued: cancellation_queued_tool_call.clone(),
+                                            call: Some(call.clone()),
+                                            announced: true,
+                                            dispatch_started: false,
+                                            outcome: TerminalToolCallOutcome::Synthetic,
+                                        }),
+                                        &mut tool_batch,
+                                        &mut pending_assistant_context,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        trace_observer.as_ref(),
+                                        &mut event_stream,
+                                        tool_registry.as_ref(),
+                                        &model_tool_result_gate,
+                                        trace_assistant_message_id.as_deref(),
+                                        &run_id,
+                                    )?;
+                                }
                                 return Err(error);
                             }
                         };
@@ -1689,9 +2334,67 @@ impl AgentRuntime {
                             Ok(checkpoint) => checkpoint,
                             Err(error) => {
                                 let _ = tool_registry.invalidate_proposed_action(&action);
+                                if llm_request.provider_protocol_key.profile.id
+                                    == ProviderProfileId::DeepSeekV4Chat
+                                {
+                                    settle_aborted_deepseek_tool_batch(
+                                        &error,
+                                        Some(TerminalToolCallSettlement {
+                                            queued: cancellation_queued_tool_call.clone(),
+                                            call: Some(call.clone()),
+                                            announced: true,
+                                            dispatch_started: false,
+                                            outcome: TerminalToolCallOutcome::Synthetic,
+                                        }),
+                                        &mut tool_batch,
+                                        &mut pending_assistant_context,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        trace_observer.as_ref(),
+                                        &mut event_stream,
+                                        tool_registry.as_ref(),
+                                        &model_tool_result_gate,
+                                        trace_assistant_message_id.as_deref(),
+                                        &run_id,
+                                    )?;
+                                }
                                 return Err(error);
                             }
                         };
+                        if cancellation_token.is_cancelled() {
+                            let _ = tool_registry.invalidate_proposed_action(&action);
+                            if llm_request.provider_protocol_key.profile.id
+                                == ProviderProfileId::DeepSeekV4Chat
+                            {
+                                settle_cancelled_deepseek_tool_batch(
+                                    Some(TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: false,
+                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                    }),
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                            }
+                            return Ok(cancelled_output(
+                                run_id,
+                                event_stream,
+                                tool_definitions,
+                                runtime_extensions.todo_state(),
+                                usage,
+                                finish_reason,
+                            ));
+                        }
                         if let AgentProposedAction::McpToolCall { approval } = &action {
                             checkpoint.pending_action_id =
                                 Some(approval.identity.action_id.clone());
@@ -1712,6 +2415,30 @@ impl AgentRuntime {
                                 Ok(invocation) => invocation,
                                 Err(error) => {
                                     let _ = tool_registry.invalidate_proposed_action(&action);
+                                    if llm_request.provider_protocol_key.profile.id
+                                        == ProviderProfileId::DeepSeekV4Chat
+                                    {
+                                        settle_aborted_deepseek_tool_batch(
+                                            &error,
+                                            Some(TerminalToolCallSettlement {
+                                                queued: cancellation_queued_tool_call.clone(),
+                                                call: Some(call.clone()),
+                                                announced: true,
+                                                dispatch_started: false,
+                                                outcome: TerminalToolCallOutcome::Synthetic,
+                                            }),
+                                            &mut tool_batch,
+                                            &mut pending_assistant_context,
+                                            &mut active_context,
+                                            &conversation_trace,
+                                            trace_observer.as_ref(),
+                                            &mut event_stream,
+                                            tool_registry.as_ref(),
+                                            &model_tool_result_gate,
+                                            trace_assistant_message_id.as_deref(),
+                                            &run_id,
+                                        )?;
+                                    }
                                     return Err(error);
                                 }
                             };
@@ -1776,10 +2503,36 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .enrich_tool_call(&action);
-                                publish_trace_snapshot(
+                                if let Err(error) = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
-                                )?;
+                                ) {
+                                    if llm_request.provider_protocol_key.profile.id
+                                        == ProviderProfileId::DeepSeekV4Chat
+                                    {
+                                        settle_aborted_deepseek_tool_batch(
+                                            &error,
+                                            Some(TerminalToolCallSettlement {
+                                                queued: cancellation_queued_tool_call.clone(),
+                                                call: Some(call.clone()),
+                                                announced: true,
+                                                dispatch_started: false,
+                                                outcome: TerminalToolCallOutcome::Synthetic,
+                                            }),
+                                            &mut tool_batch,
+                                            &mut pending_assistant_context,
+                                            &mut active_context,
+                                            &conversation_trace,
+                                            None,
+                                            &mut event_stream,
+                                            tool_registry.as_ref(),
+                                            &model_tool_result_gate,
+                                            trace_assistant_message_id.as_deref(),
+                                            &run_id,
+                                        )?;
+                                    }
+                                    return Err(error);
+                                }
                                 if let AgentProposedAction::Diff { diff } = &action {
                                     event_stream.emit(AgentEvent::Diff {
                                         run_id: run_id.clone(),
@@ -1829,6 +2582,29 @@ impl AgentRuntime {
                     let result = match result_result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => {
+                            if llm_request.provider_protocol_key.profile.id
+                                == ProviderProfileId::DeepSeekV4Chat
+                            {
+                                settle_cancelled_deepseek_tool_batch(
+                                    Some(TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: true,
+                                        outcome: TerminalToolCallOutcome::Synthetic,
+                                    }),
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                            }
                             return Ok(cancelled_output(
                                 run_id,
                                 event_stream,
@@ -1838,8 +2614,78 @@ impl AgentRuntime {
                                 finish_reason,
                             ));
                         }
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            if llm_request.provider_protocol_key.profile.id
+                                == ProviderProfileId::DeepSeekV4Chat
+                            {
+                                let failed_result = failed_tool_call_result(&call, error.clone());
+                                settle_aborted_deepseek_tool_batch(
+                                    &error,
+                                    Some(TerminalToolCallSettlement {
+                                        queued: cancellation_queued_tool_call.clone(),
+                                        call: Some(call.clone()),
+                                        announced: true,
+                                        dispatch_started: true,
+                                        outcome: TerminalToolCallOutcome::Authoritative(
+                                            failed_result,
+                                        ),
+                                    }),
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                            }
+                            return Err(error);
+                        }
                     };
+                    if llm_request.provider_protocol_key.profile.id
+                        == ProviderProfileId::DeepSeekV4Chat
+                        && cancellation_preempts_tool_result(
+                            auto_execute_host_action,
+                            if authoritative_tool_settlement {
+                                crate::tools::AgentToolCancellationSettlement::Authoritative
+                            } else {
+                                crate::tools::AgentToolCancellationSettlement::Interruptible
+                            },
+                            cancellation_token.is_cancelled(),
+                            &result,
+                        )
+                    {
+                        settle_cancelled_deepseek_tool_batch(
+                            Some(TerminalToolCallSettlement {
+                                queued: cancellation_queued_tool_call.clone(),
+                                call: Some(call.clone()),
+                                announced: true,
+                                dispatch_started: true,
+                                outcome: TerminalToolCallOutcome::Synthetic,
+                            }),
+                            &mut tool_batch,
+                            &mut pending_assistant_context,
+                            &mut active_context,
+                            &conversation_trace,
+                            trace_observer.as_ref(),
+                            &mut event_stream,
+                            tool_registry.as_ref(),
+                            &model_tool_result_gate,
+                            trace_assistant_message_id.as_deref(),
+                            &run_id,
+                        )?;
+                        return Ok(cancelled_output(
+                            run_id,
+                            event_stream,
+                            tool_definitions,
+                            runtime_extensions.todo_state(),
+                            usage,
+                            finish_reason,
+                        ));
+                    }
                     if !duplicate_in_batch {
                         tool_failure_guard.observe(&call, &result);
                     }
@@ -1868,14 +2714,52 @@ impl AgentRuntime {
                     };
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
-                    let (model_observation, checkpoint_observation) = finalize_tool_observations(
-                        &model_tool_result_gate,
-                        &call.id,
-                        !result.ok,
-                        &llm_result,
-                        &checkpoint_result,
-                        &archive_metadata,
-                    )?;
+                    let (model_observation, checkpoint_observation) =
+                        match finalize_tool_observations(
+                            &model_tool_result_gate,
+                            &call.id,
+                            !result.ok,
+                            &llm_result,
+                            &checkpoint_result,
+                            &archive_metadata,
+                        ) {
+                            Ok(observations) => observations,
+                            Err(error) => {
+                                if llm_request.provider_protocol_key.profile.id
+                                    == ProviderProfileId::DeepSeekV4Chat
+                                {
+                                    conversation_trace
+                                        .lock()
+                                        .unwrap_or_else(|poison| poison.into_inner())
+                                        .record_tool_result_with_archive(
+                                            &call,
+                                            &checkpoint_result,
+                                            archive_metadata,
+                                        );
+                                    settle_aborted_deepseek_tool_batch(
+                                        &error,
+                                        Some(TerminalToolCallSettlement {
+                                            queued: cancellation_queued_tool_call.clone(),
+                                            call: Some(call.clone()),
+                                            announced: true,
+                                            dispatch_started: true,
+                                            outcome: TerminalToolCallOutcome::Synthetic,
+                                        }),
+                                        &mut tool_batch,
+                                        &mut pending_assistant_context,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        trace_observer.as_ref(),
+                                        &mut event_stream,
+                                        tool_registry.as_ref(),
+                                        &model_tool_result_gate,
+                                        trace_assistant_message_id.as_deref(),
+                                        &run_id,
+                                    )?;
+                                }
+                                return Err(error);
+                            }
+                        };
                     let recorded_result_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
@@ -1883,7 +2767,7 @@ impl AgentRuntime {
                         let sequence = recorder.record_tool_result_with_archive(
                             &call,
                             &checkpoint_result,
-                            archive_metadata,
+                            archive_metadata.clone(),
                         );
                         if let Some(sequence) = sequence {
                             recorder.record_model_message(
@@ -1898,7 +2782,43 @@ impl AgentRuntime {
                         }
                         sequence
                     };
-                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                    if let Err(error) =
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
+                    {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            settle_aborted_deepseek_tool_batch(
+                                &error,
+                                Some(TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: true,
+                                    outcome: TerminalToolCallOutcome::Settled(Box::new(
+                                        SettledTerminalToolCallOutcome {
+                                        result: result.clone(),
+                                        checkpoint_result: checkpoint_result.clone(),
+                                        model_observation: model_observation.clone(),
+                                        checkpoint_observation: checkpoint_observation.clone(),
+                                        archive_metadata: archive_metadata.clone(),
+                                        },
+                                    )),
+                                }),
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                None,
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                        }
+                        return Err(error);
+                    }
                     if cancellation_preempts_tool_result(
                         auto_execute_host_action,
                         if authoritative_tool_settlement {
@@ -1909,6 +2829,37 @@ impl AgentRuntime {
                         cancellation_token.is_cancelled(),
                         &result,
                     ) {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                        {
+                            settle_cancelled_deepseek_tool_batch(
+                                Some(TerminalToolCallSettlement {
+                                    queued: cancellation_queued_tool_call.clone(),
+                                    call: Some(call.clone()),
+                                    announced: true,
+                                    dispatch_started: true,
+                                    outcome: TerminalToolCallOutcome::Settled(Box::new(
+                                        SettledTerminalToolCallOutcome {
+                                        result: result.clone(),
+                                        checkpoint_result: checkpoint_result.clone(),
+                                        model_observation: model_observation.clone(),
+                                        checkpoint_observation: checkpoint_observation.clone(),
+                                        archive_metadata: archive_metadata.clone(),
+                                        },
+                                    )),
+                                }),
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                        }
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
@@ -1979,10 +2930,35 @@ impl AgentRuntime {
                             .with_checkpoint_message(checkpoint_message),
                         );
                     }
-                    let extension_effects = runtime_extensions
-                        .on_event(RuntimeExtensionEvent::ToolCompleted {
+                    let extension_effects = match runtime_extensions.on_event(
+                        RuntimeExtensionEvent::ToolCompleted {
                             result: &trace_result,
-                        })?;
+                        },
+                    ) {
+                        Ok(effects) => effects,
+                        Err(error) => {
+                            if llm_request.provider_protocol_key.profile.id
+                                == ProviderProfileId::DeepSeekV4Chat
+                                && !tool_batch.is_empty()
+                            {
+                                settle_aborted_deepseek_tool_batch(
+                                    &error,
+                                    None,
+                                    &mut tool_batch,
+                                    &mut pending_assistant_context,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                    tool_registry.as_ref(),
+                                    &model_tool_result_gate,
+                                    trace_assistant_message_id.as_deref(),
+                                    &run_id,
+                                )?;
+                            }
+                            return Err(error);
+                        }
+                    };
                     // A tool result must remain adjacent to its assistant tool call. Runtime
                     // extensions may append retained context only after the paired result has
                     // entered the frame, otherwise provider tool-call protocol would be invalid.
@@ -1995,9 +2971,47 @@ impl AgentRuntime {
                         }
                     }
                     if terminate_after_repeat_guard_result {
-                        return Err(ToolFailureGuard::terminal_error(&call));
+                        let error = ToolFailureGuard::terminal_error(&call);
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                            && !tool_batch.is_empty()
+                        {
+                            settle_aborted_deepseek_tool_batch(
+                                &error,
+                                None,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                        }
+                        return Err(error);
                     }
                     if cancellation_token.is_cancelled() {
+                        if llm_request.provider_protocol_key.profile.id
+                            == ProviderProfileId::DeepSeekV4Chat
+                            && !tool_batch.is_empty()
+                        {
+                            settle_cancelled_deepseek_tool_batch(
+                                None,
+                                &mut tool_batch,
+                                &mut pending_assistant_context,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                &mut event_stream,
+                                tool_registry.as_ref(),
+                                &model_tool_result_gate,
+                                trace_assistant_message_id.as_deref(),
+                                &run_id,
+                            )?;
+                        }
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
@@ -2070,6 +3084,475 @@ impl AgentRuntime {
             trace_assistant_message_id.as_deref(),
         )
     }
+}
+
+type PendingAssistantToolContext = (LlmMessage, LlmMessage, crate::context::ContextGroup);
+
+/// Owns the narrow interval between sealing a private Provider turn and publishing its first
+/// durable Host handoff. Staged rows are invisible to hydration, profile-boundary detection,
+/// forks and approval checkpoints until this exact binding is promoted.
+struct PendingProviderContinuationHandoff {
+    vault: Arc<crate::ProviderContinuationVault>,
+    continuation_ref: crate::protocol::ProviderContinuationRef,
+    conversation_id: String,
+    assistant_message_id: String,
+    run_id: String,
+    request_index: u64,
+    assistant_turn_id: String,
+    assistant_turn_digest: String,
+    provider_protocol: ProviderProtocolKey,
+}
+
+impl PendingProviderContinuationHandoff {
+    fn binding(&self) -> crate::provider_continuation_store::ProviderContinuationBinding<'_> {
+        crate::provider_continuation_store::ProviderContinuationBinding {
+            conversation_id: &self.conversation_id,
+            assistant_message_id: &self.assistant_message_id,
+            run_id: &self.run_id,
+            request_index: self.request_index,
+            assistant_turn_id: &self.assistant_turn_id,
+            assistant_turn_digest: &self.assistant_turn_digest,
+            provider_protocol: &self.provider_protocol,
+        }
+    }
+}
+
+fn promote_pending_provider_continuation(
+    pending: &mut Option<PendingProviderContinuationHandoff>,
+) -> AgentResult<()> {
+    let Some(handoff) = pending.as_ref() else {
+        return Ok(());
+    };
+    handoff
+        .vault
+        .promote_staged(&handoff.continuation_ref, handoff.binding(), now_ms())
+        .map_err(provider_continuation_runtime_error)?;
+    *pending = None;
+    Ok(())
+}
+
+fn release_pending_provider_continuation(
+    pending: &mut Option<PendingProviderContinuationHandoff>,
+) -> AgentResult<()> {
+    let Some(handoff) = pending.as_ref() else {
+        return Ok(());
+    };
+    handoff
+        .vault
+        .release(
+            &handoff.continuation_ref,
+            crate::provider_continuation_store::ProviderContinuationOwner {
+                conversation_id: &handoff.conversation_id,
+                assistant_message_id: &handoff.assistant_message_id,
+                run_id: &handoff.run_id,
+            },
+            now_ms(),
+        )
+        .map_err(provider_continuation_runtime_error)?;
+    *pending = None;
+    Ok(())
+}
+
+/// The runtime persists a DeepSeek tool-bearing Provider turn before any Tool can execute. Once
+/// that happens, cancellation must close the *whole* grouped turn as well: leaving even one call
+/// without a ToolResult would make the encrypted continuation impossible to replay safely.
+///
+/// `call` carries policy/approval state already computed for the in-flight call. Queued suffix
+/// calls deliberately use a fresh `NotRequired` state because cancellation prevents them from
+/// reaching either approval or dispatch.
+struct TerminalToolCallSettlement {
+    queued: QueuedToolCall,
+    call: Option<AgentToolCall>,
+    announced: bool,
+    dispatch_started: bool,
+    outcome: TerminalToolCallOutcome,
+}
+
+enum TerminalToolCallOutcome {
+    Synthetic,
+    Authoritative(AgentToolResult),
+    Settled(Box<SettledTerminalToolCallOutcome>),
+}
+
+struct SettledTerminalToolCallOutcome {
+    result: AgentToolResult,
+    checkpoint_result: AgentToolResult,
+    model_observation: String,
+    checkpoint_observation: String,
+    archive_metadata: ConversationHistoryArchiveTraceMetadata,
+}
+
+#[derive(Clone)]
+enum DeepSeekToolBatchTerminalCause {
+    Cancelled,
+    Aborted { cause_code: String },
+}
+
+fn take_pending_assistant_tool_context(
+    tool_batch: &mut ToolCallBatch,
+) -> AgentResult<Option<PendingAssistantToolContext>> {
+    let checkpoint_assistant_message = tool_batch.checkpoint_assistant_message()?;
+    match (
+        tool_batch.take_assistant_turn(),
+        checkpoint_assistant_message,
+        tool_batch.context_group(),
+    ) {
+        (Some(turn), Some(checkpoint_message), Some(group)) => Ok(Some((
+            LlmMessage::from_assistant_turn(turn),
+            checkpoint_message,
+            group,
+        ))),
+        (None, None, _) => Ok(None),
+        _ => Err(AgentError::new(
+            "Tool Call 批次的完整 Assistant Turn 与执行队列不一致。",
+        )),
+    }
+}
+
+fn cancelled_tool_call_result(call: &AgentToolCall, dispatch_started: bool) -> AgentToolResult {
+    let dispatch = if dispatch_started {
+        json!({
+            "dispatchCertainty": "possiblyDispatched",
+            "retryable": false,
+            "recovery": "inspectAuthoritativeStateBeforeRetry",
+        })
+    } else {
+        json!({
+            "dispatchCertainty": "definitelyNotDispatched",
+            "executed": false,
+            "retryable": false,
+            "recovery": "waitForExplicitUserInstruction",
+        })
+    };
+    let mut details = json!({
+        "type": "runtimeGuard",
+        "code": "runCancelled",
+        "status": "cancelled",
+        "outcome": "cancelled",
+        "cancelled": true,
+    });
+    if let (Some(details), Some(dispatch)) = (details.as_object_mut(), dispatch.as_object()) {
+        details.extend(dispatch.clone());
+    }
+    failed_tool_call_result(
+        call,
+        AgentError::structured("agent.run_cancelled", "agent run 已取消。", details),
+    )
+}
+
+fn aborted_tool_call_result(
+    call: &AgentToolCall,
+    dispatch_started: bool,
+    cause_code: &str,
+) -> AgentToolResult {
+    let (outcome, dispatch_certainty, recovery) = if dispatch_started {
+        (
+            "failed",
+            "possiblyDispatched",
+            "inspectAuthoritativeStateBeforeRetry",
+        )
+    } else {
+        (
+            "skipped",
+            "definitelyNotDispatched",
+            "retryFromSafeContextBoundary",
+        )
+    };
+    let mut details = json!({
+        "type": "runtimeGuard",
+        "code": "groupedTurnAborted",
+        "status": "failed",
+        "outcome": outcome,
+        "dispatchCertainty": dispatch_certainty,
+        "retryable": false,
+        "recovery": recovery,
+        "causeCode": cause_code,
+    });
+    if !dispatch_started {
+        details["executed"] = json!(false);
+    }
+    failed_tool_call_result(
+        call,
+        AgentError::structured(
+            "agent.grouped_tool_call_skipped",
+            "The grouped Provider turn was aborted before this Tool Call could complete.",
+            details,
+        ),
+    )
+}
+
+/// Atomically stages ordered cancellation ToolResults for the current call and every queued
+/// suffix call, then publishes one complete trace snapshot. No remaining Tool is proposed,
+/// approved, or dispatched. Generic adapters retain their historical cancellation behavior.
+#[allow(clippy::too_many_arguments)]
+fn settle_cancelled_deepseek_tool_batch(
+    current: Option<TerminalToolCallSettlement>,
+    tool_batch: &mut ToolCallBatch,
+    pending_assistant_context: &mut Option<PendingAssistantToolContext>,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    event_stream: &mut AgentEventStream,
+    tool_registry: &ToolRegistry,
+    model_tool_result_gate: &ModelToolResultGate,
+    trace_assistant_message_id: Option<&str>,
+    run_id: &str,
+) -> AgentResult<()> {
+    settle_terminal_deepseek_tool_batch(
+        DeepSeekToolBatchTerminalCause::Cancelled,
+        current,
+        tool_batch,
+        pending_assistant_context,
+        active_context,
+        conversation_trace,
+        trace_observer,
+        event_stream,
+        tool_registry,
+        model_tool_result_gate,
+        trace_assistant_message_id,
+        run_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_aborted_deepseek_tool_batch(
+    cause: &AgentError,
+    current: Option<TerminalToolCallSettlement>,
+    tool_batch: &mut ToolCallBatch,
+    pending_assistant_context: &mut Option<PendingAssistantToolContext>,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    event_stream: &mut AgentEventStream,
+    tool_registry: &ToolRegistry,
+    model_tool_result_gate: &ModelToolResultGate,
+    trace_assistant_message_id: Option<&str>,
+    run_id: &str,
+) -> AgentResult<()> {
+    settle_terminal_deepseek_tool_batch(
+        DeepSeekToolBatchTerminalCause::Aborted {
+            cause_code: cause.code().unwrap_or("agent.runtime_abort").to_string(),
+        },
+        current,
+        tool_batch,
+        pending_assistant_context,
+        active_context,
+        conversation_trace,
+        trace_observer,
+        event_stream,
+        tool_registry,
+        model_tool_result_gate,
+        trace_assistant_message_id,
+        run_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_terminal_deepseek_tool_batch(
+    terminal_cause: DeepSeekToolBatchTerminalCause,
+    current: Option<TerminalToolCallSettlement>,
+    tool_batch: &mut ToolCallBatch,
+    pending_assistant_context: &mut Option<PendingAssistantToolContext>,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    event_stream: &mut AgentEventStream,
+    tool_registry: &ToolRegistry,
+    model_tool_result_gate: &ModelToolResultGate,
+    trace_assistant_message_id: Option<&str>,
+    run_id: &str,
+) -> AgentResult<()> {
+    let mut staged_batch = tool_batch.clone();
+    let mut staged_context = active_context.clone();
+    let mut staged_pending_assistant_context = pending_assistant_context.clone();
+    let mut staged_trace = conversation_trace
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let mut settlements = Vec::with_capacity(staged_batch.len().saturating_add(1));
+    if let Some(current) = current {
+        settlements.push(current);
+    }
+    while let Some(queued) = staged_batch.pop_front() {
+        settlements.push(TerminalToolCallSettlement {
+            queued,
+            call: None,
+            announced: false,
+            dispatch_started: false,
+            outcome: TerminalToolCallOutcome::Synthetic,
+        });
+    }
+
+    let mut staged_events = Vec::with_capacity(settlements.len().saturating_mul(2));
+    for settlement in settlements {
+        let TerminalToolCallSettlement {
+            queued,
+            call,
+            announced,
+            dispatch_started,
+            outcome,
+        } = settlement;
+        let call = call.unwrap_or_else(|| AgentToolCall {
+            id: queued.call.id.clone(),
+            tool: queued.call.name.clone(),
+            args: queued.call.args.clone(),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: extract_reason_from_args(&queued.call.args),
+        });
+        let tool_identity = tool_registry.identity(&call.tool).cloned();
+        let is_mcp_tool = matches!(tool_identity, Some(AgentToolIdentity::Mcp { .. }));
+        let trace_call = tool_registry.trace_call_projection(&call);
+        let checkpoint_call = tool_registry.checkpoint_call_projection(&call);
+        let durable_trace_assistant_message = LlmMessage::assistant(
+            queued.assistant_content.clone(),
+            vec![queued.checkpoint_call.clone()],
+        );
+        let call_sequence = staged_trace.record_tool_call_with_identity(&trace_call, tool_identity);
+        if let Some(sequence) = call_sequence {
+            staged_trace.record_model_message(sequence, 0, &durable_trace_assistant_message);
+            if trace_call.args != call.args || checkpoint_call.args != call.args {
+                staged_trace.mark_truncated();
+            }
+        }
+
+        let tool_exchange_group = queued.context_group();
+        if let Some((live_message, checkpoint_message, batch_group)) =
+            staged_pending_assistant_context.take()
+        {
+            if batch_group != tool_exchange_group {
+                return Err(AgentError::new(
+                    "Tool Call 取消结算的 Assistant Turn 与结果分组不一致。",
+                ));
+            }
+            staged_context.push(
+                ContextItem::new(
+                    live_message,
+                    with_trace_origin(
+                        ContextMetadata::new(
+                            ContextSource::ModelResponse,
+                            ContextScope::Run,
+                            ContextRetention::Retained,
+                        )
+                        .with_group(batch_group),
+                        trace_assistant_message_id,
+                        call_sequence,
+                    ),
+                )
+                .with_checkpoint_message(checkpoint_message),
+            );
+        }
+
+        if !announced && !is_mcp_tool {
+            staged_events.push(AgentEvent::ToolCall {
+                run_id: run_id.to_string(),
+                call: tool_registry.event_call_projection(&call),
+            });
+        }
+
+        let project_terminal_result = |result: AgentToolResult| {
+            let model_result = tool_registry.model_projection(&result);
+            let checkpoint_result = tool_registry.checkpoint_projection(&result);
+            let archive_metadata = ConversationHistoryArchiveTraceMetadata::default();
+            let (model_observation, checkpoint_observation) = finalize_tool_observations(
+                model_tool_result_gate,
+                &call.id,
+                true,
+                &model_result,
+                &checkpoint_result,
+                &archive_metadata,
+            )?;
+            Ok::<_, AgentError>((
+                result,
+                checkpoint_result,
+                model_observation,
+                checkpoint_observation,
+                archive_metadata,
+            ))
+        };
+        let (
+            result,
+            checkpoint_result,
+            model_observation,
+            checkpoint_observation,
+            archive_metadata,
+        ) = match outcome {
+            TerminalToolCallOutcome::Settled(settled) => {
+                let SettledTerminalToolCallOutcome {
+                    result,
+                    checkpoint_result,
+                    model_observation,
+                    checkpoint_observation,
+                    archive_metadata,
+                } = *settled;
+                (
+                    result,
+                    checkpoint_result,
+                    model_observation,
+                    checkpoint_observation,
+                    archive_metadata,
+                )
+            }
+            TerminalToolCallOutcome::Authoritative(result) => project_terminal_result(result)?,
+            TerminalToolCallOutcome::Synthetic => project_terminal_result(match &terminal_cause {
+                DeepSeekToolBatchTerminalCause::Cancelled => {
+                    cancelled_tool_call_result(&call, dispatch_started)
+                }
+                DeepSeekToolBatchTerminalCause::Aborted { cause_code } => {
+                    aborted_tool_call_result(&call, dispatch_started, cause_code)
+                }
+            })?,
+        };
+        let is_error = !result.ok;
+        let result_sequence = staged_trace.record_tool_result_with_archive(
+            &call,
+            &checkpoint_result,
+            archive_metadata,
+        );
+        if let Some(sequence) = result_sequence {
+            staged_trace.record_model_message(
+                sequence,
+                0,
+                &LlmMessage::tool_result(call.id.clone(), checkpoint_observation.clone(), is_error),
+            );
+        }
+        if !is_mcp_tool {
+            staged_events.push(AgentEvent::ToolResult {
+                run_id: run_id.to_string(),
+                result: redact_tool_result_for_event(&tool_registry.event_projection(&result)),
+            });
+        }
+        staged_context.push(
+            ContextItem::tool_result(
+                call.id.clone(),
+                model_observation,
+                is_error,
+                with_trace_origin(
+                    ContextMetadata::new(
+                        ContextSource::ToolResult,
+                        ContextScope::Run,
+                        ContextRetention::Retained,
+                    )
+                    .with_group(tool_exchange_group),
+                    trace_assistant_message_id,
+                    result_sequence,
+                ),
+            )
+            .with_checkpoint_tool_result(call.id, checkpoint_observation, is_error),
+        );
+    }
+    staged_context.validate_complete_tool_protocol()?;
+
+    *tool_batch = staged_batch;
+    *active_context = staged_context;
+    *pending_assistant_context = staged_pending_assistant_context;
+    *conversation_trace
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = staged_trace;
+    publish_trace_snapshot(conversation_trace, trace_observer)?;
+    for event in staged_events {
+        event_stream.emit(event);
+    }
+    Ok(())
 }
 
 fn unavailable_tool_error(tool_set: &EffectiveToolSet, tool_name: &str) -> AgentError {

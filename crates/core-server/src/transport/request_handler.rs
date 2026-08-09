@@ -157,7 +157,7 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            conversation_fork_response(request.id, storage.fork_conversation_view(input))
+            conversation_fork_response(request.id, agent_service.fork_conversation_view(input))
         }
         STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD => {
             let input = match parse_params::<AttachmentIdRequest>(request.params) {

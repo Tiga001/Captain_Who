@@ -10,10 +10,15 @@ use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
     conversation_history_archive_repository, conversation_history_open,
     conversation_model_context_repository, conversation_trace_repository, file_draft_repository,
-    guidance_repository, turn_diff_repository, world_state_repository,
+    guidance_repository, provider_continuation_repository, turn_diff_repository,
+    world_state_repository,
 };
 use crate::{
-    AgentGuidanceStatus, ConversationModelContextItem, ConversationTurnTrace, WorldStateRecord,
+    provider_continuation_store::{
+        PreparedProviderContinuationClone, ProviderContinuationForkMapping,
+    },
+    AgentGuidanceStatus, ConversationModelContextItem, ConversationTurnTrace,
+    ProviderContinuationRef, WorldStateRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
@@ -91,6 +96,7 @@ pub(crate) struct ConversationForkPlan {
     file_drafts: Vec<AgentFileDraftRecord>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
     world_state_records: Vec<world_state_repository::ConversationWorldStateJournalEntry>,
+    pub(crate) provider_continuation_mappings: Vec<ProviderContinuationForkMapping>,
     message_id_map: HashMap<String, String>,
     run_id_map: HashMap<String, String>,
     id_replacements: HashMap<String, String>,
@@ -182,6 +188,36 @@ pub(crate) fn build_fork_plan(
         .iter()
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
+    let active_chain =
+        context_compaction_repository::list_active_summary_chain(connection, &source.id)
+            .map_err(|error| error.to_string())?;
+    let summaries = summaries_visible_at_cutoff(active_chain, &source_positions, cutoff)?;
+    let summary_covered_runtime_tool_calls = summaries
+        .last()
+        .map(|version| {
+            context_compaction_repository::covered_runtime_tool_calls_through_cursor(
+                connection,
+                &source.id,
+                &version.summary.covered_through,
+            )
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    if provider_continuation_repository::has_released_for_messages_outside_summary_coverage(
+        connection,
+        &source.id,
+        &source_message_ids,
+        &summary_covered_runtime_tool_calls,
+    )
+    .map_err(database_error)?
+    {
+        return Err(
+            "所选历史边界包含已由上下文压缩替换的 Provider Tool Exchange，无法安全复制原始 Provider 状态。"
+                .to_string()
+                .into(),
+        );
+    }
     let source_attachments = attachment_repository::list_message_attachments_for_fork(
         connection,
         &source.id,
@@ -425,10 +461,6 @@ pub(crate) fn build_fork_plan(
         })
         .collect::<Result<Vec<_>, String>>()?;
 
-    let active_chain =
-        context_compaction_repository::list_active_summary_chain(connection, &source.id)
-            .map_err(|error| error.to_string())?;
-    let summaries = summaries_visible_at_cutoff(active_chain, &source_positions, cutoff)?;
     let world_state_records = world_state_records_visible_at_cutoff(
         connection,
         &source.id,
@@ -436,6 +468,38 @@ pub(crate) fn build_fork_plan(
         cutoff,
         &summaries,
     )?;
+    let provider_continuation_mappings =
+        provider_continuation_repository::list_replayable_for_conversation(connection, &source.id)
+            .map_err(database_error)?
+            .into_iter()
+            .filter_map(|record| {
+                let target_assistant_message_id =
+                    message_id_map.get(&record.assistant_message_id)?.clone();
+                Some((record, target_assistant_message_id))
+            })
+            .map(|(record, target_assistant_message_id)| {
+                let source_ref = ProviderContinuationRef::parse(
+                    crate::protocol::PROVIDER_CONTINUATION_REF_VERSION,
+                    record.continuation_id.clone(),
+                )?;
+                let target_run_id = mapped_id(
+                    &run_id_map,
+                    &record.run_id,
+                    "Provider continuation 所属运行",
+                )?;
+                Ok(ProviderContinuationForkMapping {
+                    source_ref,
+                    source_record: record.clone(),
+                    source_conversation_id: source.id.clone(),
+                    source_assistant_message_id: record.assistant_message_id.clone(),
+                    source_run_id: record.run_id.clone(),
+                    request_index: record.request_index,
+                    target_conversation_id: target_conversation_id.clone(),
+                    target_assistant_message_id,
+                    target_run_id,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
     Ok(ConversationForkPlan {
         request_id: input.request_id.trim().to_string(),
@@ -461,16 +525,48 @@ pub(crate) fn build_fork_plan(
         file_drafts,
         summaries,
         world_state_records,
+        provider_continuation_mappings,
         message_id_map,
         run_id_map,
         id_replacements: replacements,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn commit_fork_plan(
     connection: &mut Connection,
     plan: &ConversationForkPlan,
 ) -> Result<(), ConversationForkError> {
+    commit_fork_plan_with_provider_continuations(connection, plan, &[])
+}
+
+pub(crate) fn commit_fork_plan_with_provider_continuations(
+    connection: &mut Connection,
+    plan: &ConversationForkPlan,
+    provider_continuations: &[PreparedProviderContinuationClone],
+) -> Result<(), ConversationForkError> {
+    if provider_continuations.len() != plan.provider_continuation_mappings.len() {
+        return Err("Provider continuation 克隆未完整准备，已安全取消整个分叉。"
+            .to_string()
+            .into());
+    }
+    for (mapping, prepared) in plan
+        .provider_continuation_mappings
+        .iter()
+        .zip(provider_continuations)
+    {
+        if prepared.source_ref != mapping.source_ref
+            || prepared.target_ref.id != prepared.record.continuation_id
+            || prepared.record.conversation_id != mapping.target_conversation_id
+            || prepared.record.assistant_message_id != mapping.target_assistant_message_id
+            || prepared.record.run_id != mapping.target_run_id
+            || prepared.record.request_index != mapping.request_index
+        {
+            return Err("Provider continuation 克隆身份不匹配，已安全取消整个分叉。"
+                .to_string()
+                .into());
+        }
+    }
     let target_message_id = mapped_id(
         &plan.message_id_map,
         &plan.source_message_id,
@@ -481,6 +577,26 @@ pub(crate) fn commit_fork_plan(
         .map_err(database_error)?;
     ensure_no_active_command_sessions(&transaction, &plan.source_conversation_id)?;
     insert_conversation(&transaction, &plan.target)?;
+    for prepared in provider_continuations {
+        match provider_continuation_repository::store_active_in_connection(
+            &transaction,
+            &prepared.record,
+        )
+        .map_err(database_error)?
+        {
+            provider_continuation_repository::ProviderContinuationStoreOutcome::Inserted {
+                ..
+            } => {}
+            provider_continuation_repository::ProviderContinuationStoreOutcome::Idempotent {
+                ..
+            }
+            | provider_continuation_repository::ProviderContinuationStoreOutcome::Conflict => {
+                return Err("Provider continuation 克隆写入冲突，已安全取消整个分叉。"
+                    .to_string()
+                    .into());
+            }
+        }
+    }
     for archive in &plan.archives {
         conversation_history_archive_repository::clone_archive_in_connection(&transaction, archive)
             .map_err(database_error)?;
@@ -1287,8 +1403,9 @@ mod tests {
     };
     use crate::storage::migrations;
     use crate::{
-        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, WorldStateDiff,
-        WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
+        AgentApprovalStatus, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
+        ConversationTurnTraceTerminalStatus, WorldStateDiff, WorldStateLifetime,
+        WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
 
@@ -1349,6 +1466,184 @@ mod tests {
         assert!(
             ensure_settled_assistant(&message, Some(&stale_trace)).is_err(),
             "a renderer-owned completed status must not bypass an in-progress backend trace"
+        );
+    }
+
+    #[test]
+    fn fork_rejects_a_cutoff_containing_released_provider_history() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+        let record = provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+            continuation_id: format!(
+                "{}{}",
+                provider_continuation_repository::PROVIDER_CONTINUATION_REF_PREFIX,
+                uuid::Uuid::new_v4().hyphenated()
+            ),
+            conversation_id: source.id.clone(),
+            assistant_message_id: "assistant-a".to_string(),
+            run_id: "run-source-0".to_string(),
+            request_index: 0,
+            assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+            assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+            provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+            payload_digest: format!("sha256:{}", "d".repeat(64)),
+            nonce: vec![1; 12],
+            ciphertext: vec![2; 17],
+            decoded_bytes: 1,
+            compressed_bytes: 1,
+            created_at: 2,
+            runtime_tool_calls: vec![
+                provider_continuation_repository::ProviderContinuationRuntimeToolIdentity {
+                    provider_tool_index: 0,
+                    runtime_call_id: "call-source-a".to_string(),
+                },
+            ],
+        };
+        provider_continuation_repository::store_active_in_connection(&connection, &record).unwrap();
+        assert_eq!(
+            provider_continuation_repository::release(&connection, &record.continuation_id, 10)
+                .unwrap(),
+            provider_continuation_repository::ProviderContinuationReleaseOutcome::Released
+        );
+
+        let error = build_fork_plan(
+            &connection,
+            &ForkConversationInput {
+                request_id: "fork-released-provider-history".to_string(),
+                source_conversation_id: source.id,
+                through_assistant_message_id: "assistant-a".to_string(),
+            },
+            20,
+        )
+        .unwrap_err();
+        assert!(error.message().contains("Provider Tool Exchange"));
+    }
+
+    #[test]
+    fn fork_omits_released_turn_only_when_the_selected_summary_covers_its_complete_exchange() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+        let trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-source-0".to_string(),
+            conversation_id: source.id.clone(),
+            assistant_message_id: "assistant-a".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "call-source-a".to_string(),
+                    tool: "web_fetch".to_string(),
+                    provenance: None,
+                    operation: json!({ "url": "https://example.com" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 1,
+                    call_id: "call-source-a".to_string(),
+                    tool: "web_fetch".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({ "content": "complete" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: None,
+                    truncated: false,
+                    archive: Default::default(),
+                },
+            ],
+        };
+        conversation_trace_repository::replace_trace(&mut connection, &trace, 2, 3).unwrap();
+        let record = provider_continuation_repository::ProviderContinuationEnvelopeRecord {
+            continuation_id: format!(
+                "{}{}",
+                provider_continuation_repository::PROVIDER_CONTINUATION_REF_PREFIX,
+                uuid::Uuid::new_v4().hyphenated()
+            ),
+            conversation_id: source.id.clone(),
+            assistant_message_id: "assistant-a".to_string(),
+            run_id: "run-source-0".to_string(),
+            request_index: 0,
+            assistant_turn_id: format!("at1_{}", "a".repeat(64)),
+            assistant_turn_digest: format!("sha256:{}", "b".repeat(64)),
+            provider_protocol_digest: format!("sha256:{}", "c".repeat(64)),
+            payload_digest: format!("sha256:{}", "d".repeat(64)),
+            nonce: vec![1; 12],
+            ciphertext: vec![2; 17],
+            decoded_bytes: 1,
+            compressed_bytes: 1,
+            created_at: 2,
+            runtime_tool_calls: vec![
+                provider_continuation_repository::ProviderContinuationRuntimeToolIdentity {
+                    provider_tool_index: 0,
+                    runtime_call_id: "call-source-a".to_string(),
+                },
+            ],
+        };
+        provider_continuation_repository::store_active_in_connection(&connection, &record).unwrap();
+        let prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::trace_item("assistant-a", 1),
+        )
+        .unwrap();
+        context_compaction_repository::commit_prefix_replacement(
+            &mut connection,
+            &prefix,
+            summary_draft(&prefix, "summary-covers-provider-a", 20),
+            "assistant-b",
+        )
+        .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM provider_continuations WHERE continuation_id = ?1",
+                    [&record.continuation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "released"
+        );
+
+        let before_summary = build_fork_plan(
+            &connection,
+            &ForkConversationInput {
+                request_id: "fork-before-provider-summary".to_string(),
+                source_conversation_id: source.id.clone(),
+                through_assistant_message_id: "assistant-a".to_string(),
+            },
+            30,
+        )
+        .unwrap_err();
+        assert!(before_summary.message().contains("Provider Tool Exchange"));
+
+        let after_summary = build_fork_plan(
+            &connection,
+            &ForkConversationInput {
+                request_id: "fork-after-provider-summary".to_string(),
+                source_conversation_id: source.id,
+                through_assistant_message_id: "assistant-b".to_string(),
+            },
+            40,
+        )
+        .unwrap();
+        assert_eq!(after_summary.summaries.len(), 1);
+        assert!(after_summary.provider_continuation_mappings.is_empty());
+        commit_fork_plan(&mut connection, &after_summary).unwrap();
+        assert_eq!(
+            context_compaction_repository::list_active_summary_chain(
+                &connection,
+                &after_summary.target.id,
+            )
+            .unwrap()
+            .len(),
+            1
         );
     }
 

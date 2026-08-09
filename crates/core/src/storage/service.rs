@@ -23,8 +23,9 @@ use crate::storage::{
     conversation_model_context_repository, conversation_trace_repository, file_draft_repository,
     guidance_repository, image_generation_repository, mcp_approval_envelope_repository,
     model_request_observation_repository, now_ms, pending_action_repository,
-    preferences_repository, project_repository, skill_enablement_repository, storage_error,
-    turn_diff_repository, usage_repository, world_state_repository, StorageState,
+    preferences_repository, project_repository, provider_continuation_repository,
+    skill_enablement_repository, storage_error, turn_diff_repository, usage_repository,
+    world_state_repository, StorageState,
 };
 use crate::{
     AgentApiStyle, AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -35,7 +36,8 @@ use crate::{
     ContextCompactionSummaryDraft, ContextJournalCursor, ConversationGoal,
     ConversationGoalMutationActor, ConversationGoalRevision, ConversationGoalStatus,
     ConversationModelContextItem, ConversationModelContextLog, ConversationTurnTrace,
-    ConversationTurnTraceItem, ModelRequestObservation, WorldStateRecord,
+    ConversationTurnTraceItem, ModelRequestObservation, ProviderContinuationVault,
+    WorldStateRecord,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -53,6 +55,7 @@ mod lifecycle;
 mod mcp_approval_envelopes;
 mod messages;
 mod pending_actions;
+mod provider_continuations;
 mod settings;
 mod trace_reconciliation;
 mod turn_diffs;

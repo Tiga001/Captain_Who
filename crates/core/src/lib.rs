@@ -18,6 +18,7 @@ pub mod office;
 pub mod patch;
 mod prompts;
 pub mod protocol;
+mod provider_continuation_store;
 pub mod provider_profile;
 mod revision;
 mod runtime;
@@ -69,6 +70,10 @@ pub use model_request_observation::{
     ProviderCacheTopology, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
+pub use provider_continuation_store::{
+    ProviderContinuationStoreError, ProviderContinuationVault, ProviderContinuationVaultFactory,
+    PROVIDER_CONTINUATION_CREDENTIAL_SERVICE,
+};
 pub use provider_profile::{
     ProviderProfileConfig, ProviderProfileId, ProviderProfileRef, ProviderProfileValidationError,
     ProviderProtocolDialect, ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
@@ -209,17 +214,18 @@ pub use protocol::{
     AgentToolIdentity, AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission, ModelCapabilities,
-    AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    ProviderContinuationRef, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
     AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
     AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
     AGENT_OFFICE_REASON_MAX_CHARS, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-    AGENT_SKILL_INSTALLATION_SCHEMA_VERSION,
+    AGENT_SKILL_INSTALLATION_SCHEMA_VERSION, PROVIDER_CONTINUATION_REF_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{
     conversation_context_configuration_revision, create_conversation_context_state,
-    inspect_context_window, inspect_context_window_with_tool_projection, next_run_id,
+    create_conversation_context_state_with_host_services, inspect_context_window,
+    inspect_context_window_with_tool_projection, next_run_id,
     prepare_context_window_tool_projection, redact_terminal_skill_discovery, send_chat,
     send_chat_with_events, send_chat_with_events_and_cancellation, send_chat_with_host_executor,
     send_chat_with_host_services, skill_checkpoint_authority,

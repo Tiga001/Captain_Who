@@ -21,6 +21,45 @@ pub(super) fn publish_inline_file_write_tool_result(
 }
 
 impl AgentService {
+    fn validate_provider_continuations_before_dispatch(
+        &self,
+        record: &PendingActionRecord,
+    ) -> Result<(), String> {
+        let Some(checkpoint) = record.agent_input.resume_checkpoint.as_ref() else {
+            return Ok(());
+        };
+        let requires_provider_continuation = checkpoint.provider_protocol_key.profile.id
+            == mycopilot_core::ProviderProfileId::DeepSeekV4Chat
+            && !checkpoint
+                .assistant_turn_identity
+                .tool_call_identities
+                .is_empty();
+        if checkpoint.provider_continuation_refs.is_empty() {
+            return if requires_provider_continuation {
+                Err("provider_continuation_missing: approved action was not dispatched".to_string())
+            } else {
+                Ok(())
+            };
+        }
+        let conversation_id = record.snapshot.conversation_id.as_deref().ok_or_else(|| {
+            "provider_continuation.invalid_approval_scope: approved action was not dispatched"
+                .to_string()
+        })?;
+        self.provider_continuation_vault
+            .as_deref()
+            .ok_or_else(|| {
+                "provider_continuation.credential_unavailable: approved action was not dispatched"
+                    .to_string()
+            })?
+            .validate_approval_checkpoint_refs(
+                conversation_id,
+                &checkpoint.provider_protocol_key,
+                &checkpoint.provider_continuation_refs,
+                &checkpoint.assistant_turn_identity,
+            )
+            .map_err(|error| format!("{}: approved action was not dispatched", error.code()))
+    }
+
     pub fn list_pending_actions(&self) -> Vec<PendingAgentActionSnapshot> {
         let pending_actions = self
             .pending_actions
@@ -613,6 +652,36 @@ impl AgentService {
                                 .to_string(),
                         );
                     }
+                }
+                if let Err(error) = self.validate_provider_continuations_before_dispatch(record) {
+                    // Publish the durable terminal intent before replacing the resume payload.
+                    // A crash between these writes leaves a non-dispatchable pending row that
+                    // startup reconciliation can finish; it can never fall back to approval.
+                    self.storage.set_pending_agent_action_target_status(
+                        &record.storage_id,
+                        pending_status_label(PendingActionStatus::Pending),
+                        pending_status_label(PendingActionStatus::Cancelled),
+                        now_ms(),
+                    )?;
+                    self.persist_pending_status(
+                        record,
+                        PendingActionStatus::Pending,
+                        PendingActionStatus::Cancelled,
+                    )?;
+                    record.snapshot.status = PendingActionStatus::Cancelled;
+                    self.invalidate_mcp_pending_payload(&record.snapshot.action);
+                    self.record_action_audit(
+                        record,
+                        Some("blocked"),
+                        "cancelled",
+                        None,
+                        None,
+                        None,
+                        Some("Provider continuation validation failed before dispatch."),
+                        Some(now_ms()),
+                        Some(now_ms()),
+                    );
+                    return Err(error);
                 }
             }
             let call = tool_call_for_pending_record(record)?;
@@ -1273,6 +1342,32 @@ impl AgentService {
         }
         if deletion_lifecycle.contains_input(&record.agent_input) {
             return Err("项目或会话正在移除，无法恢复 MCP 操作。".to_string());
+        }
+        if let Err(error) = self.validate_provider_continuations_before_dispatch(record) {
+            let retired = self
+                .storage
+                .terminalize_mcp_agent_action_on_startup(
+                    &record.storage_id,
+                    "approved",
+                    McpStartupActionTerminalOutcome::PayloadUnavailable,
+                    self.mcp_approval_now_ms(),
+                )
+                .map_err(|_| {
+                    "Recovered MCP approval could not be retired before dispatch.".to_string()
+                })?;
+            if !retired {
+                return Err(
+                    "Recovered MCP approval changed while Provider continuation validation was being settled."
+                        .to_string(),
+                );
+            }
+            record.snapshot.status = PendingActionStatus::Failed;
+            self.startup_recoverable_mcp_approvals
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner())
+                .remove(&storage_id);
+            self.invalidate_mcp_pending_payload(&record.snapshot.action);
+            return Err(error);
         }
         let AgentProposedAction::McpToolCall { approval } = &record.snapshot.action else {
             unreachable!("MCP action was checked above");

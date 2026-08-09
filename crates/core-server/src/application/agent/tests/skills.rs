@@ -621,6 +621,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         assistant_turn_identity: crate::test_assistant_turn_identity(&[
             "pending-after-dynamic-skill",
         ]),
+        provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "pending-after-dynamic-skill".to_string(),
         conversation_model_context_items: Vec::new(),

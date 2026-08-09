@@ -1390,6 +1390,31 @@ pub(super) fn pending_status_redacts_run_scoped_input(status: PendingActionStatu
     }
 }
 
+fn validate_current_effective_provider_protocol(
+    frozen_revision: &str,
+    current_protocol_revision: &str,
+    model: &mycopilot_core::storage::models::ModelConfigRecord,
+    connection: &mycopilot_core::storage::models::ModelConnectionConfig,
+    frozen_profile: &mycopilot_core::ProviderProfileConfig,
+    frozen_key: &ProviderProtocolKey,
+) -> Result<(), String> {
+    if !mycopilot_core::storage::config_repository::is_provider_protocol_revision(frozen_revision) {
+        return Err("frozen pending-action Provider Protocol revision is invalid".to_string());
+    }
+    if frozen_revision != current_protocol_revision {
+        return Err("frozen pending-action Provider Protocol no longer matches".to_string());
+    }
+
+    let current_dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
+    let current_profile = model
+        .resolved_provider_profile_config(current_dialect)
+        .map_err(|_| "frozen pending-action Provider Profile is unavailable".to_string())?;
+    if &current_profile != frozen_profile || frozen_key.dialect != current_dialect {
+        return Err("frozen pending-action Provider Protocol no longer matches".to_string());
+    }
+    Ok(())
+}
+
 pub(super) fn restore_agent_input_secrets(
     storage: &Arc<StorageService>,
     persisted: DecodedPersistedAgentResumeInput,
@@ -1403,6 +1428,10 @@ pub(super) fn restore_agent_input_secrets(
         .provider_connection_revisions
         .get(&agent_input.model)
         .ok_or_else(|| "frozen pending-action provider connection is unavailable".to_string())?;
+    let current_provider_protocol_revision = settings_snapshot
+        .provider_protocol_revisions
+        .get(&agent_input.model)
+        .ok_or_else(|| "frozen pending-action Provider Protocol is unavailable".to_string())?;
     if current_provider_connection_revision != &persisted.provider_connection_revision {
         return Err("frozen pending-action provider connection no longer matches".to_string());
     }
@@ -1478,6 +1507,14 @@ pub(super) fn restore_agent_input_secrets(
     {
         return Err("frozen pending-action Provider Protocol provenance diverged".to_string());
     }
+    validate_current_effective_provider_protocol(
+        &persisted.provider_configuration_revision,
+        current_provider_protocol_revision,
+        model,
+        &connection,
+        provider_profile_config,
+        provider_protocol_key,
+    )?;
     if let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() {
         if &checkpoint.provider_profile_config != provider_profile_config
             || &checkpoint.provider_protocol_key != provider_protocol_key
@@ -1523,9 +1560,9 @@ fn bind_pending_provider_configuration(
         .provider_configuration_revision
         .as_deref()
         .filter(|revision| {
-            mycopilot_core::storage::config_repository::is_model_settings_revision(revision)
+            mycopilot_core::storage::config_repository::is_provider_protocol_revision(revision)
         })
-        .ok_or_else(|| "pending-action provider settings revision is unavailable".to_string())?;
+        .ok_or_else(|| "pending-action Provider Protocol revision is unavailable".to_string())?;
     let model = snapshot
         .settings
         .models
@@ -1540,6 +1577,10 @@ fn bind_pending_provider_configuration(
         .provider_connection_revisions
         .get(&model.id)
         .ok_or_else(|| "pending-action provider connection identity is unavailable".to_string())?;
+    let current_provider_protocol_revision = snapshot
+        .provider_protocol_revisions
+        .get(&model.id)
+        .ok_or_else(|| "pending-action Provider Protocol identity is unavailable".to_string())?;
     if agent_input.provider_connection_revision.as_ref()
         != Some(current_provider_connection_revision)
     {
@@ -1571,6 +1612,14 @@ fn bind_pending_provider_configuration(
     {
         return Err("pending-action Provider Protocol provenance is inconsistent".to_string());
     }
+    validate_current_effective_provider_protocol(
+        provider_configuration_revision,
+        current_provider_protocol_revision,
+        model,
+        &connection,
+        provider_profile_config,
+        provider_protocol_key,
+    )?;
     if connection.api_url != agent_input.api_url
         || connection.api_token != agent_input.api_token
         || model.supports_image != agent_input.model_capabilities.image_input

@@ -48,6 +48,7 @@ pub(crate) struct ContextTokenCategoryEstimate {
     pub(crate) message_content_tokens: u64,
     pub(crate) message_structure_tokens: u64,
     pub(crate) tool_call_tokens: u64,
+    pub(crate) provider_continuation_tokens: u64,
     pub(crate) tool_definition_tokens: u64,
     pub(crate) tool_definition_count: usize,
     pub(crate) image_tokens: u64,
@@ -61,6 +62,7 @@ impl ContextTokenCategoryEstimate {
             message_content_tokens,
             message_structure_tokens,
             tool_call_tokens,
+            provider_continuation_tokens,
             image_tokens,
             image_count,
         } = bucket.estimate;
@@ -70,6 +72,7 @@ impl ContextTokenCategoryEstimate {
             message_content_tokens,
             message_structure_tokens,
             tool_call_tokens,
+            provider_continuation_tokens,
             tool_definition_tokens: 0,
             tool_definition_count: 0,
             image_tokens,
@@ -118,6 +121,9 @@ impl ContextTokenCategoryEstimate {
             .message_structure_tokens
             .saturating_add(other.message_structure_tokens);
         self.tool_call_tokens = self.tool_call_tokens.saturating_add(other.tool_call_tokens);
+        self.provider_continuation_tokens = self
+            .provider_continuation_tokens
+            .saturating_add(other.provider_continuation_tokens);
         self.tool_definition_tokens = self
             .tool_definition_tokens
             .saturating_add(other.tool_definition_tokens);
@@ -245,6 +251,7 @@ impl ContextBudgetReport {
 
     pub(crate) fn context_cost_breakdown(&self) -> AgentContextCostBreakdown {
         let semantic = self.usage.breakdown.semantic;
+        let provider_continuation_tokens = self.usage.breakdown.total.provider_continuation_tokens;
         AgentContextCostBreakdown {
             system_tokens: semantic
                 .system_tokens
@@ -259,7 +266,10 @@ impl ContextBudgetReport {
             world_state_tokens: semantic.world_state_tokens,
             goal_tokens: semantic.goal_tokens,
             todo_tokens: semantic.todo_tokens,
-            recent_history_tokens: semantic.recent_history_tokens,
+            provider_continuation_tokens,
+            recent_history_tokens: semantic
+                .recent_history_tokens
+                .saturating_sub(provider_continuation_tokens),
             total_input_tokens: self.usage.request_input_tokens(),
         }
     }

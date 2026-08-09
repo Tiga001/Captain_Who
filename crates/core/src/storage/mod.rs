@@ -28,6 +28,7 @@ pub mod models;
 pub mod pending_action_repository;
 pub mod preferences_repository;
 pub mod project_repository;
+pub(crate) mod provider_continuation_repository;
 pub mod service;
 pub mod skill_enablement_repository;
 pub mod turn_diff_repository;

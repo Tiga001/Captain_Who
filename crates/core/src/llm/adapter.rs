@@ -4,7 +4,8 @@
 //! transport compatibility projection and is deliberately not an adapter registry key.
 
 use super::payload::{
-    build_anthropic_headers, build_anthropic_payload, build_openai_headers, build_openai_payload,
+    build_anthropic_headers, build_anthropic_payload, build_deepseek_payload, build_openai_headers,
+    build_openai_payload,
 };
 use super::response::{
     extract_anthropic_tool_calls, extract_openai_tool_calls, extract_response_text,
@@ -12,15 +13,18 @@ use super::response::{
 use super::stream::{AnthropicStreamAccumulator, OpenAiStreamAccumulator, ProviderStreamState};
 use super::{
     LlmAssistantTurn, LlmChatRequest, LlmChatResponse, LlmMessage, LlmStreamEvent, LlmToolCall,
-    ProviderContinuation,
+    ProviderContinuation, ProviderContinuationAttachment, ProviderContinuationFragment,
+    ProviderContinuationPosition, ProviderContinuationReplayScope, MAX_PROVIDER_CONTINUATION_BYTES,
 };
 use crate::protocol::{AgentError, AgentResult, AgentUsage};
 use crate::provider_profile::{
-    ProviderProfileId, ProviderProfileRef, ProviderProtocolDialect, ProviderProtocolKey,
+    ProviderProfileConfig, ProviderProfileId, ProviderProfileRef, ProviderProtocolDialect,
+    ProviderProtocolKey, ReasoningMode, DEEPSEEK_V4_CHAT_PROFILE_VERSION,
     GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION, GENERIC_OPENAI_CHAT_PROFILE_VERSION,
 };
 use reqwest::header::HeaderMap;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 pub(super) trait ProviderAdapter: Sync {
     fn profile(&self) -> ProviderProfileRef;
@@ -37,6 +41,7 @@ pub(super) trait ProviderAdapter: Sync {
 
     fn parse_non_streaming_response(
         &self,
+        profile: &ProviderProfileConfig,
         protocol: &ProviderProtocolKey,
         value: &Value,
     ) -> AgentResult<LlmAssistantTurn>;
@@ -53,6 +58,7 @@ pub(super) trait ProviderAdapter: Sync {
 
     fn finalize_assistant_turn(
         &self,
+        profile: &ProviderProfileConfig,
         protocol: &ProviderProtocolKey,
         state: ProviderStreamState,
     ) -> AgentResult<LlmChatResponse>;
@@ -67,11 +73,18 @@ pub(super) trait ProviderAdapter: Sync {
 
 struct GenericOpenAiAdapter;
 struct GenericAnthropicAdapter;
+struct DeepSeekV4ChatAdapter;
+
+const DEEPSEEK_REASONING_FRAGMENT_V1: u8 = 1;
 
 static GENERIC_OPENAI_ADAPTER: GenericOpenAiAdapter = GenericOpenAiAdapter;
 static GENERIC_ANTHROPIC_ADAPTER: GenericAnthropicAdapter = GenericAnthropicAdapter;
-static PROVIDER_ADAPTERS: [&'static dyn ProviderAdapter; 2] =
-    [&GENERIC_OPENAI_ADAPTER, &GENERIC_ANTHROPIC_ADAPTER];
+static DEEPSEEK_V4_CHAT_ADAPTER: DeepSeekV4ChatAdapter = DeepSeekV4ChatAdapter;
+static PROVIDER_ADAPTERS: [&'static dyn ProviderAdapter; 3] = [
+    &GENERIC_OPENAI_ADAPTER,
+    &GENERIC_ANTHROPIC_ADAPTER,
+    &DEEPSEEK_V4_CHAT_ADAPTER,
+];
 
 pub(super) struct ProviderAdapterRegistry;
 
@@ -138,6 +151,7 @@ impl ProviderAdapter for GenericOpenAiAdapter {
 
     fn parse_non_streaming_response(
         &self,
+        _profile: &ProviderProfileConfig,
         protocol: &ProviderProtocolKey,
         value: &Value,
     ) -> AgentResult<LlmAssistantTurn> {
@@ -167,6 +181,7 @@ impl ProviderAdapter for GenericOpenAiAdapter {
 
     fn finalize_assistant_turn(
         &self,
+        _profile: &ProviderProfileConfig,
         protocol: &ProviderProtocolKey,
         state: ProviderStreamState,
     ) -> AgentResult<LlmChatResponse> {
@@ -218,6 +233,7 @@ impl ProviderAdapter for GenericAnthropicAdapter {
 
     fn parse_non_streaming_response(
         &self,
+        _profile: &ProviderProfileConfig,
         protocol: &ProviderProtocolKey,
         value: &Value,
     ) -> AgentResult<LlmAssistantTurn> {
@@ -247,6 +263,7 @@ impl ProviderAdapter for GenericAnthropicAdapter {
 
     fn finalize_assistant_turn(
         &self,
+        _profile: &ProviderProfileConfig,
         protocol: &ProviderProtocolKey,
         state: ProviderStreamState,
     ) -> AgentResult<LlmChatResponse> {
@@ -266,6 +283,120 @@ impl ProviderAdapter for GenericAnthropicAdapter {
     ) -> AgentResult<u64> {
         estimate_generic_continuation_tokens(continuation)
     }
+}
+
+impl ProviderAdapter for DeepSeekV4ChatAdapter {
+    fn profile(&self) -> ProviderProfileRef {
+        ProviderProfileRef {
+            id: ProviderProfileId::DeepSeekV4Chat,
+            version: DEEPSEEK_V4_CHAT_PROFILE_VERSION,
+        }
+    }
+
+    fn dialect(&self) -> ProviderProtocolDialect {
+        ProviderProtocolDialect::OpenAiChatCompletions
+    }
+
+    fn validate_profile_settings(&self, request: &LlmChatRequest) -> AgentResult<()> {
+        validate_deepseek_profile_settings(self, request)
+    }
+
+    fn validate_wire_protocol(&self, request: &LlmChatRequest) -> AgentResult<()> {
+        let _ = project_deepseek_exchange(
+            &request.provider_profile,
+            &request.provider_protocol,
+            &request.messages,
+        )?;
+        Ok(())
+    }
+
+    fn prepare_request(&self, request: &LlmChatRequest) -> AgentResult<Value> {
+        build_deepseek_payload(request)
+    }
+
+    fn build_headers(&self, api_token: &str) -> AgentResult<HeaderMap> {
+        build_openai_headers(api_token)
+    }
+
+    fn parse_non_streaming_response(
+        &self,
+        profile: &ProviderProfileConfig,
+        protocol: &ProviderProtocolKey,
+        value: &Value,
+    ) -> AgentResult<LlmAssistantTurn> {
+        let turn = LlmAssistantTurn::from_provider(
+            protocol.clone(),
+            extract_response_text(value).unwrap_or_default(),
+            extract_openai_tool_calls(value)?,
+        )?;
+        attach_deepseek_reasoning(
+            profile,
+            protocol,
+            turn,
+            extract_deepseek_reasoning_content(value)?,
+        )
+    }
+
+    fn new_stream_state(&self) -> ProviderStreamState {
+        ProviderStreamState::DeepSeek(Box::default())
+    }
+
+    fn consume_streaming_event(
+        &self,
+        state: &mut ProviderStreamState,
+        _event: Option<&str>,
+        value: &Value,
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) -> AgentResult<()> {
+        let ProviderStreamState::DeepSeek(state) = state else {
+            return Err(stream_state_mismatch());
+        };
+        state.process(value, on_delta)
+    }
+
+    fn finalize_assistant_turn(
+        &self,
+        profile: &ProviderProfileConfig,
+        protocol: &ProviderProtocolKey,
+        state: ProviderStreamState,
+    ) -> AgentResult<LlmChatResponse> {
+        let ProviderStreamState::DeepSeek(state) = state else {
+            return Err(stream_state_mismatch());
+        };
+        let (mut response, reasoning_content) = (*state).finish(protocol)?;
+        response.assistant_turn = attach_deepseek_reasoning(
+            profile,
+            protocol,
+            response.assistant_turn,
+            reasoning_content.as_deref(),
+        )?;
+        response.usage = response.usage.map(project_deepseek_usage);
+        Ok(response)
+    }
+
+    fn project_usage(&self, value: &Value) -> Option<AgentUsage> {
+        crate::usage::extract_usage(value).map(project_deepseek_usage)
+    }
+
+    fn estimate_continuation_tokens(
+        &self,
+        continuation: Option<&ProviderContinuation>,
+    ) -> AgentResult<u64> {
+        estimate_deepseek_continuation_tokens(continuation)
+    }
+}
+
+/// DeepSeek reports `completion_tokens` as the complete generated output, including private
+/// reasoning. Runtime accounting keeps visible and thinking output disjoint, while preserving the
+/// provider-authoritative total. Missing or inconsistent detail fails closed instead of guessing.
+pub(super) fn project_deepseek_usage(mut usage: AgentUsage) -> AgentUsage {
+    usage.output_tokens = match (usage.output_tokens, usage.output_thinking_tokens) {
+        (Some(completion_tokens), Some(reasoning_tokens)) => {
+            completion_tokens.checked_sub(reasoning_tokens)
+        }
+        _ => None,
+    };
+    usage
 }
 
 fn validate_generic_profile_settings(
@@ -291,6 +422,337 @@ fn validate_generic_profile_settings(
     Ok(())
 }
 
+fn validate_deepseek_profile_settings(
+    adapter: &dyn ProviderAdapter,
+    request: &LlmChatRequest,
+) -> AgentResult<()> {
+    request
+        .provider_protocol
+        .validate_against_config(&request.provider_profile)
+        .map_err(|error| AgentError::new(format!("DeepSeek profile 设置无效：{error}")))?;
+    if request.provider_protocol.profile != adapter.profile()
+        || request.provider_protocol.dialect != adapter.dialect()
+    {
+        return Err(AgentError::new(
+            "DeepSeek profile 设置与所选 Adapter 不一致。",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_deepseek_reasoning_content(value: &Value) -> AgentResult<Option<&str>> {
+    let reasoning = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("reasoning_content"));
+    match reasoning {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(reasoning)) => Ok(Some(reasoning)),
+        Some(_) => Err(AgentError::new(
+            "DeepSeek 响应中的 reasoning_content 不是字符串。",
+        )),
+    }
+}
+
+fn attach_deepseek_reasoning(
+    profile: &ProviderProfileConfig,
+    protocol: &ProviderProtocolKey,
+    turn: LlmAssistantTurn,
+    reasoning_content: Option<&str>,
+) -> AgentResult<LlmAssistantTurn> {
+    let reasoning_content = match reasoning_content {
+        Some(reasoning_content) => reasoning_content,
+        None if profile.reasoning.mode == ReasoningMode::Enabled
+            && !turn.provider_tool_calls().is_empty() =>
+        {
+            return Err(AgentError::structured(
+                "provider_reasoning_required",
+                "DeepSeek thinking 响应包含工具调用，但缺少 reasoning_content。",
+                json!({
+                    "type": "providerReasoningBoundary",
+                    "reason": "missingEnabledToolReasoning",
+                    "recovery": "retryProviderRequest",
+                }),
+            ));
+        }
+        None => return Ok(turn),
+    };
+    if reasoning_content.len() >= MAX_PROVIDER_CONTINUATION_BYTES {
+        return Err(AgentError::new(format!(
+            "DeepSeek reasoning_content 连同协议版本标记超过 {} 字节上限。",
+            MAX_PROVIDER_CONTINUATION_BYTES,
+        )));
+    }
+    let position =
+        ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn);
+    let replay_scope = if turn.provider_tool_calls().is_empty() {
+        ProviderContinuationReplayScope::AssistantTurnV1
+    } else {
+        ProviderContinuationReplayScope::InteractionV1
+    };
+    let mut opaque = Vec::with_capacity(reasoning_content.len() + 1);
+    opaque.push(DEEPSEEK_REASONING_FRAGMENT_V1);
+    opaque.extend_from_slice(reasoning_content.as_bytes());
+    let continuation = ProviderContinuation::new(
+        protocol.clone(),
+        replay_scope,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(position, opaque)],
+    )?;
+    turn.with_provider_continuation(continuation)
+}
+
+pub(super) fn deepseek_reasoning_content<'a>(
+    request_protocol: &ProviderProtocolKey,
+    turn: &'a LlmAssistantTurn,
+) -> AgentResult<Option<&'a str>> {
+    let Some(continuation) = turn.provider_continuation() else {
+        return Ok(None);
+    };
+    let turn_protocol = turn
+        .provider_protocol()
+        .ok_or_else(|| AgentError::new("Legacy Assistant Turn 不能回放 DeepSeek continuation。"))?;
+    continuation.validate_for(turn_protocol, turn.digest())?;
+    if continuation.provenance() != request_protocol {
+        return Err(AgentError::new(
+            "DeepSeek continuation 与当前冻结 Provider 协议不一致。",
+        ));
+    }
+    let expected_scope = if turn.provider_tool_calls().is_empty() {
+        ProviderContinuationReplayScope::AssistantTurnV1
+    } else {
+        ProviderContinuationReplayScope::InteractionV1
+    };
+    if continuation.replay_scope() != expected_scope {
+        return Err(AgentError::new(
+            "DeepSeek continuation replay scope 与 Assistant Turn 不一致。",
+        ));
+    }
+    deepseek_reasoning_fragment(continuation).map(Some)
+}
+
+fn deepseek_reasoning_fragment(continuation: &ProviderContinuation) -> AgentResult<&str> {
+    if continuation.provenance().profile.id != ProviderProfileId::DeepSeekV4Chat
+        || continuation.provenance().dialect != ProviderProtocolDialect::OpenAiChatCompletions
+    {
+        return Err(AgentError::new(
+            "Provider continuation 不是 DeepSeek v4 chat reasoning。",
+        ));
+    }
+    let [fragment] = continuation.fragments() else {
+        return Err(AgentError::new(
+            "DeepSeek continuation 必须包含一个 reasoning fragment。",
+        ));
+    };
+    if fragment.position()
+        != ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn)
+    {
+        return Err(AgentError::new(
+            "DeepSeek continuation reasoning fragment 位置无效。",
+        ));
+    }
+    let Some((&version, raw_reasoning)) = fragment.opaque().split_first() else {
+        return Err(AgentError::new(
+            "DeepSeek continuation reasoning fragment 不能为空。",
+        ));
+    };
+    if version != DEEPSEEK_REASONING_FRAGMENT_V1 {
+        return Err(AgentError::new(
+            "DeepSeek continuation reasoning fragment 版本不受支持。",
+        ));
+    }
+    let reasoning_content = std::str::from_utf8(raw_reasoning)
+        .map_err(|_| AgentError::new("DeepSeek continuation 不是有效 UTF-8 reasoning_content。"))?;
+    Ok(reasoning_content)
+}
+
+/// Derived DeepSeek wire view. Tool-bearing provider turns stay grouped, while runtime-only
+/// interstitial context is moved behind all matching Tool results so the actual provider wire
+/// remains a legal `assistant(tool_calls) -> tool results` exchange.
+pub(super) enum DeepSeekWireMessage<'a> {
+    Original(&'a LlmMessage),
+    Assistant {
+        turn: &'a LlmAssistantTurn,
+        provider_tool_calls: Vec<LlmToolCall>,
+    },
+    ToolResult {
+        message: &'a LlmMessage,
+        provider_call_id: String,
+    },
+}
+
+pub(super) fn project_deepseek_exchange<'a>(
+    profile: &ProviderProfileConfig,
+    request_protocol: &ProviderProtocolKey,
+    messages: &'a [LlmMessage],
+) -> AgentResult<Vec<DeepSeekWireMessage<'a>>> {
+    let mut projected = Vec::new();
+    let mut seen_runtime_call_ids = BTreeSet::new();
+    let mut message_index = 0usize;
+
+    while message_index < messages.len() {
+        let message = &messages[message_index];
+        let Some(turn) = message.assistant_turn() else {
+            if message.tool_result_fields().is_some() {
+                return Err(provider_context_boundary_required(
+                    "unpairedToolResult",
+                    message_index,
+                ));
+            }
+            projected.push(DeepSeekWireMessage::Original(message));
+            message_index += 1;
+            continue;
+        };
+
+        if turn.provider_tool_calls().is_empty() {
+            projected.push(DeepSeekWireMessage::Assistant {
+                turn,
+                provider_tool_calls: Vec::new(),
+            });
+            message_index += 1;
+            continue;
+        }
+
+        let Some(bindings) = turn
+            .runtime_tool_bindings()
+            .filter(|bindings| !bindings.is_empty())
+        else {
+            return Err(provider_context_boundary_required(
+                "missingRuntimeToolBindings",
+                message_index,
+            ));
+        };
+        if bindings.len() != turn.provider_tool_calls().len() {
+            return Err(provider_context_boundary_required(
+                "incompleteGroupedToolTurn",
+                message_index,
+            ));
+        }
+        match deepseek_reasoning_content(request_protocol, turn) {
+            Ok(Some(_)) => {}
+            Ok(None) if profile.reasoning.mode == ReasoningMode::Enabled => {
+                return Err(provider_context_boundary_required(
+                    "missingToolBearingContinuation",
+                    message_index,
+                ));
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return Err(provider_context_boundary_required(
+                    "incompatibleToolBearingContinuation",
+                    message_index,
+                ));
+            }
+        }
+
+        let mut provider_tool_calls = Vec::with_capacity(bindings.len());
+        for (expected_provider_index, binding) in bindings.iter().enumerate() {
+            if binding.provider_tool_index != expected_provider_index {
+                return Err(provider_context_boundary_required(
+                    "providerToolOrderMismatch",
+                    message_index,
+                ));
+            }
+            super::validate_model_tool_call_id(&binding.runtime_call.id)?;
+            if !seen_runtime_call_ids.insert(binding.runtime_call.id.as_str()) {
+                return Err(provider_context_boundary_required(
+                    "duplicateRuntimeToolCallId",
+                    message_index,
+                ));
+            }
+            let provider_call = turn
+                .provider_tool_calls()
+                .get(binding.provider_tool_index)
+                .ok_or_else(|| {
+                    provider_context_boundary_required("invalidProviderToolIndex", message_index)
+                })?;
+            if provider_call.id != binding.provider_call_id {
+                return Err(provider_context_boundary_required(
+                    "providerToolIdentityMismatch",
+                    message_index,
+                ));
+            }
+            super::validate_provider_tool_call_id(&provider_call.id)?;
+            provider_tool_calls.push(provider_call.clone());
+        }
+
+        let mut tool_results = Vec::with_capacity(bindings.len());
+        let mut interstitial = Vec::new();
+        let mut search_index = message_index + 1;
+        for binding in bindings {
+            let mut matched_result = None;
+            while search_index < messages.len() {
+                let candidate = &messages[search_index];
+                if let Some((tool_call_id, _, _)) = candidate.tool_result_fields() {
+                    if tool_call_id != binding.runtime_call.id {
+                        return Err(provider_context_boundary_required(
+                            "toolResultOrderMismatch",
+                            search_index,
+                        ));
+                    }
+                    matched_result = Some(candidate);
+                    search_index += 1;
+                    break;
+                }
+                if candidate
+                    .assistant_turn()
+                    .is_some_and(|candidate_turn| !candidate_turn.provider_tool_calls().is_empty())
+                {
+                    return Err(provider_context_boundary_required(
+                        "nestedToolBearingTurn",
+                        search_index,
+                    ));
+                }
+                interstitial.push(candidate);
+                search_index += 1;
+            }
+            let result = matched_result.ok_or_else(|| {
+                provider_context_boundary_required("missingToolResult", message_index)
+            })?;
+            tool_results.push((result, binding.provider_call_id.clone()));
+        }
+
+        projected.push(DeepSeekWireMessage::Assistant {
+            turn,
+            provider_tool_calls,
+        });
+        projected.extend(tool_results.into_iter().map(|(message, provider_call_id)| {
+            DeepSeekWireMessage::ToolResult {
+                message,
+                provider_call_id,
+            }
+        }));
+        for interstitial_message in interstitial {
+            if let Some(interstitial_turn) = interstitial_message.assistant_turn() {
+                projected.push(DeepSeekWireMessage::Assistant {
+                    turn: interstitial_turn,
+                    provider_tool_calls: Vec::new(),
+                });
+            } else {
+                projected.push(DeepSeekWireMessage::Original(interstitial_message));
+            }
+        }
+        message_index = search_index;
+    }
+
+    Ok(projected)
+}
+
+fn provider_context_boundary_required(reason: &'static str, message_index: usize) -> AgentError {
+    AgentError::structured(
+        "provider_context_boundary_required",
+        "DeepSeek 工具调用历史缺少可安全回放的 Provider 上下文边界。",
+        json!({
+            "type": "provider_context_boundary",
+            "reason": reason,
+            "messageIndex": message_index,
+            "recovery": "startNewProviderContext",
+        }),
+    )
+}
+
 fn estimate_generic_continuation_tokens(
     continuation: Option<&ProviderContinuation>,
 ) -> AgentResult<u64> {
@@ -300,6 +762,31 @@ fn estimate_generic_continuation_tokens(
         ));
     }
     Ok(0)
+}
+
+fn estimate_deepseek_continuation_tokens(
+    continuation: Option<&ProviderContinuation>,
+) -> AgentResult<u64> {
+    let Some(continuation) = continuation else {
+        return Ok(0);
+    };
+    if continuation.replay_scope() == ProviderContinuationReplayScope::AssistantTurnV1 {
+        // Ordinary no-tool reasoning is deliberately not replayed across a user boundary.
+        return Ok(0);
+    }
+    let reasoning_content = deepseek_reasoning_fragment(continuation)?;
+    // Measure the exact JSON escaping and field structure that `build_deepseek_messages` adds to
+    // the assistant object. Wrapping the incremental property in an object adds a conservative
+    // pair of braces while reusing the same Unicode-aware estimator as the context capacity gate.
+    let wire_projection = serde_json::to_string(&json!({
+        "reasoning_content": reasoning_content
+    }))
+    .map_err(|error| {
+        AgentError::new(format!(
+            "DeepSeek reasoning_content 无法投影为请求 JSON：{error}"
+        ))
+    })?;
+    Ok(crate::context::ContextTextBudget::heuristic(u64::MAX).estimate(&wire_projection))
 }
 
 fn stream_state_mismatch() -> AgentError {

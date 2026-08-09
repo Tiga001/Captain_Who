@@ -200,6 +200,11 @@ impl AgentService {
                 .with_trace_observer(trace_observer)
                 .with_model_request_observer(model_request_observer)
                 .with_context_compaction(context_compaction_services);
+            if let Some(provider_continuation_vault) = service.provider_continuation_vault.as_ref()
+            {
+                host_services = host_services
+                    .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));
+            }
             if let Some(context_window_observer) = context_window_observer {
                 host_services = host_services.with_context_window_observer(context_window_observer);
             }

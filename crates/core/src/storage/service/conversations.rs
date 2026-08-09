@@ -119,13 +119,14 @@ impl StorageService {
         &self,
         input: ForkConversationInput,
     ) -> Result<ChatConversationRecord, String> {
-        self.fork_conversation_with_domain_error(input)
+        self.fork_conversation_with_domain_error(input, None)
             .map_err(|error| error.to_string())
     }
 
     fn fork_conversation_with_domain_error(
         &self,
         input: ForkConversationInput,
+        provider_continuation_vault: Option<&ProviderContinuationVault>,
     ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
         let mut connection = self.state.connection()?;
         if let Some(existing) =
@@ -154,6 +155,24 @@ impl StorageService {
         let mut plan =
             conversation_fork_repository::build_fork_plan(&connection, &input, now_ms())?;
         ensure_project_reference_exists(&connection, plan.target.project_id.as_deref())?;
+        let provider_continuations = if plan.provider_continuation_mappings.is_empty() {
+            Vec::new()
+        } else {
+            let vault = provider_continuation_vault.ok_or_else(|| {
+                conversation_fork_repository::ConversationForkError::Other(
+                    "原任务包含 Provider continuation，但当前 Host 未提供安全克隆能力。"
+                        .to_string(),
+                )
+            })?;
+            vault
+                .prepare_fork_clones(&plan.provider_continuation_mappings)
+                .map_err(|error| {
+                    conversation_fork_repository::ConversationForkError::Other(format!(
+                        "Provider continuation 安全克隆失败：{}",
+                        error.code()
+                    ))
+                })?
+        };
 
         let mut staged_files = Vec::new();
         let mut committed_files = Vec::new();
@@ -206,7 +225,13 @@ impl StorageService {
             return Err(error.into());
         }
 
-        if let Err(error) = conversation_fork_repository::commit_fork_plan(&mut connection, &plan) {
+        if let Err(error) =
+            conversation_fork_repository::commit_fork_plan_with_provider_continuations(
+                &mut connection,
+                &plan,
+                &provider_continuations,
+            )
+        {
             cleanup_fork_files(&staged_files, &committed_files);
             return Err(error);
         }
@@ -223,7 +248,26 @@ impl StorageService {
         input: ForkConversationInput,
     ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
     {
-        let conversation = self.fork_conversation_with_domain_error(input)?;
+        let conversation = self.fork_conversation_with_domain_error(input, None)?;
+        self.decorate_fork_conversation_view(conversation)
+    }
+
+    pub fn fork_conversation_view_with_provider_continuation_vault(
+        &self,
+        input: ForkConversationInput,
+        provider_continuation_vault: &ProviderContinuationVault,
+    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
+    {
+        let conversation =
+            self.fork_conversation_with_domain_error(input, Some(provider_continuation_vault))?;
+        self.decorate_fork_conversation_view(conversation)
+    }
+
+    fn decorate_fork_conversation_view(
+        &self,
+        conversation: ChatConversationRecord,
+    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
+    {
         let connection = self.state.connection()?;
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)
@@ -464,6 +508,11 @@ impl StorageService {
             )
             .map_err(storage_error)?;
             agent_action_audit_repository::delete_action_audit_for_conversation(
+                &transaction,
+                conversation_id,
+            )
+            .map_err(storage_error)?;
+            provider_continuation_repository::delete_for_conversation(
                 &transaction,
                 conversation_id,
             )

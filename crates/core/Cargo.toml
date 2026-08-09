@@ -15,6 +15,7 @@ image = { version = "0.25", default-features = false, features = ["gif", "jpeg",
 keyring = "4"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+ring = "0.17.14"
 pdf-extract = "0.12"
 roxmltree = "0.21"
 rusqlite = { version = "0.32", features = ["backup", "bundled"] }

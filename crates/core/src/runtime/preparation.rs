@@ -606,72 +606,79 @@ pub(super) fn build_llm_request(
     )?;
     let shared_context_baseline = shared_context_baseline
         .filter(|baseline| baseline.matches_configuration(&configuration_revision));
-    let (context, next_model_request_index, tool_batch, conversation_trace) =
-        match restored_checkpoint {
-            Some(restored) => {
-                let context = match shared_context_baseline {
-                    Some(baseline) => baseline.rebase_restored_frame(restored.context),
-                    None => restored.context,
-                };
-                (
-                    context,
-                    restored.next_model_request_index,
-                    restored.tool_batch,
-                    restored.conversation_trace,
-                )
-            }
-            None => {
-                let attachment_context = build_attachment_context(
-                    &input.attachments,
-                    input
-                        .context
-                        .as_ref()
-                        .and_then(|context| context.attachment_library.as_ref()),
-                )?;
-                let skill_activation = input.skill_activation;
-                let skill_discovery = input.skill_discovery;
-                let world_state_records = input.world_state_records;
-                let context = match shared_context_baseline {
-                    Some(baseline) => {
-                        let mut context = baseline.into_frame();
-                        ContextAssembler::append_initial_run_world_state(
-                            &mut context,
-                            initial_run_world_state.as_ref(),
-                        )?;
-                        append_attachment_context(&mut context, attachment_context);
-                        ContextAssembler::append_skill_overlays(
-                            &mut context,
-                            skill_discovery.as_ref(),
-                            skill_activation.as_ref(),
-                        )?;
-                        context
-                    }
-                    None => assemble_initial_context_with_skill_overlays(
-                        DurableConversationTimeline {
-                            compaction_summary: input.context_compaction_summary,
-                            world_state_records,
-                            goal: input.goal,
-                            messages: input.messages,
-                        },
-                        initial_run_world_state,
-                        InitialSkillOverlays {
-                            discovery: skill_discovery,
-                            activation: skill_activation,
-                        },
-                        attachment_context,
-                        input.context.as_ref(),
-                        input.prompt_preferences.as_ref(),
-                        tool_definitions,
-                    )?,
-                };
-                (
-                    context,
-                    0,
-                    ToolCallBatch::default(),
-                    ConversationTraceRecorder::default(),
-                )
-            }
-        };
+    let (
+        context,
+        next_model_request_index,
+        tool_batch,
+        conversation_trace,
+        provider_continuation_refs,
+    ) = match restored_checkpoint {
+        Some(restored) => {
+            let context = match shared_context_baseline {
+                Some(baseline) => baseline.rebase_restored_frame(restored.context),
+                None => restored.context,
+            };
+            (
+                context,
+                restored.next_model_request_index,
+                restored.tool_batch,
+                restored.conversation_trace,
+                Some(restored.provider_continuation_refs),
+            )
+        }
+        None => {
+            let attachment_context = build_attachment_context(
+                &input.attachments,
+                input
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.attachment_library.as_ref()),
+            )?;
+            let skill_activation = input.skill_activation;
+            let skill_discovery = input.skill_discovery;
+            let world_state_records = input.world_state_records;
+            let context = match shared_context_baseline {
+                Some(baseline) => {
+                    let mut context = baseline.into_frame();
+                    ContextAssembler::append_initial_run_world_state(
+                        &mut context,
+                        initial_run_world_state.as_ref(),
+                    )?;
+                    append_attachment_context(&mut context, attachment_context);
+                    ContextAssembler::append_skill_overlays(
+                        &mut context,
+                        skill_discovery.as_ref(),
+                        skill_activation.as_ref(),
+                    )?;
+                    context
+                }
+                None => assemble_initial_context_with_skill_overlays(
+                    DurableConversationTimeline {
+                        compaction_summary: input.context_compaction_summary,
+                        world_state_records,
+                        goal: input.goal,
+                        messages: input.messages,
+                    },
+                    initial_run_world_state,
+                    InitialSkillOverlays {
+                        discovery: skill_discovery,
+                        activation: skill_activation,
+                    },
+                    attachment_context,
+                    input.context.as_ref(),
+                    input.prompt_preferences.as_ref(),
+                    tool_definitions,
+                )?,
+            };
+            (
+                context,
+                0,
+                ToolCallBatch::default(),
+                ConversationTraceRecorder::default(),
+                None,
+            )
+        }
+    };
 
     Ok(PreparedLlmRequest {
         template,
@@ -679,6 +686,7 @@ pub(super) fn build_llm_request(
         next_model_request_index,
         tool_batch,
         conversation_trace,
+        provider_continuation_refs,
     })
 }
 

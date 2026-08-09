@@ -28,6 +28,11 @@ impl AgentService {
             .get(&model.id)
             .cloned()
             .ok_or_else(|| format!("模型 {model_id} 的 Provider 连接身份缺失。"))?;
+        let provider_protocol_revision = settings_snapshot
+            .provider_protocol_revisions
+            .get(&model.id)
+            .cloned()
+            .ok_or_else(|| format!("模型 {model_id} 的 Provider Protocol 身份缺失。"))?;
         let context_window_tokens = model.effective_context_window_tokens();
         let connection = settings.effective_connection_for(&model)?;
         let provider_dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
@@ -38,7 +43,7 @@ impl AgentService {
             provider_dialect,
             &provider_profile_config,
             model.id.clone(),
-            Some(settings_snapshot.configuration_revision.clone()),
+            Some(provider_protocol_revision.clone()),
         )
         .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
 
@@ -119,7 +124,7 @@ impl AgentService {
         let agent_input = AgentChatInput {
             api_url: connection.api_url,
             api_token: String::new(),
-            provider_configuration_revision: Some(settings_snapshot.configuration_revision),
+            provider_configuration_revision: Some(provider_protocol_revision),
             provider_connection_revision: Some(provider_connection_revision),
             search_connection_revision: Some(settings_snapshot.search_connection_revision),
             provider_profile_config: Some(provider_profile_config),
@@ -205,8 +210,9 @@ impl AgentService {
         skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
         mcp_tools: Option<McpToolRuntime>,
     ) -> Result<AgentContextWindowToolProjection, String> {
-        let mut host_services =
-            AgentRuntimeHostServices::new().with_office_engine(Arc::clone(&self.office_engine));
+        let mut host_services = self
+            .context_window_provider_host_services()
+            .with_office_engine(Arc::clone(&self.office_engine));
         if let Some(execution) = self.image_generation_execution.as_ref() {
             host_services = host_services.with_image_generation_execution(Arc::clone(execution));
         }
@@ -230,6 +236,18 @@ impl AgentService {
         // constructing an executable action closure during a read-only capacity inspection.
         prepare_context_window_tool_projection(agent_input, &host_services, true)
             .map_err(|error| error.to_string())
+    }
+
+    /// Builds the Host-private capability boundary used to hydrate provider-owned Assistant Turns
+    /// for context previews. The returned value contains no executable action capability.
+    pub(super) fn context_window_provider_host_services(&self) -> AgentRuntimeHostServices {
+        let mut host_services =
+            AgentRuntimeHostServices::new().with_storage(Arc::clone(&self.storage));
+        if let Some(provider_continuation_vault) = self.provider_continuation_vault.as_ref() {
+            host_services = host_services
+                .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));
+        }
+        host_services
     }
 
     /// Accepts the runtime's aggregate accounting for the final assembled request attempt.
@@ -400,8 +418,13 @@ impl AgentService {
             })
             .transpose()?
             .unwrap_or_default();
-        let mut state =
-            create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
+        let host_services = self.context_window_provider_host_services();
+        let mut state = create_conversation_context_state_with_host_services(
+            preview_input,
+            conversation_id,
+            &host_services,
+        )
+        .map_err(|error| error.to_string())?;
         let baseline = state.shared_baseline().map_err(|error| error.to_string())?;
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(match tool_projection {
@@ -463,48 +486,66 @@ impl AgentService {
         let configuration_revision = conversation_context_configuration_revision(agent_input)
             .map_err(|error| error.to_string())?;
         let access = self.next_conversation_context_state_access();
-        let mut needs_rebuild = false;
+        let provider_native_replay = agent_input
+            .provider_profile_config
+            .as_ref()
+            .is_some_and(|profile| profile.profile.id == ProviderProfileId::DeepSeekV4Chat);
+        if provider_native_replay && !trace.terminal_status.is_terminal() {
+            // Approval boundaries can durably expose only the first call of a grouped Provider
+            // turn. Runtime owns the exact checkpoint/raw replay for that in-progress exchange;
+            // rebuilding a Host preview here would incorrectly require later queued calls to be
+            // visible already. Keep the incremental safe projection until a complete terminal
+            // trace can be privately hydrated.
+            return Ok(None);
+        }
+        // Provider-native Assistant Turns are restored from the encrypted Host sidecar. Never
+        // incrementally extend a split durable projection because that would lose opaque replay
+        // state and undercount the next provider request.
+        let mut needs_rebuild = provider_native_replay;
         {
             let mut states = self
                 .conversation_context_states
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if let Some(entry) = states.get_mut(conversation_id) {
-                if entry.configuration_revision == configuration_revision
-                    && entry.active_run_id.as_deref() == Some(run_id)
-                    && entry.active_assistant_message_id.as_deref() == Some(assistant_message_id)
-                {
-                    if !entry.terminal {
-                        match entry.state.finalize_conversation_turn(
-                            &trace,
-                            &model_context_items,
-                            entry.committed_activity_items,
-                            assistant_content,
-                            Some(assistant_created_at),
-                        ) {
-                            Ok(committed_activity_items) => {
-                                entry.committed_activity_items = committed_activity_items;
-                                entry.terminal = true;
-                                entry.active_run_id = None;
+            if !needs_rebuild {
+                if let Some(entry) = states.get_mut(conversation_id) {
+                    if entry.configuration_revision == configuration_revision
+                        && entry.active_run_id.as_deref() == Some(run_id)
+                        && entry.active_assistant_message_id.as_deref()
+                            == Some(assistant_message_id)
+                    {
+                        if !entry.terminal {
+                            match entry.state.finalize_conversation_turn(
+                                &trace,
+                                &model_context_items,
+                                entry.committed_activity_items,
+                                assistant_content,
+                                Some(assistant_created_at),
+                            ) {
+                                Ok(committed_activity_items) => {
+                                    entry.committed_activity_items = committed_activity_items;
+                                    entry.terminal = true;
+                                    entry.active_run_id = None;
+                                }
+                                Err(_) => needs_rebuild = true,
                             }
-                            Err(_) => needs_rebuild = true,
                         }
-                    }
-                    if !needs_rebuild {
-                        entry.last_access = access;
-                        entry
-                            .state
-                            .shared_baseline()
-                            .map_err(|error| error.to_string())?;
-                        return Ok(agent_input
-                            .context_window_indicator_enabled
-                            .then(|| entry.state.snapshot()));
+                        if !needs_rebuild {
+                            entry.last_access = access;
+                            entry
+                                .state
+                                .shared_baseline()
+                                .map_err(|error| error.to_string())?;
+                            return Ok(agent_input
+                                .context_window_indicator_enabled
+                                .then(|| entry.state.snapshot()));
+                        }
+                    } else {
+                        needs_rebuild = true;
                     }
                 } else {
                     needs_rebuild = true;
                 }
-            } else {
-                needs_rebuild = true;
             }
             if needs_rebuild {
                 states.remove(conversation_id);

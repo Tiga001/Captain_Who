@@ -28,7 +28,7 @@ use crate::protocol::{
     AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
     AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
-use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
+use crate::provider_profile::{ProviderProfileConfig, ProviderProfileId, ProviderProtocolKey};
 use crate::tools::{
     validate_tool_set_checkpoint_shape, AgentToolCallCheckpointPersistence, EffectiveToolSet,
 };
@@ -54,6 +54,7 @@ pub(super) struct QueuedToolCall {
     pub(super) checkpoint_persistence: AgentToolCallCheckpointPersistence,
     pub(super) assistant_content: String,
     pub(super) group_id: String,
+    pub(super) deferred_by_skill_activation: bool,
 }
 
 impl QueuedToolCall {
@@ -165,6 +166,7 @@ impl ToolCallBatch {
                         String::new()
                     },
                     group_id: format!("run:{run_id}:tool-exchange:{}", model_request_index + 1),
+                    deferred_by_skill_activation: false,
                 })
             })
             .collect::<AgentResult<VecDeque<_>>>()?;
@@ -230,6 +232,10 @@ impl ToolCallBatch {
         self.queue.is_empty()
     }
 
+    pub(super) fn len(&self) -> usize {
+        self.queue.len()
+    }
+
     /// Drops queued external calls that do not yet have a one-time Host preparation.
     ///
     /// Only a count survives the approval checkpoint. In particular, model-authored arguments,
@@ -278,8 +284,40 @@ impl ToolCallBatch {
         })
     }
 
+    pub(super) fn checkpoint_assistant_turn_id(&self) -> Option<&str> {
+        self.assistant_turn_identity
+            .as_ref()
+            .map(|identity| identity.assistant_turn_id.as_str())
+    }
+
     pub(super) fn take_assistant_turn(&mut self) -> Option<LlmAssistantTurn> {
         self.assistant_turn.take()
+    }
+
+    pub(super) fn assistant_turn(&self) -> Option<&LlmAssistantTurn> {
+        self.assistant_turn.as_ref()
+    }
+
+    pub(super) fn attach_provider_continuation_ref(
+        &mut self,
+        continuation_ref: crate::protocol::ProviderContinuationRef,
+    ) -> AgentResult<()> {
+        let turn = self.assistant_turn.take().ok_or_else(|| {
+            AgentError::new(
+                "Tool Call 批次缺少可绑定 Provider continuation ref 的 Assistant Turn。",
+            )
+        })?;
+        self.assistant_turn = Some(turn.with_provider_continuation_ref(continuation_ref)?);
+        Ok(())
+    }
+
+    /// Keeps the complete Provider turn while preventing calls planned before newly activated
+    /// Skill instructions were available from executing. This policy belongs to the batch and
+    /// is copied into approval checkpoints, so a restart cannot lose the guard.
+    pub(super) fn mark_skill_activation_barrier(&mut self) {
+        for queued in &mut self.queue {
+            queued.deferred_by_skill_activation = queued.call.name != "skills_activate";
+        }
     }
 
     pub(super) fn context_group(&self) -> Option<ContextGroup> {
@@ -324,6 +362,67 @@ impl ToolCallBatch {
             checkpoint_turn,
         )))
     }
+
+    /// Replaces approval-checkpoint placeholders with the authenticated runtime calls from the
+    /// encrypted provider turn. No queued call may execute before this succeeds.
+    pub(super) fn rehydrate_queued_calls_from_provider_turn(
+        &mut self,
+        turn: &LlmAssistantTurn,
+        mut checkpoint_projection: impl FnMut(
+            &LlmToolCall,
+        )
+            -> (LlmToolCall, AgentToolCallCheckpointPersistence),
+    ) -> AgentResult<()> {
+        if self.deferred_external_tool_call_count != 0 {
+            return Err(AgentError::new(
+                "DeepSeek 审批检查点包含旧版延后调用，无法安全恢复完整 Provider Turn。",
+            ));
+        }
+        let expected_identity = self.assistant_turn_identity()?.clone();
+        let actual_identity = turn.checkpoint_identity()?;
+        if actual_identity != expected_identity {
+            return Err(AgentError::new(
+                "加密 Provider Turn 与审批检查点的完整身份不一致。",
+            ));
+        }
+        let bindings = turn
+            .runtime_tool_bindings()
+            .ok_or_else(|| AgentError::new("加密 Provider Turn 缺少 Runtime Tool Call 映射。"))?;
+        for queued in &mut self.queue {
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.runtime_call.id == queued.call.id)
+                .ok_or_else(|| {
+                    AgentError::new("加密 Provider Turn 缺少审批检查点中的 queued Tool Call。")
+                })?;
+            let provider_call = turn
+                .provider_tool_calls()
+                .get(binding.provider_tool_index)
+                .ok_or_else(|| AgentError::new("加密 Provider Tool Call 映射越界。"))?;
+            if provider_call.id != binding.provider_call_id
+                || binding.provider_tool_index != queued.provider_tool_index
+            {
+                return Err(AgentError::new(
+                    "加密 Provider Turn 的 queued Tool Call 身份不一致。",
+                ));
+            }
+            let (checkpoint_call, checkpoint_persistence) =
+                checkpoint_projection(&binding.runtime_call);
+            if checkpoint_call.id != binding.runtime_call.id
+                || checkpoint_call.name != binding.runtime_call.name
+            {
+                return Err(AgentError::new(
+                    "Provider Tool Call 的安全 Checkpoint 投影改变了调用身份。",
+                ));
+            }
+            queued.provider_call = provider_call.clone();
+            queued.provider_tool_index = binding.provider_tool_index;
+            queued.call = binding.runtime_call.clone();
+            queued.checkpoint_call = checkpoint_call;
+            queued.checkpoint_persistence = checkpoint_persistence;
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct RestoredRunCheckpoint {
@@ -338,6 +437,7 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) run_world_state: WorldStateSnapshot,
     pub(super) provider_profile_config: ProviderProfileConfig,
     pub(super) provider_protocol_key: ProviderProtocolKey,
+    pub(super) provider_continuation_refs: Vec<crate::protocol::ProviderContinuationRef>,
 }
 
 pub(super) struct RunCheckpointState<'a> {
@@ -408,6 +508,7 @@ pub(super) fn create_run_checkpoint(
     project_mcp_result_context_for_checkpoint(&mut context_items);
     validate_context_checkpoint_tool_call_ids(&context_items)?;
     validate_checkpoint_world_state(run_world_state, model_capabilities)?;
+    let provider_continuation_refs = context.provider_continuation_refs()?;
     Ok(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
@@ -417,7 +518,11 @@ pub(super) fn create_run_checkpoint(
             .queue
             .iter()
             .map(|queued| {
-                queued_tool_call_checkpoint(queued, &assistant_turn_identity.assistant_turn_id)
+                queued_tool_call_checkpoint(
+                    queued,
+                    &assistant_turn_identity.assistant_turn_id,
+                    provider_profile_config.profile.id == ProviderProfileId::DeepSeekV4Chat,
+                )
             })
             .collect::<AgentResult<Vec<_>>>()?,
         deferred_external_tool_call_count: tool_batch.deferred_external_tool_call_count,
@@ -429,6 +534,7 @@ pub(super) fn create_run_checkpoint(
         provider_profile_config: provider_profile_config.clone(),
         provider_protocol_key: provider_protocol_key.clone(),
         assistant_turn_identity,
+        provider_continuation_refs,
         run_world_state: run_world_state.clone(),
         pending_action_id: None,
         pending_tool_call_id: pending_tool_call_id.to_string(),
@@ -606,6 +712,19 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
                 "无法恢复运行检查点：Provider protocol key 无效：{error}"
             ))
         })?;
+    let mut continuation_ref_ids = BTreeSet::new();
+    for continuation_ref in &checkpoint.provider_continuation_refs {
+        continuation_ref.validate().map_err(|error| {
+            AgentError::new(format!(
+                "无法恢复运行检查点：Provider continuation ref 无效：{error}"
+            ))
+        })?;
+        if !continuation_ref_ids.insert(continuation_ref.id.as_str()) {
+            return Err(AgentError::new(
+                "无法恢复运行检查点：Provider continuation ref 重复。",
+            ));
+        }
+    }
     validate_model_tool_call_id(&checkpoint.pending_tool_call_id)?;
     if checkpoint
         .pending_action_id
@@ -654,6 +773,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         continuation_result_sequence(&checkpoint, &continuation.call.id);
     let provider_profile_config = checkpoint.provider_profile_config.clone();
     let provider_protocol_key = checkpoint.provider_protocol_key.clone();
+    let provider_continuation_refs = checkpoint.provider_continuation_refs.clone();
     let assistant_turn_identity = checkpoint.assistant_turn_identity.clone();
     let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
@@ -789,6 +909,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         run_world_state: checkpoint.run_world_state,
         provider_profile_config,
         provider_protocol_key,
+        provider_continuation_refs,
     })
 }
 
@@ -982,8 +1103,13 @@ fn restore_batch_fingerprints(
 fn queued_tool_call_checkpoint(
     call: &QueuedToolCall,
     assistant_turn_id: &str,
+    allow_encrypted_provider_rehydration: bool,
 ) -> AgentResult<AgentQueuedToolCallCheckpoint> {
-    if call.checkpoint_persistence != AgentToolCallCheckpointPersistence::Allowed {
+    let rehydrates_from_encrypted_provider_turn = allow_encrypted_provider_rehydration
+        && call.checkpoint_persistence == AgentToolCallCheckpointPersistence::DeniedMcp;
+    if call.checkpoint_persistence != AgentToolCallCheckpointPersistence::Allowed
+        && !rehydrates_from_encrypted_provider_turn
+    {
         let code = match call.checkpoint_persistence {
             AgentToolCallCheckpointPersistence::DeniedMcp => "mcpToolCallPersistenceDenied",
             AgentToolCallCheckpointPersistence::DeniedUnknown => "unknownToolCallPersistenceDenied",
@@ -1005,7 +1131,7 @@ fn queued_tool_call_checkpoint(
             "无法创建运行检查点：工具调用安全投影改变了调用身份。",
         ));
     }
-    if call.checkpoint_call.args != call.call.args {
+    if call.checkpoint_call.args != call.call.args && !rehydrates_from_encrypted_provider_turn {
         return Err(AgentError::structured(
             "agent.checkpoint_private_tool_arguments",
             "无法创建运行检查点：同批待执行工具调用包含不能安全持久化的参数。",
@@ -1032,6 +1158,7 @@ fn queued_tool_call_checkpoint(
         group_id: call.group_id.clone(),
         assistant_turn_id: assistant_turn_id.to_string(),
         provider_tool_index: u32::try_from(call.provider_tool_index).unwrap_or(u32::MAX),
+        deferred_by_skill_activation: call.deferred_by_skill_activation,
     })
 }
 
@@ -1163,6 +1290,7 @@ fn restore_queued_tool_calls(
                 checkpoint_persistence: AgentToolCallCheckpointPersistence::Allowed,
                 assistant_content: queued.assistant_content,
                 group_id: queued.group_id,
+                deferred_by_skill_activation: queued.deferred_by_skill_activation,
             })
         })
         .collect()
@@ -1291,9 +1419,10 @@ mod tests {
             checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
             assistant_content: String::new(),
             group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
+            deferred_by_skill_activation: false,
         };
 
-        let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test").unwrap_err();
+        let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test", false).unwrap_err();
         assert_eq!(
             error.code(),
             Some("agent.checkpoint_private_tool_arguments")
@@ -1325,9 +1454,10 @@ mod tests {
             checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
             assistant_content: String::new(),
             group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
+            deferred_by_skill_activation: false,
         };
 
-        let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test").unwrap_err();
+        let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test", false).unwrap_err();
         assert_eq!(
             error.code(),
             Some("agent.checkpoint_private_tool_arguments")
@@ -1336,6 +1466,106 @@ mod tests {
         assert!(!error
             .details()
             .is_some_and(|details| details.to_string().contains(secret)));
+    }
+
+    #[test]
+    fn deepseek_skill_activation_barrier_is_bound_to_each_queued_checkpoint_call() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        let calls = vec![
+            LlmToolCall {
+                id: canonical_test_call_id(0, "activate-skill"),
+                name: "skills_activate".to_string(),
+                args: json!({ "skills": ["presentations"] }),
+            },
+            LlmToolCall {
+                id: canonical_test_call_id(1, "premature-read"),
+                name: "read_file".to_string(),
+                args: json!({ "path": "README.md" }),
+            },
+        ];
+        let mut batch = ToolCallBatch::from_model_response(
+            "run-skill-activation-boundary",
+            0,
+            String::new(),
+            calls,
+            false,
+            |call| (call.clone(), registry.checkpoint_persistence(&call.name)),
+        );
+        batch.mark_skill_activation_barrier();
+        let activation = batch.pop_front().expect("activation call");
+        let deferred = batch.pop_front().expect("deferred call");
+        assert!(!activation.deferred_by_skill_activation);
+        assert!(deferred.deferred_by_skill_activation);
+
+        let checkpoint = queued_tool_call_checkpoint(&deferred, "assistant-turn", true).unwrap();
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let restored: AgentQueuedToolCallCheckpoint = serde_json::from_str(&json).unwrap();
+        assert!(restored.deferred_by_skill_activation);
+    }
+
+    #[test]
+    fn deepseek_checkpoint_rehydrates_private_mcp_queue_from_authenticated_turn() {
+        let secret = "deepseek-encrypted-mcp-secret";
+        let pending = LlmToolCall {
+            id: canonical_test_call_id(0, "provider-mcp-pending"),
+            name: "mcp__fixture__first".to_string(),
+            args: json!({"value": "first"}),
+        };
+        let queued = LlmToolCall {
+            id: canonical_test_call_id(1, "provider-mcp-queued"),
+            name: "mcp__fixture__second".to_string(),
+            args: json!({"token": secret}),
+        };
+        let mut batch = ToolCallBatch::from_model_response(
+            "checkpoint-validation-run",
+            0,
+            String::new(),
+            vec![pending.clone(), queued.clone()],
+            false,
+            |call| {
+                (
+                    LlmToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        args: json!({}),
+                    },
+                    AgentToolCallCheckpointPersistence::DeniedMcp,
+                )
+            },
+        );
+        let authenticated_turn = batch.take_assistant_turn().unwrap();
+        pop_test_call(&mut batch, &pending.id);
+
+        let safe_checkpoint = queued_tool_call_checkpoint(
+            batch.queue.front().unwrap(),
+            &authenticated_turn.stable_id(),
+            true,
+        )
+        .unwrap();
+        let checkpoint_json = serde_json::to_string(&safe_checkpoint).unwrap();
+        assert!(!checkpoint_json.contains(secret));
+
+        let placeholder = batch.queue.front_mut().unwrap();
+        placeholder.call.args = json!({});
+        placeholder.provider_call.args = json!({});
+        batch
+            .rehydrate_queued_calls_from_provider_turn(&authenticated_turn, |call| {
+                (
+                    LlmToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        args: json!({}),
+                    },
+                    AgentToolCallCheckpointPersistence::DeniedMcp,
+                )
+            })
+            .unwrap();
+        assert_eq!(batch.queue.front().unwrap().call.args["token"], secret);
+        assert_eq!(batch.queue.front().unwrap().checkpoint_call.args, json!({}));
+        assert_eq!(
+            batch.queue.front().unwrap().checkpoint_persistence,
+            AgentToolCallCheckpointPersistence::DeniedMcp
+        );
     }
 
     #[test]

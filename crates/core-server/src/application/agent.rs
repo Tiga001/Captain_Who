@@ -64,7 +64,7 @@ use mycopilot_core::{
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_context_configuration_revision,
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
-    create_conversation_context_state, failed_conversation_trace_without_items,
+    create_conversation_context_state_with_host_services, failed_conversation_trace_without_items,
     inspect_context_window_with_tool_projection, mcp_tool_invocation_event,
     mcp_tool_result_from_approved_invocation, mcp_tool_result_from_rejected_approval,
     mcp_tool_result_size_summary, next_run_id, prepare_context_window_tool_projection,
@@ -91,8 +91,11 @@ use mycopilot_core::{
     ContextJournalCursor, ConversationModelContextItem, ConversationTraceSnapshot,
     ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
-    McpToolRuntime, ModelCapabilities, ProviderProtocolDialect, ProviderProtocolKey,
+    McpToolRuntime, ModelCapabilities, ProviderContinuationVault, ProviderProfileId,
+    ProviderProtocolDialect, ProviderProtocolKey,
 };
+#[cfg(test)]
+use mycopilot_core::{create_conversation_context_state, ProviderContinuationVaultFactory};
 use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -126,6 +129,23 @@ use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
 use context_compaction::validate_compaction_trace_boundary;
 #[cfg(test)]
 use run_lifecycle::inject_project_deletion_failure;
+
+#[cfg(test)]
+fn test_provider_continuation_vault(
+    storage: Arc<StorageService>,
+) -> Result<Arc<ProviderContinuationVault>, String> {
+    ProviderContinuationVaultFactory::open_or_provision(
+        storage,
+        Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default()),
+    )
+    .map(Arc::new)
+    .map_err(|error| {
+        format!(
+            "failed to initialize test Provider continuation vault: {}",
+            error.code()
+        )
+    })
+}
 
 pub(crate) const AGENT_EVENT_NAME: &str = "agent.event";
 
@@ -394,6 +414,7 @@ struct ActiveRunControl {
 #[derive(Clone)]
 pub struct AgentService {
     storage: Arc<StorageService>,
+    provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
     skills: Arc<SkillsService>,
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveRunControl>>>,
@@ -424,20 +445,31 @@ pub struct AgentService {
 impl AgentService {
     #[cfg(test)]
     pub fn try_new(storage: Arc<StorageService>) -> Result<Self, String> {
-        Self::try_new_with_startup_reconciliation(storage, true)
+        let provider_continuation_vault = test_provider_continuation_vault(Arc::clone(&storage))?;
+        Self::try_new_with_startup_reconciliation(storage, true, Some(provider_continuation_vault))
     }
 
     /// Builds the production service while deferring orphan trace retirement until asynchronous
     /// external execution journals have been reconciled.
+    pub(crate) fn try_new_deferred_startup_reconciliation_with_provider_continuation_vault(
+        storage: Arc<StorageService>,
+        provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
+    ) -> Result<Self, String> {
+        Self::try_new_with_startup_reconciliation(storage, false, provider_continuation_vault)
+    }
+
+    #[cfg(test)]
     pub(crate) fn try_new_deferred_startup_reconciliation(
         storage: Arc<StorageService>,
     ) -> Result<Self, String> {
-        Self::try_new_with_startup_reconciliation(storage, false)
+        let provider_continuation_vault = test_provider_continuation_vault(Arc::clone(&storage))?;
+        Self::try_new_with_startup_reconciliation(storage, false, Some(provider_continuation_vault))
     }
 
     fn try_new_with_startup_reconciliation(
         storage: Arc<StorageService>,
         reconcile_orphaned_traces: bool,
+        provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
     ) -> Result<Self, String> {
         // Process handles are intentionally not recoverable across Host restarts. Reconcile the
         // operational projection before generic orphaned-run handling so no stale row is ever
@@ -516,6 +548,7 @@ impl AgentService {
         let command_sessions = AgentCommandSessionRegistry::new(Arc::clone(&storage));
         let service = Self {
             storage,
+            provider_continuation_vault,
             skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
@@ -562,6 +595,21 @@ impl AgentService {
     #[cfg(test)]
     pub fn new(storage: Arc<StorageService>) -> Self {
         Self::try_new(storage).expect("agent service test fixture must initialize")
+    }
+
+    pub(crate) fn fork_conversation_view(
+        &self,
+        input: mycopilot_core::storage::models::ForkConversationInput,
+    ) -> Result<
+        mycopilot_core::storage::models::ChatConversationViewRecord,
+        mycopilot_core::storage::conversation_fork_repository::ConversationForkError,
+    > {
+        match self.provider_continuation_vault.as_deref() {
+            Some(vault) => self
+                .storage
+                .fork_conversation_view_with_provider_continuation_vault(input, vault),
+            None => self.storage.fork_conversation_view(input),
+        }
     }
 
     pub fn with_skills_service(mut self, skills: Arc<SkillsService>) -> Self {

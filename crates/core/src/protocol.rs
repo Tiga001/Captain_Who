@@ -10,6 +10,68 @@ use serde_json::Value;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+pub const PROVIDER_CONTINUATION_REF_VERSION: u32 = 1;
+
+/// Opaque, conversation-bound handle to provider-owned continuation state.
+///
+/// The referenced payload is stored in the Host's private encrypted vault. This value is safe to
+/// persist in an approval checkpoint, but it deliberately carries no payload hash, ciphertext,
+/// provider text, or storage location.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderContinuationRef {
+    pub version: u32,
+    pub id: String,
+}
+
+impl ProviderContinuationRef {
+    pub fn new() -> Self {
+        Self {
+            version: PROVIDER_CONTINUATION_REF_VERSION,
+            id: format!(
+                "provider-continuation-v1:{}",
+                uuid::Uuid::new_v4().hyphenated()
+            ),
+        }
+    }
+
+    pub fn parse(version: u32, id: impl Into<String>) -> Result<Self, String> {
+        let value = Self {
+            version,
+            id: id.into(),
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != PROVIDER_CONTINUATION_REF_VERSION {
+            return Err("provider continuation ref version is unsupported".to_string());
+        }
+        let Some(raw_uuid) = self.id.strip_prefix("provider-continuation-v1:") else {
+            return Err("provider continuation ref prefix is invalid".to_string());
+        };
+        let parsed = uuid::Uuid::parse_str(raw_uuid)
+            .map_err(|_| "provider continuation ref UUID is invalid".to_string())?;
+        if parsed.get_version_num() != 4 || parsed.hyphenated().to_string() != raw_uuid {
+            return Err("provider continuation ref UUID is not canonical v4".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl Default for ProviderContinuationRef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for ProviderContinuationRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProviderContinuationRef([REDACTED])")
+    }
+}
+
 /// Backend-authoritative capabilities frozen for one logical model run.
 ///
 /// This provider-neutral contract is intentionally separate from tool
@@ -27,14 +89,16 @@ pub struct ModelCapabilities {
 pub struct AgentChatInput {
     pub api_url: String,
     pub api_token: String,
-    /// Opaque Host-only identity of the exact provider settings save used to prepare this run.
+    /// Opaque Host-only identity of this model's effective provider wire protocol.
     ///
-    /// This field never crosses Serde boundaries. Core-server freezes it into its explicit,
-    /// secret-free pending-resume DTO instead of exposing it to Renderer or provider payloads.
+    /// The legacy field name is retained for checkpoint compatibility. Existing databases seed
+    /// the per-model identity from the prior broad settings revision; later effective protocol
+    /// changes rotate it independently. This field never crosses normal Serde boundaries or
+    /// provider payloads.
     #[serde(skip)]
     pub provider_configuration_revision: Option<String>,
-    /// Host-only stable identity of this model's effective endpoint/token pair. Unlike the broad
-    /// settings revision, it survives unrelated settings and Provider Profile edits.
+    /// Host-only stable identity of this model's effective endpoint/token pair. It is kept
+    /// separately from the protocol revision for credential restoration and CAS checks.
     #[serde(skip)]
     pub provider_connection_revision: Option<String>,
     /// Host-only stable identity of the effective search mode/credential pair.
@@ -203,11 +267,11 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 6 additionally freezes the provider profile/configuration identity and the ordered,
-/// provider-to-runtime Tool Call mapping for the assistant turn that crossed the approval
-/// boundary. Raw provider continuation/reasoning remains intentionally non-durable. A version 5
-/// checkpoint cannot safely infer this provenance from newer settings and is rejected.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 6;
+/// Version 7 additionally carries ordered, opaque references to Provider continuation state.
+/// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
+/// reasoning are never serialized into the checkpoint. Earlier checkpoints cannot prove that a
+/// retained tool-bearing Provider turn is replayable and are rejected at the approval boundary.
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -248,6 +312,11 @@ pub struct AgentRunCheckpoint {
     /// Ordered identity-only projection of the assistant Tool Call batch. It binds durable
     /// runtime calls to provider calls without persisting raw reasoning or continuation payloads.
     pub assistant_turn_identity: AgentAssistantTurnCheckpointIdentity,
+    /// Ordered, payload-free handles for every Provider continuation retained by this checkpoint.
+    /// The Host must resolve and validate every handle before executing an approved tool or
+    /// sending another Provider request.
+    #[serde(default)]
+    pub provider_continuation_refs: Vec<ProviderContinuationRef>,
     /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
     /// epoch; it never reconstructs authority from rendered model context.
     pub run_world_state: WorldStateSnapshot,
@@ -383,6 +452,12 @@ pub struct AgentQueuedToolCallCheckpoint {
     /// Reference into `AgentRunCheckpoint.assistant_turn_identity.tool_call_identities`.
     pub assistant_turn_id: String,
     pub provider_tool_index: u32,
+    /// Host policy attached to this exact Provider batch. When a DeepSeek response combines
+    /// `skills_activate` with other calls, those other calls must be closed with a fixed guard
+    /// result and re-evaluated after the Skill instructions are available. Persisting the bit
+    /// prevents an approval/restart boundary from turning a deferred call into a side effect.
+    #[serde(default)]
+    pub deferred_by_skill_activation: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -875,6 +950,10 @@ pub struct AgentContextCostBreakdown {
     pub world_state_tokens: u64,
     pub goal_tokens: u64,
     pub todo_tokens: u64,
+    /// Hidden Provider protocol state (for example DeepSeek tool-turn reasoning) included in the
+    /// final wire request. This is a token count only; no continuation content crosses the API.
+    #[serde(default)]
+    pub provider_continuation_tokens: u64,
     /// Uncovered history plus current-run messages, attachments, Skills, guards, and tool
     /// protocol that are not represented by the dedicated categories above.
     pub recent_history_tokens: u64,
@@ -2964,6 +3043,42 @@ mod tests {
         ImageArtifactFormat, ImageGenerationExecutionFailureCode, ImageGenerationExecutionPhase,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn provider_continuation_ref_is_versioned_canonical_and_debug_redacted() {
+        let continuation_ref = ProviderContinuationRef::new();
+        continuation_ref.validate().unwrap();
+        assert!(continuation_ref.id.starts_with("provider-continuation-v1:"));
+        assert_eq!(
+            format!("{continuation_ref:?}"),
+            "ProviderContinuationRef([REDACTED])"
+        );
+        assert!(!format!("{continuation_ref:?}").contains(&continuation_ref.id));
+
+        let encoded = serde_json::to_value(&continuation_ref).unwrap();
+        assert_eq!(encoded["version"], PROVIDER_CONTINUATION_REF_VERSION);
+        assert_eq!(encoded["id"], continuation_ref.id);
+        assert_eq!(
+            serde_json::from_value::<ProviderContinuationRef>(encoded).unwrap(),
+            continuation_ref
+        );
+    }
+
+    #[test]
+    fn provider_continuation_ref_rejects_unknown_or_noncanonical_identity() {
+        let valid = ProviderContinuationRef::new();
+        assert!(ProviderContinuationRef::parse(valid.version + 1, valid.id.clone()).is_err());
+        assert!(ProviderContinuationRef::parse(
+            PROVIDER_CONTINUATION_REF_VERSION,
+            "provider-continuation-v1:00000000-0000-0000-0000-000000000000"
+        )
+        .is_err());
+        assert!(ProviderContinuationRef::parse(
+            PROVIDER_CONTINUATION_REF_VERSION,
+            valid.id.to_ascii_uppercase()
+        )
+        .is_err());
+    }
 
     fn image_generation_audit() -> AgentImageGenerationAudit {
         AgentImageGenerationAudit {

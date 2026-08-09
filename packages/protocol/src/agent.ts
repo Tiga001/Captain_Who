@@ -634,6 +634,8 @@ export interface AgentContextCostBreakdown {
   worldStateTokens: number
   goalTokens: number
   todoTokens: number
+  /** Hidden provider protocol-state cost; never includes continuation content. */
+  providerContinuationTokens: number
   /** Uncovered history and remaining current-run context. */
   recentHistoryTokens: number
   totalInputTokens: number
@@ -868,6 +870,8 @@ export interface ModelRequestEstimate {
   worldStateTokens: number
   goalTokens: number
   todoTokens: number
+  /** Hidden provider-native replay state included in the final wire request. */
+  providerContinuationTokens: number
   recentHistoryTokens: number
   totalInputTokens: number
   contextWindowTokens?: number

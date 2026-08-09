@@ -46,6 +46,11 @@ pub(crate) fn prepare_conversation_turn(
         .get(&model.id)
         .cloned()
         .ok_or_else(|| format!("模型 {model_id} 的 Provider 连接身份缺失。"))?;
+    let provider_protocol_revision = settings_snapshot
+        .provider_protocol_revisions
+        .get(&model.id)
+        .cloned()
+        .ok_or_else(|| format!("模型 {model_id} 的 Provider Protocol 身份缺失。"))?;
     let context_window_tokens = model.effective_context_window_tokens();
     // Resolve the complete pair once and carry it through the run. Model-level credentials
     // take priority; otherwise both values come from global settings. This prevents a URL
@@ -59,7 +64,7 @@ pub(crate) fn prepare_conversation_turn(
         provider_dialect,
         &provider_profile_config,
         model.id.clone(),
-        Some(settings_snapshot.configuration_revision.clone()),
+        Some(provider_protocol_revision.clone()),
     )
     .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
     if !model.supports_image
@@ -213,10 +218,11 @@ pub(crate) fn prepare_conversation_turn(
     });
     let goal = storage.load_visible_conversation_goal(&conversation_id)?;
 
+    let usage_provider_profile_id = provider_profile_config.profile.id;
     let agent_input = AgentChatInput {
         api_url: connection.api_url,
         api_token: connection.api_token,
-        provider_configuration_revision: Some(settings_snapshot.configuration_revision),
+        provider_configuration_revision: Some(provider_protocol_revision),
         provider_connection_revision: Some(provider_connection_revision),
         search_connection_revision: Some(settings_snapshot.search_connection_revision),
         provider_profile_config: Some(provider_profile_config),
@@ -265,6 +271,7 @@ pub(crate) fn prepare_conversation_turn(
             project_id: resolved_project_id.clone(),
             model_id: model.id.clone(),
             model_name: model.display_name.clone(),
+            provider_profile_id: usage_provider_profile_id,
             input_price: Some(model.input_price.clone()),
             output_price: Some(model.output_price.clone()),
             started_at: timestamp,
