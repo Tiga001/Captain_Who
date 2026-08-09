@@ -1,10 +1,19 @@
 use super::*;
+use futures_util::StreamExt;
+use sha2::Digest;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(super) const LLM_MAX_ATTEMPTS: usize = 3;
+const MAX_PROVIDER_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
+
+pub(super) const LLM_MAX_ATTEMPTS: usize = 6;
 pub(super) const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
 pub(super) const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
-pub(super) const RETRYABLE_UPSTREAM_CONTENT_TYPE_ERROR: &str =
-    "the provided content type is invalid or not supported for this model";
+pub(super) const LLM_RATE_LIMIT_RETRY_BASE_DELAY_MS: u64 = 2_000;
+pub(super) const LLM_RATE_LIMIT_RETRY_MAX_DELAY_MS: u64 = 30_000;
+pub(super) const LLM_OVERLOAD_RETRY_BASE_DELAY_MS: u64 = 1_000;
+pub(super) const LLM_OVERLOAD_RETRY_MAX_DELAY_MS: u64 = 10_000;
+pub(super) const LLM_MAX_TOTAL_RETRY_SLEEP_MS: u64 = 60_000;
+pub(super) const LLM_LOGICAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 pub(crate) const EMPTY_MODEL_ACTION_ERROR_CODE: &str = "agent.empty_model_action";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +56,14 @@ pub(super) async fn complete_chat_with_validation(
 
     let mut last_error = None;
     let mut total_usage = None;
+    let mut total_retry_sleep = Duration::ZERO;
+    let deadline = tokio::time::Instant::now() + LLM_LOGICAL_REQUEST_TIMEOUT;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
-        match complete_chat_once(&request, cancellation_token.clone(), validation).await {
+        let result = tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => Err(logical_request_timeout_error()),
+            result = complete_chat_once(&request, cancellation_token.clone(), validation) => result,
+        };
+        match result {
             Ok(mut response) => {
                 merge_total_usage(&mut total_usage, response.usage.take());
                 response.usage = total_usage;
@@ -59,11 +74,18 @@ pub(super) async fn complete_chat_with_validation(
             }
             Err(error) => {
                 let error = merge_error_usage(error, &mut total_usage);
-                if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(&error) {
+                let Some(plan) = retry_plan(
+                    &error,
+                    attempt,
+                    total_retry_sleep,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                ) else {
                     return Err(retry_exhausted_error(error, attempt));
-                }
+                };
+                register_retry_cooldown(&request, &plan);
                 last_error = Some(error);
-                wait_before_retry(attempt, cancellation_token.clone())
+                total_retry_sleep += plan.delay;
+                wait_before_retry(plan.delay, cancellation_token.clone())
                     .await
                     .map_err(|error| error.with_usage(total_usage.clone()))?;
             }
@@ -140,18 +162,32 @@ where
 
     let mut last_error = None;
     let mut total_usage = None;
+    let mut total_retry_sleep = Duration::ZERO;
+    let deadline = tokio::time::Instant::now() + LLM_LOGICAL_REQUEST_TIMEOUT;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
         on_event(LlmStreamEvent::AttemptStarted {
             attempt,
             max_attempts: LLM_MAX_ATTEMPTS,
         });
-        let result = complete_chat_streaming_once(
+        let mut emitted_model_output = false;
+        let request_attempt = complete_chat_streaming_once(
             &request,
             cancellation_token.clone(),
             validation,
-            &mut on_event,
-        )
-        .await;
+            |event| {
+                if matches!(
+                    event,
+                    LlmStreamEvent::Delta(_) | LlmStreamEvent::ToolInputProgress { .. }
+                ) {
+                    emitted_model_output = true;
+                }
+                on_event(event);
+            },
+        );
+        let result = tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => Err(logical_request_timeout_error()),
+            result = request_attempt => result,
+        };
 
         match result {
             Ok(mut response) => {
@@ -165,20 +201,37 @@ where
             }
             Err(error) => {
                 let error = merge_error_usage(error, &mut total_usage);
-                let reason = error.to_string();
+                let reason = safe_retry_reason(&error);
                 on_event(LlmStreamEvent::AttemptReset {
                     reason: reason.clone(),
                 });
-                if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(&error) {
+                // Once any user-visible model output or Tool input has arrived, replaying the
+                // request can duplicate semantic work or a provider Tool Call. The provisional UI
+                // reset is not a sufficient safety boundary for transport-level replay.
+                if emitted_model_output {
                     return Err(retry_exhausted_error(error, attempt));
                 }
+                let Some(plan) = retry_plan(
+                    &error,
+                    attempt,
+                    total_retry_sleep,
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
+                ) else {
+                    return Err(retry_exhausted_error(error, attempt));
+                };
+                register_retry_cooldown(&request, &plan);
                 last_error = Some(error);
                 on_event(LlmStreamEvent::Retrying {
                     attempt: attempt + 1,
-                    max_attempts: LLM_MAX_ATTEMPTS,
+                    max_attempts: plan.max_attempts,
+                    category: plan.category.as_str().to_string(),
+                    provider_code: plan.provider_code.clone(),
+                    delay_ms: duration_ms(plan.delay),
+                    retry_at: plan.retry_at,
                     reason,
                 });
-                wait_before_retry(attempt, cancellation_token.clone())
+                total_retry_sleep += plan.delay;
+                wait_before_retry(plan.delay, cancellation_token.clone())
                     .await
                     .map_err(|error| error.with_usage(total_usage.clone()))?;
             }
@@ -239,14 +292,20 @@ pub(super) fn parse_non_stream_response(
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
     let value: Value = serde_json::from_str(body).map_err(|error| {
-        with_request_usage(AgentError::new(format!(
-            "模型响应不是有效 JSON：{error}；原始响应：{}",
-            truncate_for_error(body)
-        )))
+        with_request_usage(
+            LlmProviderFailure::from_local_transport_failure(&format!(
+                "model response was not valid JSON: {error}; body_hash=sha256:{:x}",
+                sha2::Sha256::digest(body.as_bytes())
+            ))
+            .to_agent_error(),
+        )
     })?;
     let usage = usage_for_request(extract_usage(&value));
     if let Some(error) = extract_api_error(&value) {
-        return Err(AgentError::new(format!("模型接口返回错误：{error}")).with_usage(Some(usage)));
+        let _ = error;
+        return Err(LlmProviderFailure::from_embedded_error(api_style, body)
+            .to_agent_error()
+            .with_usage(Some(usage)));
     }
 
     let tool_calls = extract_tool_calls(&value, api_style)
@@ -293,28 +352,66 @@ pub(super) async fn send_llm_request(
         .build()
         .map_err(|error| AgentError::new(format!("创建 HTTP 客户端失败：{error}")))?;
 
+    let cooldown_permit = acquire_provider_cooldown(
+        request.api_url.trim(),
+        request.api_token.trim(),
+        request.api_style,
+        cancellation_token.clone(),
+    )
+    .await?;
     let send = client
         .post(request.api_url.trim())
         .headers(headers)
         .json(&payload)
         .send();
     let response = tokio::select! {
-        _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
-        response = send => response
-            .map_err(|error| AgentError::new(format!("请求模型接口失败：{error}")))?,
+        _ = cancellation_token.cancelled() => {
+            complete_provider_cooldown(cooldown_permit);
+            return Err(AgentError::cancelled());
+        },
+        response = send => match response {
+            Ok(response) => response,
+            Err(error) => {
+                complete_provider_cooldown(cooldown_permit);
+                return Err(LlmProviderFailure::from_network_error(error).to_agent_error());
+            }
+        },
     };
 
     let status = response.status();
     if !status.is_success() {
-        let body =
-            response_text(response, cancellation_token.clone(), "读取模型错误响应失败").await?;
-        return Err(AgentError::new(format!(
-            "模型接口返回 {}：{}",
-            status.as_u16(),
-            truncate_for_error(&body)
-        )));
+        let response_headers = response.headers().clone();
+        let body = match error_response_text_bounded(response, cancellation_token.clone()).await {
+            Ok(body) => body,
+            Err(error) if error.is_cancelled() => {
+                complete_provider_cooldown(cooldown_permit);
+                return Err(error);
+            }
+            // Status and headers are already authoritative. A broken error body must not erase a
+            // 429 or its Retry-After and turn it into an aggressively retried network failure.
+            Err(_) => String::new(),
+        };
+        let failure = LlmProviderFailure::from_http_response(
+            request.api_style,
+            status,
+            &response_headers,
+            &body,
+            request.api_token.trim(),
+        );
+        if failure.category == LlmProviderFailureCategory::RateLimited {
+            register_default_rate_limit_cooldown(
+                request.api_url.trim(),
+                request.api_token.trim(),
+                request.api_style,
+                failure.retry_after_ms,
+            );
+        } else {
+            complete_provider_cooldown(cooldown_permit);
+        }
+        return Err(failure.to_agent_error());
     }
 
+    complete_provider_cooldown(cooldown_permit);
     Ok(response)
 }
 
@@ -327,8 +424,45 @@ pub(super) async fn response_text(
     let read = response.text();
     tokio::select! {
         _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
-        body = read => body.map_err(|error| AgentError::new(format!("{error_prefix}：{error}"))),
+        body = read => body.map_err(|error| {
+            let failure = LlmProviderFailure::from_network_error(error);
+            let mut agent_error = failure.to_agent_error();
+            if let Some(details) = agent_error.details().cloned() {
+                agent_error = AgentError::structured(
+                    PROVIDER_FAILURE_ERROR_CODE,
+                    format!("{error_prefix}：模型服务网络响应失败。"),
+                    details,
+                );
+            }
+            agent_error
+        }),
     }
+}
+
+async fn error_response_text_bounded(
+    response: reqwest::Response,
+    cancellation_token: AgentCancellationToken,
+) -> AgentResult<String> {
+    cancellation_token.check()?;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::with_capacity(MAX_PROVIDER_ERROR_RESPONSE_BYTES.min(4 * 1024));
+    while body.len() < MAX_PROVIDER_ERROR_RESPONSE_BYTES {
+        let chunk = tokio::select! {
+            _ = cancellation_token.cancelled() => return Err(AgentError::cancelled()),
+            chunk = stream.next() => chunk,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk
+            .map_err(|error| LlmProviderFailure::from_network_error(error).to_agent_error())?;
+        let remaining = MAX_PROVIDER_ERROR_RESPONSE_BYTES - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 pub(super) fn validate_request(request: &LlmChatRequest) -> AgentResult<()> {
@@ -366,16 +500,15 @@ pub(super) fn validate_llm_response(
         let repairable = matches!(finish_reason, Some("stop" | "end_turn"));
         return Err(AgentError::structured(
             EMPTY_MODEL_ACTION_ERROR_CODE,
-            format!(
-                "模型响应里没有可显示文本或工具调用：{}",
-                truncate_for_error(raw_response)
-            ),
+            "模型响应里没有可显示文本或工具调用。",
             json!({
                 "type": "model_response_validation",
                 "code": "emptyModelAction",
                 "finishReason": finish_reason,
                 "contentLength": content.len(),
                 "toolCallCount": tool_calls.len(),
+                "responseBytes": raw_response.len(),
+                "responseHash": format!("sha256:{:x}", sha2::Sha256::digest(raw_response.as_bytes())),
                 "repairable": repairable,
                 "recovery": if repairable {
                     "repairRetryOnce"
@@ -404,23 +537,159 @@ pub(super) fn retry_exhausted_error(error: AgentError, attempts: usize) -> Agent
     }
 
     let usage = error.usage().cloned();
-    AgentError::new(format!("模型请求失败，已重试 {} 次：{error}", attempts - 1)).with_usage(usage)
+    let message = format!(
+        "模型请求失败，已重试 {} 次：{}",
+        attempts - 1,
+        safe_retry_reason(&error)
+    );
+    if let (Some(code), Some(details)) = (error.code(), error.details()) {
+        AgentError::structured(code, message, details.clone()).with_usage(usage)
+    } else {
+        AgentError::new(message).with_usage(usage)
+    }
 }
 
 pub(super) async fn wait_before_retry(
-    attempt: usize,
+    delay: Duration,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<()> {
-    let delay = retry_delay(attempt);
     tokio::select! {
         _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
         _ = tokio::time::sleep(delay) => Ok(()),
     }
 }
 
-pub(super) fn retry_delay(attempt: usize) -> Duration {
+#[derive(Debug, Clone)]
+pub(super) struct LlmRetryPlan {
+    pub category: LlmProviderFailureCategory,
+    pub provider_code: Option<String>,
+    pub max_attempts: usize,
+    pub delay: Duration,
+    pub retry_at: u64,
+}
+
+pub(super) fn retry_plan(
+    error: &AgentError,
+    attempt: usize,
+    total_retry_sleep: Duration,
+    wall_clock_remaining: Duration,
+) -> Option<LlmRetryPlan> {
+    if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(error) {
+        return None;
+    }
+    let (category, retry_after_ms, provider_code) = provider_failure_metadata(error)
+        .map(|(category, _, retry_after_ms, provider_code)| {
+            (category, retry_after_ms, provider_code)
+        })
+        .unwrap_or((LlmProviderFailureCategory::Unknown, None, None));
+    let category_attempt_limit = match category {
+        LlmProviderFailureCategory::RateLimited => LLM_MAX_ATTEMPTS,
+        LlmProviderFailureCategory::Overloaded
+        | LlmProviderFailureCategory::Network
+        | LlmProviderFailureCategory::Unknown => 3,
+        _ => 1,
+    };
+    if attempt >= category_attempt_limit {
+        return None;
+    }
+    let delay = retry_after_ms.map_or_else(
+        || positive_retry_jitter(retry_delay_for_category(category, attempt), attempt),
+        Duration::from_millis,
+    );
+    let sleep_budget = Duration::from_millis(LLM_MAX_TOTAL_RETRY_SLEEP_MS);
+    if delay > sleep_budget.saturating_sub(total_retry_sleep) || delay >= wall_clock_remaining {
+        return None;
+    }
+    Some(LlmRetryPlan {
+        category,
+        provider_code,
+        max_attempts: category_attempt_limit,
+        delay,
+        retry_at: unix_epoch_ms().saturating_add(duration_ms(delay)),
+    })
+}
+
+fn register_retry_cooldown(request: &LlmChatRequest, plan: &LlmRetryPlan) {
+    if plan.category == LlmProviderFailureCategory::RateLimited {
+        register_provider_cooldown(
+            request.api_url.trim(),
+            request.api_token.trim(),
+            request.api_style,
+            plan.delay,
+        );
+    }
+}
+
+pub(super) fn retry_delay_for_category(
+    category: LlmProviderFailureCategory,
+    attempt: usize,
+) -> Duration {
+    let (base, cap) = match category {
+        LlmProviderFailureCategory::RateLimited => (
+            LLM_RATE_LIMIT_RETRY_BASE_DELAY_MS,
+            LLM_RATE_LIMIT_RETRY_MAX_DELAY_MS,
+        ),
+        LlmProviderFailureCategory::Overloaded => (
+            LLM_OVERLOAD_RETRY_BASE_DELAY_MS,
+            LLM_OVERLOAD_RETRY_MAX_DELAY_MS,
+        ),
+        _ => (LLM_RETRY_BASE_DELAY_MS, LLM_RETRY_MAX_DELAY_MS),
+    };
     let multiplier = 1_u64 << attempt.saturating_sub(1).min(8);
-    Duration::from_millis((LLM_RETRY_BASE_DELAY_MS * multiplier).min(LLM_RETRY_MAX_DELAY_MS))
+    Duration::from_millis(base.saturating_mul(multiplier).min(cap))
+}
+
+fn positive_retry_jitter(delay: Duration, attempt: usize) -> Duration {
+    let delay_ms = duration_ms(delay);
+    let jitter_ceiling = delay_ms / 4;
+    if jitter_ceiling == 0 {
+        return delay;
+    }
+    let entropy = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
+        .unwrap_or(0)
+        ^ (attempt as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    Duration::from_millis(delay_ms.saturating_add(entropy % (jitter_ceiling + 1)))
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn safe_retry_reason(error: &AgentError) -> String {
+    public_provider_error_message(error).unwrap_or_else(|| {
+        if error.is_cancelled() {
+            "模型请求已取消。".to_string()
+        } else {
+            "模型请求暂时失败，正在按退避策略重试。".to_string()
+        }
+    })
+}
+
+fn logical_request_timeout_error() -> AgentError {
+    AgentError::structured(
+        PROVIDER_FAILURE_ERROR_CODE,
+        "模型请求超过总时间预算，已停止继续等待。",
+        json!({
+            "type": "llm_provider_failure",
+            "category": LlmProviderFailureCategory::Network,
+            "retryable": true,
+            "retryAfterMs": null,
+            "httpStatus": null,
+            "providerCode": null,
+            "requestId": null,
+            "bodyBytes": 0,
+            "bodyHash": null,
+            "bodyArchived": false,
+        }),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn retry_delay(attempt: usize) -> Duration {
+    retry_delay_for_category(LlmProviderFailureCategory::Unknown, attempt)
 }
 
 pub(super) fn is_retryable_llm_error(error: &AgentError) -> bool {
@@ -431,72 +700,7 @@ pub(super) fn is_retryable_llm_error(error: &AgentError) -> bool {
         return false;
     }
 
-    let message = error.to_string().to_ascii_lowercase();
-    if message.trim().is_empty() {
-        return false;
-    }
-
-    // Some OpenAI-compatible gateways intermittently fail while routing an otherwise valid
-    // JSON request to Bedrock. Keep this exception exact so other client-side 400s still fail fast.
-    if message.contains("400") && message.contains(RETRYABLE_UPSTREAM_CONTENT_TYPE_ERROR) {
-        return true;
-    }
-
-    if message.contains("请先在设置")
-        || message.contains("请选择一个可用模型")
-        || message.contains("没有可发送的对话内容")
-        || message.contains("不支持的消息角色")
-        || message.contains("api token")
-        || message.contains("401")
-        || message.contains("403")
-        || message.contains("404")
-        || message.contains("400")
-    {
-        return false;
-    }
-
-    if retryable_http_status_in_message(&message) {
-        return true;
-    }
-
-    [
-        "请求模型接口失败",
-        "读取模型响应失败",
-        "读取模型错误响应失败",
-        "读取模型流失败",
-        "模型响应不是有效 json",
-        "模型流事件不是有效 json",
-        "模型流不是有效 utf-8",
-        "模型流尾部不是有效 utf-8",
-        "error decoding response body",
-        "connection",
-        "connect",
-        "timeout",
-        "timed out",
-        "deadline",
-        "temporarily",
-        "temporary",
-        "overloaded",
-        "unavailable",
-        "try again",
-        "rate limit",
-        "rate_limit",
-        "too many requests",
-        "connection reset",
-        "connection closed",
-        "broken pipe",
-        "unexpected eof",
-        "incomplete message",
-        "body write aborted",
-    ]
-    .iter()
-    .any(|pattern| message.contains(pattern))
-}
-
-pub(super) fn retryable_http_status_in_message(message: &str) -> bool {
-    [408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524]
-        .iter()
-        .any(|status| message.contains(&status.to_string()))
+    provider_failure_metadata(error).is_some_and(|(_, retryable, _, _)| retryable)
 }
 
 pub(super) fn streaming_response_diagnostic(response: &LlmChatResponse) -> String {

@@ -603,6 +603,7 @@ function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView 
     delete durableNormalized.commandSessions
   }
   delete durableNormalized.commandOutputPreviews
+  delete durableNormalized.llmRetry
   const rawMcpInvocations = Array.isArray(storedRun.mcpInvocations) ? storedRun.mcpInvocations : []
   const referencedMcpCallIds = new Set<string>(
     rawMcpInvocations.flatMap((invocation) =>
@@ -935,6 +936,7 @@ function stringifyAgentRun(run: ChatAgentRunView | undefined): string | null {
   const persistedRun = { ...run }
   delete persistedRun.fileWritePreviews
   delete persistedRun.commandOutputPreviews
+  delete persistedRun.llmRetry
   const runCommandCallIds = new Set(
     run.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
   )

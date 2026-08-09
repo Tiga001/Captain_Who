@@ -6,6 +6,7 @@ import type {
   AgentFileDraftSnapshot,
   AgentFileWritePreview,
   AgentInputAttachment,
+  AgentLlmRetryCategory,
   AgentMcpDispatchCertainty,
   AgentMcpServerScope,
   AgentMcpToolInvocationOutcome,
@@ -213,6 +214,15 @@ export interface ChatAgentRunView {
   /** Safe lifecycle-only MCP views. Never store MCP arguments or result bodies here. */
   mcpInvocations?: ChatMcpToolInvocationView[]
   messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
+  /** Ephemeral, model-safe retry status. Cleared at the next request or terminal boundary. */
+  llmRetry?: {
+    category: AgentLlmRetryCategory
+    providerCode?: string
+    delayMs: number
+    retryAt: number
+    attempt: number
+    maxAttempts: number
+  }
   timeline: ChatAgentTimelineItem[]
   state?: AgentStateSnapshot
   error?: string

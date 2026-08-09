@@ -889,6 +889,10 @@ impl AgentRuntime {
                                     LlmStreamEvent::Retrying {
                                         attempt,
                                         max_attempts,
+                                        category,
+                                        provider_code,
+                                        delay_ms,
+                                        retry_at,
                                         reason,
                                     } => {
                                         event_stream.emit(AgentEvent::LlmRetry {
@@ -896,6 +900,10 @@ impl AgentRuntime {
                                             stream_id: stream_id.clone(),
                                             attempt,
                                             max_attempts,
+                                            category,
+                                            provider_code,
+                                            delay_ms,
+                                            retry_at,
                                             reason,
                                         });
                                     }

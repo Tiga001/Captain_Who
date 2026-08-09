@@ -856,6 +856,11 @@ export const enUSTranslations = {
   'chat.usageCacheCreationInputTokens': 'Cache write',
 
   'agent.thinking': 'Thinking',
+  'agent.llmRetry.rateLimited':
+    'Service rate limited; retrying automatically in {seconds}s ({attempt}/{maxAttempts})',
+  'agent.llmRetry.temporarilyUnavailable':
+    'Model service temporarily unavailable; retrying automatically in {seconds}s ({attempt}/{maxAttempts})',
+  'agent.llmRetry.retrying': 'Retrying the model request automatically ({attempt}/{maxAttempts})',
   'agent.command.waitingForCompletion': 'Waiting for command to finish',
   'agent.contextCompaction.running': 'Automatically compacting context',
   'agent.contextCompaction.completed': 'Context automatically compacted',

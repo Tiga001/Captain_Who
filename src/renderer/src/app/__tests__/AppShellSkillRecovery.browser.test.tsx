@@ -230,6 +230,9 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       <output data-testid="command-sessions">
         {JSON.stringify(conversation.messages.at(-1)?.agentRun?.commandSessions ?? {})}
       </output>
+      <output data-testid="llm-retry">
+        {JSON.stringify(conversation.messages.at(-1)?.agentRun?.llmRetry ?? {})}
+      </output>
       <output data-testid="command-output">
         {conversation.messages
           .at(-1)
@@ -1539,6 +1542,33 @@ describe('edited turn Skill recovery', () => {
       await expect.element(screen.getByTestId('draft-skills')).toHaveTextContent(skillSelection.id)
     }
   )
+})
+
+describe('transient LLM retry lifecycle', () => {
+  it('updates live state without persisting retryAt into the assistant record', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    const savesBeforeRetry = testState.saveChatMessageState.mock.calls.length
+
+    emitAgentEvent({
+      type: 'llm_retry',
+      runId: 'run-1',
+      streamId: 'stream-1',
+      category: 'rate_limited',
+      providerCode: 'rate_limit_exceeded',
+      delayMs: 5_000,
+      retryAt: Date.now() + 5_000,
+      attempt: 2,
+      maxAttempts: 6
+    })
+
+    await expect.element(screen.getByTestId('llm-retry')).toHaveTextContent('"rate_limited"')
+    expect(testState.saveChatMessageState).toHaveBeenCalledTimes(savesBeforeRetry)
+  })
 })
 
 describe('authoritative run cancellation and conversation forking', () => {

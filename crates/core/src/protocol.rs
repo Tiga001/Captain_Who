@@ -2585,6 +2585,12 @@ pub enum AgentEvent {
         stream_id: String,
         attempt: usize,
         max_attempts: usize,
+        category: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider_code: Option<String>,
+        delay_ms: u64,
+        retry_at: u64,
+        /// Legacy compatibility only. Renderer Host parsing drops this field.
         reason: String,
     },
     ToolInputProgress {
@@ -3367,5 +3373,29 @@ mod tests {
         assert_eq!(finished["type"], "context_compaction_finished");
         assert_eq!(finished["operationId"], started["operationId"]);
         assert_eq!(finished["outcome"], "applied");
+    }
+
+    #[test]
+    fn llm_retry_event_serializes_structured_safe_retry_metadata() {
+        let retry = serde_json::to_value(AgentEvent::LlmRetry {
+            run_id: "run-1".to_string(),
+            stream_id: "stream-1".to_string(),
+            attempt: 2,
+            max_attempts: 6,
+            category: "rate_limited".to_string(),
+            provider_code: Some("rate_limit_exceeded".to_string()),
+            delay_ms: 5_000,
+            retry_at: 1_800_000_005_000,
+            reason: "模型服务请求过于频繁。".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(retry["type"], "llm_retry");
+        assert_eq!(retry["category"], "rate_limited");
+        assert_eq!(retry["providerCode"], "rate_limit_exceeded");
+        assert_eq!(retry["delayMs"], 5_000);
+        assert_eq!(retry["retryAt"], 1_800_000_005_000_u64);
+        assert_eq!(retry["attempt"], 2);
+        assert_eq!(retry["maxAttempts"], 6);
     }
 }

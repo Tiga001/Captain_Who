@@ -1068,6 +1068,7 @@ export function applyAgentEventToChatMessage(
         ...currentRun,
         runId: agentEvent.runId,
         status: 'running',
+        llmRetry: undefined,
         startedAt: currentRun.startedAt ?? Date.now(),
         toolDefinitions: agentEvent.toolDefinitions
       }
@@ -1091,6 +1092,7 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'state') {
+    const terminalState = isCompletedAgentRunStatus(agentEvent.state.status)
     const nextRun = settleAgentRunToolActivities(
       {
         ...currentRun,
@@ -1099,7 +1101,8 @@ export function applyAgentEventToChatMessage(
           ? (currentRun.completedAt ?? Date.now())
           : currentRun.completedAt,
         state: agentEvent.state,
-        error: agentEvent.state.lastError ?? currentRun.error
+        error: agentEvent.state.lastError ?? currentRun.error,
+        llmRetry: terminalState ? undefined : currentRun.llmRetry
       },
       agentEvent.state.status
     )
@@ -1112,12 +1115,15 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'message_stream_started') {
-    if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId]) return message
+    if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId] && !currentRun.llmRetry) {
+      return message
+    }
     const currentContent = message.content === THINKING_PLACEHOLDER ? '' : message.content
     return {
       ...message,
       agentRun: {
         ...currentRun,
+        llmRetry: undefined,
         messageStreamCheckpoints: {
           ...currentRun.messageStreamCheckpoints,
           [agentEvent.streamId]: {
@@ -1155,7 +1161,11 @@ export function applyAgentEventToChatMessage(
     delete nextCheckpoints[agentEvent.streamId]
     return {
       ...message,
-      agentRun: { ...currentRun, messageStreamCheckpoints: nextCheckpoints }
+      agentRun: {
+        ...currentRun,
+        llmRetry: undefined,
+        messageStreamCheckpoints: nextCheckpoints
+      }
     }
   }
 
@@ -1220,7 +1230,24 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'llm_retry') {
-    return message
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        llmRetry: {
+          category: agentEvent.category,
+          ...(agentEvent.providerCode === undefined
+            ? {}
+            : { providerCode: agentEvent.providerCode }),
+          delayMs: agentEvent.delayMs,
+          retryAt: agentEvent.retryAt,
+          attempt: agentEvent.attempt,
+          maxAttempts: agentEvent.maxAttempts
+        }
+      }
+    }
   }
 
   if (agentEvent.type === 'message_delta') {
@@ -1233,6 +1260,7 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'running',
+        llmRetry: undefined,
         ...getRunResponseTimestamps(currentRun, receivedAt),
         timeline: appendMessageDeltaToTimeline(currentRun, agentEvent.delta, agentEvent.streamId)
       }
@@ -1249,6 +1277,7 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'running',
+        llmRetry: undefined,
         ...getRunResponseTimestamps(currentRun, receivedAt),
         timeline: appendMessageToTimeline(currentRun, agentEvent.content)
       }
@@ -1642,6 +1671,7 @@ export function applyAgentEventToChatMessage(
           ? currentRun.completedAt
           : (currentRun.completedAt ?? Date.now()),
         error: agentEvent.message,
+        llmRetry: undefined,
         timeline: appendTimelineItem(currentRun, {
           id: `error-${currentRun.timeline.length + 1}`,
           type: 'error',
@@ -1681,6 +1711,7 @@ export function applyAgentEventToChatMessage(
     {
       ...currentRun,
       status: nextStatus,
+      llmRetry: undefined,
       firstResponseAt: finalResponseAt,
       lastResponseAt:
         agentEvent.content !== undefined

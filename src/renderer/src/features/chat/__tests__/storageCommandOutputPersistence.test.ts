@@ -112,6 +112,14 @@ it('keeps live command output transient while persisting the final tool result',
           chunks: [{ sequence: 1, stream: 'stdout', output: 'done' }]
         }
       },
+      llmRetry: {
+        category: 'rate_limited',
+        providerCode: 'rate_limit_exceeded',
+        delayMs: 5_000,
+        retryAt: 10_000,
+        attempt: 2,
+        maxAttempts: 3
+      },
       commandSessions: {
         'command-call': {
           callId: 'command-call',
@@ -133,6 +141,7 @@ it('keeps live command output transient while persisting the final tool result',
   const storedRun = JSON.parse(storedMessage.agentRunJson) as Record<string, unknown>
   expect(storedRun.commandOutputPreviews).toBeUndefined()
   expect(storedRun.commandSessions).toBeUndefined()
+  expect(storedRun.llmRetry).toBeUndefined()
   expect(storedRun.toolResults).toEqual(message.agentRun?.toolResults)
 })
 

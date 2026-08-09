@@ -1,4 +1,6 @@
 mod payload;
+mod provider_cooldown;
+mod provider_error;
 mod response;
 mod stream;
 mod tool_call_id;
@@ -17,9 +19,16 @@ use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentToolDefinitio
 use crate::tools::schema::validate_portable_tool_input_schema;
 use crate::usage::{extract_usage, merge_total_usage, usage_for_request};
 use payload::{build_headers, build_payload, is_sse_response};
+use provider_cooldown::{
+    acquire_provider_cooldown, complete_provider_cooldown, register_default_rate_limit_cooldown,
+    register_provider_cooldown, unix_epoch_ms,
+};
+use provider_error::{
+    provider_failure_metadata, public_provider_error_message, LlmProviderFailure,
+    LlmProviderFailureCategory, PROVIDER_FAILURE_ERROR_CODE,
+};
 use response::{
     extract_api_error, extract_finish_reason, extract_response_text, extract_tool_calls,
-    truncate_for_error,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -213,6 +222,10 @@ pub(crate) enum LlmStreamEvent {
     Retrying {
         attempt: usize,
         max_attempts: usize,
+        category: String,
+        provider_code: Option<String>,
+        delay_ms: u64,
+        retry_at: u64,
         reason: String,
     },
     Committed,

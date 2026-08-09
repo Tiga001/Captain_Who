@@ -915,7 +915,11 @@ export function useAgentRunLifecycle({
           return applyAgentEventToChatMessage(messageForEvent, agentEvent)
         },
         {
-          persist: !isCommandSessionEvent || isTerminalCommandSessionEvent,
+          // Retry countdowns are Host-authoritative transient UI state. Persisting retryAt would
+          // resurrect a stale countdown after reload; durable Run state remains unchanged.
+          persist:
+            agentEvent.type !== 'llm_retry' &&
+            (!isCommandSessionEvent || isTerminalCommandSessionEvent),
           touchConversation:
             !isCommandSessionEvent && shouldTouchConversationForAgentEvent(agentEvent)
         }

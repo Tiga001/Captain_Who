@@ -2,6 +2,7 @@ import type {
   AgentActionExecutionOutput,
   AgentChatOutput,
   AgentEvent,
+  AgentLlmRetryCategory,
   AgentMcpArgumentSummary,
   AgentMcpInvocationDiagnostics,
   AgentMcpServerScope,
@@ -31,6 +32,7 @@ import {
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const SAFE_CODE_PATTERN = /^[a-zA-Z0-9_.-]{1,128}$/
+const CANONICAL_PROVIDER_CODE_PATTERN = /^[a-z0-9][a-z0-9_.-]{0,127}$/
 const MODEL_TOOL_CALL_ID_PATTERN = /^tc1_[a-zA-Z0-9_-]{43}$/
 const MCP_APPROVAL_TTL_MS = 15 * 60 * 1000
 const MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES = 1024 * 1024
@@ -40,6 +42,18 @@ const MAX_MCP_DIAGNOSTIC_ARGUMENT_VALUES = 4096
 const MAX_MCP_DIAGNOSTIC_ARGUMENT_DEPTH = 32
 const MAX_MCP_DIAGNOSTIC_RESULT_BLOCKS = 128
 const MAX_MCP_DIAGNOSTIC_RESULT_BYTES = 4 * 1024 * 1024
+const MAX_LLM_RETRY_DELAY_MS = 60_000
+const MAX_LLM_RETRY_ATTEMPTS = 6
+const LLM_RETRY_CATEGORIES = [
+  'rate_limited',
+  'quota_exhausted',
+  'overloaded',
+  'authentication',
+  'invalid_request',
+  'context_too_large',
+  'network',
+  'unknown'
+] as const satisfies readonly AgentLlmRetryCategory[]
 
 /**
  * Parses Agent event families that have strict Host-boundary contracts. Legacy event families
@@ -47,6 +61,12 @@ const MAX_MCP_DIAGNOSTIC_RESULT_BYTES = 4 * 1024 * 1024
  */
 export function parseAgentEventForHost(value: unknown): AgentEvent {
   const record = expectRecord(value, 'Agent event')
+  if (record.type === 'llm_retry') {
+    return parseAgentLlmRetryEvent(record)
+  }
+  if (record.type === 'message_stream_reset') {
+    return parseAgentMessageStreamResetEvent(record)
+  }
   if (isAgentCommandSessionEventType(record.type)) {
     return parseAgentCommandSessionEvent(record)
   }
@@ -150,6 +170,93 @@ export function parseAgentEventForHost(value: unknown): AgentEvent {
   }
 
   return value as AgentEvent
+}
+
+function parseAgentLlmRetryEvent(
+  record: Record<string, unknown>
+): Extract<AgentEvent, { type: 'llm_retry' }> {
+  const context = 'LLM retry event'
+  expectOnlyKeys(
+    record,
+    [
+      'type',
+      'runId',
+      'streamId',
+      'category',
+      'providerCode',
+      'delayMs',
+      'retryAt',
+      'attempt',
+      'maxAttempts',
+      'reason'
+    ] as const,
+    context
+  )
+  if (record.reason !== undefined) {
+    // Validate only for resource bounds. Provider-authored text is deliberately not returned.
+    expectBoundedString(record.reason, `${context}.reason`, 16 * 1024)
+  }
+  const rawCategory =
+    record.category === undefined
+      ? undefined
+      : expectBoundedNonEmptyString(record.category, `${context}.category`, 64)
+  const category = LLM_RETRY_CATEGORIES.includes(rawCategory as AgentLlmRetryCategory)
+    ? (rawCategory as AgentLlmRetryCategory)
+    : 'unknown'
+  const delayMs =
+    record.delayMs === undefined ? 0 : expectSafeInteger(record.delayMs, `${context}.delayMs`, 0)
+  if (delayMs > MAX_LLM_RETRY_DELAY_MS) {
+    throw invalidProtocolValue(context, `delayMs must not exceed ${MAX_LLM_RETRY_DELAY_MS}`)
+  }
+  const attempt = expectSafeInteger(record.attempt, `${context}.attempt`, 1)
+  const maxAttempts = expectSafeInteger(record.maxAttempts, `${context}.maxAttempts`, 1)
+  if (attempt > MAX_LLM_RETRY_ATTEMPTS || maxAttempts > MAX_LLM_RETRY_ATTEMPTS) {
+    throw invalidProtocolValue(
+      context,
+      `attempt and maxAttempts must not exceed ${MAX_LLM_RETRY_ATTEMPTS}`
+    )
+  }
+  if (attempt > maxAttempts) {
+    throw invalidProtocolValue(context, 'attempt must not exceed maxAttempts')
+  }
+  const providerCode =
+    record.providerCode === undefined
+      ? undefined
+      : expectBoundedNonEmptyString(record.providerCode, `${context}.providerCode`, 128)
+  if (providerCode !== undefined && !CANONICAL_PROVIDER_CODE_PATTERN.test(providerCode)) {
+    throw invalidProtocolValue(context, 'providerCode must be a bounded machine-readable code')
+  }
+
+  return {
+    type: 'llm_retry',
+    runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+    streamId: expectBoundedNonEmptyString(record.streamId, `${context}.streamId`, 256),
+    category,
+    ...(providerCode === undefined ? {} : { providerCode }),
+    delayMs,
+    retryAt:
+      record.retryAt === undefined ? 0 : expectSafeInteger(record.retryAt, `${context}.retryAt`, 0),
+    attempt,
+    maxAttempts
+  }
+}
+
+function parseAgentMessageStreamResetEvent(
+  record: Record<string, unknown>
+): Extract<AgentEvent, { type: 'message_stream_reset' }> {
+  const context = 'LLM message stream reset event'
+  expectOnlyKeys(record, ['type', 'runId', 'streamId', 'reason'] as const, context)
+  if (record.reason !== undefined) {
+    // The reason can contain an upstream response body. It controls no Renderer behavior and is
+    // replaced with a stable lifecycle code at the Host boundary.
+    expectBoundedString(record.reason, `${context}.reason`, 16 * 1024)
+  }
+  return {
+    type: 'message_stream_reset',
+    runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+    streamId: expectBoundedNonEmptyString(record.streamId, `${context}.streamId`, 256),
+    reason: 'retrying_model_request'
+  }
 }
 
 export function parseAgentMcpProposedAction(

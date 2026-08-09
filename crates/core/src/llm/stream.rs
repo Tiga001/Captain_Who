@@ -1,11 +1,13 @@
 // Server-sent event parsing and stream accumulation for LLM responses.
-use super::response::{extract_api_error, parse_tool_arguments, truncate_for_error};
+use super::provider_error::LlmProviderFailure;
+use super::response::{extract_api_error, parse_tool_arguments};
 use super::{LlmChatResponse, LlmStreamEvent, LlmToolCall};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
 use crate::usage::{extract_anthropic_stream_usage, extract_usage, merge_stream_usage};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::collections::BTreeMap;
 
 pub(super) async fn parse_sse_response<F>(
@@ -30,7 +32,8 @@ where
                     break;
                 };
                 chunk.map_err(|error| {
-                    AgentError::new(format!("读取模型流失败：{error}"))
+                    LlmProviderFailure::from_network_error(error)
+                        .to_agent_error()
                         .with_usage(accumulator.usage().cloned())
                 })?
             }
@@ -42,8 +45,11 @@ where
             let frame_bytes = buffer[..frame_end].to_vec();
             buffer.drain(..frame_end + separator_len);
             let frame = String::from_utf8(frame_bytes).map_err(|error| {
-                AgentError::new(format!("模型流不是有效 UTF-8：{error}"))
-                    .with_usage(accumulator.usage().cloned())
+                LlmProviderFailure::from_local_transport_failure(&format!(
+                    "model stream frame was not valid UTF-8: {error}"
+                ))
+                .to_agent_error()
+                .with_usage(accumulator.usage().cloned())
             })?;
             process_sse_frame(&frame, &mut accumulator, &mut on_delta)
                 .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
@@ -53,8 +59,11 @@ where
     cancellation_token.check()?;
     if !buffer.iter().all(u8::is_ascii_whitespace) {
         let frame = String::from_utf8(buffer).map_err(|error| {
-            AgentError::new(format!("模型流尾部不是有效 UTF-8：{error}"))
-                .with_usage(accumulator.usage().cloned())
+            LlmProviderFailure::from_local_transport_failure(&format!(
+                "model stream tail was not valid UTF-8: {error}"
+            ))
+            .to_agent_error()
+            .with_usage(accumulator.usage().cloned())
         })?;
         process_sse_frame(&frame, &mut accumulator, &mut on_delta)
             .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
@@ -78,13 +87,17 @@ where
     }
 
     let value: Value = serde_json::from_str(data).map_err(|error| {
-        AgentError::new(format!(
-            "模型流事件不是有效 JSON：{error}；事件：{}",
-            truncate_for_error(data)
+        LlmProviderFailure::from_local_transport_failure(&format!(
+            "model stream event was not valid JSON: {error}; event_hash=sha256:{:x}",
+            sha2::Sha256::digest(data.as_bytes())
         ))
+        .to_agent_error()
     })?;
     if let Some(error) = extract_api_error(&value) {
-        return Err(AgentError::new(format!("模型接口返回错误：{error}")));
+        let _ = error;
+        return Err(
+            LlmProviderFailure::from_embedded_error(accumulator.api_style(), data).to_agent_error(),
+        );
     }
     accumulator.process(frame.event.as_deref(), &value, on_delta)
 }
@@ -146,6 +159,13 @@ impl LlmStreamAccumulator {
             AgentApiStyle::AnthropicCompatible => {
                 Self::Anthropic(AnthropicStreamAccumulator::default())
             }
+        }
+    }
+
+    fn api_style(&self) -> AgentApiStyle {
+        match self {
+            Self::OpenAi(_) => AgentApiStyle::OpenAiCompatible,
+            Self::Anthropic(_) => AgentApiStyle::AnthropicCompatible,
         }
     }
 
@@ -486,13 +506,11 @@ impl AnthropicStreamAccumulator {
                 merge_stream_usage(&mut self.usage, extract_anthropic_stream_usage(value));
             }
             "error" => {
-                let message = value
-                    .get("error")
-                    .and_then(|error| error.get("message"))
-                    .and_then(Value::as_str)
-                    .or_else(|| value.get("message").and_then(Value::as_str))
-                    .unwrap_or("Anthropic stream error");
-                return Err(AgentError::new(format!("模型流返回错误：{message}")));
+                return Err(LlmProviderFailure::from_embedded_error(
+                    AgentApiStyle::AnthropicCompatible,
+                    &value.to_string(),
+                )
+                .to_agent_error());
             }
             "ping" | "content_block_stop" | "message_stop" => {}
             _ => {}

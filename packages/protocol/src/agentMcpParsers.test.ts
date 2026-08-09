@@ -104,6 +104,104 @@ const resultSizeSummary = {
   omittedEncodedBytes: 128
 } as const
 
+describe('LLM retry Host projection', () => {
+  it('keeps structured retry metadata while dropping provider-authored text', () => {
+    const parsed = parseAgentEventForHost({
+      type: 'llm_retry',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      category: 'rate_limited',
+      providerCode: 'rate_limit_exceeded',
+      delayMs: 5_000,
+      retryAt: 1_800_000_005_000,
+      attempt: 2,
+      maxAttempts: 3,
+      reason: 'upstream body that must not reach Renderer state'
+    })
+
+    expect(parsed).toEqual({
+      type: 'llm_retry',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      category: 'rate_limited',
+      providerCode: 'rate_limit_exceeded',
+      delayMs: 5_000,
+      retryAt: 1_800_000_005_000,
+      attempt: 2,
+      maxAttempts: 3
+    })
+    expect(parsed).not.toHaveProperty('reason')
+  })
+
+  it('normalizes legacy and future retry categories without inspecting raw error text', () => {
+    expect(
+      parseAgentEventForHost({
+        type: 'llm_retry',
+        runId: 'run-retry',
+        streamId: 'stream-legacy',
+        attempt: 2,
+        maxAttempts: 3,
+        reason: '429 too many requests: secret provider body'
+      })
+    ).toEqual({
+      type: 'llm_retry',
+      runId: 'run-retry',
+      streamId: 'stream-legacy',
+      category: 'unknown',
+      delayMs: 0,
+      retryAt: 0,
+      attempt: 2,
+      maxAttempts: 3
+    })
+    expect(
+      parseAgentEventForHost({
+        type: 'llm_retry',
+        runId: 'run-retry',
+        streamId: 'stream-future',
+        category: 'new_provider_category',
+        delayMs: 1_000,
+        retryAt: 1_800_000_001_000,
+        attempt: 2,
+        maxAttempts: 3
+      })
+    ).toMatchObject({ category: 'unknown' })
+  })
+
+  it('replaces stream reset diagnostics with a stable lifecycle reason', () => {
+    expect(
+      parseAgentEventForHost({
+        type: 'message_stream_reset',
+        runId: 'run-retry',
+        streamId: 'stream-1',
+        reason: 'secret upstream response body'
+      })
+    ).toEqual({
+      type: 'message_stream_reset',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      reason: 'retrying_model_request'
+    })
+  })
+
+  it('bounds retry scheduling metadata and requires canonical provider codes', () => {
+    const base = {
+      type: 'llm_retry',
+      runId: 'run-retry',
+      streamId: 'stream-1',
+      category: 'network',
+      delayMs: 1_000,
+      retryAt: 1_800_000_001_000,
+      attempt: 2,
+      maxAttempts: 6
+    }
+    expect(() => parseAgentEventForHost({ ...base, delayMs: 60_001 })).toThrow(/delayMs/)
+    expect(() => parseAgentEventForHost({ ...base, maxAttempts: 7 })).toThrow(/must not exceed 6/)
+    expect(() =>
+      parseAgentEventForHost({ ...base, providerCode: 'Provider response body' })
+    ).toThrow(/machine-readable code/)
+  })
+})
+
 describe('Round 4 MCP Agent contract', () => {
   it('round-trips the shared Rust/TypeScript Renderer-safe golden events', () => {
     expect(rendererGolden.schemaVersion).toBe(1)

@@ -84,6 +84,16 @@ export type AgentPromptTone = 'friendly' | 'pragmatic'
 
 export type AgentPromptDetailLevel = 'low' | 'medium' | 'high'
 
+export type AgentLlmRetryCategory =
+  | 'rate_limited'
+  | 'quota_exhausted'
+  | 'overloaded'
+  | 'authentication'
+  | 'invalid_request'
+  | 'context_too_large'
+  | 'network'
+  | 'unknown'
+
 export type AgentToolName =
   | 'attachments_list'
   | 'attachments_list_project'
@@ -1725,9 +1735,14 @@ export type AgentEvent =
       type: 'llm_retry'
       runId: string
       streamId: string
+      category: AgentLlmRetryCategory
+      providerCode?: string
+      delayMs: number
+      retryAt: number
       attempt: number
       maxAttempts: number
-      reason: string
+      /** Legacy wire field. Host parsing intentionally drops this provider-authored text. */
+      reason?: string
     }
   | {
       type: 'tool_input_progress'

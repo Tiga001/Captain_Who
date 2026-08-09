@@ -160,11 +160,24 @@ async fn read_test_http_request(stream: &mut TcpStream) {
 }
 
 async fn write_test_http_response(stream: &mut TcpStream, status: &str, body: Value) {
+    write_test_http_response_with_headers(stream, status, &[], body).await;
+}
+
+async fn write_test_http_response_with_headers(
+    stream: &mut TcpStream,
+    status: &str,
+    extra_headers: &[(&str, &str)],
+    body: Value,
+) {
     let body = serde_json::to_vec(&body).unwrap();
+    let extra_headers = extra_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     let headers = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
     stream.write_all(headers.as_bytes()).await.unwrap();
     stream.write_all(&body).await.unwrap();
 }
@@ -246,18 +259,28 @@ fn retry_delay_uses_capped_exponential_backoff() {
 
 #[test]
 fn classifies_transient_llm_errors_as_retryable() {
-    assert!(is_retryable_llm_error(&AgentError::new(
-        "读取模型流失败：error decoding response body"
-    )));
-    assert!(is_retryable_llm_error(&AgentError::new(
-        "模型接口返回 429：rate limit"
-    )));
-    assert!(is_retryable_llm_error(&AgentError::new(
-        "模型接口返回 503：upstream overloaded"
-    )));
-    assert!(is_retryable_llm_error(&AgentError::new(
-            "模型接口返回 400：upstream status 400: Provider API error: The provided Content Type is invalid or not supported for this model"
-        )));
+    let transport =
+        LlmProviderFailure::from_local_transport_failure("connection reset").to_agent_error();
+    let rate_limited = LlmProviderFailure::from_http_response(
+        AgentApiStyle::OpenAiCompatible,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &reqwest::header::HeaderMap::new(),
+        r#"{"error":{"code":"API_KEY_RATE_LIMIT_EXCEEDED"}}"#,
+        "",
+    )
+    .to_agent_error();
+    let overloaded = LlmProviderFailure::from_http_response(
+        AgentApiStyle::OpenAiCompatible,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        &reqwest::header::HeaderMap::new(),
+        r#"{"error":{"type":"overloaded_error"}}"#,
+        "",
+    )
+    .to_agent_error();
+
+    assert!(is_retryable_llm_error(&transport));
+    assert!(is_retryable_llm_error(&rate_limited));
+    assert!(is_retryable_llm_error(&overloaded));
 }
 
 #[test]
@@ -359,6 +382,296 @@ async fn streaming_retries_the_known_upstream_content_type_400_and_recovers() {
             .and_then(|usage| usage.billable_request_count),
         Some(2)
     );
+}
+
+#[tokio::test]
+async fn qizhen_429_retries_from_structured_code_and_recovers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_test_http_request(&mut stream).await;
+            if attempt == 1 {
+                write_test_http_response_with_headers(
+                    &mut stream,
+                    "429 Too Many Requests",
+                    &[("Retry-After", "0"), ("X-Request-Id", "qizhen-fixture")],
+                    json!({
+                        "error": {
+                            "code": "API_KEY_RATE_LIMIT_EXCEEDED",
+                            "type": "RATE_LIMIT",
+                            "message": "请求限流超限"
+                        }
+                    }),
+                )
+                .await;
+            } else {
+                write_test_http_response(
+                    &mut stream,
+                    "200 OK",
+                    json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "recovered" },
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                )
+                .await;
+            }
+        }
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    request.api_token = "qizhen-retry-token".to_string();
+    request.stream = false;
+
+    let response = complete_chat(request, AgentCancellationToken::new())
+        .await
+        .unwrap();
+    server.await.unwrap();
+    assert_eq!(response.content, "recovered");
+    assert_eq!(
+        response
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.billable_request_count),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn cancellation_during_rate_limit_backoff_prevents_the_second_request() {
+    const CANARY: &str = "RATE_LIMIT_BODY_SECRET_CANARY";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        write_test_http_response_with_headers(
+            &mut stream,
+            "429 Too Many Requests",
+            &[("Retry-After", "5")],
+            json!({
+                "error": {
+                    "code": "API_KEY_RATE_LIMIT_EXCEEDED",
+                    "message": CANARY
+                }
+            }),
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    request.api_token = "cancelled-rate-limit-token".to_string();
+    let cancellation = AgentCancellationToken::new();
+    let event_cancellation = cancellation.clone();
+    let mut events = Vec::new();
+    let started = std::time::Instant::now();
+
+    let error = complete_chat_streaming(request, cancellation, |event| {
+        if matches!(event, LlmStreamEvent::Retrying { .. }) {
+            event_cancellation.cancel();
+        }
+        events.push(event);
+    })
+    .await
+    .unwrap_err();
+    server.await.unwrap();
+
+    assert!(error.is_cancelled());
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        LlmStreamEvent::AttemptReset { reason }
+            | LlmStreamEvent::Retrying { reason, .. }
+            if reason.contains(CANARY)
+    )));
+}
+
+#[tokio::test]
+async fn hard_quota_429_is_not_retried() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        write_test_http_response(
+            &mut stream,
+            "429 Too Many Requests",
+            json!({
+                "error": {
+                    "code": "insufficient_quota",
+                    "message": "billing quota exhausted"
+                }
+            }),
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    request.api_token = "hard-quota-token".to_string();
+    request.stream = false;
+
+    let error = complete_chat(request, AgentCancellationToken::new())
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+    assert_eq!(error.code(), Some(PROVIDER_FAILURE_ERROR_CODE));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("category"))
+            .and_then(Value::as_str),
+        Some("quota_exhausted")
+    );
+    assert!(!error.to_string().contains("billing quota exhausted"));
+}
+
+#[tokio::test]
+async fn long_retry_after_returns_without_sending_a_second_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        write_test_http_response_with_headers(
+            &mut stream,
+            "429 Too Many Requests",
+            &[("Retry-After", "120")],
+            json!({"error":{"code":"API_KEY_RATE_LIMIT_EXCEEDED"}}),
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    request.api_token = "long-retry-after-token".to_string();
+    request.stream = false;
+
+    let error = complete_chat(request, AgentCancellationToken::new())
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+    assert_eq!(error.code(), Some(PROVIDER_FAILURE_ERROR_CODE));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("retryAfterMs"))
+            .and_then(Value::as_u64),
+        Some(120_000)
+    );
+    assert!(error.to_string().contains("暂时限流"));
+}
+
+#[tokio::test]
+async fn broken_429_body_still_preserves_status_and_retry_after() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    request.api_token = "broken-429-body-token".to_string();
+    request.stream = false;
+
+    let error = complete_chat(request, AgentCancellationToken::new())
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+    assert_eq!(error.code(), Some(PROVIDER_FAILURE_ERROR_CODE));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("category"))
+            .and_then(Value::as_str),
+        Some("rate_limited")
+    );
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details.get("retryAfterMs"))
+            .and_then(Value::as_u64),
+        Some(120_000)
+    );
+}
+
+#[tokio::test]
+async fn streaming_partial_output_is_never_transparently_replayed() {
+    const CANARY: &str = "PARTIAL_STREAM_SECRET_CANARY";
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "data: {}\n\ndata: {{not-json-{CANARY}\n\n",
+                    json!({"choices":[{"delta":{"content":"partial"}}]})
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let mut request = request_with_messages(vec![message(LlmMessageRole::User, "Hello")]);
+    request.api_url = format!("http://{address}/v1/chat/completions");
+    let mut events = Vec::new();
+
+    let error = complete_chat_streaming(request, AgentCancellationToken::new(), |event| {
+        events.push(event);
+    })
+    .await
+    .unwrap_err();
+    server.await.unwrap();
+
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::Delta(delta) if delta == "partial")));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::Retrying { .. })));
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        LlmStreamEvent::AttemptReset { reason } if reason.contains(CANARY)
+    )));
+    assert!(!error.to_string().contains(CANARY));
+    assert!(!format!("{:?}", error.details()).contains(CANARY));
 }
 
 #[test]
@@ -609,22 +922,67 @@ async fn streaming_stop_without_text_or_tools_is_a_repairable_semantic_error() {
 #[test]
 fn retry_exhausted_error_mentions_retry_count() {
     let error = retry_exhausted_error(
-        AgentError::new("读取模型响应失败：timeout").with_usage(Some(AgentUsage {
-            input_tokens: Some(7),
-            output_tokens: None,
-            output_thinking_tokens: None,
-            total_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            billable_request_count: Some(3),
-        })),
+        LlmProviderFailure::from_local_transport_failure("timeout secret diagnostic")
+            .to_agent_error()
+            .with_usage(Some(AgentUsage {
+                input_tokens: Some(7),
+                output_tokens: None,
+                output_thinking_tokens: None,
+                total_tokens: None,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(3),
+            })),
         3,
     );
 
     assert!(error.to_string().contains("已重试 2 次"));
-    assert!(error.to_string().contains("timeout"));
+    assert!(!error.to_string().contains("secret diagnostic"));
+    assert_eq!(error.code(), Some(PROVIDER_FAILURE_ERROR_CODE));
     assert_eq!(error.usage().unwrap().input_tokens, Some(7));
     assert_eq!(error.usage().unwrap().billable_request_count, Some(3));
+}
+
+#[test]
+fn retry_plan_refuses_retry_after_beyond_the_total_sleep_budget() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::RETRY_AFTER,
+        reqwest::header::HeaderValue::from_static("120"),
+    );
+    let error = LlmProviderFailure::from_http_response(
+        AgentApiStyle::OpenAiCompatible,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+        r#"{"error":{"code":"API_KEY_RATE_LIMIT_EXCEEDED"}}"#,
+        "",
+    )
+    .to_agent_error();
+
+    assert!(retry_plan(&error, 1, Duration::ZERO, LLM_LOGICAL_REQUEST_TIMEOUT,).is_none());
+}
+
+#[test]
+fn rate_limit_retry_plan_has_longer_bounded_delay_and_canonical_metadata() {
+    let error = LlmProviderFailure::from_http_response(
+        AgentApiStyle::OpenAiCompatible,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &reqwest::header::HeaderMap::new(),
+        r#"{"error":{"code":"API_KEY_RATE_LIMIT_EXCEEDED"}}"#,
+        "",
+    )
+    .to_agent_error();
+    let plan = retry_plan(&error, 1, Duration::ZERO, LLM_LOGICAL_REQUEST_TIMEOUT).unwrap();
+
+    assert_eq!(plan.category, LlmProviderFailureCategory::RateLimited);
+    assert_eq!(
+        plan.provider_code.as_deref(),
+        Some("api_key_rate_limit_exceeded")
+    );
+    assert_eq!(plan.max_attempts, LLM_MAX_ATTEMPTS);
+    assert!(plan.delay >= Duration::from_millis(LLM_RATE_LIMIT_RETRY_BASE_DELAY_MS));
+    assert!(plan.delay <= Duration::from_millis(2_500));
+    assert!(plan.delay > retry_delay(1));
 }
 
 #[test]
@@ -663,7 +1021,7 @@ fn internal_callers_can_defer_empty_response_validation() {
         }],
         // Response metadata must not trick the transport retry heuristic into replaying the
         // original empty request before the agent loop sends its one semantic repair request.
-        "gatewayDiagnostic": "upstream timeout"
+        "gatewayDiagnostic": "EMPTY_ACTION_SECRET_CANARY upstream timeout"
     })
     .to_string();
     let repairable = parse_non_stream_response(
@@ -674,6 +1032,10 @@ fn internal_callers_can_defer_empty_response_validation() {
     .unwrap_err();
     assert!(is_repairable_empty_model_action(&repairable));
     assert!(!is_retryable_llm_error(&repairable));
+    assert!(!repairable
+        .to_string()
+        .contains("EMPTY_ACTION_SECRET_CANARY"));
+    assert!(!format!("{:?}", repairable.details()).contains("EMPTY_ACTION_SECRET_CANARY"));
 }
 
 #[test]
