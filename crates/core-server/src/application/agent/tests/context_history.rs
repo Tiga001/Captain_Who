@@ -168,6 +168,9 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
         .unwrap()
         .render_sanitized_text();
     assert!(first_projection.contains("\"id\":\"environment\""));
+    assert!(first_projection.contains("\"id\":\"model.selection\""));
+    assert!(first_projection.contains("\"configuredModelId\":\"model-1\""));
+    assert!(first_projection.contains("\"imageInput\":false"));
     assert!(first_projection.contains("\"os\""));
     assert!(first_projection.contains("\"network\""));
     assert!(!first_projection.contains("\"managedOffice\""));
@@ -233,6 +236,118 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
 
     let stored = load_conversation_world_state(&storage, "conversation-world-state").unwrap();
     assert_eq!(stored, second.agent_input.world_state_records);
+}
+
+#[test]
+fn model_switch_appends_visible_selection_diffs_even_when_modalities_match() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let mut settings = test_model_settings();
+    let mut alternate = settings.models[0].clone();
+    alternate.id = "model-2".to_string();
+    let mut vision = settings.models[0].clone();
+    vision.id = "model-vision".to_string();
+    vision.supports_image = true;
+    settings.models.extend([alternate, vision]);
+    storage.save_model_settings(settings).unwrap();
+
+    let prepare = |model_id: &str, user_id: &str, assistant_id: &str, run_id: &str| {
+        prepare_conversation_turn(
+            &storage,
+            &SkillsService::new(),
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-model-switch".to_string()),
+                project_id: None,
+                model_id: model_id.to_string(),
+                context_window_indicator_enabled: true,
+                content: format!("Use {model_id}"),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some(user_id.to_string()),
+                assistant_message_id: Some(assistant_id.to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            },
+            run_id,
+        )
+        .unwrap()
+    };
+
+    let first = prepare(
+        "model-1",
+        "user-model-1",
+        "assistant-model-1",
+        "run-model-1",
+    );
+    let mycopilot_core::WorldStateRecord::Full(first_snapshot) =
+        &first.agent_input.world_state_records[0].record
+    else {
+        panic!("first model selection must establish a full snapshot");
+    };
+
+    let second = prepare(
+        "model-2",
+        "user-model-2",
+        "assistant-model-2",
+        "run-model-2",
+    );
+    let mycopilot_core::WorldStateRecord::Diff(second_diff) =
+        &second.agent_input.world_state_records[1].record
+    else {
+        panic!("switching model identity must append a diff");
+    };
+    assert_eq!(
+        second.agent_input.world_state_records[1]
+            .effective_before_message_id
+            .as_deref(),
+        Some("user-model-2")
+    );
+    let second_projection = second_diff
+        .model_projection_against(
+            first_snapshot,
+            mycopilot_core::WorldStateLifetime::Conversation,
+        )
+        .unwrap()
+        .unwrap()
+        .render_sanitized_text();
+    assert!(second_projection.contains("\"configuredModelId\":\"model-2\""));
+    assert!(second_projection.contains("\"imageInput\":false"));
+
+    let second_snapshot = mycopilot_core::WorldStateReducer::fold(
+        first_snapshot.clone(),
+        std::slice::from_ref(second_diff),
+    )
+    .unwrap();
+    let third = prepare(
+        "model-vision",
+        "user-model-vision",
+        "assistant-model-vision",
+        "run-model-vision",
+    );
+    let mycopilot_core::WorldStateRecord::Diff(third_diff) =
+        &third.agent_input.world_state_records[2].record
+    else {
+        panic!("switching image capability must append a diff");
+    };
+    assert_eq!(
+        third.agent_input.world_state_records[2]
+            .effective_before_message_id
+            .as_deref(),
+        Some("user-model-vision")
+    );
+    let third_projection = third_diff
+        .model_projection_against(
+            &second_snapshot,
+            mycopilot_core::WorldStateLifetime::Conversation,
+        )
+        .unwrap()
+        .unwrap()
+        .render_sanitized_text();
+    assert!(third_projection.contains("\"configuredModelId\":\"model-vision\""));
+    assert!(third_projection.contains("\"imageInput\":true"));
 }
 
 #[test]
@@ -631,6 +746,7 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
                     "mode": "create",
                     "content": "EXACT_WRITE_CONTENT"
                 }),
+                provider_identity: None,
             }],
             is_error: false,
         },
@@ -913,6 +1029,7 @@ fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete
                 api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
+                provider_profile_config: None,
                 input_price: "0.01".to_string(),
                 output_price: "0.02".to_string(),
                 enabled: true,

@@ -4,8 +4,9 @@
 //! `ContextFrame` uses that identity to invalidate item caches safely when a run switches to a
 //! different tokenizer. Persisted checkpoints intentionally exclude these derived measurements.
 
-use crate::llm::LlmMessage;
+use crate::llm::{LlmMessage, LlmMessageRole};
 use crate::protocol::AgentToolDefinition;
+use crate::provider_profile::ProviderProfileId;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -254,21 +255,45 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
     }
 
     fn estimate_message(&self, message: &LlmMessage) -> ContextMessageEstimate {
-        let message_content_tokens = self.estimate_text(&message.content);
+        let message_content_tokens = self.estimate_text(message.content());
         let mut message_structure_tokens =
-            MESSAGE_STRUCTURE_TOKENS.saturating_add(self.estimate_text(message.role.as_str()));
-        if let Some(tool_call_id) = &message.tool_call_id {
+            MESSAGE_STRUCTURE_TOKENS.saturating_add(self.estimate_text(message.role().as_str()));
+        if let Some(tool_call_id) = message.tool_call_id() {
             message_structure_tokens =
                 message_structure_tokens.saturating_add(self.estimate_text(tool_call_id));
         }
-        let tool_call_tokens = message.tool_calls.iter().fold(0_u64, |total, call| {
+        let mut tool_call_tokens = message.tool_calls().fold(0_u64, |total, call| {
             total
                 .saturating_add(TOOL_CALL_STRUCTURE_TOKENS)
                 .saturating_add(self.estimate_text(&call.id))
                 .saturating_add(self.estimate_text(&call.name))
                 .saturating_add(estimate_json_tokens(&call.args))
         });
-        let image_count = message.images.len();
+        if let Some(turn) = message.assistant_turn() {
+            let effective_call_count = turn.effective_tool_calls().len();
+            let uses_legacy_split_projection = turn.provider_protocol().is_none_or(|key| {
+                matches!(
+                    key.profile.id,
+                    ProviderProfileId::GenericOpenAiChat
+                        | ProviderProfileId::GenericAnthropicMessages
+                )
+            });
+            if turn.runtime_tool_bindings().is_some()
+                && uses_legacy_split_projection
+                && effective_call_count > 1
+            {
+                let extra_assistant_messages =
+                    u64::try_from(effective_call_count - 1).unwrap_or(u64::MAX);
+                let per_message = MESSAGE_STRUCTURE_TOKENS
+                    .saturating_add(self.estimate_text(LlmMessageRole::Assistant.as_str()));
+                message_structure_tokens = message_structure_tokens
+                    .saturating_add(extra_assistant_messages.saturating_mul(per_message));
+            }
+            tool_call_tokens = tool_call_tokens.saturating_add(
+                crate::llm::estimate_assistant_turn_continuation_tokens(turn).unwrap_or(u64::MAX),
+            );
+        }
+        let image_count = message.images().len();
         let image_tokens = u64::try_from(image_count)
             .unwrap_or(u64::MAX)
             .saturating_mul(IMAGE_TOKEN_RESERVE);
@@ -328,6 +353,11 @@ fn estimate_json_tokens(value: &serde_json::Value) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{LlmAssistantTurn, LlmRuntimeToolCallBinding, LlmToolCall};
+    use crate::provider_profile::{
+        ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
+    };
+    use serde_json::json;
 
     #[test]
     fn text_budget_returns_a_valid_utf8_prefix() {
@@ -339,5 +369,131 @@ mod tests {
         assert_eq!(prefix, "abc甲");
         assert!(budget.fits(prefix));
         assert!(!budget.fits(value));
+    }
+
+    #[test]
+    fn complete_legacy_turn_matches_split_wire_message_budget() {
+        let calls = (0..3)
+            .map(|index| LlmToolCall {
+                id: format!("call-{index}"),
+                name: "read_file".to_string(),
+                args: json!({ "path": format!("file-{index}.txt") }),
+            })
+            .collect::<Vec<_>>();
+        let bindings = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| LlmRuntimeToolCallBinding::new(index, call, call.clone()))
+            .collect();
+        let complete = LlmMessage::from_assistant_turn(
+            LlmAssistantTurn::from_legacy("I will inspect the files.", calls.clone())
+                .with_runtime_tool_bindings(bindings)
+                .unwrap(),
+        );
+        let split = calls
+            .into_iter()
+            .enumerate()
+            .map(|(index, call)| {
+                LlmMessage::assistant(
+                    if index == 0 {
+                        "I will inspect the files."
+                    } else {
+                        ""
+                    },
+                    vec![call],
+                )
+            })
+            .collect::<Vec<_>>();
+        let estimator = HeuristicTokenEstimator;
+        let complete_tokens = estimator.estimate_message(&complete).total_tokens();
+        let split_tokens = split
+            .iter()
+            .map(|message| estimator.estimate_message(message).total_tokens())
+            .sum::<u64>();
+
+        assert_eq!(complete_tokens, split_tokens);
+    }
+
+    #[test]
+    fn historical_grouped_legacy_turn_keeps_single_assistant_structure_cost() {
+        let calls = vec![
+            LlmToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "one.txt" }),
+            },
+            LlmToolCall {
+                id: "call-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "two.txt" }),
+            },
+        ];
+        let historical_grouped = LlmMessage::assistant("", calls.clone());
+        let bindings = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| LlmRuntimeToolCallBinding::new(index, call, call.clone()))
+            .collect();
+        let runtime_split = LlmMessage::from_assistant_turn(
+            LlmAssistantTurn::from_legacy("", calls)
+                .with_runtime_tool_bindings(bindings)
+                .unwrap(),
+        );
+        let estimator = HeuristicTokenEstimator;
+        let single_assistant_structure =
+            MESSAGE_STRUCTURE_TOKENS + estimator.estimate_text(LlmMessageRole::Assistant.as_str());
+
+        assert_eq!(
+            estimator.estimate_message(&runtime_split).total_tokens(),
+            estimator
+                .estimate_message(&historical_grouped)
+                .total_tokens()
+                + single_assistant_structure
+        );
+    }
+
+    #[test]
+    fn grouped_provider_profile_does_not_pay_legacy_split_overhead() {
+        let profile = ProviderProfileConfig::deepseek_v4_default();
+        let key = ProviderProtocolKey::new(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+            &profile,
+            "deepseek-v4",
+            None,
+        )
+        .unwrap();
+        let provider_calls = vec![
+            LlmToolCall {
+                id: "provider-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "one" }),
+            },
+            LlmToolCall {
+                id: "provider-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "two" }),
+            },
+        ];
+        let bindings = provider_calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| LlmRuntimeToolCallBinding::new(index, call, call.clone()))
+            .collect::<Vec<_>>();
+        let turn = LlmAssistantTurn::from_provider(key, "", provider_calls.clone())
+            .unwrap()
+            .with_runtime_tool_bindings(bindings.clone())
+            .unwrap();
+        let grouped = LlmMessage::from_assistant_turn(turn);
+        let generic_live = LlmMessage::from_assistant_turn(
+            LlmAssistantTurn::from_legacy("", provider_calls)
+                .with_runtime_tool_bindings(bindings)
+                .unwrap(),
+        );
+        let estimator = HeuristicTokenEstimator;
+
+        assert!(
+            estimator.estimate_message(&grouped).total_tokens()
+                < estimator.estimate_message(&generic_live).total_tokens()
+        );
     }
 }

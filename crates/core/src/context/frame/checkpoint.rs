@@ -1,11 +1,10 @@
 use super::*;
 
 fn same_tool_call_identity(live: &LlmMessage, projected: &LlmMessage) -> bool {
-    live.tool_calls.len() == projected.tool_calls.len()
+    live.tool_calls().len() == projected.tool_calls().len()
         && live
-            .tool_calls
-            .iter()
-            .zip(&projected.tool_calls)
+            .tool_calls()
+            .zip(projected.tool_calls())
             .all(|(live, projected)| live.id == projected.id && live.name == projected.name)
 }
 
@@ -23,37 +22,66 @@ impl ContextItem {
             return Err(AgentError::new("运行检查点不能保存 request-only 上下文。"));
         }
         let message = self.checkpoint_message.as_ref().unwrap_or(&self.message);
-        if message.role != self.message.role
-            || message.tool_call_id != self.message.tool_call_id
-            || message.is_error != self.message.is_error
+        if message.role() != self.message.role()
+            || message.tool_call_id() != self.message.tool_call_id()
+            || message.is_error() != self.message.is_error()
             || !same_tool_call_identity(&self.message, message)
         {
             return Err(AgentError::new(
                 "运行检查点投影不能改变消息角色、工具身份或错误语义。",
             ));
         }
+        if message
+            .assistant_turn()
+            .and_then(LlmAssistantTurn::provider_continuation)
+            .is_some()
+        {
+            return Err(AgentError::new(
+                "运行检查点不能持久化 Provider raw continuation。",
+            ));
+        }
+        let provider_identities = message
+            .assistant_turn()
+            .and_then(LlmAssistantTurn::runtime_tool_bindings)
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .map(|binding| {
+                        (
+                            binding.runtime_call.id.as_str(),
+                            AgentProviderToolCallIdentity {
+                                provider_tool_index: u32::try_from(binding.provider_tool_index)
+                                    .unwrap_or(u32::MAX),
+                                provider_call_id: binding.provider_call_id.clone(),
+                                runtime_call_id: binding.runtime_call.id.clone(),
+                            },
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
         Ok(AgentContextCheckpointItem {
-            role: message.role.as_str().to_string(),
-            content: message.content.clone(),
+            role: message.role().as_str().to_string(),
+            content: message.content().to_string(),
             images: message
-                .images
+                .images()
                 .iter()
                 .map(|image| AgentContextCheckpointImage {
                     mime_type: image.mime_type.clone(),
                     data_base64: image.data_base64.clone(),
                 })
                 .collect(),
-            tool_call_id: message.tool_call_id.clone(),
+            tool_call_id: message.tool_call_id().map(str::to_string),
             tool_calls: message
-                .tool_calls
-                .iter()
+                .tool_calls()
                 .map(|call| AgentContextCheckpointToolCall {
                     id: call.id.clone(),
                     name: call.name.clone(),
                     args: call.args.clone(),
+                    provider_identity: provider_identities.get(call.id.as_str()).cloned(),
                 })
                 .collect(),
-            is_error: message.is_error,
+            is_error: message.is_error(),
             sources: self
                 .metadata
                 .sources()
@@ -141,33 +169,103 @@ impl ContextItem {
             });
         }
 
-        Ok(Self::new(
-            LlmMessage {
-                role,
-                content: item.content,
-                images: item
-                    .images
-                    .into_iter()
-                    .map(|image| crate::llm::LlmImage {
+        let message = match role {
+            LlmMessageRole::System | LlmMessageRole::User => {
+                let mut message = LlmMessage::text(role, item.content);
+                message
+                    .images_mut()
+                    .expect("text checkpoint messages support images")
+                    .extend(item.images.into_iter().map(|image| crate::llm::LlmImage {
                         mime_type: image.mime_type,
                         data_base64: image.data_base64,
-                    })
-                    .collect(),
-                tool_call_id: item.tool_call_id,
-                tool_calls: item
-                    .tool_calls
-                    .into_iter()
-                    .map(|call| LlmToolCall {
-                        id: call.id,
-                        name: call.name,
-                        args: call.args,
-                    })
-                    .collect(),
-                is_error: item.is_error,
-                placement: crate::llm::LlmMessagePlacement::default_for_role(role),
-            },
-            metadata,
-        ))
+                    }));
+                message
+            }
+            LlmMessageRole::Assistant => {
+                if item.tool_calls.is_empty() {
+                    LlmMessage::text(LlmMessageRole::Assistant, item.content)
+                } else {
+                    let max_provider_index = item
+                        .tool_calls
+                        .iter()
+                        .enumerate()
+                        .map(|(index, call)| {
+                            call.provider_identity
+                                .as_ref()
+                                .map_or(u32::try_from(index).unwrap_or(u32::MAX), |identity| {
+                                    identity.provider_tool_index
+                                })
+                        })
+                        .max()
+                        .map(|index| usize::try_from(index).unwrap_or(usize::MAX));
+                    if max_provider_index
+                        .is_some_and(|index| index > item.tool_calls.len().saturating_add(1_024))
+                    {
+                        return Err(AgentError::new(
+                            "运行检查点的 Provider Tool index 超出安全恢复范围。",
+                        ));
+                    }
+                    let mut provider_calls = (0..max_provider_index.map_or(0, |index| index + 1))
+                        .map(|index| LlmToolCall {
+                            id: format!("checkpoint-omitted-provider-call-{index}"),
+                            name: "checkpoint_omitted_provider_call".to_string(),
+                            args: serde_json::Value::Null,
+                        })
+                        .collect::<Vec<_>>();
+                    let mut runtime_bindings = Vec::with_capacity(item.tool_calls.len());
+                    let mut previous_provider_index = None;
+                    for (index, call) in item.tool_calls.into_iter().enumerate() {
+                        let provider_identity =
+                            call.provider_identity
+                                .unwrap_or(AgentProviderToolCallIdentity {
+                                    provider_tool_index: u32::try_from(index).unwrap_or(u32::MAX),
+                                    provider_call_id: call.id.clone(),
+                                    runtime_call_id: call.id.clone(),
+                                });
+                        let provider_index = usize::try_from(provider_identity.provider_tool_index)
+                            .map_err(|_| {
+                                AgentError::new("运行检查点的 Provider Tool index 无效。")
+                            })?;
+                        if previous_provider_index
+                            .is_some_and(|previous| previous >= provider_index)
+                            || provider_identity.runtime_call_id != call.id
+                        {
+                            return Err(AgentError::new(
+                                "运行检查点的 Provider/Runtime Tool Call 映射无序或不一致。",
+                            ));
+                        }
+                        previous_provider_index = Some(provider_index);
+                        let provider_call = LlmToolCall {
+                            id: provider_identity.provider_call_id,
+                            name: call.name.clone(),
+                            args: call.args.clone(),
+                        };
+                        let runtime_call = LlmToolCall {
+                            id: call.id,
+                            name: call.name,
+                            args: call.args,
+                        };
+                        runtime_bindings.push(LlmRuntimeToolCallBinding::new(
+                            provider_index,
+                            &provider_call,
+                            runtime_call,
+                        ));
+                        provider_calls[provider_index] = provider_call;
+                    }
+                    let turn = LlmAssistantTurn::from_legacy(item.content, provider_calls)
+                        .with_runtime_tool_bindings(runtime_bindings)?;
+                    LlmMessage::from_assistant_turn(turn)
+                }
+            }
+            LlmMessageRole::Tool => {
+                let tool_call_id = item.tool_call_id.ok_or_else(|| {
+                    AgentError::new("运行检查点无效：tool 消息缺少 tool_call_id。")
+                })?;
+                LlmMessage::tool_result(tool_call_id, item.content, item.is_error)
+            }
+        };
+
+        Ok(Self::new(message, metadata))
     }
 }
 

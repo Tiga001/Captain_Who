@@ -341,6 +341,7 @@ fn pending_approval_persists_full_run_checkpoint() {
                     id: "call-checkpoint".to_string(),
                     name: "apply_patch".to_string(),
                     args: json!({ "operation": "create", "filePath": "report.txt" }),
+                    provider_identity: None,
                 }],
                 is_error: false,
                 sources: vec!["model_response".to_string()],
@@ -361,6 +362,9 @@ fn pending_approval_persists_full_run_checkpoint() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&["call-checkpoint"]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "call-checkpoint".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -368,7 +372,12 @@ fn pending_approval_persists_full_run_checkpoint() {
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
     };
-    let checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
+    let mut checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
+    save_test_pending_provider_for_input(&storage, &mut checkpoint);
+    let run_checkpoint = checkpoint
+        .resume_checkpoint
+        .clone()
+        .expect("test run checkpoint remains attached");
     let action = AgentProposedAction::ToolCall {
         call: AgentToolCall {
             id: "call-checkpoint".to_string(),

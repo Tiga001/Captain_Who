@@ -34,6 +34,7 @@ mod mcp_approval_expiry;
 mod mcp_approval_lifecycle;
 mod office;
 mod pending_actions;
+mod provider_profiles;
 mod skills;
 mod steering;
 mod terminal_events;
@@ -182,6 +183,7 @@ fn test_model_settings() -> ModelSettingsRecord {
             api_token_override: None,
             supports_image: false,
             context_window_tokens: Some(128_000),
+            provider_profile_config: None,
             input_price: "0.01".to_string(),
             output_price: "0.02".to_string(),
             enabled: true,
@@ -210,6 +212,7 @@ fn save_test_pending_provider(
                 api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
+                provider_profile_config: None,
                 input_price: "0".to_string(),
                 output_price: "0".to_string(),
                 enabled: true,
@@ -218,7 +221,7 @@ fn save_test_pending_provider(
         .unwrap();
 }
 
-fn save_test_pending_provider_for_input(storage: &StorageService, input: &AgentChatInput) {
+fn save_test_pending_provider_for_input(storage: &StorageService, input: &mut AgentChatInput) {
     let (search_mode, tavily_api_key) = input
         .search_config
         .as_ref()
@@ -244,12 +247,83 @@ fn save_test_pending_provider_for_input(storage: &StorageService, input: &AgentC
                 api_token_override: None,
                 supports_image: input.model_capabilities.image_input,
                 context_window_tokens: input.context_window_tokens.or(Some(128_000)),
+                provider_profile_config: input.provider_profile_config.clone(),
                 input_price: "0".to_string(),
                 output_price: "0".to_string(),
                 enabled: true,
             }],
         })
         .unwrap();
+
+    freeze_test_pending_provider_configuration(storage, input);
+}
+
+fn freeze_test_pending_provider_configuration(
+    storage: &StorageService,
+    input: &mut AgentChatInput,
+) {
+    let snapshot = storage
+        .load_model_settings_snapshot()
+        .unwrap()
+        .expect("test Provider settings snapshot");
+    let (configuration_revision, config, key) =
+        test_frozen_provider_protocol(storage, &input.model, input.api_style);
+    input.provider_configuration_revision = Some(configuration_revision);
+    input.provider_connection_revision = Some(
+        snapshot
+            .provider_connection_revisions
+            .get(&input.model)
+            .expect("test Provider connection revision")
+            .clone(),
+    );
+    input.search_connection_revision = Some(snapshot.search_connection_revision);
+    input.provider_profile_config = Some(config.clone());
+    input.provider_protocol_key = Some(key.clone());
+    if let Some(checkpoint) = input.resume_checkpoint.as_mut() {
+        checkpoint.provider_profile_config = config;
+        checkpoint.provider_protocol_key = key;
+    }
+}
+
+fn test_frozen_provider_protocol(
+    storage: &StorageService,
+    model_id: &str,
+    api_style: Option<mycopilot_core::AgentApiStyle>,
+) -> (
+    String,
+    mycopilot_core::ProviderProfileConfig,
+    mycopilot_core::ProviderProtocolKey,
+) {
+    let snapshot = storage
+        .load_model_settings_snapshot()
+        .unwrap()
+        .expect("test Provider settings snapshot");
+    let model = snapshot
+        .settings
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .expect("test Provider model");
+    let connection = snapshot
+        .settings
+        .effective_connection_for(model)
+        .expect("test Provider connection");
+    let dialect = api_style
+        .map(mycopilot_core::ProviderProtocolDialect::from)
+        .unwrap_or_else(|| {
+            mycopilot_core::ProviderProtocolDialect::detect_from_api_url(&connection.api_url)
+        });
+    let config = model
+        .resolved_provider_profile_config(dialect)
+        .expect("test Provider Profile");
+    let key = mycopilot_core::ProviderProtocolKey::new(
+        dialect,
+        &config,
+        model.id.clone(),
+        Some(snapshot.configuration_revision.clone()),
+    )
+    .expect("test Provider Protocol key");
+    (snapshot.configuration_revision, config, key)
 }
 
 fn write_test_skill(workspace: &Path, body: &str) {

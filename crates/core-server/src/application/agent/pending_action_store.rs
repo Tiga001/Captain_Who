@@ -422,7 +422,7 @@ impl AgentService {
         record: &PendingActionRecord,
     ) -> Result<PendingActionStoreOutcome, String> {
         self.storage
-            .store_pending_agent_action(pending_storage_record(record, now_ms()))
+            .store_pending_agent_action(pending_storage_record(record, now_ms())?)
     }
 
     pub(super) fn persist_pending_status(
@@ -435,7 +435,7 @@ impl AgentService {
             &record.storage_id,
             pending_status_label(expected_status),
             pending_status_label(status),
-            &persisted_pending_agent_input_json(&record.agent_input, status),
+            &persisted_pending_agent_input_json(&record.agent_input, status)?,
             now_ms(),
         )
     }
@@ -1275,8 +1275,8 @@ pub(super) fn resolve_pending_action_storage_id(
 pub(super) fn pending_storage_record(
     record: &PendingActionRecord,
     updated_at: i64,
-) -> AgentPendingActionRecord {
-    AgentPendingActionRecord {
+) -> Result<AgentPendingActionRecord, String> {
+    Ok(AgentPendingActionRecord {
         action_id: record.storage_id.clone(),
         run_id: record.snapshot.run_id.clone(),
         conversation_id: record.snapshot.conversation_id.clone(),
@@ -1290,10 +1290,10 @@ pub(super) fn pending_storage_record(
         agent_input_json: persisted_pending_agent_input_json(
             &record.agent_input,
             record.snapshot.status,
-        ),
+        )?,
         created_at: record.snapshot.created_at,
         updated_at,
-    }
+    })
 }
 
 pub(super) fn same_pending_action_identity(
@@ -1310,8 +1310,20 @@ pub(super) fn same_pending_action_identity(
         && existing.snapshot.tool_call_id == candidate.snapshot.tool_call_id
         && existing.snapshot.status == candidate.snapshot.status
         && serialize_json(&existing.snapshot.action) == serialize_json(&candidate.snapshot.action)
-        && persisted_pending_agent_input_json(&existing.agent_input, existing.snapshot.status)
-            == persisted_pending_agent_input_json(&candidate.agent_input, candidate.snapshot.status)
+        && same_persisted_pending_agent_input(existing, candidate)
+}
+
+fn same_persisted_pending_agent_input(
+    existing: &PendingActionRecord,
+    candidate: &PendingActionRecord,
+) -> bool {
+    match (
+        persisted_pending_agent_input_json(&existing.agent_input, existing.snapshot.status),
+        persisted_pending_agent_input_json(&candidate.agent_input, candidate.snapshot.status),
+    ) {
+        (Ok(existing), Ok(candidate)) => existing == candidate,
+        _ => false,
+    }
 }
 
 fn same_pending_action_identity_except_status(
@@ -1332,7 +1344,7 @@ fn same_pending_action_identity_except_status(
 pub(super) fn persisted_pending_agent_input_json(
     agent_input: &AgentChatInput,
     status: PendingActionStatus,
-) -> String {
+) -> Result<String, String> {
     let mut persisted_agent_input = agent_input.clone();
     // The explicit allowlist DTO below, rather than mutation of a full AgentChatInput
     // serialization, is the security boundary. Secret-bearing fields may remain in this
@@ -1363,7 +1375,7 @@ pub(super) fn persisted_pending_agent_input_json(
             mycopilot_core::redact_terminal_skill_discovery(checkpoint);
         }
     }
-    PersistedAgentResumeInput::from_agent_input(&persisted_agent_input).encode()
+    Ok(PersistedAgentResumeInput::from_agent_input(&persisted_agent_input)?.encode())
 }
 
 pub(super) fn pending_status_redacts_run_scoped_input(status: PendingActionStatus) -> bool {
@@ -1387,8 +1399,15 @@ pub(super) fn restore_agent_input_secrets(
         .load_model_settings_snapshot()
         .map_err(|_| "failed to resolve frozen pending-action provider settings".to_string())?
         .ok_or_else(|| "frozen pending-action provider settings are unavailable".to_string())?;
-    if settings_snapshot.configuration_revision != persisted.provider_configuration_revision {
-        return Err("frozen pending-action provider configuration no longer matches".to_string());
+    let current_provider_connection_revision = settings_snapshot
+        .provider_connection_revisions
+        .get(&agent_input.model)
+        .ok_or_else(|| "frozen pending-action provider connection is unavailable".to_string())?;
+    if current_provider_connection_revision != &persisted.provider_connection_revision {
+        return Err("frozen pending-action provider connection no longer matches".to_string());
+    }
+    if settings_snapshot.search_connection_revision != persisted.search_connection_revision {
+        return Err("frozen pending-action search connection no longer matches".to_string());
     }
     let settings = settings_snapshot.settings;
 
@@ -1414,7 +1433,7 @@ pub(super) fn restore_agent_input_secrets(
     let model = settings
         .models
         .iter()
-        .find(|model| model.id == agent_input.model && model.enabled)
+        .find(|model| model.id == agent_input.model)
         .ok_or_else(|| "frozen pending-action model configuration is unavailable".to_string())?;
 
     // Pending actions deliberately persist without API tokens. On restoration, resolve the
@@ -1440,6 +1459,32 @@ pub(super) fn restore_agent_input_secrets(
     if persisted_endpoint_digest(&connection.api_url) != persisted.provider_endpoint_digest {
         return Err("frozen pending-action provider endpoint no longer matches".to_string());
     }
+    let provider_profile_config = agent_input
+        .provider_profile_config
+        .as_ref()
+        .ok_or_else(|| "frozen pending-action Provider Profile is unavailable".to_string())?;
+    let provider_protocol_key = agent_input
+        .provider_protocol_key
+        .as_ref()
+        .ok_or_else(|| "frozen pending-action Provider Protocol is unavailable".to_string())?;
+    provider_protocol_key
+        .validate_against_config(provider_profile_config)
+        .map_err(|_| "frozen pending-action Provider Protocol is invalid".to_string())?;
+    if provider_protocol_key.model_id != agent_input.model
+        || provider_protocol_key
+            .provider_configuration_revision
+            .as_deref()
+            != Some(persisted.provider_configuration_revision.as_str())
+    {
+        return Err("frozen pending-action Provider Protocol provenance diverged".to_string());
+    }
+    if let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() {
+        if &checkpoint.provider_profile_config != provider_profile_config
+            || &checkpoint.provider_protocol_key != provider_protocol_key
+        {
+            return Err("frozen pending-action checkpoint Provider Protocol diverged".to_string());
+        }
+    }
     let provider_credential_present = !connection.api_token.trim().is_empty();
     if provider_credential_present != persisted.provider_credential_required {
         return Err(
@@ -1460,7 +1505,7 @@ pub(super) fn restore_agent_input_secrets(
             );
         }
         if persisted.search_credential_required {
-            search.tavily_api_key = Some(settings.tavily_api_key);
+            search.tavily_api_key = Some(settings.tavily_api_key.trim().to_string());
         }
     }
     Ok(agent_input)
@@ -1468,29 +1513,64 @@ pub(super) fn restore_agent_input_secrets(
 
 fn bind_pending_provider_configuration(
     storage: &Arc<StorageService>,
-    mut agent_input: AgentChatInput,
+    agent_input: AgentChatInput,
 ) -> Result<AgentChatInput, String> {
     let snapshot = storage
         .load_model_settings_snapshot()
         .map_err(|_| "failed to freeze pending-action provider configuration".to_string())?
         .ok_or_else(|| "pending-action provider configuration is unavailable".to_string())?;
-    if agent_input
+    let provider_configuration_revision = agent_input
         .provider_configuration_revision
         .as_deref()
-        .is_some_and(|revision| revision != snapshot.configuration_revision)
-    {
-        return Err("pending-action provider configuration changed before persistence".to_string());
-    }
+        .filter(|revision| {
+            mycopilot_core::storage::config_repository::is_model_settings_revision(revision)
+        })
+        .ok_or_else(|| "pending-action provider settings revision is unavailable".to_string())?;
     let model = snapshot
         .settings
         .models
         .iter()
-        .find(|model| model.id == agent_input.model && model.enabled)
+        .find(|model| model.id == agent_input.model)
         .ok_or_else(|| "pending-action model configuration is unavailable".to_string())?;
     let connection = snapshot
         .settings
         .effective_connection_for(model)
         .map_err(|_| "pending-action provider connection is unavailable".to_string())?;
+    let current_provider_connection_revision = snapshot
+        .provider_connection_revisions
+        .get(&model.id)
+        .ok_or_else(|| "pending-action provider connection identity is unavailable".to_string())?;
+    if agent_input.provider_connection_revision.as_ref()
+        != Some(current_provider_connection_revision)
+    {
+        return Err("pending-action provider connection changed before persistence".to_string());
+    }
+    if agent_input.search_connection_revision.as_ref() != Some(&snapshot.search_connection_revision)
+    {
+        return Err("pending-action search connection changed before persistence".to_string());
+    }
+    let provider_profile_config = agent_input
+        .provider_profile_config
+        .as_ref()
+        .ok_or_else(|| "pending-action Provider Profile is unavailable".to_string())?;
+    provider_profile_config
+        .validate()
+        .map_err(|_| "pending-action Provider Profile is invalid".to_string())?;
+    let provider_protocol_key = agent_input
+        .provider_protocol_key
+        .as_ref()
+        .ok_or_else(|| "pending-action Provider Protocol is unavailable".to_string())?;
+    provider_protocol_key
+        .validate_against_config(provider_profile_config)
+        .map_err(|_| "pending-action Provider Protocol is invalid".to_string())?;
+    if provider_protocol_key.model_id != agent_input.model
+        || provider_protocol_key
+            .provider_configuration_revision
+            .as_deref()
+            != Some(provider_configuration_revision)
+    {
+        return Err("pending-action Provider Protocol provenance is inconsistent".to_string());
+    }
     if connection.api_url != agent_input.api_url
         || connection.api_token != agent_input.api_token
         || model.supports_image != agent_input.model_capabilities.image_input
@@ -1501,6 +1581,13 @@ fn bind_pending_provider_configuration(
         return Err(
             "pending-action provider configuration does not match the active run".to_string(),
         );
+    }
+    if let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() {
+        if &checkpoint.provider_profile_config != provider_profile_config
+            || &checkpoint.provider_protocol_key != provider_protocol_key
+        {
+            return Err("pending-action checkpoint Provider Protocol is inconsistent".to_string());
+        }
     }
     if let Some(search) = agent_input.search_config.as_ref() {
         let configured_key = (!snapshot.settings.tavily_api_key.trim().is_empty())
@@ -1513,7 +1600,6 @@ fn bind_pending_provider_configuration(
             );
         }
     }
-    agent_input.provider_configuration_revision = Some(snapshot.configuration_revision);
     Ok(agent_input)
 }
 

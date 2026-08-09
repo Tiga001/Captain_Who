@@ -15,6 +15,11 @@ pub(super) fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<
         if model.context_window_tokens == Some(0) {
             return Err(format!("模型 {model_id} 的上下文窗口必须大于 0。"));
         }
+        if let Some(config) = &model.provider_profile_config {
+            config
+                .validate()
+                .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
+        }
         model.connection_override()?;
         if !usage_repository::is_valid_price_per_1k(&model.input_price) {
             return Err(format!(
@@ -134,9 +139,12 @@ impl StorageService {
         config_repository::load_model_settings_snapshot(&mut connection).map_err(storage_error)
     }
 
-    pub fn save_model_settings(&self, settings: ModelSettingsRecord) -> Result<(), String> {
-        validate_model_settings(&settings)?;
+    pub fn save_model_settings(&self, mut settings: ModelSettingsRecord) -> Result<(), String> {
         let mut connection = self.state.connection()?;
+        let existing =
+            config_repository::load_model_settings(&mut connection).map_err(storage_error)?;
+        preserve_existing_provider_profiles(&mut settings, existing.as_ref());
+        validate_model_settings(&settings)?;
         config_repository::save_model_settings(&mut connection, settings).map_err(storage_error)
     }
 
@@ -313,5 +321,27 @@ impl StorageService {
             input_price,
             output_price,
         )
+    }
+}
+
+/// Older Renderer builds do not know the provider profile field. Treat omission as "not
+/// supplied" and retain a matching model's explicit profile instead of resetting it to Generic.
+/// A new client can select Generic explicitly by sending the corresponding versioned config.
+fn preserve_existing_provider_profiles(
+    incoming: &mut ModelSettingsRecord,
+    existing: Option<&ModelSettingsRecord>,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+    for model in &mut incoming.models {
+        if model.provider_profile_config.is_some() {
+            continue;
+        }
+        model.provider_profile_config = existing
+            .models
+            .iter()
+            .find(|candidate| candidate.id == model.id)
+            .and_then(|candidate| candidate.provider_profile_config.clone());
     }
 }

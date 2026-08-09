@@ -3,6 +3,7 @@ use crate::conversation_trace::{
     ConversationModelContextItem, ConversationTraceAttachment, ConversationTurnTrace,
     ConversationTurnTraceItem,
 };
+use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::world_state::{AnchoredWorldStateRecord, WorldStateSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +33,21 @@ pub struct AgentChatInput {
     /// secret-free pending-resume DTO instead of exposing it to Renderer or provider payloads.
     #[serde(skip)]
     pub provider_configuration_revision: Option<String>,
+    /// Host-only stable identity of this model's effective endpoint/token pair. Unlike the broad
+    /// settings revision, it survives unrelated settings and Provider Profile edits.
+    #[serde(skip)]
+    pub provider_connection_revision: Option<String>,
+    /// Host-only stable identity of the effective search mode/credential pair.
+    #[serde(skip)]
+    pub search_connection_revision: Option<String>,
+    /// Host-only provider protocol configuration. Legacy/direct inputs leave this unset and
+    /// runtime preparation resolves the Generic profile for the effective API dialect.
+    #[serde(skip)]
+    pub provider_profile_config: Option<ProviderProfileConfig>,
+    /// Host-only immutable provenance for provider-owned assistant state. Hosts freeze this before
+    /// a run; direct legacy callers may omit it and let runtime preparation derive a Generic key.
+    #[serde(skip)]
+    pub provider_protocol_key: Option<ProviderProtocolKey>,
     pub model: String,
     /// Resolved by the backend from the selected model configuration and kept
     /// immutable across approval pause/resume for this logical run.
@@ -187,11 +203,11 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 5 additionally freezes the backend-authoritative run context, model capabilities and
-/// exact Run World State that produced a pending Tool Call batch. Approval resume must continue
-/// that same logical world instead of rebuilding authority from newer UI/settings state.
-/// Earlier development checkpoints are intentionally not migrated.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 5;
+/// Version 6 additionally freezes the provider profile/configuration identity and the ordered,
+/// provider-to-runtime Tool Call mapping for the assistant turn that crossed the approval
+/// boundary. Raw provider continuation/reasoning remains intentionally non-durable. A version 5
+/// checkpoint cannot safely infer this provenance from newer settings and is rejected.
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -225,6 +241,13 @@ pub struct AgentRunCheckpoint {
     pub run_context: Option<AgentRunContext>,
     /// Provider-neutral capabilities frozen for the same logical run.
     pub model_capabilities: ModelCapabilities,
+    /// Exact provider protocol settings used by the run before it paused.
+    pub provider_profile_config: ProviderProfileConfig,
+    /// Provider/dialect/model/settings provenance used to reject cross-profile replay.
+    pub provider_protocol_key: ProviderProtocolKey,
+    /// Ordered identity-only projection of the assistant Tool Call batch. It binds durable
+    /// runtime calls to provider calls without persisting raw reasoning or continuation payloads.
+    pub assistant_turn_identity: AgentAssistantTurnCheckpointIdentity,
     /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
     /// epoch; it never reconstructs authority from rendered model context.
     pub run_world_state: WorldStateSnapshot,
@@ -310,6 +333,38 @@ pub struct AgentContextCheckpointToolCall {
     pub id: String,
     pub name: String,
     pub args: Value,
+    /// Optional provider/runtime identity projection. Historical Generic items may omit it; a v6
+    /// approval-boundary batch carries the authoritative ordered mapping on the checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_identity: Option<AgentProviderToolCallIdentity>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentProviderToolCallIdentity {
+    pub provider_tool_index: u32,
+    pub provider_call_id: String,
+    pub runtime_call_id: String,
+}
+
+impl std::fmt::Debug for AgentProviderToolCallIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentProviderToolCallIdentity([REDACTED])")
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentAssistantTurnCheckpointIdentity {
+    pub assistant_turn_id: String,
+    pub assistant_turn_digest: String,
+    pub tool_call_identities: Vec<AgentProviderToolCallIdentity>,
+}
+
+impl std::fmt::Debug for AgentAssistantTurnCheckpointIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AgentAssistantTurnCheckpointIdentity([REDACTED])")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -325,6 +380,9 @@ pub struct AgentQueuedToolCallCheckpoint {
     pub call: AgentContextCheckpointToolCall,
     pub assistant_content: String,
     pub group_id: String,
+    /// Reference into `AgentRunCheckpoint.assistant_turn_identity.tool_call_identities`.
+    pub assistant_turn_id: String,
+    pub provider_tool_index: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

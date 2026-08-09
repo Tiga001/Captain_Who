@@ -4,11 +4,12 @@ use mycopilot_core::{
     AgentInputAttachment, AgentPromptPreferences, AgentRunCheckpoint, AgentRunContext,
     AgentSearchConfig, AgentSearchMode, AgentSkillActivation, AgentToolContinuation,
     AnchoredWorldStateRecord, ContextCompactionSummary, ConversationGoal, ModelCapabilities,
+    ProviderProfileConfig, ProviderProtocolKey,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 3;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 5;
 
 /// Explicit allowlist for the durable continuation input owned by core-server.
 ///
@@ -23,6 +24,13 @@ pub(super) struct PersistedAgentResumeInput {
     /// Opaque, random identity of the exact settings save used by the Host. It contains no
     /// credential-derived material and is intentionally unavailable to Renderer.
     provider_configuration_revision: String,
+    /// Stable identity of the selected model's effective endpoint/token pair. It is random and
+    /// contains no credential-derived material.
+    provider_connection_revision: String,
+    /// Stable identity of the effective search mode/credential pair.
+    search_connection_revision: String,
+    provider_profile_config: ProviderProfileConfig,
+    provider_protocol_key: ProviderProtocolKey,
     /// SHA-256 of the exact Host-resolved endpoint. The URL itself may contain credentials and
     /// therefore never enters the durable row.
     provider_endpoint_digest: String,
@@ -68,6 +76,8 @@ struct PersistedAgentSearchConfig {
 pub(super) struct DecodedPersistedAgentResumeInput {
     pub(super) agent_input: AgentChatInput,
     pub(super) provider_configuration_revision: String,
+    pub(super) provider_connection_revision: String,
+    pub(super) search_connection_revision: String,
     pub(super) provider_endpoint_digest: String,
     pub(super) provider_credential_required: bool,
     pub(super) search_credential_required: bool,
@@ -87,13 +97,81 @@ pub(super) enum PersistedAgentResumeInputError {
 }
 
 impl PersistedAgentResumeInput {
-    pub(super) fn from_agent_input(input: &AgentChatInput) -> Self {
-        Self {
-            resume_input_schema_version: PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION,
-            provider_configuration_revision: input
+    pub(super) fn from_agent_input(input: &AgentChatInput) -> Result<Self, String> {
+        let provider_configuration_revision = input
+            .provider_configuration_revision
+            .clone()
+            .ok_or_else(|| {
+                "pending Agent input is missing its frozen provider settings revision".to_string()
+            })?;
+        if !mycopilot_core::storage::config_repository::is_model_settings_revision(
+            &provider_configuration_revision,
+        ) {
+            return Err(
+                "pending Agent input has an invalid frozen provider settings revision".to_string(),
+            );
+        }
+        let provider_connection_revision =
+            input.provider_connection_revision.clone().ok_or_else(|| {
+                "pending Agent input is missing its frozen provider connection revision".to_string()
+            })?;
+        if !mycopilot_core::storage::config_repository::is_provider_connection_revision(
+            &provider_connection_revision,
+        ) {
+            return Err(
+                "pending Agent input has an invalid frozen provider connection revision"
+                    .to_string(),
+            );
+        }
+        let search_connection_revision =
+            input.search_connection_revision.clone().ok_or_else(|| {
+                "pending Agent input is missing its frozen search connection revision".to_string()
+            })?;
+        if !mycopilot_core::storage::config_repository::is_search_connection_revision(
+            &search_connection_revision,
+        ) {
+            return Err(
+                "pending Agent input has an invalid frozen search connection revision".to_string(),
+            );
+        }
+        let provider_profile_config = input.provider_profile_config.clone().ok_or_else(|| {
+            "pending Agent input is missing its frozen Provider Profile".to_string()
+        })?;
+        provider_profile_config
+            .validate()
+            .map_err(|_| "pending Agent input has an invalid Provider Profile".to_string())?;
+        let provider_protocol_key = input.provider_protocol_key.clone().ok_or_else(|| {
+            "pending Agent input is missing its frozen Provider Protocol key".to_string()
+        })?;
+        provider_protocol_key
+            .validate_against_config(&provider_profile_config)
+            .map_err(|_| "pending Agent input has an invalid Provider Protocol key".to_string())?;
+        if provider_protocol_key.model_id != input.model
+            || provider_protocol_key
                 .provider_configuration_revision
-                .clone()
-                .unwrap_or_default(),
+                .as_deref()
+                != Some(provider_configuration_revision.as_str())
+        {
+            return Err(
+                "pending Agent input Provider Protocol provenance is inconsistent".to_string(),
+            );
+        }
+        if input.resume_checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.provider_profile_config != provider_profile_config
+                || checkpoint.provider_protocol_key != provider_protocol_key
+        }) {
+            return Err(
+                "pending Agent checkpoint Provider Protocol provenance is inconsistent".to_string(),
+            );
+        }
+
+        Ok(Self {
+            resume_input_schema_version: PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION,
+            provider_configuration_revision,
+            provider_connection_revision,
+            search_connection_revision,
+            provider_profile_config,
+            provider_protocol_key,
             provider_endpoint_digest: sha256_hex(input.api_url.as_bytes()),
             provider_credential_required: !input.api_token.trim().is_empty(),
             model: input.model.clone(),
@@ -131,7 +209,7 @@ impl PersistedAgentResumeInput {
             skill_activation: input.skill_activation.clone(),
             skill_discovery: input.skill_discovery.clone(),
             messages: Vec::new(),
-        }
+        })
     }
 
     pub(super) fn encode(&self) -> String {
@@ -162,6 +240,28 @@ impl PersistedAgentResumeInput {
         ) {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
+        if !mycopilot_core::storage::config_repository::is_provider_connection_revision(
+            &self.provider_connection_revision,
+        ) || !mycopilot_core::storage::config_repository::is_search_connection_revision(
+            &self.search_connection_revision,
+        ) {
+            return Err(PersistedAgentResumeInputError::InvalidShape);
+        }
+        self.provider_profile_config
+            .validate()
+            .map_err(|_| PersistedAgentResumeInputError::InvalidShape)?;
+        self.provider_protocol_key
+            .validate_against_config(&self.provider_profile_config)
+            .map_err(|_| PersistedAgentResumeInputError::InvalidShape)?;
+        if self.provider_protocol_key.model_id != self.model
+            || self
+                .provider_protocol_key
+                .provider_configuration_revision
+                .as_deref()
+                != Some(self.provider_configuration_revision.as_str())
+        {
+            return Err(PersistedAgentResumeInputError::InvalidShape);
+        }
         if self.approval_decision.is_some()
             || self.tool_continuation.is_some()
             || !self.attachments.is_empty()
@@ -176,6 +276,8 @@ impl PersistedAgentResumeInput {
             .is_some_and(|search| search.credential_required);
         Ok(DecodedPersistedAgentResumeInput {
             provider_configuration_revision: self.provider_configuration_revision.clone(),
+            provider_connection_revision: self.provider_connection_revision.clone(),
+            search_connection_revision: self.search_connection_revision.clone(),
             provider_endpoint_digest: self.provider_endpoint_digest,
             provider_credential_required: self.provider_credential_required,
             search_credential_required,
@@ -183,6 +285,10 @@ impl PersistedAgentResumeInput {
                 api_url: String::new(),
                 api_token: String::new(),
                 provider_configuration_revision: Some(self.provider_configuration_revision),
+                provider_connection_revision: Some(self.provider_connection_revision),
+                search_connection_revision: Some(self.search_connection_revision),
+                provider_profile_config: Some(self.provider_profile_config),
+                provider_protocol_key: Some(self.provider_protocol_key),
                 model: self.model,
                 model_capabilities: self.model_capabilities,
                 api_style: self.api_style,
@@ -218,14 +324,7 @@ pub(super) fn persisted_endpoint_digest(value: &str) -> String {
 }
 
 fn resolved_api_style(api_url: &str) -> AgentApiStyle {
-    let normalized = api_url.trim().to_ascii_lowercase();
-    if normalized.contains("/chat/completions") {
-        AgentApiStyle::OpenAiCompatible
-    } else if normalized.contains("anthropic") || normalized.ends_with("/messages") {
-        AgentApiStyle::AnthropicCompatible
-    } else {
-        AgentApiStyle::OpenAiCompatible
-    }
+    mycopilot_core::ProviderProtocolDialect::detect_from_api_url(api_url).api_style()
 }
 
 fn sha256_hex(value: &[u8]) -> String {
@@ -254,7 +353,7 @@ mod tests {
     const API_URL_CANARY: &str = "PENDING_API_URL_QUERY_CANARY_DO_NOT_PERSIST";
     const SEARCH_KEY_CANARY: &str = "PENDING_SEARCH_KEY_CANARY_DO_NOT_PERSIST";
 
-    fn checkpoint() -> AgentRunCheckpoint {
+    fn checkpoint(provider_configuration_revision: &str) -> AgentRunCheckpoint {
         serde_json::from_value(json!({
             "version": mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
             "runId": "run-persisted-resume",
@@ -266,6 +365,26 @@ mod tests {
             "toolSet": crate::test_tool_set_checkpoint(),
             "runContext": null,
             "modelCapabilities": { "imageInput": false },
+            "providerProfileConfig": {
+                "schemaVersion": 1,
+                "profile": { "id": "generic_openai_chat", "version": 1 },
+                "reasoning": { "mode": "provider_default", "effort": "provider_default" }
+            },
+            "providerProtocolKey": {
+                "dialect": "openai_chat_completions",
+                "profile": { "id": "generic_openai_chat", "version": 1 },
+                "modelId": "test-model",
+                "providerConfigurationRevision": provider_configuration_revision
+            },
+            "assistantTurnIdentity": {
+                "assistantTurnId": "turn-persisted-resume",
+                "assistantTurnDigest": "digest-persisted-resume",
+                "toolCallIdentities": [{
+                    "providerToolIndex": 0,
+                    "providerCallId": "call-persisted-resume",
+                    "runtimeCallId": "call-persisted-resume"
+                }]
+            },
             "runWorldState": crate::test_run_world_state(),
             "pendingToolCallId": "call-persisted-resume",
             "conversationTraceItems": [],
@@ -290,9 +409,25 @@ mod tests {
             }]
         }))
         .unwrap();
-        input.resume_checkpoint = Some(checkpoint());
-        input.provider_configuration_revision =
-            Some(format!("model-settings-v1:{}", uuid::Uuid::new_v4()));
+        let provider_configuration_revision = format!("model-settings-v1:{}", uuid::Uuid::new_v4());
+        let provider_profile_config = ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        );
+        let provider_protocol_key = ProviderProtocolKey::new(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+            &provider_profile_config,
+            "test-model",
+            Some(provider_configuration_revision.clone()),
+        )
+        .unwrap();
+        input.resume_checkpoint = Some(checkpoint(&provider_configuration_revision));
+        input.provider_configuration_revision = Some(provider_configuration_revision);
+        input.provider_connection_revision =
+            Some(format!("provider-connection-v1:{}", uuid::Uuid::new_v4()));
+        input.search_connection_revision =
+            Some(format!("search-connection-v1:{}", uuid::Uuid::new_v4()));
+        input.provider_profile_config = Some(provider_profile_config);
+        input.provider_protocol_key = Some(provider_protocol_key);
         input
     }
 
@@ -300,14 +435,29 @@ mod tests {
     fn allowlisted_projection_contains_no_connection_or_search_secret() {
         let input = input();
         let renderer_wire = serde_json::to_string(&input).unwrap();
-        assert!(!renderer_wire.contains("providerConfigurationRevision"));
-        let encoded = PersistedAgentResumeInput::from_agent_input(&input).encode();
+        let renderer_wire_value = serde_json::from_str::<Value>(&renderer_wire).unwrap();
+        assert!(renderer_wire_value
+            .get("providerConfigurationRevision")
+            .is_none());
+        assert!(renderer_wire_value
+            .get("providerConnectionRevision")
+            .is_none());
+        assert!(renderer_wire_value
+            .get("searchConnectionRevision")
+            .is_none());
+        assert!(renderer_wire_value.get("providerProfileConfig").is_none());
+        assert!(renderer_wire_value.get("providerProtocolKey").is_none());
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input)
+            .unwrap()
+            .encode();
 
+        assert!(encoded.contains("\"providerProfileConfig\""));
+        assert!(encoded.contains("\"providerProtocolKey\""));
         assert!(!encoded.contains(API_TOKEN_CANARY));
         assert!(!encoded.contains(API_URL_CANARY));
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
-        assert!(encoded.contains("\"resumeInputSchemaVersion\":3"));
+        assert!(encoded.contains("\"resumeInputSchemaVersion\":5"));
         for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
             assert!(
                 !encoded.contains(forbidden_key),
@@ -340,6 +490,22 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_or_diverged_provider_freeze_fails_without_panicking() {
+        let mut missing = input();
+        missing.provider_protocol_key = None;
+        assert!(PersistedAgentResumeInput::from_agent_input(&missing).is_err());
+
+        let mut diverged = input();
+        diverged
+            .resume_checkpoint
+            .as_mut()
+            .unwrap()
+            .provider_protocol_key
+            .model_id = "different-model".to_string();
+        assert!(PersistedAgentResumeInput::from_agent_input(&diverged).is_err());
+    }
+
+    #[test]
     fn legacy_full_agent_input_and_unknown_fields_fail_closed() {
         let legacy = serde_json::to_string(&input()).unwrap();
         assert_eq!(
@@ -347,7 +513,9 @@ mod tests {
             PersistedAgentResumeInputError::LegacyOrUnsupported
         );
 
-        let encoded = PersistedAgentResumeInput::from_agent_input(&input()).encode();
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input())
+            .unwrap()
+            .encode();
         let mut value = serde_json::from_str::<Value>(&encoded).unwrap();
         value["futureSecretField"] =
             Value::String("must not become durable implicitly".to_string());
@@ -359,7 +527,9 @@ mod tests {
 
     #[test]
     fn legacy_versioned_rows_with_connection_or_search_keys_are_rejected() {
-        let encoded = PersistedAgentResumeInput::from_agent_input(&input()).encode();
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input())
+            .unwrap()
+            .encode();
         for (key, value) in [
             (
                 "apiUrl",
@@ -382,7 +552,7 @@ mod tests {
             PersistedAgentResumeInputError::LegacyOrUnsupported
         );
 
-        for legacy_version in [1, 2] {
+        for legacy_version in [1, 2, 3, 4] {
             let mut old_version = serde_json::from_str::<Value>(&encoded).unwrap();
             old_version["resumeInputSchemaVersion"] = Value::from(legacy_version);
             assert_eq!(
@@ -396,6 +566,48 @@ mod tests {
             Value::String("model-settings-v1:not-a-uuid".to_string());
         assert_eq!(
             PersistedAgentResumeInput::decode(&invalid_revision.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
+        );
+
+        for field in ["providerConnectionRevision", "searchConnectionRevision"] {
+            let mut invalid_connection_revision = serde_json::from_str::<Value>(&encoded).unwrap();
+            invalid_connection_revision[field] = Value::String("not-a-revision".to_string());
+            assert_eq!(
+                PersistedAgentResumeInput::decode(&invalid_connection_revision.to_string())
+                    .unwrap_err(),
+                PersistedAgentResumeInputError::InvalidShape
+            );
+        }
+    }
+
+    #[test]
+    fn provider_profile_and_protocol_provenance_mismatches_fail_closed() {
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input())
+            .unwrap()
+            .encode();
+
+        let mut unknown_profile_version = serde_json::from_str::<Value>(&encoded).unwrap();
+        unknown_profile_version["providerProfileConfig"]["profile"]["version"] = Value::from(99);
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&unknown_profile_version.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
+        );
+
+        let mut wrong_model = serde_json::from_str::<Value>(&encoded).unwrap();
+        wrong_model["providerProtocolKey"]["modelId"] =
+            Value::String("different-model".to_string());
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&wrong_model.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
+        );
+
+        let mut mismatched_profile = serde_json::from_str::<Value>(&encoded).unwrap();
+        mismatched_profile["providerProfileConfig"]["profile"] = json!({
+            "id": "deepseek_v4_chat",
+            "version": 1
+        });
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&mismatched_profile.to_string()).unwrap_err(),
             PersistedAgentResumeInputError::InvalidShape
         );
     }

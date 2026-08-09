@@ -1,3 +1,6 @@
+use super::adapter::ProviderAdapterRegistry;
+use super::payload::build_payload;
+use super::response::extract_tool_calls;
 use super::transport::*;
 use super::*;
 
@@ -13,8 +16,8 @@ fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: CANARY.to_string(),
-        model: "test-model".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "test-model"),
         max_tokens: 100,
         temperature: 0.0,
         stream: false,
@@ -22,8 +25,7 @@ fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
         tools: Vec::new(),
     };
     let response = LlmChatResponse {
-        content: CANARY.to_string(),
-        tool_calls: vec![tool_call.clone()],
+        assistant_turn: LlmAssistantTurn::from_legacy(CANARY, vec![tool_call.clone()]),
         usage: None,
         finish_reason: None,
     };
@@ -51,6 +53,7 @@ use crate::conversation_trace::{
     ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use crate::protocol::{AgentApprovalStatus, AgentChatMessage, AgentToolSafety};
+use crate::usage::extract_usage;
 use crate::world_state::{
     WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
     WorldStateSnapshot,
@@ -61,6 +64,15 @@ use tokio::net::{TcpListener, TcpStream};
 
 fn message(role: LlmMessageRole, content: &str) -> LlmMessage {
     LlmMessage::text(role, content)
+}
+
+fn generic_provider_profile(api_style: AgentApiStyle) -> ProviderProfileConfig {
+    ProviderProfileConfig::generic_for_dialect(api_style.into())
+}
+
+fn generic_provider_protocol(api_style: AgentApiStyle, model: &str) -> ProviderProtocolKey {
+    let profile = generic_provider_profile(api_style);
+    ProviderProtocolKey::new(api_style.into(), &profile, model, None).unwrap()
 }
 
 fn joined_text(events: &[LlmStreamEvent]) -> String {
@@ -115,8 +127,8 @@ fn request_with_messages(messages: Vec<LlmMessage>) -> LlmChatRequest {
     LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "gpt".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: true,
@@ -341,8 +353,11 @@ async fn streaming_retries_the_known_upstream_content_type_400_and_recovers() {
     let request = LlmChatRequest {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "token".to_string(),
-        model: "claude-opus-4-7".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(
+            AgentApiStyle::OpenAiCompatible,
+            "claude-opus-4-7",
+        ),
         max_tokens: 1_024,
         temperature: 0.2,
         stream: false,
@@ -370,7 +385,7 @@ async fn streaming_retries_the_known_upstream_content_type_400_and_recovers() {
         .unwrap();
     server.await.unwrap();
 
-    assert_eq!(response.content, "recovered");
+    assert_eq!(response.content(), "recovered");
     assert_eq!(attempts_started, 2);
     assert_eq!(attempts_reset, 1);
     assert_eq!(retries, 1);
@@ -430,7 +445,7 @@ async fn qizhen_429_retries_from_structured_code_and_recovers() {
         .await
         .unwrap();
     server.await.unwrap();
-    assert_eq!(response.content, "recovered");
+    assert_eq!(response.content(), "recovered");
     assert_eq!(
         response
             .usage
@@ -681,8 +696,8 @@ fn rejects_incompatible_tool_schema_before_building_an_http_request() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "gpt".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: true,
@@ -889,8 +904,8 @@ async fn streaming_stop_without_text_or_tools_is_a_repairable_semantic_error() {
     let request = LlmChatRequest {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "token".to_string(),
-        model: "test-model".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "test-model"),
         max_tokens: 1_024,
         temperature: 0.2,
         stream: true,
@@ -994,24 +1009,18 @@ fn internal_callers_can_defer_empty_response_validation() {
         }]
     })
     .to_string();
+    let protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "test-model");
 
-    let strict = parse_non_stream_response(
-        &body,
-        AgentApiStyle::OpenAiCompatible,
-        LlmResponseValidation::RequireModelAction,
-    );
-    let deferred = parse_non_stream_response(
-        &body,
-        AgentApiStyle::OpenAiCompatible,
-        LlmResponseValidation::AllowEmpty,
-    )
-    .unwrap();
+    let strict =
+        parse_non_stream_response(&body, &protocol, LlmResponseValidation::RequireModelAction);
+    let deferred =
+        parse_non_stream_response(&body, &protocol, LlmResponseValidation::AllowEmpty).unwrap();
 
     let strict = strict.unwrap_err();
     assert!(strict.to_string().contains("没有可显示文本"));
     assert_eq!(strict.code(), Some(EMPTY_MODEL_ACTION_ERROR_CODE));
     assert!(!is_repairable_empty_model_action(&strict));
-    assert!(deferred.content.is_empty());
+    assert!(deferred.content().is_empty());
     assert_eq!(deferred.finish_reason.as_deref(), Some("length"));
 
     let normal_stop = json!({
@@ -1026,7 +1035,7 @@ fn internal_callers_can_defer_empty_response_validation() {
     .to_string();
     let repairable = parse_non_stream_response(
         &normal_stop,
-        AgentApiStyle::OpenAiCompatible,
+        &protocol,
         LlmResponseValidation::RequireModelAction,
     )
     .unwrap_err();
@@ -1051,8 +1060,8 @@ fn moves_system_messages_to_anthropic_system_field() {
     let request = LlmChatRequest {
         api_url: "https://api.anthropic.com/v1/messages".to_string(),
         api_token: "token".to_string(),
-        model: "claude".to_string(),
-        api_style: AgentApiStyle::AnthropicCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::AnthropicCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::AnthropicCompatible, "claude"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1077,8 +1086,8 @@ fn anthropic_only_hoists_stable_system_policy() {
     let request = LlmChatRequest {
         api_url: "https://api.anthropic.com/v1/messages".to_string(),
         api_token: "token".to_string(),
-        model: "claude".to_string(),
-        api_style: AgentApiStyle::AnthropicCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::AnthropicCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::AnthropicCompatible, "claude"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1119,12 +1128,12 @@ fn anthropic_only_hoists_stable_system_policy() {
 #[test]
 fn anthropic_keeps_nonstable_runtime_messages_chronological_without_state_tag() {
     let mut runtime_message = message(LlmMessageRole::System, "Continue the active run.");
-    runtime_message.placement = LlmMessagePlacement::OrdinaryTimeline;
+    runtime_message.set_placement(LlmMessagePlacement::OrdinaryTimeline);
     let request = LlmChatRequest {
         api_url: "https://api.anthropic.com/v1/messages".to_string(),
         api_token: "token".to_string(),
-        model: "claude".to_string(),
-        api_style: AgentApiStyle::AnthropicCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::AnthropicCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::AnthropicCompatible, "claude"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1155,8 +1164,8 @@ fn openai_preserves_backend_state_chronology_without_system_authority() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "gpt".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1298,27 +1307,27 @@ fn world_state_checkpoint_round_trip_preserves_provider_placement() {
     let restored_messages = restored.to_messages();
 
     assert_eq!(
-        restored_messages[0].placement,
+        restored_messages[0].placement(),
         LlmMessagePlacement::StableSystemPolicy
     );
     assert_eq!(
-        restored_messages[1].placement,
+        restored_messages[1].placement(),
         LlmMessagePlacement::BackendStateTimeline
     );
     assert_eq!(
-        restored_messages[4].placement,
+        restored_messages[4].placement(),
         LlmMessagePlacement::BackendStateTimeline
     );
     assert_eq!(
-        restored_messages[6].placement,
+        restored_messages[6].placement(),
         LlmMessagePlacement::BackendStateTimeline
     );
 
     let request = |api_style| LlmChatRequest {
         api_url: "https://example.test".to_string(),
         api_token: "token".to_string(),
-        model: "model".to_string(),
-        api_style,
+        provider_profile: generic_provider_profile(api_style),
+        provider_protocol: generic_provider_protocol(api_style, "model"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1382,12 +1391,12 @@ fn message_placement_distinguishes_stable_policy_from_timeline_state() {
     let backend_state = LlmMessage::backend_state("state");
     let ordinary = message(LlmMessageRole::User, "request");
 
-    assert_eq!(stable.placement, LlmMessagePlacement::StableSystemPolicy);
+    assert_eq!(stable.placement(), LlmMessagePlacement::StableSystemPolicy);
     assert_eq!(
-        backend_state.placement,
+        backend_state.placement(),
         LlmMessagePlacement::BackendStateTimeline
     );
-    assert_eq!(ordinary.placement, LlmMessagePlacement::OrdinaryTimeline);
+    assert_eq!(ordinary.placement(), LlmMessagePlacement::OrdinaryTimeline);
 }
 
 #[test]
@@ -1395,8 +1404,11 @@ fn omits_temperature_for_claude_models() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "claude-opus-4-7".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(
+            AgentApiStyle::OpenAiCompatible,
+            "claude-opus-4-7",
+        ),
         max_tokens: 1024,
         temperature: 0.2,
         stream: true,
@@ -1430,8 +1442,8 @@ fn builds_openai_native_tool_payload_and_tool_result_messages() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "gpt".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1467,8 +1479,8 @@ fn builds_openai_mcp_namespace_tool_payload_without_internal_catalog_fields() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "gpt".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1518,8 +1530,8 @@ fn builds_anthropic_mcp_namespace_tool_payload_without_internal_catalog_fields()
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/messages".to_string(),
         api_token: "token".to_string(),
-        model: "claude".to_string(),
-        api_style: AgentApiStyle::AnthropicCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::AnthropicCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::AnthropicCompatible, "claude"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1609,8 +1621,8 @@ fn assembled_context_preserves_order_across_provider_payloads() {
     let request = |api_style| LlmChatRequest {
         api_url: "https://example.test".to_string(),
         api_token: "token".to_string(),
-        model: "model".to_string(),
-        api_style,
+        provider_profile: generic_provider_profile(api_style),
+        provider_protocol: generic_provider_protocol(api_style, "model"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1691,8 +1703,8 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
     let request = |api_style| LlmChatRequest {
         api_url: "https://example.test".to_string(),
         api_token: "token".to_string(),
-        model: "model".to_string(),
-        api_style,
+        provider_profile: generic_provider_profile(api_style),
+        provider_protocol: generic_provider_protocol(api_style, "model"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1766,15 +1778,15 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
 #[test]
 fn builds_openai_image_messages_with_image_url_parts() {
     let mut image_message = message(LlmMessageRole::User, "Inspect this image.");
-    image_message.images.push(LlmImage {
+    image_message.images_mut().unwrap().push(LlmImage {
         mime_type: "image/png".to_string(),
         data_base64: "YWJj".to_string(),
     });
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "token".to_string(),
-        model: "gpt".to_string(),
-        api_style: AgentApiStyle::OpenAiCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::OpenAiCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1794,8 +1806,8 @@ fn builds_anthropic_native_tool_payload_and_tool_result_messages() {
     let request = LlmChatRequest {
         api_url: "https://api.anthropic.com/v1/messages".to_string(),
         api_token: "token".to_string(),
-        model: "claude".to_string(),
-        api_style: AgentApiStyle::AnthropicCompatible,
+        provider_profile: generic_provider_profile(AgentApiStyle::AnthropicCompatible),
+        provider_protocol: generic_provider_protocol(AgentApiStyle::AnthropicCompatible, "claude"),
         max_tokens: 1024,
         temperature: 0.2,
         stream: false,
@@ -1832,7 +1844,7 @@ fn extracts_native_tool_calls() {
         "choices": [{
             "message": {
                 "tool_calls": [{
-                    "id": "call-1",
+                    "id": " call-1 ",
                     "type": "function",
                     "function": {
                         "name": "read_file",
@@ -1845,7 +1857,7 @@ fn extracts_native_tool_calls() {
     let anthropic = json!({
         "content": [{
             "type": "tool_use",
-            "id": "toolu-1",
+            "id": " toolu-1 ",
             "name": "search_files",
             "input": { "query": "main" }
         }]
@@ -1855,12 +1867,166 @@ fn extracts_native_tool_calls() {
     let anthropic_calls =
         extract_tool_calls(&anthropic, AgentApiStyle::AnthropicCompatible).unwrap();
 
-    assert_eq!(openai_calls[0].id, "call-1");
+    assert_eq!(openai_calls[0].id, " call-1 ");
     assert_eq!(openai_calls[0].name, "read_file");
     assert_eq!(openai_calls[0].args["path"], "src/lib.rs");
-    assert_eq!(anthropic_calls[0].id, "toolu-1");
+    assert_eq!(anthropic_calls[0].id, " toolu-1 ");
     assert_eq!(anthropic_calls[0].name, "search_files");
     assert_eq!(anthropic_calls[0].args["query"], "main");
+}
+
+#[test]
+fn provider_tool_call_ids_preserve_the_byte_boundary_and_short_duplicates() {
+    let protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt");
+    let boundary_id = "é".repeat(MAX_PROVIDER_TOOL_CALL_ID_BYTES / "é".len());
+    assert_eq!(boundary_id.len(), MAX_PROVIDER_TOOL_CALL_ID_BYTES);
+    let duplicate_id = " provider-opaque-id ";
+    let calls = vec![
+        LlmToolCall {
+            id: boundary_id.clone(),
+            name: "read_file".to_string(),
+            args: json!({}),
+        },
+        LlmToolCall {
+            id: duplicate_id.to_string(),
+            name: "read_file".to_string(),
+            args: json!({}),
+        },
+        LlmToolCall {
+            id: duplicate_id.to_string(),
+            name: "read_file".to_string(),
+            args: json!({}),
+        },
+    ];
+
+    let turn = LlmAssistantTurn::from_provider(protocol.clone(), "", calls).unwrap();
+    assert_eq!(turn.provider_tool_calls()[0].id, boundary_id);
+    assert_eq!(turn.provider_tool_calls()[1].id, duplicate_id);
+    assert_eq!(turn.provider_tool_calls()[2].id, duplicate_id);
+
+    let oversized = LlmAssistantTurn::from_provider(
+        protocol,
+        "",
+        vec![LlmToolCall {
+            id: "x".repeat(MAX_PROVIDER_TOOL_CALL_ID_BYTES + 1),
+            name: "read_file".to_string(),
+            args: json!({}),
+        }],
+    )
+    .unwrap_err();
+    assert_eq!(
+        oversized.code(),
+        Some("agent.invalid_provider_tool_call_id")
+    );
+
+    let empty = LlmAssistantTurn::from_provider(
+        generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt"),
+        "",
+        vec![LlmToolCall {
+            id: String::new(),
+            name: "read_file".to_string(),
+            args: json!({}),
+        }],
+    )
+    .unwrap_err();
+    assert_eq!(empty.code(), Some("agent.invalid_provider_tool_call_id"));
+
+    let forged_provider_call = LlmToolCall {
+        id: "x".repeat(MAX_PROVIDER_TOOL_CALL_ID_BYTES + 1),
+        name: "read_file".to_string(),
+        args: json!({}),
+    };
+    let forged_binding = LlmRuntimeToolCallBinding::new(
+        0,
+        &forged_provider_call,
+        LlmToolCall {
+            id: model_response_tool_call_id("forged-checkpoint", 0, 0, "provider"),
+            name: forged_provider_call.name.clone(),
+            args: forged_provider_call.args.clone(),
+        },
+    );
+    let forged = LlmAssistantTurn::from_legacy("", vec![forged_provider_call])
+        .with_runtime_tool_bindings(vec![forged_binding])
+        .unwrap_err();
+    assert_eq!(forged.code(), Some("agent.invalid_provider_tool_call_id"));
+}
+
+#[test]
+fn oversized_provider_tool_call_ids_fail_closed_nonstream_and_stream() {
+    let oversized_id = "x".repeat(MAX_PROVIDER_TOOL_CALL_ID_BYTES + 1);
+    let protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt");
+    let nonstream = parse_non_stream_response(
+        &json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": oversized_id,
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        })
+        .to_string(),
+        &protocol,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap_err();
+    assert_eq!(
+        nonstream.code(),
+        Some("agent.invalid_provider_tool_call_id")
+    );
+
+    let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+    process_sse_frame(
+        &format!(
+            "data: {}\n\n",
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": oversized_id,
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })
+        ),
+        &mut accumulator,
+        &mut |_| {},
+    )
+    .unwrap();
+    let stream = accumulator.finish().unwrap_err();
+    assert_eq!(stream.code(), Some("agent.invalid_provider_tool_call_id"));
+}
+
+#[test]
+fn provider_checkpoint_identity_debug_is_redacted() {
+    const CANARY: &str = "RAW_PROVIDER_CALL_ID_DEBUG_CANARY";
+    let mapping = AgentProviderToolCallIdentity {
+        provider_tool_index: 0,
+        provider_call_id: CANARY.to_string(),
+        runtime_call_id: "runtime-id".to_string(),
+    };
+    let identity = AgentAssistantTurnCheckpointIdentity {
+        assistant_turn_id: "turn-id".to_string(),
+        assistant_turn_digest: "digest".to_string(),
+        tool_call_identities: vec![mapping.clone()],
+    };
+
+    assert!(!format!("{mapping:?}").contains(CANARY));
+    assert!(!format!("{identity:?}").contains(CANARY));
 }
 
 #[test]
@@ -1942,11 +2108,11 @@ fn openai_stream_accumulates_text_and_tool_calls() {
         }
             if tool == "read_file" && *received_bytes > 0
     )));
-    assert_eq!(response.content, "Hello");
+    assert_eq!(response.content(), "Hello");
     assert_eq!(response.finish_reason, Some("tool_calls".to_string()));
-    assert_eq!(response.tool_calls[0].id, "call-1");
-    assert_eq!(response.tool_calls[0].name, "read_file");
-    assert_eq!(response.tool_calls[0].args["path"], "src/lib.rs");
+    assert_eq!(response.provider_tool_calls()[0].id, "call-1");
+    assert_eq!(response.provider_tool_calls()[0].name, "read_file");
+    assert_eq!(response.provider_tool_calls()[0].args["path"], "src/lib.rs");
 }
 
 #[test]
@@ -2039,12 +2205,12 @@ fn anthropic_stream_accumulates_text_and_tool_calls() {
         }
             if tool == "search_files" && *received_bytes > 0
     )));
-    assert_eq!(response.content, "Hi there");
+    assert_eq!(response.content(), "Hi there");
     assert_eq!(response.finish_reason, Some("tool_use".to_string()));
-    assert_eq!(response.usage.unwrap().output_tokens, Some(8));
-    assert_eq!(response.tool_calls[0].id, "toolu-1");
-    assert_eq!(response.tool_calls[0].name, "search_files");
-    assert_eq!(response.tool_calls[0].args["query"], "main");
+    assert_eq!(response.usage.as_ref().unwrap().output_tokens, Some(8));
+    assert_eq!(response.provider_tool_calls()[0].id, "toolu-1");
+    assert_eq!(response.provider_tool_calls()[0].name, "search_files");
+    assert_eq!(response.provider_tool_calls()[0].args["query"], "main");
 }
 
 #[test]
@@ -2078,4 +2244,531 @@ fn extracts_openai_and_anthropic_usage() {
     assert_eq!(anthropic_usage.cached_input_tokens, Some(2));
     assert_eq!(anthropic_usage.cache_creation_input_tokens, Some(1));
     assert_eq!(anthropic_usage.billable_request_count, Some(1));
+}
+
+#[test]
+fn generic_adapters_project_complete_multi_tool_turn_to_legacy_wire_order() {
+    for api_style in [
+        AgentApiStyle::OpenAiCompatible,
+        AgentApiStyle::AnthropicCompatible,
+    ] {
+        let model = if api_style == AgentApiStyle::OpenAiCompatible {
+            "gpt"
+        } else {
+            "claude"
+        };
+        let profile = generic_provider_profile(api_style);
+        let protocol = generic_provider_protocol(api_style, model);
+        let provider_calls = vec![
+            LlmToolCall {
+                id: "provider-call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"a.txt"}),
+            },
+            LlmToolCall {
+                id: "provider-call-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"b.txt"}),
+            },
+        ];
+        let runtime_calls = [
+            LlmToolCall {
+                id: "runtime-call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"a.txt"}),
+            },
+            LlmToolCall {
+                id: "runtime-call-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"b.txt"}),
+            },
+        ];
+        let bindings = provider_calls
+            .iter()
+            .zip(runtime_calls.iter().cloned())
+            .enumerate()
+            .map(|(index, (provider_call, runtime_call))| {
+                LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
+            })
+            .collect();
+        let turn = LlmAssistantTurn::from_provider(
+            protocol.clone(),
+            "I will read both files.",
+            provider_calls,
+        )
+        .unwrap()
+        .with_runtime_tool_bindings(bindings)
+        .unwrap();
+        let request = LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            provider_profile: profile,
+            provider_protocol: protocol,
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![
+                LlmMessage::from_assistant_turn(turn),
+                LlmMessage::tool_result("runtime-call-1", "a", false),
+                LlmMessage::tool_result("runtime-call-2", "b", false),
+            ],
+            tools: Vec::new(),
+        };
+
+        let payload = build_payload(&request);
+        let messages = payload["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[2]["role"], "assistant");
+        if api_style == AgentApiStyle::OpenAiCompatible {
+            assert_eq!(messages[0]["content"], "I will read both files.");
+            assert_eq!(messages[0]["tool_calls"][0]["id"], "runtime-call-1");
+            assert_eq!(messages[1]["role"], "tool");
+            assert_eq!(messages[1]["tool_call_id"], "runtime-call-1");
+            assert!(messages[2]["content"].is_null());
+            assert_eq!(messages[2]["tool_calls"][0]["id"], "runtime-call-2");
+            assert_eq!(messages[3]["tool_call_id"], "runtime-call-2");
+        } else {
+            assert_eq!(messages[0]["content"][0]["text"], "I will read both files.");
+            assert_eq!(messages[0]["content"][1]["id"], "runtime-call-1");
+            assert_eq!(messages[1]["content"][0]["tool_use_id"], "runtime-call-1");
+            assert_eq!(messages[2]["content"][0]["id"], "runtime-call-2");
+            assert_eq!(messages[3]["content"][0]["tool_use_id"], "runtime-call-2");
+        }
+    }
+}
+
+#[test]
+fn generic_adapters_project_interleaved_image_and_runtime_extension_to_legal_wire() {
+    for api_style in [
+        AgentApiStyle::OpenAiCompatible,
+        AgentApiStyle::AnthropicCompatible,
+    ] {
+        let model = if api_style == AgentApiStyle::OpenAiCompatible {
+            "gpt"
+        } else {
+            "claude"
+        };
+        let profile = generic_provider_profile(api_style);
+        let protocol = generic_provider_protocol(api_style, model);
+        let provider_calls = vec![
+            LlmToolCall {
+                id: "provider-call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"one.png"}),
+            },
+            LlmToolCall {
+                id: "provider-call-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"two.txt"}),
+            },
+        ];
+        let runtime_calls = provider_calls
+            .iter()
+            .enumerate()
+            .map(|(index, provider_call)| LlmToolCall {
+                id: model_response_tool_call_id(
+                    "interleaved-projection-run",
+                    0,
+                    index,
+                    &provider_call.id,
+                ),
+                name: provider_call.name.clone(),
+                args: provider_call.args.clone(),
+            })
+            .collect::<Vec<_>>();
+        let bindings = provider_calls
+            .iter()
+            .zip(runtime_calls.iter().cloned())
+            .enumerate()
+            .map(|(index, (provider_call, runtime_call))| {
+                LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
+            })
+            .collect();
+        let turn = LlmAssistantTurn::from_provider(
+            protocol.clone(),
+            "I will inspect both files.",
+            provider_calls,
+        )
+        .unwrap()
+        .with_runtime_tool_bindings(bindings)
+        .unwrap();
+        let mut image_context = LlmMessage::text(
+            LlmMessageRole::User,
+            "Image emitted after the first tool result.",
+        );
+        image_context.images_mut().unwrap().push(LlmImage {
+            mime_type: "image/png".to_string(),
+            data_base64: "AA==".to_string(),
+        });
+        let runtime_extension = LlmMessage::text(
+            LlmMessageRole::Assistant,
+            "Runtime extension state updated.",
+        );
+        let request = LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            provider_profile: profile,
+            provider_protocol: protocol,
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![
+                LlmMessage::from_assistant_turn(turn),
+                LlmMessage::tool_result(runtime_calls[0].id.clone(), "first result", false),
+                image_context,
+                runtime_extension,
+                LlmMessage::tool_result(runtime_calls[1].id.clone(), "second result", false),
+            ],
+            tools: Vec::new(),
+        };
+
+        assert!(validate_model_tool_protocol(&request.messages).is_err());
+        validate_request(&request).unwrap();
+        let payload = build_payload(&request);
+        let messages = payload["messages"].as_array().unwrap();
+
+        if api_style == AgentApiStyle::OpenAiCompatible {
+            assert_eq!(messages.len(), 6);
+            assert_eq!(messages[0]["tool_calls"][0]["id"], runtime_calls[0].id);
+            assert_eq!(messages[1]["tool_call_id"], runtime_calls[0].id);
+            assert_eq!(messages[2]["role"], "user");
+            assert_eq!(messages[2]["content"][0]["type"], "text");
+            assert_eq!(messages[2]["content"][1]["type"], "image_url");
+            assert_eq!(messages[3]["content"], "Runtime extension state updated.");
+            assert_eq!(messages[4]["tool_calls"][0]["id"], runtime_calls[1].id);
+            assert_eq!(messages[5]["tool_call_id"], runtime_calls[1].id);
+        } else {
+            assert_eq!(messages.len(), 4);
+            assert_eq!(messages[0]["content"][1]["id"], runtime_calls[0].id);
+            assert_eq!(
+                messages[1]["content"][0]["tool_use_id"],
+                runtime_calls[0].id
+            );
+            assert_eq!(messages[1]["content"][1]["type"], "text");
+            assert_eq!(messages[1]["content"][2]["type"], "image");
+            assert_eq!(
+                messages[2]["content"][0]["text"],
+                "Runtime extension state updated."
+            );
+            assert_eq!(messages[2]["content"][1]["id"], runtime_calls[1].id);
+            assert_eq!(
+                messages[3]["content"][0]["tool_use_id"],
+                runtime_calls[1].id
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_adapters_preserve_legacy_grouped_multi_tool_wire_shape() {
+    for api_style in [
+        AgentApiStyle::OpenAiCompatible,
+        AgentApiStyle::AnthropicCompatible,
+    ] {
+        let model = if api_style == AgentApiStyle::OpenAiCompatible {
+            "gpt"
+        } else {
+            "claude"
+        };
+        let calls = vec![
+            LlmToolCall {
+                id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"a.txt"}),
+            },
+            LlmToolCall {
+                id: "call-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({"path":"b.txt"}),
+            },
+        ];
+        let request = LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            provider_profile: generic_provider_profile(api_style),
+            provider_protocol: generic_provider_protocol(api_style, model),
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![
+                LlmMessage::assistant("I will read both files.", calls),
+                LlmMessage::tool_result("call-1", "a", false),
+                LlmMessage::tool_result("call-2", "b", false),
+            ],
+            tools: Vec::new(),
+        };
+
+        let payload = build_payload(&request);
+        let messages = payload["messages"].as_array().unwrap();
+        if api_style == AgentApiStyle::OpenAiCompatible {
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[0]["content"], "I will read both files.");
+            assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
+            assert_eq!(messages[0]["tool_calls"][0]["id"], "call-1");
+            assert_eq!(messages[0]["tool_calls"][1]["id"], "call-2");
+            assert_eq!(messages[1]["tool_call_id"], "call-1");
+            assert_eq!(messages[2]["tool_call_id"], "call-2");
+        } else {
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0]["content"][0]["text"], "I will read both files.");
+            assert_eq!(messages[0]["content"][1]["id"], "call-1");
+            assert_eq!(messages[0]["content"][2]["id"], "call-2");
+            assert_eq!(messages[1]["content"][0]["tool_use_id"], "call-1");
+            assert_eq!(messages[1]["content"][1]["tool_use_id"], "call-2");
+        }
+    }
+}
+
+#[test]
+fn adapter_registry_never_falls_back_from_profile_to_api_style() {
+    let provider_profile = ProviderProfileConfig::deepseek_v4_default();
+    let provider_protocol = ProviderProtocolKey::new(
+        AgentApiStyle::OpenAiCompatible.into(),
+        &provider_profile,
+        "deepseek-v4",
+        None,
+    )
+    .unwrap();
+    let request = LlmChatRequest {
+        api_url: "https://example.test/v1/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        provider_profile,
+        provider_protocol,
+        max_tokens: 100,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![LlmMessage::text(LlmMessageRole::User, "hello")],
+        tools: Vec::new(),
+    };
+
+    let error = ProviderAdapterRegistry::resolve(&request)
+        .err()
+        .expect("unregistered provider profile must not use the Generic OpenAI adapter");
+    assert!(error.to_string().contains("没有注册"));
+}
+
+#[test]
+fn provider_continuation_is_bounded_bound_and_debug_redacted() {
+    const CANARY: &str = "OPAQUE_PROVIDER_CONTINUATION_CANARY";
+    let protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt");
+    let turn = LlmAssistantTurn::from_provider(protocol.clone(), "visible", Vec::new()).unwrap();
+    let continuation = ProviderContinuation::new(
+        protocol.clone(),
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            CANARY.as_bytes().to_vec(),
+        )],
+    )
+    .unwrap();
+
+    assert_eq!(continuation.encoded_bytes(), CANARY.len());
+    assert_eq!(
+        continuation.replay_scope(),
+        ProviderContinuationReplayScope::AssistantTurnV1
+    );
+    assert_eq!(continuation.payload_hash().len(), "sha256:".len() + 64);
+    assert!(!format!("{continuation:?}").contains(CANARY));
+
+    let revision_without_continuation = turn.context_revision_material();
+    let turn = turn.with_provider_continuation(continuation).unwrap();
+    let revision_with_continuation = turn.context_revision_material();
+    assert_eq!(revision_with_continuation.len(), "sha256:".len() + 64);
+    assert!(!revision_with_continuation.contains(CANARY));
+    assert_ne!(revision_with_continuation, revision_without_continuation);
+    let serialized_checkpoint_identity =
+        serde_json::to_string(&turn.checkpoint_identity().unwrap()).unwrap();
+    assert!(!serialized_checkpoint_identity.contains(CANARY));
+    assert!(turn
+        .without_raw_continuation_for_checkpoint()
+        .provider_continuation()
+        .is_none());
+
+    let at_limit = ProviderContinuation::new(
+        protocol.clone(),
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            vec![0; MAX_PROVIDER_CONTINUATION_BYTES],
+        )],
+    )
+    .unwrap();
+    assert_eq!(at_limit.encoded_bytes(), MAX_PROVIDER_CONTINUATION_BYTES);
+
+    let oversized = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            vec![0; MAX_PROVIDER_CONTINUATION_BYTES + 1],
+        )],
+    );
+    assert!(oversized.is_err());
+}
+
+#[test]
+fn provider_continuation_rejects_cross_key_digest_and_reordered_fragments() {
+    let protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt-a");
+    let other_protocol = generic_provider_protocol(AgentApiStyle::OpenAiCompatible, "gpt-b");
+    let turn = LlmAssistantTurn::from_provider(protocol.clone(), "visible", Vec::new()).unwrap();
+    let other_turn =
+        LlmAssistantTurn::from_provider(protocol.clone(), "changed", Vec::new()).unwrap();
+    let fragment = || {
+        vec![ProviderContinuationFragment::new(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::AssistantTurn),
+            vec![1],
+        )]
+    };
+
+    let cross_key = ProviderContinuation::new(
+        other_protocol,
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        turn.digest(),
+        fragment(),
+    )
+    .unwrap();
+    assert!(turn.clone().with_provider_continuation(cross_key).is_err());
+
+    let cross_digest = ProviderContinuation::new(
+        protocol.clone(),
+        ProviderContinuationReplayScope::AssistantTurnV1,
+        other_turn.digest(),
+        fragment(),
+    )
+    .unwrap();
+    assert!(turn
+        .clone()
+        .with_provider_continuation(cross_digest)
+        .is_err());
+
+    let reordered = ProviderContinuation::new(
+        protocol,
+        ProviderContinuationReplayScope::InteractionV1,
+        turn.digest(),
+        vec![
+            ProviderContinuationFragment::new(
+                ProviderContinuationPosition::new(
+                    1,
+                    ProviderContinuationAttachment::InteractionStep(1),
+                ),
+                vec![1],
+            ),
+            ProviderContinuationFragment::new(
+                ProviderContinuationPosition::new(
+                    0,
+                    ProviderContinuationAttachment::InteractionStep(0),
+                ),
+                vec![2],
+            ),
+        ],
+    );
+    assert!(reordered.is_err());
+
+    let bound = turn
+        .clone()
+        .with_provider_continuation(
+            ProviderContinuation::new(
+                turn.provider_protocol().unwrap().clone(),
+                ProviderContinuationReplayScope::AssistantTurnV1,
+                turn.digest(),
+                fragment(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(bound
+        .with_reasoning(vec![ReasoningProjection::summary(
+            ProviderContinuationPosition::new(0, ProviderContinuationAttachment::ContentBlock(0),),
+            "changed reasoning projection",
+        )])
+        .is_err());
+}
+
+#[test]
+fn generic_response_parsers_do_not_capture_reasoning_fields() {
+    for (api_style, model, response_body) in [
+        (
+            AgentApiStyle::OpenAiCompatible,
+            "gpt",
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "visible",
+                        "reasoning_content": "MUST_NOT_CAPTURE"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }),
+        ),
+        (
+            AgentApiStyle::AnthropicCompatible,
+            "claude",
+            json!({
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "MUST_NOT_CAPTURE",
+                        "signature": "MUST_NOT_CAPTURE_SIGNATURE"
+                    },
+                    { "type": "text", "text": "visible" }
+                ],
+                "stop_reason": "end_turn"
+            }),
+        ),
+    ] {
+        let protocol = generic_provider_protocol(api_style, model);
+        let response = parse_non_stream_response(
+            &response_body.to_string(),
+            &protocol,
+            LlmResponseValidation::RequireModelAction,
+        )
+        .unwrap();
+
+        assert_eq!(response.content(), "visible");
+        assert!(response.assistant_turn.reasoning().is_empty());
+        assert!(response.assistant_turn.provider_continuation().is_none());
+    }
+}
+
+#[test]
+fn generic_request_adapters_do_not_send_reasoning_projection() {
+    const CANARY: &str = "REASONING_PROJECTION_MUST_NOT_ENTER_GENERIC_WIRE";
+    for (api_style, model) in [
+        (AgentApiStyle::OpenAiCompatible, "gpt"),
+        (AgentApiStyle::AnthropicCompatible, "claude"),
+    ] {
+        let profile = generic_provider_profile(api_style);
+        let protocol = generic_provider_protocol(api_style, model);
+        let turn = LlmAssistantTurn::from_provider(protocol.clone(), "visible", Vec::new())
+            .unwrap()
+            .with_reasoning(vec![ReasoningProjection::summary(
+                ProviderContinuationPosition::new(
+                    0,
+                    ProviderContinuationAttachment::ContentBlock(0),
+                ),
+                CANARY,
+            )])
+            .unwrap();
+        let request = LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            provider_profile: profile,
+            provider_protocol: protocol,
+            max_tokens: 100,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![LlmMessage::from_assistant_turn(turn)],
+            tools: Vec::new(),
+        };
+
+        let encoded = serde_json::to_string(&build_payload(&request)).unwrap();
+        assert!(!encoded.contains(CANARY));
+        assert!(!encoded.contains("reasoning"));
+        assert!(!encoded.contains("thinking"));
+    }
 }

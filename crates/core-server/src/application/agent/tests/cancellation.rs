@@ -155,6 +155,9 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -170,7 +173,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
     });
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-cancel",
@@ -274,6 +277,9 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("model-1"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&["pending-command"]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "pending-command".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -450,6 +456,9 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -484,7 +493,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         permissions: AgentPermissions::default(),
     });
     agent_input.resume_checkpoint = Some(checkpoint);
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-cancel-before-spawn",
@@ -592,6 +601,9 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -627,7 +639,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
     });
     agent_input.resume_checkpoint = Some(checkpoint);
 
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     let service = AgentService::new(Arc::clone(&storage));
     service
         .store_pending_action(
@@ -784,6 +796,9 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -818,6 +833,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         permissions: AgentPermissions::default(),
     });
     agent_input.resume_checkpoint = Some(checkpoint);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     let record = PendingActionRecord {
         storage_id: pending_action_storage_id("run-command-cancel", &command.id),
         snapshot: PendingAgentActionSnapshot {

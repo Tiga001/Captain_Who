@@ -1,68 +1,77 @@
 // LLM request payload and HTTP header builders.
+#[cfg(test)]
+use super::adapter::ProviderAdapterRegistry;
+use super::adapter::{project_legacy_generic_exchange, GenericWireMessage};
 use super::{LlmChatRequest, LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
-use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentToolDefinition};
+use crate::protocol::{AgentError, AgentResult, AgentToolDefinition};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 
+#[cfg(test)]
 pub(super) fn build_payload(request: &LlmChatRequest) -> Value {
-    match request.api_style {
-        AgentApiStyle::OpenAiCompatible => {
-            let mut payload = Map::from_iter([
-                ("model".to_string(), json!(request.model)),
-                (
-                    "messages".to_string(),
-                    Value::Array(build_openai_messages(&request.messages)),
-                ),
-                ("stream".to_string(), json!(request.stream)),
-                ("max_tokens".to_string(), json!(request.max_tokens)),
-            ]);
-            if should_send_temperature(&request.model) {
-                payload.insert("temperature".to_string(), json!(request.temperature));
-            }
-            if request.stream {
-                payload.insert(
-                    "stream_options".to_string(),
-                    json!({ "include_usage": true }),
-                );
-            }
+    ProviderAdapterRegistry::resolve(request)
+        .and_then(|adapter| adapter.prepare_request(request))
+        .expect("test provider request must be valid")
+}
 
-            if !request.tools.is_empty() {
-                payload.insert(
-                    "tools".to_string(),
-                    Value::Array(build_openai_tools(&request.tools)),
-                );
-                payload.insert("tool_choice".to_string(), json!("auto"));
-            }
-
-            Value::Object(payload)
-        }
-        AgentApiStyle::AnthropicCompatible => {
-            let (system, messages) = split_anthropic_messages(&request.messages);
-            let mut payload = Map::from_iter([
-                ("model".to_string(), json!(request.model)),
-                ("max_tokens".to_string(), json!(request.max_tokens)),
-                ("messages".to_string(), json!(messages)),
-            ]);
-            if should_send_temperature(&request.model) {
-                payload.insert("temperature".to_string(), json!(request.temperature));
-            }
-
-            if request.stream {
-                payload.insert("stream".to_string(), json!(true));
-            }
-            if let Some(system) = system {
-                payload.insert("system".to_string(), json!(system));
-            }
-            if !request.tools.is_empty() {
-                payload.insert(
-                    "tools".to_string(),
-                    Value::Array(build_anthropic_tools(&request.tools)),
-                );
-            }
-
-            Value::Object(payload)
-        }
+pub(super) fn build_openai_payload(request: &LlmChatRequest) -> AgentResult<Value> {
+    let messages = project_legacy_generic_exchange(&request.messages)?;
+    let mut payload = Map::from_iter([
+        ("model".to_string(), json!(request.model())),
+        (
+            "messages".to_string(),
+            Value::Array(build_openai_messages(&messages)),
+        ),
+        ("stream".to_string(), json!(request.stream)),
+        ("max_tokens".to_string(), json!(request.max_tokens)),
+    ]);
+    if should_send_temperature(request.model()) {
+        payload.insert("temperature".to_string(), json!(request.temperature));
     }
+    if request.stream {
+        payload.insert(
+            "stream_options".to_string(),
+            json!({ "include_usage": true }),
+        );
+    }
+
+    if !request.tools.is_empty() {
+        payload.insert(
+            "tools".to_string(),
+            Value::Array(build_openai_tools(&request.tools)),
+        );
+        payload.insert("tool_choice".to_string(), json!("auto"));
+    }
+
+    Ok(Value::Object(payload))
+}
+
+pub(super) fn build_anthropic_payload(request: &LlmChatRequest) -> AgentResult<Value> {
+    let projected = project_legacy_generic_exchange(&request.messages)?;
+    let (system, messages) = split_anthropic_messages(&projected);
+    let mut payload = Map::from_iter([
+        ("model".to_string(), json!(request.model())),
+        ("max_tokens".to_string(), json!(request.max_tokens)),
+        ("messages".to_string(), json!(messages)),
+    ]);
+    if should_send_temperature(request.model()) {
+        payload.insert("temperature".to_string(), json!(request.temperature));
+    }
+
+    if request.stream {
+        payload.insert("stream".to_string(), json!(true));
+    }
+    if let Some(system) = system {
+        payload.insert("system".to_string(), json!(system));
+    }
+    if !request.tools.is_empty() {
+        payload.insert(
+            "tools".to_string(),
+            Value::Array(build_anthropic_tools(&request.tools)),
+        );
+    }
+
+    Ok(Value::Object(payload))
 }
 
 fn should_send_temperature(model: &str) -> bool {
@@ -78,73 +87,94 @@ pub(super) fn is_sse_response(response: &reqwest::Response) -> bool {
         .unwrap_or(false)
 }
 
-fn build_openai_messages(messages: &[LlmMessage]) -> Vec<Value> {
+fn build_openai_messages(messages: &[GenericWireMessage<'_>]) -> Vec<Value> {
     messages
         .iter()
-        .map(|message| match (message.role, message.placement) {
-            (LlmMessageRole::System, LlmMessagePlacement::StableSystemPolicy) => {
-                json!({ "role": "system", "content": message.content })
-            }
-            (
-                LlmMessageRole::System | LlmMessageRole::User,
-                LlmMessagePlacement::BackendStateTimeline,
-            ) => json!({
-                "role": "user",
-                "content": render_backend_observed_state(&message.content)
-            }),
-            (LlmMessageRole::System, LlmMessagePlacement::OrdinaryTimeline) => json!({
-                "role": "user",
-                "content": message.content
-            }),
-            (LlmMessageRole::User, _) => json!({
-                "role": "user",
-                "content": build_openai_user_content(message)
-            }),
-            (LlmMessageRole::Assistant, _) => {
-                let mut object = Map::from_iter([(
-                    "role".to_string(),
-                    Value::String(message.role.as_str().to_string()),
-                )]);
-                if message.tool_calls.is_empty() {
-                    object.insert("content".to_string(), json!(message.content));
-                } else {
-                    object.insert(
-                        "content".to_string(),
-                        if message.content.trim().is_empty() {
-                            Value::Null
-                        } else {
-                            json!(message.content)
-                        },
-                    );
-                    object.insert(
-                        "tool_calls".to_string(),
-                        Value::Array(build_openai_tool_calls(&message.tool_calls)),
-                    );
+        .map(|message| match message {
+            GenericWireMessage::Assistant {
+                visible_text,
+                tool_call,
+            } => build_openai_assistant_message(visible_text, *tool_call),
+            GenericWireMessage::GroupedAssistant {
+                visible_text,
+                tool_calls,
+            } => build_openai_grouped_assistant_message(visible_text, tool_calls),
+            GenericWireMessage::Original(message) => match (message.role(), message.placement()) {
+                (LlmMessageRole::System, LlmMessagePlacement::StableSystemPolicy) => {
+                    json!({ "role": "system", "content": message.content() })
                 }
-                Value::Object(object)
-            }
-            (LlmMessageRole::Tool, _) => json!({
-                "role": "tool",
-                "tool_call_id": message.tool_call_id.as_deref().unwrap_or_default(),
-                "content": message.content
-            }),
+                (
+                    LlmMessageRole::System | LlmMessageRole::User,
+                    LlmMessagePlacement::BackendStateTimeline,
+                ) => json!({
+                    "role": "user",
+                    "content": render_backend_observed_state(message.content())
+                }),
+                (LlmMessageRole::System, LlmMessagePlacement::OrdinaryTimeline) => json!({
+                    "role": "user",
+                    "content": message.content()
+                }),
+                (LlmMessageRole::User, _) => json!({
+                    "role": "user",
+                    "content": build_openai_user_content(message)
+                }),
+                (LlmMessageRole::Assistant, _) => {
+                    unreachable!("assistant messages use turn view")
+                }
+                (LlmMessageRole::Tool, _) => json!({
+                    "role": "tool",
+                    "tool_call_id": message.tool_call_id().unwrap_or_default(),
+                    "content": message.content()
+                }),
+            },
         })
         .collect()
 }
 
+fn build_openai_assistant_message(visible_text: &str, tool_call: Option<&LlmToolCall>) -> Value {
+    build_openai_grouped_assistant_message(
+        visible_text,
+        tool_call.map_or(&[], std::slice::from_ref),
+    )
+}
+
+fn build_openai_grouped_assistant_message(visible_text: &str, tool_calls: &[LlmToolCall]) -> Value {
+    let mut object = Map::from_iter([(
+        "role".to_string(),
+        Value::String(LlmMessageRole::Assistant.as_str().to_string()),
+    )]);
+    if !tool_calls.is_empty() {
+        object.insert(
+            "content".to_string(),
+            if visible_text.trim().is_empty() {
+                Value::Null
+            } else {
+                json!(visible_text)
+            },
+        );
+        object.insert(
+            "tool_calls".to_string(),
+            Value::Array(build_openai_tool_calls(tool_calls)),
+        );
+    } else {
+        object.insert("content".to_string(), json!(visible_text));
+    }
+    Value::Object(object)
+}
+
 fn build_openai_user_content(message: &LlmMessage) -> Value {
-    if message.images.is_empty() {
-        return json!(message.content);
+    if message.images().is_empty() {
+        return json!(message.content());
     }
 
     let mut parts = Vec::new();
-    if !message.content.trim().is_empty() {
+    if !message.content().trim().is_empty() {
         parts.push(json!({
             "type": "text",
-            "text": message.content
+            "text": message.content()
         }));
     }
-    parts.extend(message.images.iter().map(|image| {
+    parts.extend(message.images().iter().map(|image| {
         json!({
             "type": "image_url",
             "image_url": {
@@ -188,14 +218,33 @@ fn build_openai_tool_calls(tool_calls: &[LlmToolCall]) -> Vec<Value> {
         .collect()
 }
 
-fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Value>) {
+fn split_anthropic_messages(messages: &[GenericWireMessage<'_>]) -> (Option<String>, Vec<Value>) {
     let mut system_parts = Vec::new();
     let mut chat_messages = Vec::new();
 
     for message in messages {
-        match (message.role, message.placement) {
+        let GenericWireMessage::Original(message) = message else {
+            match message {
+                GenericWireMessage::Assistant {
+                    visible_text,
+                    tool_call,
+                } => push_anthropic_assistant_message(
+                    &mut chat_messages,
+                    visible_text,
+                    tool_call.map_or(&[], std::slice::from_ref),
+                ),
+                GenericWireMessage::GroupedAssistant {
+                    visible_text,
+                    tool_calls,
+                } => push_anthropic_assistant_message(&mut chat_messages, visible_text, tool_calls),
+                GenericWireMessage::Original(_) => unreachable!(),
+            }
+            continue;
+        };
+
+        match (message.role(), message.placement()) {
             (LlmMessageRole::System, LlmMessagePlacement::StableSystemPolicy) => {
-                system_parts.push(message.content.as_str())
+                system_parts.push(message.content())
             }
             (
                 LlmMessageRole::System | LlmMessageRole::User,
@@ -206,7 +255,7 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
                     "user",
                     vec![json!({
                         "type": "text",
-                        "text": render_backend_observed_state(&message.content)
+                        "text": render_backend_observed_state(message.content())
                     })],
                 );
             }
@@ -214,15 +263,15 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
                 push_anthropic_message(
                     &mut chat_messages,
                     "user",
-                    vec![json!({ "type": "text", "text": message.content })],
+                    vec![json!({ "type": "text", "text": message.content() })],
                 );
             }
             (LlmMessageRole::User, _) => {
                 let mut blocks = Vec::new();
-                if !message.content.trim().is_empty() {
-                    blocks.push(json!({ "type": "text", "text": message.content }));
+                if !message.content().trim().is_empty() {
+                    blocks.push(json!({ "type": "text", "text": message.content() }));
                 }
-                blocks.extend(message.images.iter().map(|image| {
+                blocks.extend(message.images().iter().map(|image| {
                     json!({
                         "type": "image",
                         "source": {
@@ -234,30 +283,19 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
                 }));
                 push_anthropic_message(&mut chat_messages, "user", blocks);
             }
-            (LlmMessageRole::Assistant, _) => {
-                let mut blocks = Vec::new();
-                if !message.content.trim().is_empty() {
-                    blocks.push(json!({ "type": "text", "text": message.content }));
-                }
-                blocks.extend(message.tool_calls.iter().map(|call| {
-                    json!({
-                        "type": "tool_use",
-                        "id": call.id,
-                        "name": call.name,
-                        "input": call.args
-                    })
-                }));
-                push_anthropic_message(&mut chat_messages, "assistant", blocks);
-            }
+            (LlmMessageRole::Assistant, _) => unreachable!("assistant messages use turn view"),
             (LlmMessageRole::Tool, _) => {
+                let (tool_call_id, content, is_error) = message
+                    .tool_result_fields()
+                    .expect("tool role has tool result fields");
                 push_anthropic_message(
                     &mut chat_messages,
                     "user",
                     vec![json!({
                         "type": "tool_result",
-                        "tool_use_id": message.tool_call_id.as_deref().unwrap_or_default(),
-                        "content": message.content,
-                        "is_error": message.is_error
+                        "tool_use_id": tool_call_id,
+                        "content": content,
+                        "is_error": is_error
                     })],
                 );
             }
@@ -271,6 +309,26 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
     };
 
     (system, chat_messages)
+}
+
+fn push_anthropic_assistant_message(
+    messages: &mut Vec<Value>,
+    visible_text: &str,
+    tool_calls: &[LlmToolCall],
+) {
+    let mut blocks = Vec::new();
+    if !visible_text.trim().is_empty() {
+        blocks.push(json!({ "type": "text", "text": visible_text }));
+    }
+    for call in tool_calls {
+        blocks.push(json!({
+            "type": "tool_use",
+            "id": call.id,
+            "name": call.name,
+            "input": call.args
+        }));
+    }
+    push_anthropic_message(messages, "assistant", blocks);
 }
 
 fn render_backend_observed_state(content: &str) -> String {
@@ -317,28 +375,29 @@ fn build_anthropic_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
         .collect()
 }
 
-pub(super) fn build_headers(api_style: AgentApiStyle, api_token: &str) -> AgentResult<HeaderMap> {
+pub(super) fn build_openai_headers(api_token: &str) -> AgentResult<HeaderMap> {
+    let mut headers = json_headers();
+    let bearer = format!("Bearer {api_token}");
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&bearer).map_err(|_| AgentError::new("API Token 包含非法字符。"))?,
+    );
+    Ok(headers)
+}
+
+pub(super) fn build_anthropic_headers(api_token: &str) -> AgentResult<HeaderMap> {
+    let mut headers = json_headers();
+    headers.insert(
+        "x-api-key",
+        HeaderValue::from_str(api_token)
+            .map_err(|_| AgentError::new("API Token 包含非法字符。"))?,
+    );
+    headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+    Ok(headers)
+}
+
+fn json_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-    match api_style {
-        AgentApiStyle::OpenAiCompatible => {
-            let bearer = format!("Bearer {api_token}");
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&bearer)
-                    .map_err(|_| AgentError::new("API Token 包含非法字符。"))?,
-            );
-        }
-        AgentApiStyle::AnthropicCompatible => {
-            headers.insert(
-                "x-api-key",
-                HeaderValue::from_str(api_token)
-                    .map_err(|_| AgentError::new("API Token 包含非法字符。"))?,
-            );
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        }
-    }
-
-    Ok(headers)
+    headers
 }

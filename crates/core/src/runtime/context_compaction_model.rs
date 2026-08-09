@@ -18,6 +18,9 @@ use crate::llm::{
 };
 use crate::model_request_observation::ModelRequestObservationBuilder;
 use crate::protocol::{AgentApiStyle, AgentChatInput, AgentError, AgentResult, AgentUsage};
+use crate::provider_profile::{
+    ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
+};
 use crate::{
     ContextCompactionGeneration, ContextCompactionSummaryDraft, ModelRequestEstimate,
     ModelRequestObservation, ModelRequestPurpose,
@@ -164,11 +167,18 @@ impl AgentContextCompactionModelGenerator {
             crate::storage::now_ms(),
         );
 
+        let dialect = ProviderProtocolDialect::from(self.api_style);
+        let provider_profile = ProviderProfileConfig::generic_for_dialect(dialect);
+        let provider_protocol =
+            ProviderProtocolKey::new(dialect, &provider_profile, self.model.clone(), None)
+                .map_err(|error| {
+                    AgentError::new(format!("上下文压缩 Provider 配置无效：{error}"))
+                })?;
         let llm_request = LlmChatRequest {
             api_url: self.api_url.clone(),
             api_token: self.api_token.clone(),
-            model: self.model.clone(),
-            api_style: self.api_style,
+            provider_profile,
+            provider_protocol,
             max_tokens: maximum_summary_tokens,
             temperature: COMPACTION_TEMPERATURE,
             stream: self.stream,
@@ -225,11 +235,11 @@ impl AgentContextCompactionModelGenerator {
         observation: ModelRequestObservation,
     ) -> AgentResult<AgentContextCompactionGenerationOutput> {
         let usage = response.usage.clone();
-        if !response.tool_calls.is_empty() {
+        if !response.provider_tool_calls().is_empty() {
             return Err(generation_error(
                 "context_compaction_unexpected_tool_call",
                 "上下文压缩模型返回了工具调用，摘要未提交。",
-                json!({ "toolCallCount": response.tool_calls.len() }),
+                json!({ "toolCallCount": response.provider_tool_calls().len() }),
                 usage,
             ));
         }
@@ -246,7 +256,7 @@ impl AgentContextCompactionModelGenerator {
             ));
         }
 
-        let content = response.content.trim().to_string();
+        let content = response.content().trim().to_string();
         if content.is_empty() {
             return Err(generation_error(
                 "context_compaction_empty_summary",
@@ -543,7 +553,7 @@ mod tests {
         let messages = build_compaction_request_context(&request, 1_000)
             .unwrap()
             .into_messages();
-        let source = &messages[1].content;
+        let source = messages[1].content();
         let payload = source
             .split_once("BEGIN_UNTRUSTED_CONTEXT_LOG_JSON\n")
             .and_then(|(_, suffix)| suffix.split_once("\nEND_UNTRUSTED_CONTEXT_LOG_JSON"))
@@ -564,6 +574,10 @@ mod tests {
             api_url,
             api_token: "secret-token".to_string(),
             provider_configuration_revision: None,
+            provider_connection_revision: None,
+            search_connection_revision: None,
+            provider_profile_config: None,
+            provider_protocol_key: None,
             model: "summary-model".to_string(),
             model_capabilities: crate::ModelCapabilities::default(),
             api_style: Some(api_style),
@@ -1052,8 +1066,10 @@ mod tests {
             .finish_generation(
                 request,
                 LlmChatResponse {
-                    content: "An incomplete summary".to_string(),
-                    tool_calls: Vec::new(),
+                    assistant_turn: crate::llm::LlmAssistantTurn::from_legacy(
+                        "An incomplete summary",
+                        Vec::new(),
+                    ),
                     usage: Some(AgentUsage {
                         input_tokens: Some(100),
                         output_tokens: Some(512),
@@ -1096,8 +1112,10 @@ mod tests {
             .finish_generation(
                 request,
                 LlmChatResponse {
-                    content: format!("\n{content}\n"),
-                    tool_calls: Vec::new(),
+                    assistant_turn: crate::llm::LlmAssistantTurn::from_legacy(
+                        format!("\n{content}\n"),
+                        Vec::new(),
+                    ),
                     usage: None,
                     finish_reason: Some("stop".to_string()),
                 },

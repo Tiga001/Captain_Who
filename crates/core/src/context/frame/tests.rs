@@ -8,7 +8,7 @@ use serde_json::json;
 fn checkpoint_round_trip_preserves_messages_images_and_metadata() {
     let group = ContextGroup::tool_exchange("exchange-1");
     let mut image_message = LlmMessage::text(LlmMessageRole::User, "inspect image");
-    image_message.images.push(LlmImage {
+    image_message.images_mut().unwrap().push(LlmImage {
         mime_type: "image/png".to_string(),
         data_base64: "YWJj".to_string(),
     });
@@ -61,12 +61,208 @@ fn checkpoint_round_trip_preserves_messages_images_and_metadata() {
 
     restored.validate_complete_tool_protocol().unwrap();
     let messages = restored.to_messages();
-    assert_eq!(messages[1].images[0].data_base64, "YWJj");
-    assert_eq!(messages[2].tool_calls[0].args["path"], "notes.txt");
+    assert_eq!(messages[1].images()[0].data_base64, "YWJj");
+    assert_eq!(
+        messages[2].tool_calls().next().unwrap().args["path"],
+        "notes.txt"
+    );
     assert_eq!(
         serde_json::to_value(frame.manifest()).unwrap(),
         serde_json::to_value(restored.manifest()).unwrap()
     );
+}
+
+#[test]
+fn pending_tool_batch_accepts_exact_unresolved_calls_from_one_assistant_turn() {
+    let group = ContextGroup::tool_exchange("batch-approval");
+    let frame = ContextFrame::new(vec![ContextItem::assistant(
+        "I will run both checks.",
+        vec![
+            LlmToolCall {
+                id: "runtime-call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "one.txt" }),
+            },
+            LlmToolCall {
+                id: "runtime-call-2".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "two.txt" }),
+            },
+        ],
+        ContextMetadata::new(
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        )
+        .with_group(group),
+    )]);
+
+    let queued = vec!["runtime-call-2".to_string()];
+    let pending = frame
+        .validate_pending_tool_batch("runtime-call-1", &queued)
+        .unwrap();
+    assert_eq!(pending.id, "runtime-call-1");
+    assert!(frame
+        .validate_pending_tool_batch("runtime-call-1", &[])
+        .is_err());
+    assert!(frame
+        .validate_pending_tool_batch("runtime-call-1", &["other-call".to_string()])
+        .is_err());
+}
+
+#[test]
+fn complete_turn_allows_runtime_context_between_settled_tool_results() {
+    let group = ContextGroup::tool_exchange("multi-call-with-runtime-context");
+    let mut image_message = LlmMessage::text(LlmMessageRole::User, "first result image");
+    image_message.images_mut().unwrap().push(LlmImage {
+        mime_type: "image/png".to_string(),
+        data_base64: "AA==".to_string(),
+    });
+    let frame = ContextFrame::new(vec![
+        ContextItem::assistant(
+            "Inspect both files.",
+            vec![
+                LlmToolCall {
+                    id: "runtime-call-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "one.png" }),
+                },
+                LlmToolCall {
+                    id: "runtime-call-2".to_string(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "two.txt" }),
+                },
+            ],
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group.clone()),
+        ),
+        ContextItem::tool_result(
+            "runtime-call-1",
+            "first result",
+            false,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group.clone()),
+        ),
+        ContextItem::new(
+            image_message,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group.clone()),
+        ),
+        ContextItem::text(
+            LlmMessageRole::Assistant,
+            "runtime extension context",
+            ContextSource::RuntimeGuard,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+        ContextItem::tool_result(
+            "runtime-call-2",
+            "second result",
+            false,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group),
+        ),
+    ]);
+
+    frame.validate_complete_tool_protocol().unwrap();
+}
+
+#[test]
+fn complete_turn_still_rejects_context_before_its_first_tool_result() {
+    let group = ContextGroup::tool_exchange("invalid-pre-result-context");
+    let frame = ContextFrame::new(vec![
+        ContextItem::assistant(
+            "Inspect the file.",
+            vec![LlmToolCall {
+                id: "runtime-call-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "one.txt" }),
+            }],
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group.clone()),
+        ),
+        ContextItem::text(
+            LlmMessageRole::User,
+            "interleaved too early",
+            ContextSource::RuntimeGuard,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+        ContextItem::tool_result(
+            "runtime-call-1",
+            "result",
+            false,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group),
+        ),
+    ]);
+
+    assert!(frame.validate_complete_tool_protocol().is_err());
+}
+
+#[test]
+fn complete_turn_rejects_tool_results_out_of_provider_order() {
+    let group = ContextGroup::tool_exchange("out-of-order-results");
+    let frame = ContextFrame::new(vec![
+        ContextItem::assistant(
+            "Inspect both files.",
+            vec![
+                LlmToolCall {
+                    id: "runtime-call-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "one.txt" }),
+                },
+                LlmToolCall {
+                    id: "runtime-call-2".to_string(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "two.txt" }),
+                },
+            ],
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group.clone()),
+        ),
+        ContextItem::tool_result(
+            "runtime-call-2",
+            "second result arrived first",
+            false,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group),
+        ),
+    ]);
+
+    assert!(frame.validate_complete_tool_protocol().is_err());
 }
 
 #[test]
@@ -142,13 +338,13 @@ fn checkpoint_uses_durable_tool_projection_without_mutating_live_context() {
         false,
     )]);
 
-    assert_eq!(frame.to_messages()[0].content, "RESOURCE_SECRET_MARKER");
+    assert_eq!(frame.to_messages()[0].content(), "RESOURCE_SECRET_MARKER");
     let checkpoint = frame.checkpoint_items().unwrap();
     assert!(!checkpoint[0].content.contains("RESOURCE_SECRET_MARKER"));
     assert!(checkpoint[0].content.contains("contentOmittedFromHistory"));
     let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
     assert!(!restored.to_messages()[0]
-        .content
+        .content()
         .contains("RESOURCE_SECRET_MARKER"));
 }
 
@@ -158,7 +354,7 @@ fn checkpoint_message_can_remove_transient_model_images_without_changing_live_co
         LlmMessageRole::User,
         "Inspect the generated image at /managed/generated.png.",
     );
-    live.images.push(LlmImage {
+    live.images_mut().unwrap().push(LlmImage {
         mime_type: "image/png".to_string(),
         data_base64: "YWJj".to_string(),
     });
@@ -176,14 +372,14 @@ fn checkpoint_message_can_remove_transient_model_images_without_changing_live_co
     )
     .with_checkpoint_message(durable)]);
 
-    assert_eq!(frame.to_messages()[0].images[0].data_base64, "YWJj");
+    assert_eq!(frame.to_messages()[0].images()[0].data_base64, "YWJj");
     let checkpoint = frame.checkpoint_items().unwrap();
     assert!(checkpoint[0].images.is_empty());
     assert!(!serde_json::to_string(&checkpoint).unwrap().contains("YWJj"));
     let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
-    assert!(restored.to_messages()[0].images.is_empty());
+    assert!(restored.to_messages()[0].images().is_empty());
     assert!(restored.to_messages()[0]
-        .content
+        .content()
         .contains("/managed/generated.png"));
 }
 
@@ -212,13 +408,19 @@ fn checkpoint_message_can_redact_tool_arguments_without_mutating_live_context() 
         args: json!({}),
     }])]);
 
-    assert_eq!(frame.to_messages()[0].tool_calls[0].args["path"], secret);
+    assert_eq!(
+        frame.to_messages()[0].tool_calls().next().unwrap().args["path"],
+        secret
+    );
     let checkpoint = frame.checkpoint_items().unwrap();
     assert_eq!(checkpoint[0].content, "I will inspect the requested file.");
     assert_eq!(checkpoint[0].tool_calls[0].args, json!({}));
     assert!(!serde_json::to_string(&checkpoint).unwrap().contains(secret));
     let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
-    assert_eq!(restored.to_messages()[0].tool_calls[0].args, json!({}));
+    assert_eq!(
+        restored.to_messages()[0].tool_calls().next().unwrap().args,
+        json!({})
+    );
 }
 
 #[test]
@@ -311,13 +513,13 @@ fn persistent_replacement_keeps_run_overlay_and_discards_old_history() {
     let messages = replaced.to_messages();
 
     assert_eq!(messages.len(), 4);
-    assert_eq!(messages[0].content, "new rules");
-    assert_eq!(messages[1].content, "compacted history");
-    assert_eq!(messages[2].content, "current request");
-    assert_eq!(messages[3].content, "current run narration");
+    assert_eq!(messages[0].content(), "new rules");
+    assert_eq!(messages[1].content(), "compacted history");
+    assert_eq!(messages[2].content(), "current request");
+    assert_eq!(messages[3].content(), "current run narration");
     assert!(messages
         .iter()
-        .all(|message| !message.content.contains("very old history")));
+        .all(|message| !message.content().contains("very old history")));
 }
 
 #[test]

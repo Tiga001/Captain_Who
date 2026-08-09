@@ -5,8 +5,32 @@ use super::*;
 struct PendingActionResumeCheckpointProjection {
     model: String,
     api_style: Option<AgentApiStyle>,
-    resume_checkpoint: Option<AgentRunCheckpoint>,
-    tool_continuation: Option<AgentToolContinuation>,
+    resume_checkpoint: Option<PendingActionReconciliationCheckpointProjection>,
+    /// Startup reconciliation only needs to prove that a continuation is absent. Parsing the
+    /// full runtime continuation would unnecessarily couple legacy cleanup to the latest schema.
+    tool_continuation: Option<serde_json::Value>,
+}
+
+/// Narrow, credential-free checkpoint view used only by startup reconciliation.
+///
+/// A real approval resume is decoded by core-server's versioned, deny-unknown persisted DTO and
+/// remains fail-closed. Reconciliation instead settles or retires already durable rows, so it
+/// deliberately reads only the identities and trace prefix required for that proof. New Provider
+/// Profile fields and unrelated runtime checkpoint fields are ignored, while old v5 rows remain
+/// inspectable.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingActionReconciliationCheckpointProjection {
+    run_id: String,
+    pending_tool_call_id: String,
+    #[serde(default)]
+    conversation_trace_items: Vec<ConversationTurnTraceItem>,
+    #[serde(default)]
+    conversation_model_context_items: Vec<ConversationModelContextItem>,
+    #[serde(default)]
+    next_conversation_trace_sequence: u64,
+    #[serde(default)]
+    conversation_trace_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -589,8 +613,11 @@ fn recovered_manual_file_effect_trace(
         )
     })?;
     let snapshot =
-        crate::conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
-            checkpoint,
+        crate::conversation_trace::conversation_trace_snapshot_from_reconciliation_checkpoint(
+            checkpoint.conversation_trace_items.clone(),
+            checkpoint.conversation_model_context_items.clone(),
+            checkpoint.next_conversation_trace_sequence,
+            checkpoint.conversation_trace_truncated,
             &call,
             tool_result,
             Some(assistant_message_id),

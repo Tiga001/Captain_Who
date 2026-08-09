@@ -649,8 +649,8 @@ mod tests {
         let context = ContextFrame::new(items);
         let messages = context.to_messages();
         assert_eq!(messages.len(), 1);
-        assert!(messages[0].content.contains("Runtime todo"));
-        assert!(messages[0].content.contains("Read files"));
+        assert!(messages[0].content().contains("Runtime todo"));
+        assert!(messages[0].content().contains("Read files"));
         let manifest = context.manifest();
         assert_eq!(manifest.entries[0].sources, vec!["runtime_todo"]);
         assert_eq!(manifest.entries[0].scope, "run");

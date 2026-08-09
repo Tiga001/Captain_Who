@@ -2,7 +2,7 @@ use super::*;
 use mycopilot_core::{
     world_state::{
         effective_permissions_section, interaction_profile_section, model_capabilities_section,
-        workspace_binding_section,
+        model_selection_section, workspace_binding_section,
     },
     AnchoredWorldStateRecord, WorldStateDiff, WorldStateLifetime, WorldStateRecord,
     WorldStateReducer, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
@@ -19,6 +19,7 @@ pub(crate) struct EnsureConversationWorldStateRequest<'a> {
     pub(crate) effective_before_message_id: &'a str,
     pub(crate) context: Option<&'a AgentRunContext>,
     pub(crate) prompt_preferences: Option<&'a AgentPromptPreferences>,
+    pub(crate) model_id: &'a str,
     pub(crate) model_capabilities: ModelCapabilities,
     pub(crate) active_summary: Option<&'a mycopilot_core::ContextCompactionSummary>,
     pub(crate) created_at: i64,
@@ -33,13 +34,18 @@ pub(crate) fn ensure_conversation_world_state(
         effective_before_message_id,
         context,
         prompt_preferences,
+        model_id,
         model_capabilities,
         active_summary,
         created_at,
     } = request;
     let active_summary_id = active_summary.map(|summary| summary.id.as_str());
-    let desired_sections =
-        conversation_world_state_sections(context, prompt_preferences, model_capabilities)?;
+    let desired_sections = conversation_world_state_sections(
+        context,
+        prompt_preferences,
+        model_id,
+        model_capabilities,
+    )?;
     let mut entries = storage.list_active_conversation_world_state_records(conversation_id)?;
 
     if entries.is_empty() {
@@ -162,6 +168,7 @@ fn fold_active_entries(
 fn conversation_world_state_sections(
     context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
+    model_id: &str,
     model_capabilities: ModelCapabilities,
 ) -> Result<Vec<WorldStateSectionEnvelope>, String> {
     let permissions = context
@@ -191,18 +198,25 @@ fn conversation_world_state_sections(
     )
     .map_err(|error| format!("无法构造 environment World State：{error}"))?;
 
-    // Model capabilities are execution authority, not prompting material. Keeping the section
-    // HostOnly lets tools consult one coherent state model without teaching the model to assume a
-    // capability that the runtime will still independently enforce.
+    // The complete capability record remains Host-only execution authority. `model.selection`
+    // below is the deliberately narrow model-visible projection; tools still enforce the frozen
+    // Host capability independently.
     let capability_section =
         model_capabilities_section(model_capabilities, WorldStateLifetime::Conversation)
             .map_err(|error| format!("无法构造模型能力 World State：{error}"))?;
+    let selection_section = model_selection_section(
+        model_id,
+        model_capabilities,
+        WorldStateLifetime::Conversation,
+    )
+    .map_err(|error| format!("无法构造模型选择 World State：{error}"))?;
 
     Ok(vec![
         permission_section,
         workspace_section,
         interaction_section,
         environment_section,
+        selection_section,
         capability_section,
     ])
 }

@@ -9,10 +9,11 @@ impl AgentService {
         if model_id.is_empty() {
             return Err("modelId 不能为空。".to_string().into());
         }
-        let settings = self
+        let settings_snapshot = self
             .storage
-            .load_model_settings()?
+            .load_model_settings_snapshot()?
             .ok_or_else(|| "请先配置模型。".to_string())?;
+        let settings = settings_snapshot.settings;
         let model = settings
             .models
             .iter()
@@ -22,8 +23,24 @@ impl AgentService {
         if !model.enabled {
             return Err(format!("模型未启用：{model_id}").into());
         }
+        let provider_connection_revision = settings_snapshot
+            .provider_connection_revisions
+            .get(&model.id)
+            .cloned()
+            .ok_or_else(|| format!("模型 {model_id} 的 Provider 连接身份缺失。"))?;
         let context_window_tokens = model.effective_context_window_tokens();
         let connection = settings.effective_connection_for(&model)?;
+        let provider_dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
+        let provider_profile_config = model
+            .resolved_provider_profile_config(provider_dialect)
+            .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
+        let provider_protocol_key = ProviderProtocolKey::new(
+            provider_dialect,
+            &provider_profile_config,
+            model.id.clone(),
+            Some(settings_snapshot.configuration_revision.clone()),
+        )
+        .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
 
         let conversation_id = normalized_optional(input.conversation_id.as_deref());
         let conversation = match conversation_id.as_deref() {
@@ -102,12 +119,16 @@ impl AgentService {
         let agent_input = AgentChatInput {
             api_url: connection.api_url,
             api_token: String::new(),
-            provider_configuration_revision: None,
+            provider_configuration_revision: Some(settings_snapshot.configuration_revision),
+            provider_connection_revision: Some(provider_connection_revision),
+            search_connection_revision: Some(settings_snapshot.search_connection_revision),
+            provider_profile_config: Some(provider_profile_config),
+            provider_protocol_key: Some(provider_protocol_key),
             model: model.id.clone(),
             model_capabilities: ModelCapabilities {
                 image_input: model.supports_image,
             },
-            api_style: None,
+            api_style: Some(provider_dialect.api_style()),
             context_window_tokens: Some(context_window_tokens),
             context_window_indicator_enabled: true,
             max_tokens: input.max_tokens,

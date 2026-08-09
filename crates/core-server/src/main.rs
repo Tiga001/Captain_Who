@@ -29,6 +29,47 @@ fn test_run_world_state() -> mycopilot_core::WorldStateSnapshot {
     .expect("test Run World State")
 }
 
+#[cfg(test)]
+fn test_provider_profile_config() -> mycopilot_core::ProviderProfileConfig {
+    mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+        mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+    )
+}
+
+#[cfg(test)]
+fn test_provider_protocol_key(model_id: &str) -> mycopilot_core::ProviderProtocolKey {
+    let config = test_provider_profile_config();
+    mycopilot_core::ProviderProtocolKey::new(
+        mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        &config,
+        model_id,
+        None,
+    )
+    .expect("test Provider Protocol key")
+}
+
+#[cfg(test)]
+fn test_assistant_turn_identity(
+    runtime_call_ids: &[&str],
+) -> mycopilot_core::AgentAssistantTurnCheckpointIdentity {
+    mycopilot_core::AgentAssistantTurnCheckpointIdentity {
+        assistant_turn_id: "at1_core_server_test_fixture".to_string(),
+        assistant_turn_digest: "sha256:core-server-test-fixture".to_string(),
+        tool_call_identities: runtime_call_ids
+            .iter()
+            .enumerate()
+            .map(
+                |(provider_tool_index, call_id)| mycopilot_core::AgentProviderToolCallIdentity {
+                    provider_tool_index: u32::try_from(provider_tool_index)
+                        .expect("test Provider Tool index"),
+                    provider_call_id: (*call_id).to_string(),
+                    runtime_call_id: (*call_id).to_string(),
+                },
+            )
+            .collect(),
+    }
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

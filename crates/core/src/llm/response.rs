@@ -1,6 +1,8 @@
 // LLM response extraction and error formatting helpers.
 use super::LlmToolCall;
-use crate::protocol::{AgentApiStyle, AgentError, AgentResult};
+#[cfg(test)]
+use crate::protocol::AgentApiStyle;
+use crate::protocol::{AgentError, AgentResult};
 use serde_json::{json, Value};
 
 pub(super) fn extract_api_error(value: &Value) -> Option<String> {
@@ -106,6 +108,7 @@ pub(super) fn extract_finish_reason(value: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(test)]
 pub(super) fn extract_tool_calls(
     value: &Value,
     api_style: AgentApiStyle,
@@ -116,7 +119,7 @@ pub(super) fn extract_tool_calls(
     }
 }
 
-fn extract_openai_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
+pub(super) fn extract_openai_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
     let Some(calls) = value
         .get("choices")
         .and_then(Value::as_array)
@@ -130,8 +133,7 @@ fn extract_openai_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
 
     calls
         .iter()
-        .enumerate()
-        .map(|(index, call)| {
+        .map(|call| {
             let function = call
                 .get("function")
                 .ok_or_else(|| AgentError::new("OpenAI tool_call 缺少 function 字段。"))?;
@@ -153,10 +155,8 @@ fn extract_openai_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
             let id = call
                 .get("id")
                 .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
                 .map(ToString::to_string)
-                .unwrap_or_else(|| format!("openai-tool-call-{}", index + 1));
+                .unwrap_or_default();
 
             Ok(LlmToolCall {
                 id,
@@ -167,7 +167,7 @@ fn extract_openai_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
         .collect()
 }
 
-fn extract_anthropic_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
+pub(super) fn extract_anthropic_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> {
     let Some(content) = value.get("content").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
@@ -180,8 +180,7 @@ fn extract_anthropic_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> 
                 .map(|kind| kind == "tool_use")
                 .unwrap_or(false)
         })
-        .enumerate()
-        .map(|(index, part)| {
+        .map(|part| {
             let name = part
                 .get("name")
                 .and_then(Value::as_str)
@@ -191,10 +190,8 @@ fn extract_anthropic_tool_calls(value: &Value) -> AgentResult<Vec<LlmToolCall>> 
             let id = part
                 .get("id")
                 .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
                 .map(ToString::to_string)
-                .unwrap_or_else(|| format!("anthropic-tool-use-{}", index + 1));
+                .unwrap_or_default();
             let args = part.get("input").cloned().unwrap_or_else(|| json!({}));
 
             Ok(LlmToolCall {

@@ -91,7 +91,7 @@ use mycopilot_core::{
     ContextJournalCursor, ConversationModelContextItem, ConversationTraceSnapshot,
     ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
-    McpToolRuntime, ModelCapabilities,
+    McpToolRuntime, ModelCapabilities, ProviderProtocolDialect, ProviderProtocolKey,
 };
 use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;

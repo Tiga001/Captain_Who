@@ -368,6 +368,7 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "conversation_history".to_string(),
                     args: json!({ "open": "hist_v1_turn" }),
+                    provider_identity: None,
                 }],
                 is_error: false,
             },

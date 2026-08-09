@@ -552,6 +552,40 @@ pub(super) fn build_llm_request(
     let api_style = input
         .api_style
         .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
+    let provider_dialect = ProviderProtocolDialect::from(api_style);
+    let provider_profile_config =
+        ProviderProfileConfig::resolve(input.provider_profile_config.as_ref(), provider_dialect)
+            .map_err(|error| {
+                AgentError::new(format!(
+                    "Provider profile configuration is invalid: {error}"
+                ))
+            })?;
+    let provider_protocol_key = match input.provider_protocol_key.clone() {
+        Some(key) => {
+            key.validate_against_config(&provider_profile_config)
+                .map_err(|error| {
+                    AgentError::new(format!("Provider protocol key is invalid: {error}"))
+                })?;
+            if key.model_id != input.model.trim() {
+                return Err(AgentError::new(
+                    "Provider protocol key does not match the selected model.",
+                ));
+            }
+            if key.provider_configuration_revision != input.provider_configuration_revision {
+                return Err(AgentError::new(
+                    "Provider protocol key does not match the selected provider configuration revision.",
+                ));
+            }
+            key
+        }
+        None => ProviderProtocolKey::new(
+            provider_dialect,
+            &provider_profile_config,
+            input.model.trim(),
+            input.provider_configuration_revision.clone(),
+        )
+        .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?,
+    };
     let template = LlmRequestTemplate {
         api_url: input.api_url.trim().to_string(),
         api_token: input.api_token.trim().to_string(),
@@ -562,6 +596,8 @@ pub(super) fn build_llm_request(
         temperature: sanitize_temperature(input.temperature),
         stream: input.stream.unwrap_or(false),
         stable_tools: tool_definitions.to_vec(),
+        provider_profile_config,
+        provider_protocol_key,
     };
     let configuration_revision = conversation_context_configuration_revision_from_parts(
         &input,
@@ -654,7 +690,9 @@ pub(super) fn append_attachment_context(
         return;
     }
     let mut message = LlmMessage::text(LlmMessageRole::User, attachment_context.text);
-    message.images = attachment_context.images;
+    *message
+        .images_mut()
+        .expect("user attachment messages support images") = attachment_context.images;
     frame.push(ContextItem::new(
         message,
         ContextMetadata::new(

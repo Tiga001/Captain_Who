@@ -1681,6 +1681,9 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("model-1"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -1700,6 +1703,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     let context = agent_input.context.as_mut().unwrap();
     context.conversation_id = Some("conversation-manual-command".to_string());
     agent_input.resume_checkpoint = Some(checkpoint);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     let record = PendingActionRecord {
         storage_id: pending_action_storage_id(run_id, call_id),
         snapshot: PendingAgentActionSnapshot {

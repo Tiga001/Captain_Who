@@ -154,31 +154,32 @@ pub(crate) fn model_context_item_from_message(
     ordinal: u32,
     message: &LlmMessage,
 ) -> Result<(ConversationModelContextItem, bool), String> {
-    let (content, content_redacted) = sanitize_runtime_text(&message.content);
-    let mut tool_calls = Vec::with_capacity(message.tool_calls.len());
+    let (content, content_redacted) = sanitize_runtime_text(message.content());
+    let mut tool_calls = Vec::with_capacity(message.tool_calls().len());
     let mut tool_call_redacted = false;
-    for call in &message.tool_calls {
+    for call in message.tool_calls() {
         let (args, redacted) = sanitize_runtime_value(&call.args);
         tool_call_redacted |= redacted;
         tool_calls.push(AgentContextCheckpointToolCall {
             id: call.id.clone(),
             name: call.name.clone(),
             args,
+            provider_identity: None,
         });
     }
     let item = ConversationModelContextItem {
         sequence,
         ordinal,
-        role: message.role.as_str().to_string(),
+        role: message.role().as_str().to_string(),
         content,
-        tool_call_id: message.tool_call_id.clone(),
+        tool_call_id: message.tool_call_id().map(str::to_string),
         tool_calls,
-        is_error: message.is_error,
+        is_error: message.is_error(),
     };
     item.validate()?;
     Ok((
         item,
-        content_redacted || tool_call_redacted || !message.images.is_empty(),
+        content_redacted || tool_call_redacted || !message.images().is_empty(),
     ))
 }
 
@@ -1144,6 +1145,46 @@ pub fn conversation_trace_snapshot_from_checkpoint_and_continuation_with_project
     recorder.snapshot()
 }
 
+/// Builds the same continuation snapshot from the narrow checkpoint fields retained by storage
+/// startup reconciliation. Keeping this entry point field-oriented prevents legacy settlement
+/// from deserializing the complete, versioned runtime checkpoint merely to append one proven
+/// ToolResult.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn conversation_trace_snapshot_from_reconciliation_checkpoint(
+    conversation_trace_items: Vec<ConversationTurnTraceItem>,
+    conversation_model_context_items: Vec<ConversationModelContextItem>,
+    next_conversation_trace_sequence: u64,
+    conversation_trace_truncated: bool,
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+    assistant_message_id: Option<&str>,
+    model_observation: &str,
+    archive: ConversationHistoryArchiveTraceMetadata,
+) -> ConversationTraceSnapshot {
+    let call_already_recorded = conversation_trace_items.iter().any(|item| {
+        matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id)
+    });
+    let result_sequence =
+        next_conversation_trace_sequence.saturating_add(u64::from(!call_already_recorded));
+    let mut recorder = ConversationTraceRecorder::from_checkpoint_with_model_context(
+        conversation_trace_items,
+        conversation_model_context_items,
+        next_conversation_trace_sequence,
+        conversation_trace_truncated,
+    );
+    let history_ref = assistant_message_id
+        .map(|message_id| crate::ContextHistoryRef::trace_item(message_id, result_sequence));
+    record_model_tool_exchange_with_projection(
+        &mut recorder,
+        call,
+        result,
+        history_ref.as_ref(),
+        Some(model_observation),
+        archive,
+    );
+    recorder.snapshot()
+}
+
 fn record_model_tool_exchange_with_projection(
     recorder: &mut ConversationTraceRecorder,
     call: &AgentToolCall,
@@ -1426,6 +1467,20 @@ impl ConversationTraceRecorder {
             }
             Err(_) => {
                 self.truncated = true;
+            }
+        }
+    }
+
+    /// Applies the same durable approval-barrier projection as Context. Raw queued external calls
+    /// never enter the persisted model log, while the live provider turn remains in memory.
+    pub(crate) fn omit_model_tool_calls(&mut self, omitted_call_ids: &BTreeSet<String>) {
+        if omitted_call_ids.is_empty() {
+            return;
+        }
+        for item in &mut self.model_context_items {
+            if item.role == "assistant" {
+                item.tool_calls
+                    .retain(|call| !omitted_call_ids.contains(&call.id));
             }
         }
     }

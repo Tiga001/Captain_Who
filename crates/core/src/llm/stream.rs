@@ -1,9 +1,11 @@
 // Server-sent event parsing and stream accumulation for LLM responses.
+use super::adapter::{ProviderAdapter, ProviderAdapterRegistry};
 use super::provider_error::LlmProviderFailure;
 use super::response::{extract_api_error, parse_tool_arguments};
-use super::{LlmChatResponse, LlmStreamEvent, LlmToolCall};
+use super::{LlmAssistantTurn, LlmChatResponse, LlmStreamEvent, LlmToolCall};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
+use crate::provider_profile::ProviderProtocolKey;
 use crate::usage::{extract_anthropic_stream_usage, extract_usage, merge_stream_usage};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -12,7 +14,7 @@ use std::collections::BTreeMap;
 
 pub(super) async fn parse_sse_response<F>(
     response: reqwest::Response,
-    api_style: AgentApiStyle,
+    provider_protocol: &ProviderProtocolKey,
     cancellation_token: AgentCancellationToken,
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
@@ -21,7 +23,7 @@ where
 {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::<u8>::new();
-    let mut accumulator = LlmStreamAccumulator::new(api_style);
+    let mut accumulator = LlmStreamAccumulator::for_protocol(provider_protocol)?;
 
     loop {
         cancellation_token.check()?;
@@ -147,26 +149,38 @@ fn find_bytes(buffer: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-pub(super) enum LlmStreamAccumulator {
+pub(super) enum ProviderStreamState {
     OpenAi(OpenAiStreamAccumulator),
     Anthropic(AnthropicStreamAccumulator),
 }
 
+pub(super) struct LlmStreamAccumulator {
+    adapter: &'static dyn ProviderAdapter,
+    provider_protocol: ProviderProtocolKey,
+    state: ProviderStreamState,
+}
+
 impl LlmStreamAccumulator {
+    pub(super) fn for_protocol(provider_protocol: &ProviderProtocolKey) -> AgentResult<Self> {
+        let adapter = ProviderAdapterRegistry::resolve_key(provider_protocol)?;
+        Ok(Self {
+            adapter,
+            provider_protocol: provider_protocol.clone(),
+            state: adapter.new_stream_state(),
+        })
+    }
+
+    #[cfg(test)]
     pub(super) fn new(api_style: AgentApiStyle) -> Self {
-        match api_style {
-            AgentApiStyle::OpenAiCompatible => Self::OpenAi(OpenAiStreamAccumulator::default()),
-            AgentApiStyle::AnthropicCompatible => {
-                Self::Anthropic(AnthropicStreamAccumulator::default())
-            }
-        }
+        let dialect = api_style.into();
+        let config = crate::provider_profile::ProviderProfileConfig::generic_for_dialect(dialect);
+        let protocol = ProviderProtocolKey::new(dialect, &config, "test-model", None)
+            .expect("generic test provider protocol must be valid");
+        Self::for_protocol(&protocol).expect("generic test adapter must be registered")
     }
 
     fn api_style(&self) -> AgentApiStyle {
-        match self {
-            Self::OpenAi(_) => AgentApiStyle::OpenAiCompatible,
-            Self::Anthropic(_) => AgentApiStyle::AnthropicCompatible,
-        }
+        self.provider_protocol.dialect.api_style()
     }
 
     fn process<F>(
@@ -178,23 +192,19 @@ impl LlmStreamAccumulator {
     where
         F: FnMut(LlmStreamEvent),
     {
-        match self {
-            Self::OpenAi(accumulator) => accumulator.process(value, on_delta),
-            Self::Anthropic(accumulator) => accumulator.process(event, value, on_delta),
-        }
+        self.adapter
+            .consume_streaming_event(&mut self.state, event, value, on_delta)
     }
 
     pub(super) fn finish(self) -> AgentResult<LlmChatResponse> {
-        match self {
-            Self::OpenAi(accumulator) => accumulator.finish(),
-            Self::Anthropic(accumulator) => accumulator.finish(),
-        }
+        self.adapter
+            .finalize_assistant_turn(&self.provider_protocol, self.state)
     }
 
     fn usage(&self) -> Option<&AgentUsage> {
-        match self {
-            Self::OpenAi(accumulator) => accumulator.usage.as_ref(),
-            Self::Anthropic(accumulator) => accumulator.usage.as_ref(),
+        match &self.state {
+            ProviderStreamState::OpenAi(accumulator) => accumulator.usage.as_ref(),
+            ProviderStreamState::Anthropic(accumulator) => accumulator.usage.as_ref(),
         }
     }
 }
@@ -359,10 +369,11 @@ impl OpenAiStreamAccumulator {
             .unwrap_or_else(|| self.create_tool_call_slot(provider_index, None))
     }
 
-    fn process<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
-    where
-        F: FnMut(LlmStreamEvent),
-    {
+    pub(super) fn process(
+        &mut self,
+        value: &Value,
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) -> AgentResult<()> {
         merge_stream_usage(&mut self.usage, extract_usage(value));
 
         let Some(choices) = value.get("choices").and_then(Value::as_array) else {
@@ -393,11 +404,7 @@ impl OpenAiStreamAccumulator {
                     .and_then(Value::as_u64)
                     .map(|index| index as usize);
                 let provider_index = explicit_index.unwrap_or(fallback_index);
-                let id = call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|id| !id.is_empty());
+                let id = call.get("id").and_then(Value::as_str);
                 let slot = self.resolve_tool_call_slot(provider_index, id);
                 let entry = &mut self.tool_calls[slot];
                 if let Some(function) = call.get("function") {
@@ -422,10 +429,13 @@ impl OpenAiStreamAccumulator {
         Ok(())
     }
 
-    fn finish(self) -> AgentResult<LlmChatResponse> {
+    pub(super) fn finish(
+        self,
+        provider_protocol: &ProviderProtocolKey,
+    ) -> AgentResult<LlmChatResponse> {
         let mut tool_calls = Vec::new();
         let error_usage = self.usage.clone();
-        for (slot, call) in self.tool_calls.into_iter().enumerate() {
+        for call in self.tool_calls {
             if call.name.trim().is_empty() {
                 continue;
             }
@@ -437,17 +447,16 @@ impl OpenAiStreamAccumulator {
                 .with_usage(error_usage.clone())
             })?;
             tool_calls.push(LlmToolCall {
-                id: call
-                    .id
-                    .unwrap_or_else(|| format!("openai-stream-tool-call-{}", slot + 1)),
+                id: call.id.unwrap_or_default(),
                 name: call.name,
                 args,
             });
         }
 
+        let assistant_turn =
+            LlmAssistantTurn::from_provider(provider_protocol.clone(), self.content, tool_calls)?;
         Ok(LlmChatResponse {
-            content: self.content,
-            tool_calls,
+            assistant_turn,
             usage: self.usage,
             finish_reason: self.finish_reason,
         })
@@ -471,15 +480,12 @@ struct AnthropicBlockAccumulator {
 }
 
 impl AnthropicStreamAccumulator {
-    fn process<F>(
+    pub(super) fn process(
         &mut self,
         event: Option<&str>,
         value: &Value,
-        on_delta: &mut F,
-    ) -> AgentResult<()>
-    where
-        F: FnMut(LlmStreamEvent),
-    {
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) -> AgentResult<()> {
         let event_kind = event
             .filter(|event| !event.trim().is_empty())
             .or_else(|| value.get("type").and_then(Value::as_str))
@@ -519,10 +525,11 @@ impl AnthropicStreamAccumulator {
         Ok(())
     }
 
-    fn process_content_block_start<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
-    where
-        F: FnMut(LlmStreamEvent),
-    {
+    fn process_content_block_start(
+        &mut self,
+        value: &Value,
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) -> AgentResult<()> {
         let index = value
             .get("index")
             .and_then(Value::as_u64)
@@ -572,10 +579,11 @@ impl AnthropicStreamAccumulator {
         Ok(())
     }
 
-    fn process_content_block_delta<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
-    where
-        F: FnMut(LlmStreamEvent),
-    {
+    fn process_content_block_delta(
+        &mut self,
+        value: &Value,
+        on_delta: &mut dyn FnMut(LlmStreamEvent),
+    ) -> AgentResult<()> {
         let index = value
             .get("index")
             .and_then(Value::as_u64)
@@ -622,10 +630,13 @@ impl AnthropicStreamAccumulator {
         Ok(())
     }
 
-    fn finish(self) -> AgentResult<LlmChatResponse> {
+    pub(super) fn finish(
+        self,
+        provider_protocol: &ProviderProtocolKey,
+    ) -> AgentResult<LlmChatResponse> {
         let mut tool_calls = Vec::new();
         let error_usage = self.usage.clone();
-        for (index, block) in self.blocks {
+        for block in self.blocks.into_values() {
             if block.kind != "tool_use" {
                 continue;
             }
@@ -639,17 +650,16 @@ impl AnthropicStreamAccumulator {
                 .with_usage(error_usage.clone())
             })?;
             tool_calls.push(LlmToolCall {
-                id: block
-                    .id
-                    .unwrap_or_else(|| format!("anthropic-stream-tool-use-{}", index + 1)),
+                id: block.id.unwrap_or_default(),
                 name,
                 args,
             });
         }
 
+        let assistant_turn =
+            LlmAssistantTurn::from_provider(provider_protocol.clone(), self.content, tool_calls)?;
         Ok(LlmChatResponse {
-            content: self.content,
-            tool_calls,
+            assistant_turn,
             usage: self.usage,
             finish_reason: self.finish_reason,
         })
@@ -749,10 +759,13 @@ mod tests {
             joined_tool_input(&deltas),
             "{\"command\":\"conda env list\",\"reason\":\"检查环境\"}"
         );
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "run_command");
-        assert_eq!(response.tool_calls[0].args["command"], "conda env list");
-        assert_eq!(response.tool_calls[0].args["reason"], "检查环境");
+        assert_eq!(response.provider_tool_calls().len(), 1);
+        assert_eq!(response.provider_tool_calls()[0].name, "run_command");
+        assert_eq!(
+            response.provider_tool_calls()[0].args["command"],
+            "conda env list"
+        );
+        assert_eq!(response.provider_tool_calls()[0].args["reason"], "检查环境");
     }
 
     #[test]
@@ -778,10 +791,13 @@ mod tests {
             joined_tool_input(&deltas),
             "{\"command\":\"conda env list\",\"reason\":\"检查环境\"}"
         );
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "run_command");
-        assert_eq!(response.tool_calls[0].args["command"], "conda env list");
-        assert_eq!(response.tool_calls[0].args["reason"], "检查环境");
+        assert_eq!(response.provider_tool_calls().len(), 1);
+        assert_eq!(response.provider_tool_calls()[0].name, "run_command");
+        assert_eq!(
+            response.provider_tool_calls()[0].args["command"],
+            "conda env list"
+        );
+        assert_eq!(response.provider_tool_calls()[0].args["reason"], "检查环境");
     }
 
     #[test]
@@ -807,7 +823,10 @@ mod tests {
             joined_tool_input(&deltas),
             "{\"items\": [{\"title\":\"A\",\"status\":\"pending\"}]}"
         );
-        assert_eq!(response.tool_calls[0].args["items"][0]["title"], "A");
+        assert_eq!(
+            response.provider_tool_calls()[0].args["items"][0]["title"],
+            "A"
+        );
     }
 
     #[test]
@@ -826,7 +845,7 @@ mod tests {
 
         let response = accumulator.finish().unwrap();
         assert_eq!(joined_tool_input(&deltas), "{\"text\":\"aa\"}");
-        assert_eq!(response.tool_calls[0].args["text"], "aa");
+        assert_eq!(response.provider_tool_calls()[0].args["text"], "aa");
     }
 
     #[test]
@@ -858,11 +877,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(streamed_calls, vec![0, 1]);
         let response = accumulator.finish().unwrap();
-        assert_eq!(response.tool_calls.len(), 2);
-        assert_eq!(response.tool_calls[0].id, "call-a");
-        assert_eq!(response.tool_calls[0].args["draftId"], "draft-a");
-        assert_eq!(response.tool_calls[1].id, "call-b");
-        assert_eq!(response.tool_calls[1].args["draftId"], "draft-b");
+        assert_eq!(response.provider_tool_calls().len(), 2);
+        assert_eq!(response.provider_tool_calls()[0].id, "call-a");
+        assert_eq!(response.provider_tool_calls()[0].args["draftId"], "draft-a");
+        assert_eq!(response.provider_tool_calls()[1].id, "call-b");
+        assert_eq!(response.provider_tool_calls()[1].args["draftId"], "draft-b");
     }
 
     #[test]

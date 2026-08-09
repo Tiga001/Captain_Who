@@ -1164,6 +1164,8 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             api_token_override TEXT,
             supports_image INTEGER NOT NULL,
             context_window_tokens INTEGER,
+            provider_profile_config_json TEXT,
+            provider_connection_revision TEXT,
             input_price TEXT NOT NULL,
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
@@ -1179,6 +1181,8 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             api_token_override,
             supports_image,
             context_window_tokens,
+            provider_profile_config_json,
+            provider_connection_revision,
             input_price,
             output_price,
             enabled,
@@ -1196,6 +1200,8 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             model.api_token_override,
             model.supports_image,
             model.context_window_tokens,
+            model.provider_profile_config_json,
+            model.provider_connection_revision,
             model.input_price,
             model.output_price,
             model.enabled,
@@ -1970,6 +1976,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             api_token TEXT NOT NULL,
             search_mode TEXT NOT NULL,
             tavily_api_key TEXT NOT NULL,
+            search_connection_revision TEXT,
             updated_at INTEGER NOT NULL
         );
 
@@ -2137,6 +2144,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             api_token_override TEXT,
             supports_image INTEGER NOT NULL,
             context_window_tokens INTEGER,
+            provider_profile_config_json TEXT,
+            provider_connection_revision TEXT,
             input_price TEXT NOT NULL,
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
@@ -2379,6 +2388,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "models", "context_window_tokens", "INTEGER")?;
     add_column_if_missing(connection, "models", "api_url_override", "TEXT")?;
     add_column_if_missing(connection, "models", "api_token_override", "TEXT")?;
+    add_column_if_missing(connection, "models", "provider_profile_config_json", "TEXT")?;
+    add_column_if_missing(connection, "models", "provider_connection_revision", "TEXT")?;
     add_column_if_missing(connection, "conversations", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "archived_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "unread_at", "INTEGER")?;
@@ -3190,6 +3201,26 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
     add_column_if_missing(
         connection,
+        "model_provider_settings",
+        "search_connection_revision",
+        "TEXT",
+    )?;
+    connection.execute(
+        "
+        UPDATE model_provider_settings
+        SET search_connection_revision =
+            'search-connection-v1:' || lower(hex(randomblob(4))) || '-' ||
+            lower(hex(randomblob(2))) || '-4' ||
+            substr(lower(hex(randomblob(2))), 2) || '-8' ||
+            substr(lower(hex(randomblob(2))), 2) || '-' ||
+            lower(hex(randomblob(6)))
+        WHERE search_connection_revision IS NULL
+           OR search_connection_revision = ''
+        ",
+        [],
+    )?;
+    add_column_if_missing(
+        connection,
         "conversation_forks",
         "target_message_id",
         "TEXT REFERENCES messages(id) ON DELETE CASCADE",
@@ -3264,6 +3295,22 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
 
     upgrade_canonical_model_identity_schema(connection)?;
+    // Canonical model identity upgrades rebuild the models table, so backfill the per-model
+    // effective-connection identity only after that upgrade has completed.
+    connection.execute(
+        "
+        UPDATE models
+        SET provider_connection_revision =
+            'provider-connection-v1:' || lower(hex(randomblob(4))) || '-' ||
+            lower(hex(randomblob(2))) || '-4' ||
+            substr(lower(hex(randomblob(2))), 2) || '-8' ||
+            substr(lower(hex(randomblob(2))), 2) || '-' ||
+            lower(hex(randomblob(6)))
+        WHERE provider_connection_revision IS NULL
+           OR provider_connection_revision = ''
+        ",
+        [],
+    )?;
     upgrade_usage_consistency_schema(connection)?;
     ensure_conversation_goal_schema(connection)?;
     ensure_agent_command_session_schema(connection)?;
@@ -3500,22 +3547,55 @@ mod tests {
                     'default', 'https://migration.invalid', 'fixed-test-token',
                     'disabled', '', 1
                 );
+                CREATE TABLE models (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    api_url_override TEXT,
+                    api_token_override TEXT,
+                    supports_image INTEGER NOT NULL,
+                    context_window_tokens INTEGER,
+                    input_price TEXT NOT NULL,
+                    output_price TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO models (
+                    id, display_name, api_url_override, api_token_override, supports_image,
+                    context_window_tokens, input_price, output_price, enabled, position,
+                    created_at, updated_at
+                ) VALUES (
+                    'legacy-model', 'Legacy Model', NULL, NULL, 0, 128000,
+                    '0', '0', 1, 0, 1, 1
+                );
                 ",
             )
             .unwrap();
 
         run_migrations(&connection).unwrap();
-        let revision = connection
+        let (revision, search_revision) = connection
             .query_row(
-                "SELECT configuration_revision
+                "SELECT configuration_revision, search_connection_revision
                  FROM model_provider_settings
                  WHERE id = 'default'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        let provider_revision = connection
+            .query_row(
+                "SELECT provider_connection_revision FROM models WHERE id = 'legacy-model'",
                 [],
                 |row| row.get::<_, String>(0),
             )
             .unwrap();
 
         assert!(crate::storage::config_repository::is_model_settings_revision(&revision));
+        assert!(crate::storage::config_repository::is_search_connection_revision(&search_revision));
+        assert!(
+            crate::storage::config_repository::is_provider_connection_revision(&provider_revision)
+        );
     }
 
     #[test]
@@ -3957,23 +4037,27 @@ mod tests {
 
         run_migrations(&connection).unwrap();
 
-        let (context_window, api_url_override, api_token_override) = connection
-            .query_row(
-                "SELECT context_window_tokens, api_url_override, api_token_override
+        let (context_window, api_url_override, api_token_override, provider_profile_config) =
+            connection
+                .query_row(
+                    "SELECT context_window_tokens, api_url_override, api_token_override,
+                        provider_profile_config_json
                  FROM models WHERE id = 'model-a'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<u32>>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .unwrap();
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<u32>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .unwrap();
         assert_eq!(context_window, None);
         assert_eq!(api_url_override, None);
         assert_eq!(api_token_override, None);
+        assert_eq!(provider_profile_config, None);
         assert!(!table_has_column(&connection, "models", "short_name").unwrap());
         assert!(!table_has_column(&connection, "models", "provider_path").unwrap());
     }

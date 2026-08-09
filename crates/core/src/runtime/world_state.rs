@@ -2,8 +2,8 @@ use super::*;
 use crate::context::ContextOrigin;
 use crate::world_state::{
     effective_permissions_section, interaction_profile_section, model_capabilities_section,
-    workspace_binding_section, WorldStateDiff, WorldStateLifetime, WorldStateRecord,
-    WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
+    model_selection_section, workspace_binding_section, WorldStateDiff, WorldStateLifetime,
+    WorldStateRecord, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
 };
 
 /// Exact run-scoped World State ledger used by the active tool loop.
@@ -319,6 +319,12 @@ fn fallback_conversation_sections(
         workspace_binding_section(workspace, WorldStateLifetime::Run).map_err(world_state_error)?,
         interaction_profile_section(input.prompt_preferences.as_ref(), WorldStateLifetime::Run)
             .map_err(world_state_error)?,
+        model_selection_section(
+            &input.model,
+            input.model_capabilities,
+            WorldStateLifetime::Run,
+        )
+        .map_err(world_state_error)?,
     ])
 }
 
@@ -374,7 +380,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
-    fn run_snapshot_exposes_sanitized_tools_but_keeps_model_capabilities_host_only() {
+    fn run_snapshot_exposes_model_selection_but_keeps_execution_capabilities_host_only() {
         let input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
@@ -414,15 +420,17 @@ mod tests {
             .all(|section| section.lifetime == WorldStateLifetime::Run));
         let frame = ContextFrame::new(vec![tracker.full_context_item().unwrap()]);
         frame.validate_cache_layout().unwrap();
-        let rendered = frame.to_messages()[0].content.clone();
+        let rendered = frame.to_messages()[0].content().to_string();
 
         assert!(rendered.contains("\"lifetime\":\"run\""));
         assert!(rendered.contains("tools.effective"));
         assert!(rendered.contains("permissions.effective"));
+        assert!(rendered.contains("model.selection"));
+        assert!(rendered.contains("\"configuredModelId\":\"test-model\""));
+        assert!(rendered.contains("\"imageInput\":true"));
         assert!(rendered.contains("\"workMode\":\"general\""));
         assert!(rendered.contains("\"displayName\":\"Demo\""));
         assert!(!rendered.contains("model.capabilities"));
-        assert!(!rendered.contains("imageInput"));
         assert!(!rendered.contains("project-secret-id"));
         assert!(!rendered.contains("/private/workspace/root"));
         assert!(!rendered.contains("secret"));
@@ -461,7 +469,8 @@ mod tests {
             .expect("new dynamic tools must produce a model-visible diff");
         let frame = ContextFrame::new(vec![item]);
         frame.validate_cache_layout().unwrap();
-        let rendered = &frame.to_messages()[0].content;
+        let messages = frame.to_messages();
+        let rendered = messages[0].content();
 
         assert_eq!(tracker.snapshot().sequence, 1);
         assert!(rendered.contains("\"recordType\":\"diff\""));
@@ -518,8 +527,8 @@ mod tests {
             .unwrap()
             .expect("new Skill and attachment summary must emit one diff");
         let rendered = ContextFrame::new(vec![first]).to_messages()[0]
-            .content
-            .clone();
+            .content()
+            .to_string();
         assert!(rendered.contains("skills.activation"));
         assert!(rendered.contains("attachments.library_summary"));
         assert_eq!(tracker.snapshot().sequence, 1);
@@ -539,7 +548,7 @@ mod tests {
             .unwrap()
             .expect("removed dynamic state must emit tombstones");
         assert!(ContextFrame::new(vec![removed]).to_messages()[0]
-            .content
+            .content()
             .contains("\"op\":\"remove\""));
         assert_eq!(tracker.snapshot().sequence, 2);
     }

@@ -255,7 +255,11 @@ fn model_context_item(
             metadata,
         )),
         "assistant" => {
-            let call = &item.tool_calls[0];
+            let [call] = item.tool_calls.as_slice() else {
+                return Err(AgentError::new(
+                    "模型上下文日志必须按 Generic wire 逐个保存 Tool Call，不能静默丢弃批次调用。",
+                ));
+            };
             let group = ContextGroup::tool_exchange(format!("conversation-trace:{}", call.id));
             Ok(ContextItem::assistant(
                 item.content.clone(),
@@ -373,24 +377,25 @@ mod tests {
 
         frame.validate_complete_tool_protocol().unwrap();
         let messages = frame.to_messages();
-        assert_eq!(messages[0].role, LlmMessageRole::Assistant);
-        assert_eq!(messages[1].role, LlmMessageRole::Assistant);
-        assert_eq!(messages[2].role, LlmMessageRole::Tool);
-        let call_id = &messages[1].tool_calls[0].id;
+        assert_eq!(messages[0].role(), LlmMessageRole::Assistant);
+        assert_eq!(messages[1].role(), LlmMessageRole::Assistant);
+        assert_eq!(messages[2].role(), LlmMessageRole::Tool);
+        let rendered_call = messages[1].tool_calls().next().unwrap();
+        let call_id = &rendered_call.id;
         assert_eq!(call_id, &expected_call_id);
         assert!(call_id.starts_with("tc1_"));
         assert_eq!(call_id.len(), 47);
         assert!(call_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')));
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some(call_id.as_str()));
-        assert_eq!(messages[1].tool_calls[0].args["path"], "src/lib.rs");
-        assert!(!messages[2].content.contains("\"ok\""));
-        assert!(messages[2].content.contains("\"endLine\":20"));
+        assert_eq!(messages[2].tool_call_id(), Some(call_id.as_str()));
+        assert_eq!(rendered_call.args["path"], "src/lib.rs");
+        assert!(!messages[2].content().contains("\"ok\""));
+        assert!(messages[2].content().contains("\"endLine\":20"));
         assert!(messages[3]
-            .content
+            .content()
             .contains("historical_agent_activity_terminal"));
-        assert_eq!(messages[3].role, LlmMessageRole::Assistant);
+        assert_eq!(messages[3].role(), LlmMessageRole::Assistant);
 
         let manifest = frame.manifest();
         assert!(manifest.entries.iter().all(|entry| {
@@ -433,7 +438,7 @@ mod tests {
         let context = ContextFrame::new(items)
             .to_messages()
             .into_iter()
-            .map(|message| message.content)
+            .map(|message| message.content().to_string())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!context.contains("todo_update"));
@@ -479,7 +484,7 @@ mod tests {
         assert!(!ContextFrame::new(rendered.activity_items)
             .to_messages()
             .iter()
-            .map(|message| message.content.as_str())
+            .map(|message| message.content().to_string())
             .collect::<Vec<_>>()
             .join("\n")
             .contains("cmd_0123456789abcdef0123456789abcdef"));
@@ -516,6 +521,7 @@ mod tests {
                         id: call_id.clone(),
                         name: tool.clone(),
                         args: operation.clone(),
+                        provider_identity: None,
                     }],
                     is_error: false,
                 },
@@ -570,6 +576,7 @@ mod tests {
                     id: call_id.clone(),
                     name: tool,
                     args,
+                    provider_identity: None,
                 }],
                 is_error: false,
             },
@@ -594,14 +601,123 @@ mod tests {
 
         assert!(messages
             .iter()
-            .any(|message| message.content.contains(exact_marker)));
+            .any(|message| message.content().contains(exact_marker)));
         assert_eq!(
             messages
                 .iter()
-                .map(|message| message.content.matches(exact_marker).count())
+                .map(|message| message.content().matches(exact_marker).count())
                 .sum::<usize>(),
             1
         );
+    }
+
+    #[test]
+    fn split_durable_projection_rebuilds_every_call_from_a_multi_tool_turn() {
+        let mut trace = trace();
+        let first_call_id = match &trace.items[1] {
+            ConversationTurnTraceItem::ToolCall { call_id, .. } => call_id.clone(),
+            _ => panic!("expected first tool call"),
+        };
+        let second_call_id =
+            model_response_tool_call_id("run/with spaces", 0, 1, "provider-call-2");
+        trace.items.push(ConversationTurnTraceItem::ToolCall {
+            sequence: 6,
+            call_id: second_call_id.clone(),
+            tool: "read_file".to_string(),
+            provenance: None,
+            operation: json!({ "path": "src/main.rs" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            truncated: false,
+        });
+        trace.items.push(ConversationTurnTraceItem::ToolResult {
+            sequence: 7,
+            call_id: second_call_id.clone(),
+            tool: "read_file".to_string(),
+            status: ConversationTraceToolResultStatus::Succeeded,
+            success: true,
+            observation: json!({ "path": "src/main.rs", "endLine": 10 }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            error: None,
+            truncated: false,
+            archive: Default::default(),
+        });
+        let model_items = vec![
+            ConversationModelContextItem {
+                sequence: 3,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: "I will inspect the file.".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 4,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: first_call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "src/lib.rs" }),
+                    provider_identity: None,
+                }],
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 5,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: "first result".to_string(),
+                tool_call_id: Some(first_call_id.clone()),
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 6,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: second_call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "src/main.rs" }),
+                    provider_identity: None,
+                }],
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 7,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: "second result".to_string(),
+                tool_call_id: Some(second_call_id.clone()),
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        ];
+
+        let rendered =
+            ConversationTraceRenderer::render_with_model_context(&trace, &model_items).unwrap();
+        let frame = ContextFrame::new(rendered.activity_items);
+        frame.validate_complete_tool_protocol().unwrap();
+        let messages = frame.to_messages();
+        let rendered_call_ids = messages
+            .iter()
+            .flat_map(|message| message.tool_calls().map(|call| call.id.clone()))
+            .collect::<Vec<_>>();
+        let result_ids = messages
+            .iter()
+            .filter_map(|message| message.tool_call_id().map(str::to_string))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered_call_ids,
+            vec![first_call_id.clone(), second_call_id.clone()]
+        );
+        assert_eq!(result_ids, vec![first_call_id, second_call_id]);
     }
 
     #[test]
@@ -636,6 +752,7 @@ mod tests {
                     id: call_id,
                     name: tool,
                     args,
+                    provider_identity: None,
                 }],
                 is_error: false,
             },
@@ -694,16 +811,16 @@ mod tests {
         frame.validate_complete_tool_protocol().unwrap();
 
         let messages = frame.to_messages();
-        assert!(messages[2].is_error);
-        assert!(messages[2].content.contains("command failed"));
-        assert!(messages[2].content.contains("permission denied"));
-        assert!(messages[2].content.contains("partial output"));
-        assert!(messages[2].content.contains("\"exitCode\":1"));
-        assert!(!messages[2].content.contains("\"ok\""));
+        assert!(messages[2].is_error());
+        assert!(messages[2].content().contains("command failed"));
+        assert!(messages[2].content().contains("permission denied"));
+        assert!(messages[2].content().contains("partial output"));
+        assert!(messages[2].content().contains("\"exitCode\":1"));
+        assert!(!messages[2].content().contains("\"ok\""));
         assert!(messages[3]
-            .content
+            .content()
             .contains("\"terminalStatus\":\"failed\""));
-        assert!(messages[3].content.contains("read failed"));
+        assert!(messages[3].content().contains("read failed"));
     }
 
     #[test]

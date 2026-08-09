@@ -140,6 +140,7 @@ fn approval_action(
 }
 
 fn resume_checkpoint(run_id: &str, action_id: &str) -> AgentRunCheckpoint {
+    let pending_tool_call_id = call_id(action_id);
     serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         "runId": run_id,
@@ -151,9 +152,14 @@ fn resume_checkpoint(run_id: &str, action_id: &str) -> AgentRunCheckpoint {
         "toolSet": crate::test_tool_set_checkpoint(),
         "runContext": null,
         "modelCapabilities": { "imageInput": false },
+        "providerProfileConfig": crate::test_provider_profile_config(),
+        "providerProtocolKey": crate::test_provider_protocol_key("expiry-test-model"),
+        "assistantTurnIdentity": crate::test_assistant_turn_identity(&[
+            pending_tool_call_id.as_str()
+        ]),
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
-        "pendingToolCallId": call_id(action_id),
+        "pendingToolCallId": pending_tool_call_id,
         "conversationTraceItems": [],
         "nextConversationTraceSequence": 0,
         "conversationTraceTruncated": false
@@ -180,7 +186,7 @@ fn store_action(
     }))
     .unwrap();
     input.resume_checkpoint = Some(resume_checkpoint(run_id, &action_id));
-    save_test_pending_provider_for_input(storage, &input);
+    save_test_pending_provider_for_input(storage, &mut input);
     service
         .store_pending_action(
             run_id,

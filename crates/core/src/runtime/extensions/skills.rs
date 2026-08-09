@@ -2031,9 +2031,9 @@ mod tests {
         );
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, LlmMessageRole::User);
-        assert!(messages[0].content.contains(SECRET_INSTRUCTIONS));
-        assert!(messages[0].content.contains("<backend_activated_skill>"));
+        assert_eq!(messages[0].role(), LlmMessageRole::User);
+        assert!(messages[0].content().contains(SECRET_INSTRUCTIONS));
+        assert!(messages[0].content().contains("<backend_activated_skill>"));
     }
 
     #[test]

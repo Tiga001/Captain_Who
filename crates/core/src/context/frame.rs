@@ -3,10 +3,12 @@ use super::measurement::{
     ContextRevisionHasher, ContextTokenEstimator,
 };
 use super::ContextJournalCursor;
-use crate::llm::{LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
+use crate::llm::LlmRuntimeToolCallBinding;
+use crate::llm::{LlmAssistantTurn, LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
-    AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
-    AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentError, AgentResult,
+    AgentAssistantTurnCheckpointIdentity, AgentContextCheckpointGroup, AgentContextCheckpointImage,
+    AgentContextCheckpointItem, AgentContextCheckpointOrigin, AgentContextCheckpointToolCall,
+    AgentError, AgentProviderToolCallIdentity, AgentResult,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -479,7 +481,7 @@ struct ContextItemMeasurement {
 
 impl ContextItem {
     pub(crate) fn new(mut message: LlmMessage, metadata: ContextMetadata) -> Self {
-        message.placement = metadata.message_placement();
+        message.set_placement(metadata.message_placement());
         Self {
             message,
             checkpoint_message: None,
@@ -540,9 +542,40 @@ impl ContextItem {
     /// Keeps the live Tool arguments in memory while replacing only the
     /// durable Tool-call projection. All other assistant message fields remain
     /// byte-for-byte identical.
+    #[cfg(test)]
     pub(crate) fn with_checkpoint_tool_calls(mut self, tool_calls: Vec<LlmToolCall>) -> Self {
         let mut projected = self.message.clone();
-        projected.tool_calls = tool_calls;
+        if let Some(turn) = projected.assistant_turn_mut() {
+            *turn = turn.without_raw_continuation_for_checkpoint();
+            let live_calls = turn.effective_tool_calls().cloned().collect::<Vec<_>>();
+            debug_assert_eq!(live_calls.len(), tool_calls.len());
+            let bindings = match turn.runtime_tool_bindings() {
+                Some(live_bindings) => live_bindings
+                    .iter()
+                    .zip(tool_calls)
+                    .map(|(binding, runtime_call)| {
+                        LlmRuntimeToolCallBinding::new(
+                            binding.provider_tool_index,
+                            turn.provider_tool_calls()
+                                .get(binding.provider_tool_index)
+                                .expect("validated assistant turn binding"),
+                            runtime_call,
+                        )
+                    })
+                    .collect(),
+                None => turn
+                    .provider_tool_calls()
+                    .iter()
+                    .enumerate()
+                    .zip(tool_calls)
+                    .map(|((index, provider_call), runtime_call)| {
+                        LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
+                    })
+                    .collect(),
+            };
+            turn.set_runtime_tool_bindings(bindings)
+                .expect("checkpoint projection preserves assistant turn identities");
+        }
         if projected != self.message {
             self.checkpoint_message = Some(projected);
         }
@@ -593,18 +626,27 @@ fn persistent_frame_revision_iter<'a>(items: impl Iterator<Item = &'a ContextIte
 
 fn context_item_revision(item: &ContextItem) -> u64 {
     let mut hasher = ContextRevisionHasher::new();
-    hasher.write_str(item.message.role.as_str());
-    hasher.write_str(&item.message.content);
-    hasher.write_str(item.message.tool_call_id.as_deref().unwrap_or_default());
-    hasher.write_u64(item.message.is_error.into());
-    for image in &item.message.images {
+    hasher.write_str(item.message.role().as_str());
+    hasher.write_str(item.message.content());
+    let (tool_call_id, is_error) = item
+        .message
+        .tool_result_fields()
+        .map_or((None, false), |(id, _, is_error)| (Some(id), is_error));
+    hasher.write_str(tool_call_id.unwrap_or_default());
+    hasher.write_u64(is_error.into());
+    for image in item.message.images() {
         hasher.write_str(&image.mime_type);
         hasher.write_str(&image.data_base64);
     }
-    for call in &item.message.tool_calls {
-        hasher.write_str(&call.id);
-        hasher.write_str(&call.name);
-        hasher.write_str(&serde_json::to_string(&call.args).unwrap_or_else(|_| "null".to_string()));
+    if let Some(turn) = item.message.assistant_turn() {
+        hasher.write_str(&turn.context_revision_material());
+        for call in turn.effective_tool_calls() {
+            hasher.write_str(&call.id);
+            hasher.write_str(&call.name);
+            hasher.write_str(
+                &serde_json::to_string(&call.args).unwrap_or_else(|_| "null".to_string()),
+            );
+        }
     }
     for source in item.metadata.sources() {
         hasher.write_str(source.as_str());

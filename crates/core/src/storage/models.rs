@@ -1,6 +1,10 @@
 use crate::protocol::{AgentGuidanceStatus, AgentPermissions};
+use crate::provider_profile::{
+    ProviderProfileConfig, ProviderProfileValidationError, ProviderProtocolDialect,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Backend-authoritative context capacity used when a model configuration omits an override.
 ///
@@ -36,6 +40,10 @@ pub struct ModelConfigRecord {
     pub supports_image: bool,
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
+    /// Explicit provider wire profile. Legacy records omit this field and resolve to the Generic
+    /// profile for the run's API dialect without changing existing request construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_profile_config: Option<ProviderProfileConfig>,
     pub input_price: String,
     pub output_price: String,
     pub enabled: bool,
@@ -72,6 +80,12 @@ impl std::fmt::Debug for ModelSettingsRecord {
 pub struct ModelSettingsSnapshot {
     pub settings: ModelSettingsRecord,
     pub configuration_revision: String,
+    /// Stable opaque identity of each model's effective endpoint/token pair. Revisions are
+    /// Host-only and rotate independently, so editing another model or non-connection metadata
+    /// cannot invalidate an already frozen run.
+    pub provider_connection_revisions: BTreeMap<String, String>,
+    /// Stable opaque identity of the effective search mode/credential pair.
+    pub search_connection_revision: String,
 }
 
 impl std::fmt::Debug for ModelSettingsSnapshot {
@@ -129,6 +143,13 @@ impl ModelConfigRecord {
     pub fn effective_context_window_tokens(&self) -> u32 {
         self.context_window_tokens
             .unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS)
+    }
+
+    pub fn resolved_provider_profile_config(
+        &self,
+        dialect: ProviderProtocolDialect,
+    ) -> Result<ProviderProfileConfig, ProviderProfileValidationError> {
+        ProviderProfileConfig::resolve(self.provider_profile_config.as_ref(), dialect)
     }
 
     pub fn connection_override(&self) -> Result<Option<ModelConnectionConfig>, String> {
@@ -189,6 +210,7 @@ mod model_connection_tests {
             api_token_override: api_token_override.map(ToString::to_string),
             supports_image: false,
             context_window_tokens: None,
+            provider_profile_config: None,
             input_price: "0".to_string(),
             output_price: "0".to_string(),
             enabled: true,
@@ -740,6 +762,7 @@ mod security_tests {
             api_token_override: Some(CANARY.to_string()),
             supports_image: false,
             context_window_tokens: Some(128_000),
+            provider_profile_config: None,
             input_price: "0".to_string(),
             output_price: "0".to_string(),
             enabled: true,

@@ -762,6 +762,27 @@ mod tests {
                 },
                 run_context: None,
                 model_capabilities: crate::protocol::ModelCapabilities::default(),
+                provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+                    crate::ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
+                provider_protocol_key: crate::ProviderProtocolKey::new(
+                    crate::ProviderProtocolDialect::OpenAiChatCompletions,
+                    &crate::ProviderProfileConfig::generic_for_dialect(
+                        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+                    ),
+                    "test-model",
+                    None,
+                )
+                .unwrap(),
+                assistant_turn_identity: crate::AgentAssistantTurnCheckpointIdentity {
+                    assistant_turn_id: "assistant-turn-1".to_string(),
+                    assistant_turn_digest: "digest-assistant-turn-1".to_string(),
+                    tool_call_identities: vec![crate::AgentProviderToolCallIdentity {
+                        provider_tool_index: 0,
+                        provider_call_id: "call-1".to_string(),
+                        runtime_call_id: "call-1".to_string(),
+                    }],
+                },
                 run_world_state: crate::world_state::WorldStateSnapshot::new(
                     "approval-event-test",
                     0,

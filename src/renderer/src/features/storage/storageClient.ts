@@ -330,6 +330,7 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     apiTokenOverride: model.apiTokenOverride ?? undefined,
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? undefined,
+    providerProfileConfig: model.providerProfileConfig ?? undefined,
     inputPrice: model.inputPrice,
     outputPrice: model.outputPrice,
     enabled: model.enabled

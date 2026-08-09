@@ -156,7 +156,7 @@ impl ContextAssembler {
                 metadata = metadata.with_origin(ContextOrigin::conversation_message(message_id));
             }
 
-            if !llm_message.content.trim().is_empty() {
+            if !llm_message.content().trim().is_empty() {
                 items.push(ContextItem::new(llm_message, metadata));
             }
             if let Some(trace) = trace {
@@ -178,7 +178,10 @@ impl ContextAssembler {
         if current_turn_index.is_some() && (has_attachment_text || has_attachment_images) {
             let mut attachment_message =
                 LlmMessage::text(LlmMessageRole::User, input.attachments.text);
-            attachment_message.images.extend(input.attachments.images);
+            attachment_message
+                .images_mut()
+                .expect("user attachment messages support images")
+                .extend(input.attachments.images);
             items.push(ContextItem::new(
                 attachment_message,
                 ContextMetadata::new(
@@ -820,12 +823,12 @@ mod tests {
 
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, LlmMessageRole::System);
-        assert_eq!(messages[1].content, "old question");
-        assert_eq!(messages[3].role, LlmMessageRole::User);
-        assert_eq!(messages[3].content, "current question");
-        assert_eq!(messages[4].content, "attachment body");
-        assert_eq!(messages[4].images.len(), 1);
+        assert_eq!(messages[0].role(), LlmMessageRole::System);
+        assert_eq!(messages[1].content(), "old question");
+        assert_eq!(messages[3].role(), LlmMessageRole::User);
+        assert_eq!(messages[3].content(), "current question");
+        assert_eq!(messages[4].content(), "attachment body");
+        assert_eq!(messages[4].images().len(), 1);
 
         let manifest = frame.manifest();
         assert_eq!(manifest.entries[0].sources, vec!["backend_system_prompt"]);
@@ -863,31 +866,31 @@ mod tests {
 
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[0].role, LlmMessageRole::System);
-        assert_eq!(messages[1].role, LlmMessageRole::System);
+        assert_eq!(messages[0].role(), LlmMessageRole::System);
+        assert_eq!(messages[1].role(), LlmMessageRole::System);
         assert_eq!(
-            messages[1].placement,
+            messages[1].placement(),
             LlmMessagePlacement::BackendStateTimeline
         );
-        assert!(messages[1].content.contains("较早对话的有损语义摘要"));
-        assert!(messages[2].content.contains("\"recordType\":\"full\""));
+        assert!(messages[1].content().contains("较早对话的有损语义摘要"));
+        assert!(messages[2].content().contains("\"recordType\":\"full\""));
         assert!(messages[2]
-            .content
+            .content()
             .contains("\"lifetime\":\"conversation\""));
-        assert!(messages[2].content.contains("old-workspace"));
-        assert!(messages[3].content.contains("\"recordType\":\"diff\""));
+        assert!(messages[2].content().contains("old-workspace"));
+        assert!(messages[3].content().contains("\"recordType\":\"diff\""));
         assert!(messages[3]
-            .content
+            .content()
             .contains("\"lifetime\":\"conversation\""));
-        assert!(messages[3].content.contains("new-workspace"));
-        assert_eq!(messages[4].content, "continue in the current workspace");
+        assert!(messages[3].content().contains("new-workspace"));
+        assert_eq!(messages[4].content(), "continue in the current workspace");
         assert!(!messages.iter().any(|message| message
-            .content
+            .content()
             .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON")));
 
         let rendered = messages
             .iter()
-            .map(|message| message.content.as_str())
+            .map(|message| message.content())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!rendered.contains("/private/authoritative/root"));
@@ -928,16 +931,16 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages[2].role, LlmMessageRole::System);
+        assert_eq!(messages[2].role(), LlmMessageRole::System);
         assert_eq!(
-            messages[2].placement,
+            messages[2].placement(),
             LlmMessagePlacement::BackendStateTimeline
         );
-        assert!(messages[2].content.contains("## Explicit Goal"));
+        assert!(messages[2].content().contains("## Explicit Goal"));
         assert!(messages[2]
-            .content
+            .content()
             .contains("Latest user instructions override"));
-        assert_eq!(messages[3].content, "change one detail before continuing");
+        assert_eq!(messages[3].content(), "change one detail before continuing");
         assert_eq!(
             frame.manifest().entries[2].sources,
             vec!["conversation_goal"]
@@ -984,12 +987,12 @@ mod tests {
 
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 4);
-        assert_eq!(messages[1].content, "inspect the file");
-        assert!(messages[2].content.contains("read_file"));
-        assert!(messages[2].content.contains("\"lifetime\":\"run\""));
-        assert!(!messages[2].content.contains("host-secret"));
-        assert!(!messages[2].content.contains("providerSecret"));
-        assert_eq!(messages[3].content, "ATTACHMENT_MARKER");
+        assert_eq!(messages[1].content(), "inspect the file");
+        assert!(messages[2].content().contains("read_file"));
+        assert!(messages[2].content().contains("\"lifetime\":\"run\""));
+        assert!(!messages[2].content().contains("host-secret"));
+        assert!(!messages[2].content().contains("providerSecret"));
+        assert_eq!(messages[3].content(), "ATTACHMENT_MARKER");
         let manifest = frame.manifest();
         assert_eq!(manifest.entries[2].sources, vec!["world_state_snapshot"]);
         assert_eq!(manifest.entries[2].scope, "run");
@@ -1014,8 +1017,8 @@ mod tests {
 
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, LlmMessageRole::System);
-        assert_eq!(messages[1].content, "legacy message");
+        assert_eq!(messages[0].role(), LlmMessageRole::System);
+        assert_eq!(messages[1].content(), "legacy message");
         assert!(frame.manifest().entries.iter().all(|entry| !entry
             .sources
             .iter()
@@ -1102,12 +1105,12 @@ mod tests {
 
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 5);
-        assert_eq!(messages[1].content, "current question");
-        assert_eq!(messages[2].content, "ATTACHMENT_MARKER");
-        assert!(messages[3].content.contains("FIRST_SKILL_MARKER"));
-        assert!(messages[4].content.contains("SECOND_SKILL_MARKER"));
-        assert!(messages[3].content.contains("\"source\":\"workspace\""));
-        assert!(!messages[3].content.contains("description"));
+        assert_eq!(messages[1].content(), "current question");
+        assert_eq!(messages[2].content(), "ATTACHMENT_MARKER");
+        assert!(messages[3].content().contains("FIRST_SKILL_MARKER"));
+        assert!(messages[4].content().contains("SECOND_SKILL_MARKER"));
+        assert!(messages[3].content().contains("\"source\":\"workspace\""));
+        assert!(!messages[3].content().contains("description"));
 
         let manifest = frame.manifest();
         assert_eq!(manifest.entries[2].sources, vec!["input_attachment"]);
@@ -1171,20 +1174,20 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages[1].content, "current question");
-        assert_eq!(messages[2].content, "ATTACHMENT_BEFORE_SKILLS");
-        assert!(messages[3].content.contains("backend_available_skills"));
+        assert_eq!(messages[1].content(), "current question");
+        assert_eq!(messages[2].content(), "ATTACHMENT_BEFORE_SKILLS");
+        assert!(messages[3].content().contains("backend_available_skills"));
         assert!(messages[3]
-            .content
+            .content()
             .contains(&format!("\"ref\":\"{activation_ref}\"")));
         assert!(!messages[3]
-            .content
+            .content()
             .contains("bundled:application:documents"));
         assert!(!messages[3]
-            .content
+            .content()
             .contains("skill-package-sha256-v1:documents"));
         assert!(messages[4]
-            .content
+            .content()
             .contains("FULL_DOCUMENT_SKILL_INSTRUCTIONS"));
         assert_eq!(
             frame.manifest().entries[2].sources,
@@ -1219,24 +1222,24 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert!(messages[1].content.contains(&format!(
+        assert!(messages[1].content().contains(&format!(
             "user_message_created_at: {}",
             crate::context::format_message_created_at(0).unwrap()
         )));
-        assert!(messages[1].content.ends_with("historical question"));
-        assert_eq!(messages[2].content, "historical answer");
+        assert!(messages[1].content().ends_with("historical question"));
+        assert_eq!(messages[2].content(), "historical answer");
         assert!(!messages[2]
-            .content
+            .content()
             .contains("<backend_conversation_timing>"));
-        assert!(messages[3].content.contains(&format!(
+        assert!(messages[3].content().contains(&format!(
             "previous_assistant_message_created_at: {}",
             crate::context::format_message_created_at(1_000).unwrap()
         )));
-        assert!(messages[3].content.contains(&format!(
+        assert!(messages[3].content().contains(&format!(
             "user_message_created_at: {}",
             crate::context::format_message_created_at(2_000).unwrap()
         )));
-        assert!(messages[3].content.ends_with("follow up"));
+        assert!(messages[3].content().ends_with("follow up"));
     }
 
     #[test]
@@ -1259,8 +1262,8 @@ mod tests {
         .unwrap();
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[1].content, "hello");
-        assert_eq!(messages[2].content, "history rules");
+        assert_eq!(messages[1].content(), "hello");
+        assert_eq!(messages[2].content(), "history rules");
 
         let error = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
@@ -1299,25 +1302,23 @@ mod tests {
         frame.validate_complete_tool_protocol().unwrap();
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 8);
-        assert_eq!(messages[1].content, "create a file");
-        assert_eq!(messages[2].content, "I will update the file.");
-        assert_eq!(messages[3].role, LlmMessageRole::Assistant);
-        assert_eq!(messages[3].tool_calls[0].name, "write_file");
-        assert_eq!(messages[3].tool_calls[0].args["filePath"], "src/new.rs");
-        assert_eq!(messages[4].role, LlmMessageRole::Tool);
-        assert_eq!(
-            messages[4].tool_call_id.as_deref(),
-            Some(messages[3].tool_calls[0].id.as_str())
-        );
-        assert_eq!(messages[5].content, "Created src/new.rs.");
+        assert_eq!(messages[1].content(), "create a file");
+        assert_eq!(messages[2].content(), "I will update the file.");
+        assert_eq!(messages[3].role(), LlmMessageRole::Assistant);
+        let write_call = messages[3].tool_calls().next().unwrap();
+        assert_eq!(write_call.name, "write_file");
+        assert_eq!(write_call.args["filePath"], "src/new.rs");
+        assert_eq!(messages[4].role(), LlmMessageRole::Tool);
+        assert_eq!(messages[4].tool_call_id(), Some(write_call.id.as_str()));
+        assert_eq!(messages[5].content(), "Created src/new.rs.");
         assert!(messages[6]
-            .content
+            .content()
             .contains("historical_agent_activity_terminal"));
         assert!(messages[6]
-            .content
+            .content()
             .contains("\"terminalStatus\":\"completed\""));
-        assert_eq!(messages[7].role, LlmMessageRole::User);
-        assert_eq!(messages[7].content, "what changed?");
+        assert_eq!(messages[7].role(), LlmMessageRole::User);
+        assert_eq!(messages[7].content(), "what changed?");
 
         let manifest = frame.manifest();
         for index in [2, 3, 4, 6] {
@@ -1361,16 +1362,16 @@ mod tests {
         let messages = frame.to_messages();
         assert!(messages
             .iter()
-            .any(|message| message.content == "I will update the file."));
+            .any(|message| message.content() == "I will update the file."));
         assert!(messages.iter().any(|message| message
-            .content
+            .content()
             .contains("historical_agent_activity_terminal")));
-        assert!(!messages.iter().any(|message| message.content.is_empty()
-            && message.role == LlmMessageRole::Assistant
-            && message.tool_calls.is_empty()));
+        assert!(!messages.iter().any(|message| message.content().is_empty()
+            && message.role() == LlmMessageRole::Assistant
+            && message.tool_calls().is_empty()));
         assert!(!messages
             .iter()
-            .any(|message| message.content.starts_with("[Message created at:")));
+            .any(|message| message.content().starts_with("[Message created at:")));
     }
 
     #[test]
@@ -1390,19 +1391,19 @@ mod tests {
 
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].role, LlmMessageRole::System);
-        assert_eq!(messages[1].role, LlmMessageRole::System);
+        assert_eq!(messages[0].role(), LlmMessageRole::System);
+        assert_eq!(messages[1].role(), LlmMessageRole::System);
         assert_eq!(
-            messages[1].placement,
+            messages[1].placement(),
             LlmMessagePlacement::BackendStateTimeline
         );
-        assert!(messages[1].content.contains("old task"));
-        assert!(messages[1].content.contains("较早对话的有损语义摘要"));
-        assert!(messages[1].content.contains("当前用户消息在冲突时优先"));
-        assert!(messages[1].content.contains("conversation_history"));
-        assert_eq!(messages[2].content, "continue from the summary");
+        assert!(messages[1].content().contains("old task"));
+        assert!(messages[1].content().contains("较早对话的有损语义摘要"));
+        assert!(messages[1].content().contains("当前用户消息在冲突时优先"));
+        assert!(messages[1].content().contains("conversation_history"));
+        assert_eq!(messages[2].content(), "continue from the summary");
         assert!(!messages.iter().any(|message| message
-            .content
+            .content()
             .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON")));
         assert_eq!(
             frame.manifest().entries[1].sources,
@@ -1488,9 +1489,9 @@ mod tests {
         let tool_result = frame
             .to_messages()
             .into_iter()
-            .find(|message| message.role == LlmMessageRole::Tool)
+            .find(|message| message.role() == LlmMessageRole::Tool)
             .expect("the durable run_command result must be reconstructed after reload");
-        let observation: serde_json::Value = serde_json::from_str(&tool_result.content).unwrap();
+        let observation: serde_json::Value = serde_json::from_str(tool_result.content()).unwrap();
         assert_eq!(observation["status"], "running");
         assert_eq!(
             observation["sessionId"],

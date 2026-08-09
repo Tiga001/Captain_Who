@@ -1,4 +1,4 @@
-use super::{LlmMessage, LlmMessageRole};
+use super::{LlmMessage, LlmMessageRole, MAX_PROVIDER_TOOL_CALL_ID_BYTES};
 use crate::protocol::{AgentError, AgentResult};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -17,6 +17,23 @@ const MODEL_TOOL_CALL_ID_PREFIX: &str = "tc1_";
 const MODEL_TOOL_CALL_ID_LENGTH_BYTES: usize = 47;
 const MODEL_TOOL_CALL_ID_HASH_DOMAIN: &[u8] = b"mycopilot:model-tool-call-id:v1";
 const MODEL_RESPONSE_DOMAIN: &[u8] = b"model-response";
+
+pub(crate) fn validate_provider_tool_call_id(id: &str) -> AgentResult<()> {
+    let byte_length = id.len();
+    if byte_length == 0 || byte_length > MAX_PROVIDER_TOOL_CALL_ID_BYTES {
+        return Err(AgentError::structured(
+            "agent.invalid_provider_tool_call_id",
+            "模型服务返回了无效的 Tool Call 身份。",
+            serde_json::json!({
+                "type": "provider_tool_call_id",
+                "byteLength": byte_length,
+                "maxBytes": MAX_PROVIDER_TOOL_CALL_ID_BYTES,
+                "recovery": "retryRun",
+            }),
+        ));
+    }
+    Ok(())
+}
 
 /// Derives the identity used for one tool call accepted from a model response.
 ///
@@ -75,9 +92,9 @@ pub(crate) fn validate_model_tool_protocol(messages: &[LlmMessage]) -> AgentResu
     let mut unresolved_calls = BTreeMap::<String, usize>::new();
 
     for (message_index, message) in messages.iter().enumerate() {
-        match message.role {
+        match message.role() {
             LlmMessageRole::Assistant => {
-                if message.tool_call_id.is_some() {
+                if message.tool_call_id().is_some() {
                     return Err(protocol_error(
                         "assistantToolResultId",
                         message_index,
@@ -91,7 +108,7 @@ pub(crate) fn validate_model_tool_protocol(messages: &[LlmMessage]) -> AgentResu
                         "assistant message appears before the preceding tool calls are settled",
                     ));
                 }
-                for (tool_index, call) in message.tool_calls.iter().enumerate() {
+                for (tool_index, call) in message.tool_calls().enumerate() {
                     validate_model_tool_call_id_at(&call.id, message_index, Some(tool_index))?;
                     if !seen_call_ids.insert(call.id.clone()) {
                         return Err(protocol_error(
@@ -104,14 +121,14 @@ pub(crate) fn validate_model_tool_protocol(messages: &[LlmMessage]) -> AgentResu
                 }
             }
             LlmMessageRole::Tool => {
-                if !message.tool_calls.is_empty() {
+                if !message.tool_calls().is_empty() {
                     return Err(protocol_error(
                         "toolMessageContainsCalls",
                         message_index,
                         "tool result message unexpectedly contains tool calls",
                     ));
                 }
-                let call_id = message.tool_call_id.as_deref().ok_or_else(|| {
+                let call_id = message.tool_call_id().ok_or_else(|| {
                     protocol_error(
                         "missingToolResultId",
                         message_index,
@@ -128,7 +145,7 @@ pub(crate) fn validate_model_tool_protocol(messages: &[LlmMessage]) -> AgentResu
                 }
             }
             LlmMessageRole::System | LlmMessageRole::User => {
-                if message.tool_call_id.is_some() || !message.tool_calls.is_empty() {
+                if message.tool_call_id().is_some() || !message.tool_calls().is_empty() {
                     return Err(protocol_error(
                         "invalidRoleToolFields",
                         message_index,

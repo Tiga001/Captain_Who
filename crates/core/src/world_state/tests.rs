@@ -79,6 +79,78 @@ fn canonical_domain_sections_keep_authority_projection_and_lifetime_separate() {
     .unwrap();
     assert_eq!(capabilities.visibility, WorldStateVisibility::HostOnly);
     assert!(capabilities.model_projection.is_none());
+
+    let selection = model_selection_section(
+        "provider/model-v1",
+        crate::protocol::ModelCapabilities { image_input: true },
+        WorldStateLifetime::Conversation,
+    )
+    .unwrap();
+    assert_eq!(selection.visibility, WorldStateVisibility::ModelVisible);
+    assert_eq!(
+        selection.model_projection.as_ref().unwrap(),
+        &serde_json::json!({
+            "configuredModelId": "provider/model-v1",
+            "capabilities": {
+                "imageInput": true,
+            }
+        })
+    );
+}
+
+#[test]
+fn model_selection_capability_changes_generate_visible_replacements() {
+    let text_only = WorldStateSnapshot::new(
+        "model-epoch",
+        0,
+        vec![model_selection_section(
+            "provider/model-v1",
+            crate::protocol::ModelCapabilities { image_input: false },
+            WorldStateLifetime::Conversation,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let vision = WorldStateSnapshot::new(
+        "model-epoch",
+        1,
+        vec![model_selection_section(
+            "provider/model-v1",
+            crate::protocol::ModelCapabilities { image_input: true },
+            WorldStateLifetime::Conversation,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+
+    let upgrade = WorldStateDiff::between(&text_only, &vision).unwrap();
+    let upgrade_projection = upgrade
+        .model_projection_against(&text_only, WorldStateLifetime::Conversation)
+        .unwrap()
+        .unwrap()
+        .render_sanitized_text();
+    assert!(upgrade_projection.contains("\"op\":\"replace\""));
+    assert!(upgrade_projection.contains("\"imageInput\":true"));
+
+    let text_only_again = WorldStateSnapshot::new(
+        "model-epoch",
+        2,
+        vec![model_selection_section(
+            "provider/model-v1",
+            crate::protocol::ModelCapabilities { image_input: false },
+            WorldStateLifetime::Conversation,
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let downgrade = WorldStateDiff::between(&vision, &text_only_again).unwrap();
+    let downgrade_projection = downgrade
+        .model_projection_against(&vision, WorldStateLifetime::Conversation)
+        .unwrap()
+        .unwrap()
+        .render_sanitized_text();
+    assert!(downgrade_projection.contains("\"op\":\"replace\""));
+    assert!(downgrade_projection.contains("\"imageInput\":false"));
 }
 
 #[test]

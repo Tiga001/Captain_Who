@@ -56,6 +56,9 @@ use crate::protocol::{
     AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSteerInput, AgentToolApprovalMode,
     AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
+use crate::provider_profile::{
+    ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
+};
 use crate::revision::content_revision;
 use crate::storage::conversation_history_archive_repository::{
     ConversationHistoryArchiveFileInput, ConversationHistoryArchiveInput,
@@ -87,13 +90,15 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
+#[cfg(test)]
+use tool_flow::enforce_skill_activation_barrier;
 use tool_flow::{
     approve_proposed_action, cancellation_preempts_tool_result, cancelled_output, done_event,
-    enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
+    enforce_skill_activation_binding_barrier, execute_host_action_on_blocking_thread,
     execute_registered_tool, extract_reason_from_args, failed_tool_call_result,
     file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
     redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
-    tool_calls_from_response,
+    tool_call_bindings_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -113,6 +118,8 @@ struct LlmRequestTemplate {
     temperature: f32,
     stream: bool,
     stable_tools: Vec<AgentToolDefinition>,
+    provider_profile_config: ProviderProfileConfig,
+    provider_protocol_key: ProviderProtocolKey,
 }
 
 impl LlmRequestTemplate {
@@ -128,8 +135,8 @@ impl LlmRequestTemplate {
         LlmChatRequest {
             api_url: self.api_url.clone(),
             api_token: self.api_token.clone(),
-            model: self.model.clone(),
-            api_style: self.api_style,
+            provider_profile: self.provider_profile_config.clone(),
+            provider_protocol: self.provider_protocol_key.clone(),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             stream: self.stream,
@@ -297,11 +304,13 @@ impl AgentRuntime {
             )
         })?;
         if let Some(restored) = restored_checkpoint.as_ref() {
-            // Approval resume continues the backend authority frozen in schema-v5 checkpoint.
+            // Approval resume continues the backend authority frozen in schema-v6 checkpoint.
             // Newer UI/settings payloads cannot silently change permissions, workspace,
             // attachment authority or model capabilities in the middle of one logical run.
             input.context = restored.run_context.clone();
             input.model_capabilities = restored.model_capabilities;
+            input.provider_profile_config = Some(restored.provider_profile_config.clone());
+            input.provider_protocol_key = Some(restored.provider_protocol_key.clone());
         }
         let mut run_context = input.context.clone();
         let model_capabilities = input.model_capabilities;
@@ -972,25 +981,32 @@ impl AgentRuntime {
                         }
                     };
                     empty_model_action_repair_pending = false;
+                    let response_content = llm_response.content().to_string();
+                    let provider_tool_calls = llm_response.provider_tool_calls().to_vec();
                     merge_total_usage(&mut usage, llm_response.usage);
                     finish_reason = llm_response.finish_reason;
+                    let mut assistant_turn = llm_response.assistant_turn;
                     can_drain_steer_input = true;
 
-                    let tool_requests = tool_calls_from_response(
-                        llm_response.tool_calls,
-                        &llm_response.content,
+                    let tool_bindings = tool_call_bindings_from_response(
+                        provider_tool_calls,
+                        &response_content,
                         &run_id,
                         model_request_index,
                     );
-                    let (tool_requests, deferred_for_skill_activation) =
-                        enforce_skill_activation_barrier(tool_requests);
+                    let (tool_bindings, deferred_for_skill_activation) =
+                        enforce_skill_activation_binding_barrier(tool_bindings);
+                    let tool_requests = tool_bindings
+                        .iter()
+                        .map(|binding| binding.runtime_call.clone())
+                        .collect::<Vec<_>>();
                     let retained_assistant_content = if user_text_blocked {
                         ""
                     } else {
-                        llm_response.content.as_str()
+                        &response_content
                     };
                     let suppressed_narration =
-                        user_text_blocked && !llm_response.content.trim().is_empty();
+                        user_text_blocked && !response_content.trim().is_empty();
                     let deferred_activation_guard =
                         (deferred_for_skill_activation > 0).then(|| {
                             format!(
@@ -1032,12 +1048,12 @@ impl AgentRuntime {
                     );
                     if !tool_requests.is_empty()
                         && !user_text_blocked
-                        && !llm_response.content.trim().is_empty()
+                        && !response_content.trim().is_empty()
                     {
                         conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
-                            .record_narration(&llm_response.content);
+                            .record_narration(&response_content);
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     }
                     if let Some(stream_id) = committed_message_stream_id.take() {
@@ -1079,7 +1095,7 @@ impl AgentRuntime {
                                     apply_steer_inputs(
                                         &run_id,
                                         trace_assistant_message_id.as_deref(),
-                                        Some(&llm_response.content),
+                                        Some(&response_content),
                                         pending,
                                         &mut active_context,
                                         &conversation_trace,
@@ -1093,7 +1109,7 @@ impl AgentRuntime {
                                 AgentSteerDrainOrClose::Closed => {}
                             }
                         }
-                        break 'agent_loop llm_response.content;
+                        break 'agent_loop response_content;
                     }
                     response_fence_corrections = 0;
 
@@ -1118,15 +1134,67 @@ impl AgentRuntime {
                             ContextRetention::Retained,
                         ));
                     }
-                    tool_batch = ToolCallBatch::from_model_response(
+                    assistant_turn.set_runtime_visible_text(retained_assistant_content);
+                    if assistant_turn.provider_tool_calls().is_empty() && !tool_bindings.is_empty()
+                    {
+                        let provider_protocol = assistant_turn
+                            .provider_protocol()
+                            .cloned()
+                            .ok_or_else(|| {
+                                AgentError::new(
+                                    "Legacy assistant turn 不能产生新的 text-fallback Tool Call。",
+                                )
+                            })?;
+                        let fallback_provider_calls = tool_bindings
+                            .iter()
+                            .map(|binding| crate::llm::LlmToolCall {
+                                id: binding.provider_call_id.clone(),
+                                name: binding.runtime_call.name.clone(),
+                                args: binding.runtime_call.args.clone(),
+                            })
+                            .collect();
+                        assistant_turn = crate::llm::LlmAssistantTurn::from_provider(
+                            provider_protocol,
+                            assistant_turn.provider_visible_text(),
+                            fallback_provider_calls,
+                        )?;
+                        assistant_turn.set_runtime_visible_text(retained_assistant_content);
+                    }
+                    let context_bindings = tool_bindings
+                        .iter()
+                        .map(|binding| -> AgentResult<_> {
+                            let model_call = tool_registry.model_call_projection(&AgentToolCall {
+                                id: binding.runtime_call.id.clone(),
+                                tool: binding.runtime_call.name.clone(),
+                                args: binding.runtime_call.args.clone(),
+                                approval_status: AgentApprovalStatus::NotRequired,
+                                reason: None,
+                            });
+                            let provider_call = assistant_turn
+                                .provider_tool_calls()
+                                .get(binding.provider_tool_index)
+                                .ok_or_else(|| {
+                                    AgentError::new(
+                                        "Runtime Tool Call 映射引用了不存在的 Provider Tool Call。",
+                                    )
+                                })?;
+                            Ok(crate::llm::LlmRuntimeToolCallBinding::new(
+                                binding.provider_tool_index,
+                                provider_call,
+                                crate::llm::LlmToolCall {
+                                    id: model_call.id,
+                                    name: model_call.tool,
+                                    args: model_call.args,
+                                },
+                            ))
+                        })
+                        .collect::<AgentResult<Vec<_>>>()?;
+                    assistant_turn.set_runtime_tool_bindings(context_bindings)?;
+                    tool_batch = ToolCallBatch::from_provider_response(
                         &run_id,
                         model_request_index,
-                        if user_text_blocked {
-                            String::new()
-                        } else {
-                            llm_response.content.clone()
-                        },
-                        tool_requests,
+                        assistant_turn,
+                        tool_bindings,
                         suppressed_narration,
                         |call| {
                             let projected =
@@ -1146,8 +1214,28 @@ impl AgentRuntime {
                                 tool_registry.checkpoint_persistence(&call.name),
                             )
                         },
-                    );
+                    )?;
                 }
+
+                let checkpoint_assistant_message = tool_batch.checkpoint_assistant_message()?;
+                let pending_assistant_context = match (
+                    tool_batch.take_assistant_turn(),
+                    checkpoint_assistant_message,
+                    tool_batch.context_group(),
+                ) {
+                    (Some(turn), Some(checkpoint_message), Some(group)) => Some((
+                        LlmMessage::from_assistant_turn(turn),
+                        checkpoint_message,
+                        group,
+                    )),
+                    (None, None, _) => None,
+                    _ => {
+                        return Err(AgentError::new(
+                            "Tool Call 批次的完整 Assistant Turn 与执行队列不一致。",
+                        ));
+                    }
+                };
+                let mut pending_assistant_context = pending_assistant_context;
 
                 while let Some(queued_tool_call) = tool_batch.pop_front() {
                     if cancellation_token.is_cancelled() {
@@ -1162,7 +1250,13 @@ impl AgentRuntime {
                     }
                     let batch_claim = tool_batch.claim(&queued_tool_call.call);
                     let tool_exchange_group = queued_tool_call.context_group();
-                    let assistant_tool_content = queued_tool_call.assistant_content;
+                    // Durable model context intentionally keeps the Generic adapter's historical
+                    // one-assistant-per-call wire shape. The live Context owns one complete Turn,
+                    // while this split projection is recorded at each call's own trace sequence.
+                    let durable_trace_assistant_message = LlmMessage::assistant(
+                        queued_tool_call.assistant_content.clone(),
+                        vec![queued_tool_call.checkpoint_call.clone()],
+                    );
                     let tool_request = queued_tool_call.call;
                     let reason = extract_reason_from_args(&tool_request.args);
                     // The effective definitions are both the model contract and the execution
@@ -1343,7 +1437,6 @@ impl AgentRuntime {
                         }
                     }
                     let trace_call = tool_registry.trace_call_projection(&call);
-                    let model_call = tool_registry.model_call_projection(&call);
                     let checkpoint_call = tool_registry.checkpoint_call_projection(&call);
                     let tool_identity = tool_registry.identity(&call.tool).cloned();
                     let is_mcp_tool =
@@ -1358,14 +1451,7 @@ impl AgentRuntime {
                             recorder.record_model_message(
                                 sequence,
                                 0,
-                                &LlmMessage::assistant(
-                                    "",
-                                    vec![crate::llm::LlmToolCall {
-                                        id: checkpoint_call.id.clone(),
-                                        name: checkpoint_call.tool.clone(),
-                                        args: checkpoint_call.args.clone(),
-                                    }],
-                                ),
+                                &durable_trace_assistant_message,
                             );
                             if trace_call.args != call.args || checkpoint_call.args != call.args {
                                 recorder.mark_truncated();
@@ -1373,31 +1459,31 @@ impl AgentRuntime {
                         }
                         sequence
                     };
-                    active_context.push(
-                        ContextItem::assistant(
-                            assistant_tool_content,
-                            vec![crate::llm::LlmToolCall {
-                                id: model_call.id,
-                                name: model_call.tool,
-                                args: model_call.args,
-                            }],
-                            with_trace_origin(
-                                ContextMetadata::new(
-                                    ContextSource::ModelResponse,
-                                    ContextScope::Run,
-                                    ContextRetention::Retained,
-                                )
-                                .with_group(tool_exchange_group.clone()),
-                                trace_assistant_message_id.as_deref(),
-                                call_sequence,
-                            ),
-                        )
-                        .with_checkpoint_tool_calls(vec![crate::llm::LlmToolCall {
-                            id: checkpoint_call.id,
-                            name: checkpoint_call.tool,
-                            args: checkpoint_call.args,
-                        }]),
-                    );
+                    if let Some((live_message, checkpoint_message, batch_group)) =
+                        pending_assistant_context.take()
+                    {
+                        if batch_group != tool_exchange_group {
+                            return Err(AgentError::new(
+                                "Tool Call 批次的 Assistant Turn 与结果分组不一致。",
+                            ));
+                        }
+                        active_context.push(
+                            ContextItem::new(
+                                live_message,
+                                with_trace_origin(
+                                    ContextMetadata::new(
+                                        ContextSource::ModelResponse,
+                                        ContextScope::Run,
+                                        ContextRetention::Retained,
+                                    )
+                                    .with_group(batch_group),
+                                    trace_assistant_message_id.as_deref(),
+                                    call_sequence,
+                                ),
+                            )
+                            .with_checkpoint_message(checkpoint_message),
+                        );
+                    }
                     publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if !is_mcp_tool {
                         let event_call = tool_registry.event_call_projection(&call);
@@ -1547,12 +1633,28 @@ impl AgentRuntime {
                             });
                         }
                         if matches!(&action, AgentProposedAction::McpToolCall { .. }) {
-                            tool_batch.defer_external_calls(|queued| {
+                            let deferred_calls = tool_batch.defer_external_calls(|queued| {
                                 matches!(
                                     tool_registry.identity(&queued.call.name),
                                     Some(crate::protocol::AgentToolIdentity::Mcp { .. })
                                 )
                             });
+                            let deferred_call_ids = deferred_calls
+                                .into_iter()
+                                .map(|deferred| deferred.call.id)
+                                .collect::<std::collections::BTreeSet<_>>();
+                            active_context.omit_runtime_tool_calls_from_group(
+                                &tool_exchange_group,
+                                &deferred_call_ids,
+                            )?;
+                            conversation_trace
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .omit_model_tool_calls(&deferred_call_ids);
+                            publish_trace_snapshot(
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                            )?;
                         }
                         let extension_snapshots = match runtime_extensions.snapshots() {
                             Ok(snapshots) => snapshots,
@@ -1578,6 +1680,8 @@ impl AgentRuntime {
                                     run_context: run_context.as_ref(),
                                     model_capabilities,
                                     run_world_state: run_world_state.snapshot(),
+                                    provider_profile_config: &llm_request.provider_profile_config,
+                                    provider_protocol_key: &llm_request.provider_protocol_key,
                                 },
                             )
                         };
@@ -1855,8 +1959,8 @@ impl AgentRuntime {
                         llm_image_message_from_tool_result(&result, model_capabilities)
                     {
                         let checkpoint_message = LlmMessage::text(
-                            image_message.role,
-                            image_message.content.clone(),
+                            image_message.role(),
+                            image_message.content().to_string(),
                         );
                         active_context.push(
                             ContextItem::new(
@@ -2099,7 +2203,10 @@ fn apply_steer_inputs(
                 format!("{content}\n\n{}", attachment_context.text)
             };
             let mut message = LlmMessage::text(LlmMessageRole::User, context_content);
-            message.images = attachment_context.images.clone();
+            *message
+                .images_mut()
+                .expect("user attachment messages support images") =
+                attachment_context.images.clone();
             recorder.record_model_message(*sequence, 0, &message);
         }
     }
@@ -2132,7 +2239,9 @@ fn apply_steer_inputs(
             format!("{content}\n\n{}", attachment_context.text)
         };
         let mut message = LlmMessage::text(LlmMessageRole::User, context_content);
-        message.images = attachment_context.images;
+        *message
+            .images_mut()
+            .expect("user attachment messages support images") = attachment_context.images;
         active_context.push(ContextItem::new(
             message,
             with_trace_origin(

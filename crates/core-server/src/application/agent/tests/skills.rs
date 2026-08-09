@@ -616,6 +616,11 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[
+            "pending-after-dynamic-skill",
+        ]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "pending-after-dynamic-skill".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -1138,7 +1143,9 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
     assert_eq!(prepared.agent_input.api_url, "https://model.example/v1");
     assert_eq!(prepared.agent_input.api_token, "model-token");
 
-    let persisted = PersistedAgentResumeInput::from_agent_input(&prepared.agent_input).encode();
+    let persisted = PersistedAgentResumeInput::from_agent_input(&prepared.agent_input)
+        .unwrap()
+        .encode();
     let restored = restore_agent_input_secrets(
         &storage,
         PersistedAgentResumeInput::decode(&persisted).unwrap(),
@@ -1149,7 +1156,9 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
 
     let mut stale = prepared.agent_input;
     stale.api_url = "https://stale.example/v1".to_string();
-    let stale = PersistedAgentResumeInput::from_agent_input(&stale).encode();
+    let stale = PersistedAgentResumeInput::from_agent_input(&stale)
+        .unwrap()
+        .encode();
     let error =
         restore_agent_input_secrets(&storage, PersistedAgentResumeInput::decode(&stale).unwrap())
             .unwrap_err();

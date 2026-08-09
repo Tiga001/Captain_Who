@@ -1,5 +1,23 @@
 import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from './agent'
 
+export type ProviderProfileId =
+  'generic_openai_chat' | 'generic_anthropic_messages' | 'deepseek_v4_chat'
+
+export type ProviderReasoningMode = 'provider_default' | 'enabled' | 'disabled'
+export type ProviderReasoningEffort = 'provider_default' | 'high' | 'max'
+
+export interface ProviderProfileConfig {
+  schemaVersion: number
+  profile: {
+    id: ProviderProfileId
+    version: number
+  }
+  reasoning: {
+    mode: ProviderReasoningMode
+    effort: ProviderReasoningEffort
+  }
+}
+
 export interface StorageModelConfigRecord {
   /** Opaque model identifier sent verbatim as the provider API's `model` value. */
   id: string
@@ -9,6 +27,8 @@ export interface StorageModelConfigRecord {
   apiTokenOverride?: string | null
   supportsImage: boolean
   contextWindowTokens?: number | null
+  /** Hidden provider wire configuration; settings UIs must preserve it even before exposing it. */
+  providerProfileConfig?: ProviderProfileConfig | null
   inputPrice: string
   outputPrice: string
   enabled: boolean

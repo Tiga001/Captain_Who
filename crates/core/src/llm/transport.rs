@@ -103,7 +103,7 @@ pub(super) async fn complete_chat_once(
     cancellation_token: AgentCancellationToken,
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
-    let api_style = request.api_style;
+    let provider_protocol = request.provider_protocol.clone();
     validate_request(request)?;
     let response = send_llm_request(request, cancellation_token.clone())
         .await
@@ -111,7 +111,7 @@ pub(super) async fn complete_chat_once(
     let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
         .await
         .map_err(with_request_usage)?;
-    parse_non_stream_response(&body, api_style, validation)
+    parse_non_stream_response(&body, &provider_protocol, validation)
 }
 
 pub(crate) async fn complete_chat_streaming<F>(
@@ -253,7 +253,7 @@ pub(super) async fn complete_chat_streaming_once<F>(
 where
     F: FnMut(LlmStreamEvent) + Send,
 {
-    let api_style = request.api_style;
+    let provider_protocol = request.provider_protocol.clone();
     validate_request(request)?;
     let response = send_llm_request(request, cancellation_token.clone())
         .await
@@ -262,22 +262,23 @@ where
         let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
             .await
             .map_err(with_request_usage)?;
-        let parsed = parse_non_stream_response(&body, api_style, validation)?;
-        if !parsed.content.is_empty() {
-            on_delta(LlmStreamEvent::Delta(parsed.content.clone()));
+        let parsed = parse_non_stream_response(&body, &provider_protocol, validation)?;
+        if !parsed.content().is_empty() {
+            on_delta(LlmStreamEvent::Delta(parsed.content().to_string()));
         }
         return Ok(parsed);
     }
 
-    let mut streamed = parse_sse_response(response, api_style, cancellation_token, on_delta)
-        .await
-        .map_err(with_request_usage)?;
+    let mut streamed =
+        parse_sse_response(response, &provider_protocol, cancellation_token, on_delta)
+            .await
+            .map_err(with_request_usage)?;
     streamed.usage = Some(usage_for_request(streamed.usage));
 
     let diagnostic = streaming_response_diagnostic(&streamed);
     validate_llm_response(
-        &streamed.content,
-        &streamed.tool_calls,
+        streamed.content(),
+        streamed.provider_tool_calls(),
         &diagnostic,
         streamed.finish_reason.as_deref(),
         validation,
@@ -288,7 +289,7 @@ where
 
 pub(super) fn parse_non_stream_response(
     body: &str,
-    api_style: AgentApiStyle,
+    provider_protocol: &ProviderProtocolKey,
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
     let value: Value = serde_json::from_str(body).map_err(|error| {
@@ -300,21 +301,25 @@ pub(super) fn parse_non_stream_response(
             .to_agent_error(),
         )
     })?;
-    let usage = usage_for_request(extract_usage(&value));
+    let adapter = ProviderAdapterRegistry::resolve_key(provider_protocol)?;
+    let usage = usage_for_request(adapter.project_usage(&value));
     if let Some(error) = extract_api_error(&value) {
         let _ = error;
-        return Err(LlmProviderFailure::from_embedded_error(api_style, body)
-            .to_agent_error()
-            .with_usage(Some(usage)));
+        return Err(LlmProviderFailure::from_embedded_error(
+            provider_protocol.dialect.api_style(),
+            body,
+        )
+        .to_agent_error()
+        .with_usage(Some(usage)));
     }
 
-    let tool_calls = extract_tool_calls(&value, api_style)
+    let assistant_turn = adapter
+        .parse_non_streaming_response(provider_protocol, &value)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
-    let content = extract_response_text(&value).unwrap_or_default();
     let finish_reason = extract_finish_reason(&value);
     validate_llm_response(
-        &content,
-        &tool_calls,
+        assistant_turn.visible_text(),
+        assistant_turn.provider_tool_calls(),
         body,
         finish_reason.as_deref(),
         validation,
@@ -322,8 +327,7 @@ pub(super) fn parse_non_stream_response(
     .map_err(|error| error.with_usage(Some(usage.clone())))?;
 
     Ok(LlmChatResponse {
-        content,
-        tool_calls,
+        assistant_turn,
         usage: Some(usage),
         finish_reason,
     })
@@ -345,8 +349,9 @@ pub(super) async fn send_llm_request(
 ) -> AgentResult<reqwest::Response> {
     cancellation_token.check()?;
     validate_request(request)?;
-    let payload = build_payload(request);
-    let headers = build_headers(request.api_style, request.api_token.trim())?;
+    let adapter = ProviderAdapterRegistry::resolve(request)?;
+    let payload = adapter.prepare_request(request)?;
+    let headers = adapter.build_headers(request.api_token.trim())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .build()
@@ -355,7 +360,7 @@ pub(super) async fn send_llm_request(
     let cooldown_permit = acquire_provider_cooldown(
         request.api_url.trim(),
         request.api_token.trim(),
-        request.api_style,
+        request.api_style(),
         cancellation_token.clone(),
     )
     .await?;
@@ -392,7 +397,7 @@ pub(super) async fn send_llm_request(
             Err(_) => String::new(),
         };
         let failure = LlmProviderFailure::from_http_response(
-            request.api_style,
+            request.api_style(),
             status,
             &response_headers,
             &body,
@@ -402,7 +407,7 @@ pub(super) async fn send_llm_request(
             register_default_rate_limit_cooldown(
                 request.api_url.trim(),
                 request.api_token.trim(),
-                request.api_style,
+                request.api_style(),
                 failure.retry_after_ms,
             );
         } else {
@@ -472,13 +477,13 @@ pub(super) fn validate_request(request: &LlmChatRequest) -> AgentResult<()> {
     if request.api_token.trim().is_empty() {
         return Err(AgentError::new("请先在设置 > 配置里填写 API Token。"));
     }
-    if request.model.trim().is_empty() {
+    if request.model().trim().is_empty() {
         return Err(AgentError::new("请选择一个可用模型。"));
     }
     if request.messages.is_empty() {
         return Err(AgentError::new("没有可发送的对话内容。"));
     }
-    validate_model_tool_protocol(&request.messages)?;
+    ProviderAdapterRegistry::resolve(request)?.validate_wire_protocol(request)?;
     for tool in &request.tools {
         validate_portable_tool_input_schema(&tool.name, &tool.input_schema)?;
     }
@@ -614,7 +619,7 @@ fn register_retry_cooldown(request: &LlmChatRequest, plan: &LlmRetryPlan) {
         register_provider_cooldown(
             request.api_url.trim(),
             request.api_token.trim(),
-            request.api_style,
+            request.api_style(),
             plan.delay,
         );
     }
@@ -718,8 +723,8 @@ pub(super) fn streaming_response_diagnostic(response: &LlmChatResponse) -> Strin
     serde_json::to_string(&json!({
         "type": "streaming_response",
         "finishReason": response.finish_reason,
-        "contentLength": response.content.len(),
-        "toolCallCount": response.tool_calls.len(),
+        "contentLength": response.content().len(),
+        "toolCallCount": response.provider_tool_calls().len(),
         "usage": usage,
     }))
     .unwrap_or_else(|_| "streaming response".to_string())

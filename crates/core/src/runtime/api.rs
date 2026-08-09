@@ -761,10 +761,35 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<String> {
     let system_prompt = build_system_prompt(input.prompt_preferences.as_ref(), tool_definitions);
+    let provider_dialect = crate::provider_profile::ProviderProtocolDialect::from(api_style);
+    let provider_profile_config = crate::provider_profile::ProviderProfileConfig::resolve(
+        input.provider_profile_config.as_ref(),
+        provider_dialect,
+    )
+    .map_err(|error| {
+        AgentError::new(format!(
+            "Provider profile configuration is invalid: {error}"
+        ))
+    })?;
+    let provider_protocol_key = match input.provider_protocol_key.as_ref() {
+        Some(key) => key.clone(),
+        None => crate::provider_profile::ProviderProtocolKey::new(
+            provider_dialect,
+            &provider_profile_config,
+            input.model.trim(),
+            input.provider_configuration_revision.clone(),
+        )
+        .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?,
+    };
+    provider_protocol_key
+        .validate_against_config(&provider_profile_config)
+        .map_err(|error| AgentError::new(format!("Provider protocol key is invalid: {error}")))?;
     let material = serde_json::to_vec(&json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "model": input.model.trim(),
         "apiStyle": api_style,
+        "providerProfileConfig": provider_profile_config,
+        "providerProtocolKey": provider_protocol_key,
         "contextWindowTokens": input.context_window_tokens,
         "reservedOutputTokens": sanitize_max_tokens(input.max_tokens),
         "systemPrompt": system_prompt,

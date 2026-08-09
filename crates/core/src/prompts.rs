@@ -128,6 +128,7 @@ fn workspace_policy_section() -> String {
 
 fn attachment_policy_section() -> String {
     "## 附件规则\n\
+    - 视觉能力只以最新 World State 的 `model.selection.capabilities.imageInput` 为准：为 true 时可理解当前请求直接提供的图片；读取路径或历史附件中的图片仍须使用本次实际可用的读图工具。为 false 或缺失时不要尝试读图，遇到必须理解图片内容的需求应说明当前模型不支持图片输入，并请用户切换到支持图片输入的模型。\n\
     - 附件库是否可用及当前数量由可信后端 World State 的 `attachments.library_summary` 提供。@attachments 是后端虚拟路径，不是 workspace 路径；不要臆造真实本地路径。\n\
     - 当前聊天附件使用 attachments_list，同项目其他聊天附件使用 attachments_list_project。获取 readPath 后，只使用当前模型请求实际提供的匹配读取工具。\n\
     - 图片、普通文本和 PDF 使用对应读取工具；Word、电子表格或演示文稿附件必须先激活对应 Skill，再使用激活后实际提供的读取能力。"
@@ -398,6 +399,17 @@ mod tests {
         assert!(!prompt.contains("read_spreadsheet"));
         assert!(!prompt.contains("read_presentation"));
         assert!(prompt.contains("逐字传回 opaque cursor"));
+    }
+
+    #[test]
+    fn image_guidance_uses_the_latest_model_selection_world_state() {
+        let prompt = build_system_prompt(None, &[tool_definition("read_image")]);
+
+        assert!(prompt.contains("model.selection.capabilities.imageInput"));
+        assert!(prompt.contains("为 true 时可理解当前请求直接提供的图片"));
+        assert!(prompt.contains("读取路径或历史附件中的图片仍须使用本次实际可用的读图工具"));
+        assert!(prompt.contains("为 false 或缺失时不要尝试读图"));
+        assert!(prompt.contains("请用户切换到支持图片输入的模型"));
     }
 
     #[test]

@@ -698,10 +698,10 @@ fn runtime_messages_add_backend_system_prompt() {
     .unwrap();
     let messages = context.to_messages();
 
-    assert_eq!(messages[0].role.as_str(), "system");
-    assert!(messages[0].content.contains("Captain（船长）"));
-    assert!(!messages[0].content.contains("/private/path"));
-    assert_eq!(messages[1].role.as_str(), "user");
+    assert_eq!(messages[0].role().as_str(), "system");
+    assert!(messages[0].content().contains("Captain（船长）"));
+    assert!(!messages[0].content().contains("/private/path"));
+    assert_eq!(messages[1].role().as_str(), "user");
 }
 
 #[test]
@@ -723,8 +723,8 @@ fn runtime_messages_include_text_attachment_content() {
 
     assert!(messages
         .iter()
-        .any(|message| message.role == LlmMessageRole::User
-            && message.content.contains("hello from attachment")));
+        .any(|message| message.role() == LlmMessageRole::User
+            && message.content().contains("hello from attachment")));
 }
 
 #[test]
@@ -1150,10 +1150,10 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
     let image_message =
         llm_image_message_from_tool_result(&result, crate::ModelCapabilities { image_input: true })
             .unwrap();
-    assert_eq!(image_message.role, LlmMessageRole::User);
-    assert_eq!(image_message.images.len(), 1);
-    assert_eq!(image_message.images[0].mime_type, "image/png");
-    assert_eq!(image_message.images[0].data_base64, "YWJj");
+    assert_eq!(image_message.role(), LlmMessageRole::User);
+    assert_eq!(image_message.images().len(), 1);
+    assert_eq!(image_message.images()[0].mime_type, "image/png");
+    assert_eq!(image_message.images()[0].data_base64, "YWJj");
 }
 
 #[test]
@@ -1207,13 +1207,13 @@ fn generated_image_visual_input_is_capability_gated() {
     let image_message =
         llm_image_message_from_tool_result(&result, crate::ModelCapabilities { image_input: true })
             .expect("image-capable models receive generated pixels");
-    assert_eq!(image_message.role, LlmMessageRole::User);
+    assert_eq!(image_message.role(), LlmMessageRole::User);
     assert!(image_message
-        .content
+        .content()
         .contains("/managed/generated-image.png"));
-    assert_eq!(image_message.images.len(), 1);
-    assert_eq!(image_message.images[0].mime_type, "image/png");
-    assert_eq!(image_message.images[0].data_base64, "YWJj");
+    assert_eq!(image_message.images().len(), 1);
+    assert_eq!(image_message.images()[0].mime_type, "image/png");
+    assert_eq!(image_message.images()[0].data_base64, "YWJj");
 }
 
 #[test]
@@ -1304,6 +1304,10 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: String::new(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -3752,14 +3756,14 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     let messages = full.context.to_messages();
     let skill_index = messages
         .iter()
-        .position(|message| message.content.contains(INSTRUCTIONS))
+        .position(|message| message.content().contains(INSTRUCTIONS))
         .unwrap();
     let current_user_index = messages
         .iter()
-        .position(|message| message.content == "Current question")
+        .position(|message| message.content() == "Current question")
         .unwrap();
     assert!(skill_index > current_user_index);
-    assert!(!messages[0].content.contains(INSTRUCTIONS));
+    assert!(!messages[0].content().contains(INSTRUCTIONS));
 
     let detector = ContextCapacityDetector::for_model(
         &input.model,
@@ -3978,13 +3982,13 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
     assert_eq!(catalog_entry.scope, "run");
     assert_eq!(catalog_entry.retention, "retained");
 
-    let rendered = with_catalog
+    let rendered_message = with_catalog
         .context
         .to_messages()
         .into_iter()
-        .find(|message| message.content.contains("backend_available_skills"))
-        .unwrap()
-        .content;
+        .find(|message| message.content().contains("backend_available_skills"))
+        .unwrap();
+    let rendered = rendered_message.content();
     assert!(rendered.contains(&format!("\"ref\":\"{activation_ref}\"")));
     assert!(rendered.contains("Create and verify Word documents."));
     assert!(!rendered.contains("bundled:application:documents"));
@@ -4588,6 +4592,10 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),
@@ -4922,6 +4930,10 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -5085,6 +5097,10 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -5436,6 +5452,10 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -5716,6 +5736,10 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
@@ -6127,6 +6151,10 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
+        provider_connection_revision: None,
+        search_connection_revision: None,
+        provider_profile_config: None,
+        provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),

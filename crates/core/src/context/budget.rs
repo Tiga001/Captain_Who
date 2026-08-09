@@ -895,7 +895,7 @@ mod tests {
     fn includes_tool_schemas_calls_and_images_in_the_estimate() {
         let mut plain = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
         let mut image_message = LlmMessage::text(LlmMessageRole::User, "hello");
-        image_message.images.push(LlmImage {
+        image_message.images_mut().unwrap().push(LlmImage {
             mime_type: "image/png".to_string(),
             data_base64: "not-counted-as-text".to_string(),
         });

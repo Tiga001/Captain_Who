@@ -49,6 +49,7 @@ pub enum WorldStateSectionId {
     EffectiveTools,
     SkillActivation,
     AttachmentLibrarySummary,
+    ModelSelection,
     ModelCapabilities,
     Environment,
     Extension(String),
@@ -61,6 +62,7 @@ impl WorldStateSectionId {
     pub const EFFECTIVE_TOOLS: &'static str = "tools.effective";
     pub const SKILL_ACTIVATION: &'static str = "skills.activation";
     pub const ATTACHMENT_LIBRARY_SUMMARY: &'static str = "attachments.library_summary";
+    pub const MODEL_SELECTION: &'static str = "model.selection";
     pub const MODEL_CAPABILITIES: &'static str = "model.capabilities";
     pub const ENVIRONMENT: &'static str = "environment";
 
@@ -72,6 +74,7 @@ impl WorldStateSectionId {
             Self::EffectiveTools => Self::EFFECTIVE_TOOLS,
             Self::SkillActivation => Self::SKILL_ACTIVATION,
             Self::AttachmentLibrarySummary => Self::ATTACHMENT_LIBRARY_SUMMARY,
+            Self::ModelSelection => Self::MODEL_SELECTION,
             Self::ModelCapabilities => Self::MODEL_CAPABILITIES,
             Self::Environment => Self::ENVIRONMENT,
             Self::Extension(value) => value,
@@ -92,6 +95,7 @@ impl WorldStateSectionId {
             Self::EFFECTIVE_TOOLS => Self::EffectiveTools,
             Self::SKILL_ACTIVATION => Self::SkillActivation,
             Self::ATTACHMENT_LIBRARY_SUMMARY => Self::AttachmentLibrarySummary,
+            Self::MODEL_SELECTION => Self::ModelSelection,
             Self::MODEL_CAPABILITIES => Self::ModelCapabilities,
             Self::ENVIRONMENT => Self::Environment,
             _ => Self::Extension(value),
@@ -360,8 +364,31 @@ pub fn interaction_profile_section(
     )
 }
 
-/// Model capabilities remain Host-only execution authority even though they participate in the
-/// same versioned World State ledger.
+/// Builds the model-visible identity and image-input capability selected by the Host for the
+/// current conversation. These values describe configured routing rather than claiming a
+/// provider-verified model identity; execution continues to use the separate Host-only capability
+/// section.
+pub fn model_selection_section(
+    configured_model_id: &str,
+    capabilities: crate::protocol::ModelCapabilities,
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let state = serde_json::json!({
+        "configuredModelId": configured_model_id,
+        "capabilities": {
+            "imageInput": capabilities.image_input,
+        }
+    });
+    WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::ModelSelection,
+        lifetime,
+        state.clone(),
+        state,
+    )
+}
+
+/// Complete model capabilities remain Host-only execution authority even though a narrow derived
+/// projection is exposed through `model.selection` in the same versioned World State ledger.
 pub fn model_capabilities_section(
     capabilities: crate::protocol::ModelCapabilities,
     lifetime: WorldStateLifetime,

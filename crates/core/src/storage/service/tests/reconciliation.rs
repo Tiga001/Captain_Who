@@ -1439,6 +1439,7 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
                     ConversationTurnTraceItem::ToolCall { operation, .. } => operation.clone(),
                     _ => panic!("manual settlement must start with a ToolCall"),
                 },
+                provider_identity: None,
             }],
             is_error: false,
         },
@@ -1569,7 +1570,9 @@ fn attach_manual_file_effect_recovery_checkpoint(
         "model": "reconciliation-test",
         "messages": [],
         "resumeCheckpoint": {
-            "version": crate::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+            // Startup reconciliation must inspect this legacy v5 projection without treating it
+            // as a resumable v6 checkpoint. True approval restore remains strict in core-server.
+            "version": 5,
             "runId": pending.run_id,
             "contextItems": [],
             "nextModelRequestIndex": 1,

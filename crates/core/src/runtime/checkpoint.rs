@@ -17,13 +17,18 @@ use crate::conversation_trace::{
     canonical_tool_result_for_context, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder, ConversationTurnTraceItem,
 };
-use crate::llm::{validate_model_tool_call_id, LlmToolCall};
+use crate::llm::{
+    validate_model_tool_call_id, validate_provider_tool_call_id, LlmAssistantTurn,
+    LlmRuntimeToolCallBinding, LlmToolCall,
+};
 use crate::protocol::{
-    AgentContextCheckpointItem, AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
-    AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint, AgentRunContext,
-    AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
+    AgentAssistantTurnCheckpointIdentity, AgentContextCheckpointItem,
+    AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
+    AgentProviderToolCallIdentity, AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint,
+    AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
     AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
+use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::tools::{
     validate_tool_set_checkpoint_shape, AgentToolCallCheckpointPersistence, EffectiveToolSet,
 };
@@ -34,6 +39,11 @@ use std::collections::{BTreeSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub(super) struct QueuedToolCall {
+    /// Original provider identity and arguments. The complete provider turn is the replay
+    /// authority; this copy exists only to keep the ordered identity binding attached while the
+    /// runtime executes the queue.
+    pub(super) provider_call: LlmToolCall,
+    pub(super) provider_tool_index: usize,
     pub(super) call: LlmToolCall,
     /// Security projection that may enter a durable approval checkpoint. It is never executed.
     pub(super) checkpoint_call: LlmToolCall,
@@ -55,6 +65,10 @@ impl QueuedToolCall {
 #[derive(Debug, Clone, Default)]
 pub(super) struct ToolCallBatch {
     queue: VecDeque<QueuedToolCall>,
+    /// The one authoritative assistant turn that produced this execution batch. Runtime policy
+    /// and results refer to its bindings; no per-call assistant copies are retained.
+    assistant_turn: Option<LlmAssistantTurn>,
+    assistant_turn_identity: Option<AgentAssistantTurnCheckpointIdentity>,
     deferred_external_tool_call_count: u32,
     suppressed_narration: bool,
     /// Semantic calls already accepted from this one model response.
@@ -72,45 +86,126 @@ pub(super) enum ToolCallBatchClaim {
 }
 
 impl ToolCallBatch {
+    #[cfg(test)]
     pub(super) fn from_model_response(
         run_id: &str,
         model_request_index: usize,
         assistant_content: String,
         calls: Vec<LlmToolCall>,
         suppressed_narration: bool,
+        checkpoint_projection: impl FnMut(
+            &LlmToolCall,
+        ) -> (LlmToolCall, AgentToolCallCheckpointPersistence),
+    ) -> Self {
+        let bindings = calls
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(provider_tool_index, call)| {
+                LlmRuntimeToolCallBinding::new(provider_tool_index, &call, call.clone())
+            })
+            .collect::<Vec<_>>();
+        let assistant_turn = LlmAssistantTurn::from_legacy(assistant_content, calls)
+            .with_runtime_tool_bindings(bindings)
+            .expect("identity bindings built from the same provider calls");
+        Self::from_provider_response(
+            run_id,
+            model_request_index,
+            assistant_turn,
+            Vec::new(),
+            suppressed_narration,
+            checkpoint_projection,
+        )
+        .expect("legacy test batch is assembled from matching provider/runtime calls")
+    }
+
+    pub(super) fn from_provider_response(
+        run_id: &str,
+        model_request_index: usize,
+        mut assistant_turn: LlmAssistantTurn,
+        runtime_bindings: Vec<LlmRuntimeToolCallBinding>,
+        suppressed_narration: bool,
         mut checkpoint_projection: impl FnMut(
             &LlmToolCall,
         )
             -> (LlmToolCall, AgentToolCallCheckpointPersistence),
-    ) -> Self {
-        let queue = calls
-            .into_iter()
+    ) -> AgentResult<Self> {
+        let assistant_content = assistant_turn.visible_text().to_string();
+        let runtime_bindings = if runtime_bindings.is_empty() {
+            assistant_turn
+                .runtime_tool_bindings()
+                .unwrap_or_default()
+                .to_vec()
+        } else {
+            runtime_bindings
+        };
+        let queue = runtime_bindings
+            .iter()
+            .cloned()
             .enumerate()
-            .map(|(tool_index, call)| {
+            .map(|(batch_index, binding)| -> AgentResult<QueuedToolCall> {
+                let call = binding.runtime_call;
+                let provider_call = assistant_turn
+                    .provider_tool_calls()
+                    .get(binding.provider_tool_index)
+                    .ok_or_else(|| {
+                        AgentError::new("Tool Call 批次引用了不存在的 Provider Tool Call。")
+                    })?
+                    .clone();
                 let (checkpoint_call, checkpoint_persistence) = checkpoint_projection(&call);
-                QueuedToolCall {
+                Ok(QueuedToolCall {
+                    provider_call,
+                    provider_tool_index: binding.provider_tool_index,
                     call,
                     checkpoint_call,
                     checkpoint_persistence,
-                    assistant_content: if tool_index == 0 {
+                    assistant_content: if batch_index == 0 {
                         assistant_content.clone()
                     } else {
                         String::new()
                     },
-                    group_id: format!(
-                        "run:{run_id}:tool-exchange:{}:{}",
-                        model_request_index + 1,
-                        tool_index + 1
-                    ),
-                }
+                    group_id: format!("run:{run_id}:tool-exchange:{}", model_request_index + 1),
+                })
             })
-            .collect();
-        Self {
+            .collect::<AgentResult<VecDeque<_>>>()?;
+        if assistant_turn.runtime_tool_bindings().is_none() {
+            let context_bindings = queue
+                .iter()
+                .map(|queued| {
+                    LlmRuntimeToolCallBinding::new(
+                        queued.provider_tool_index,
+                        &queued.provider_call,
+                        queued.call.clone(),
+                    )
+                })
+                .collect();
+            assistant_turn.set_runtime_tool_bindings(context_bindings)?;
+        } else {
+            let context_ids = assistant_turn
+                .runtime_tool_bindings()
+                .unwrap_or_default()
+                .iter()
+                .map(|binding| binding.runtime_call.id.as_str())
+                .collect::<Vec<_>>();
+            let execution_ids = queue
+                .iter()
+                .map(|queued| queued.call.id.as_str())
+                .collect::<Vec<_>>();
+            if context_ids != execution_ids {
+                return Err(AgentError::new(
+                    "Tool Call 批次的 Context 与执行身份顺序不一致。",
+                ));
+            }
+        }
+        let assistant_turn_identity = assistant_turn.checkpoint_identity()?;
+        Ok(Self {
             queue,
+            assistant_turn: Some(assistant_turn),
+            assistant_turn_identity: Some(assistant_turn_identity),
             deferred_external_tool_call_count: 0,
             suppressed_narration,
             seen_semantic_fingerprints: BTreeSet::new(),
-        }
+        })
     }
 
     pub(super) fn claim(&mut self, call: &LlmToolCall) -> ToolCallBatchClaim {
@@ -142,14 +237,21 @@ impl ToolCallBatch {
     pub(super) fn defer_external_calls(
         &mut self,
         mut is_external: impl FnMut(&QueuedToolCall) -> bool,
-    ) -> u32 {
-        let before = self.queue.len();
-        self.queue.retain(|call| !is_external(call));
-        let dropped = before.saturating_sub(self.queue.len());
-        let dropped = u32::try_from(dropped).unwrap_or(u32::MAX);
+    ) -> Vec<QueuedToolCall> {
+        let mut retained = VecDeque::with_capacity(self.queue.len());
+        let mut dropped = Vec::new();
+        while let Some(call) = self.queue.pop_front() {
+            if is_external(&call) {
+                dropped.push(call);
+            } else {
+                retained.push_back(call);
+            }
+        }
+        self.queue = retained;
+        let dropped_count = u32::try_from(dropped.len()).unwrap_or(u32::MAX);
         self.deferred_external_tool_call_count = self
             .deferred_external_tool_call_count
-            .saturating_add(dropped);
+            .saturating_add(dropped_count);
         dropped
     }
 
@@ -169,6 +271,59 @@ impl ToolCallBatch {
             false
         }
     }
+
+    fn assistant_turn_identity(&self) -> AgentResult<&AgentAssistantTurnCheckpointIdentity> {
+        self.assistant_turn_identity.as_ref().ok_or_else(|| {
+            AgentError::new("无法创建运行检查点：工具批次缺少 Provider Assistant Turn 身份。")
+        })
+    }
+
+    pub(super) fn take_assistant_turn(&mut self) -> Option<LlmAssistantTurn> {
+        self.assistant_turn.take()
+    }
+
+    pub(super) fn context_group(&self) -> Option<ContextGroup> {
+        self.queue.front().map(QueuedToolCall::context_group)
+    }
+
+    pub(super) fn checkpoint_assistant_message(
+        &self,
+    ) -> AgentResult<Option<crate::llm::LlmMessage>> {
+        let Some(turn) = self.assistant_turn.as_ref() else {
+            return Ok(None);
+        };
+        let checkpoint_calls: Vec<LlmToolCall> = self
+            .queue
+            .iter()
+            .map(|queued| queued.checkpoint_call.clone())
+            .collect();
+        let mut checkpoint_turn = turn.without_raw_continuation_for_checkpoint();
+        let bindings = checkpoint_turn
+            .runtime_tool_bindings()
+            .unwrap_or_default()
+            .iter()
+            .zip(checkpoint_calls)
+            .map(|(binding, runtime_call)| -> AgentResult<_> {
+                let provider_call = checkpoint_turn
+                    .provider_tool_calls()
+                    .get(binding.provider_tool_index)
+                    .ok_or_else(|| {
+                        AgentError::new(
+                            "Checkpoint Tool Call 映射引用了不存在的 Provider Tool Call。",
+                        )
+                    })?;
+                Ok(LlmRuntimeToolCallBinding::new(
+                    binding.provider_tool_index,
+                    provider_call,
+                    runtime_call,
+                ))
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+        checkpoint_turn.set_runtime_tool_bindings(bindings)?;
+        Ok(Some(crate::llm::LlmMessage::from_assistant_turn(
+            checkpoint_turn,
+        )))
+    }
 }
 
 pub(super) struct RestoredRunCheckpoint {
@@ -181,6 +336,8 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) run_context: Option<AgentRunContext>,
     pub(super) model_capabilities: ModelCapabilities,
     pub(super) run_world_state: WorldStateSnapshot,
+    pub(super) provider_profile_config: ProviderProfileConfig,
+    pub(super) provider_protocol_key: ProviderProtocolKey,
 }
 
 pub(super) struct RunCheckpointState<'a> {
@@ -194,6 +351,8 @@ pub(super) struct RunCheckpointState<'a> {
     pub(super) run_context: Option<&'a AgentRunContext>,
     pub(super) model_capabilities: ModelCapabilities,
     pub(super) run_world_state: &'a WorldStateSnapshot,
+    pub(super) provider_profile_config: &'a ProviderProfileConfig,
+    pub(super) provider_protocol_key: &'a ProviderProtocolKey,
 }
 
 pub(super) fn create_run_checkpoint(
@@ -211,12 +370,33 @@ pub(super) fn create_run_checkpoint(
         run_context,
         model_capabilities,
         run_world_state,
+        provider_profile_config,
+        provider_protocol_key,
     } = state;
     validate_model_tool_call_id(pending_tool_call_id)?;
     for queued in &tool_batch.queue {
         validate_model_tool_call_id(&queued.call.id)?;
     }
-    context.validate_pending_tool_call(pending_tool_call_id)?;
+    let queued_tool_call_ids = tool_batch
+        .queue
+        .iter()
+        .map(|queued| queued.call.id.clone())
+        .collect::<Vec<_>>();
+    context.validate_pending_tool_batch(pending_tool_call_id, &queued_tool_call_ids)?;
+    provider_profile_config
+        .validate()
+        .map_err(|error| AgentError::new(format!("运行检查点的 Provider profile 无效：{error}")))?;
+    provider_protocol_key
+        .validate_against_config(provider_profile_config)
+        .map_err(|error| AgentError::new(format!("运行检查点的 Provider key 无效：{error}")))?;
+    let assistant_turn_identity = tool_batch.assistant_turn_identity()?.clone();
+    validate_assistant_turn_identity(&assistant_turn_identity, pending_tool_call_id, tool_batch)?;
+    context.validate_assistant_turn_checkpoint_identity(
+        &assistant_turn_identity,
+        pending_tool_call_id,
+        &queued_tool_call_ids,
+        true,
+    )?;
     let (
         conversation_trace_items,
         conversation_model_context_items,
@@ -236,7 +416,9 @@ pub(super) fn create_run_checkpoint(
         queued_tool_calls: tool_batch
             .queue
             .iter()
-            .map(queued_tool_call_checkpoint)
+            .map(|queued| {
+                queued_tool_call_checkpoint(queued, &assistant_turn_identity.assistant_turn_id)
+            })
             .collect::<AgentResult<Vec<_>>>()?,
         deferred_external_tool_call_count: tool_batch.deferred_external_tool_call_count,
         suppressed_narration: tool_batch.suppressed_narration,
@@ -244,6 +426,9 @@ pub(super) fn create_run_checkpoint(
         tool_set: tool_set.checkpoint(),
         run_context: run_context.cloned(),
         model_capabilities,
+        provider_profile_config: provider_profile_config.clone(),
+        provider_protocol_key: provider_protocol_key.clone(),
+        assistant_turn_identity,
         run_world_state: run_world_state.clone(),
         pending_action_id: None,
         pending_tool_call_id: pending_tool_call_id.to_string(),
@@ -252,6 +437,105 @@ pub(super) fn create_run_checkpoint(
         next_conversation_trace_sequence,
         conversation_trace_truncated,
     })
+}
+
+fn validate_assistant_turn_identity(
+    identity: &AgentAssistantTurnCheckpointIdentity,
+    pending_tool_call_id: &str,
+    tool_batch: &ToolCallBatch,
+) -> AgentResult<()> {
+    if identity.assistant_turn_id.trim().is_empty()
+        || identity.assistant_turn_digest.trim().is_empty()
+    {
+        return Err(AgentError::new(
+            "运行检查点的 Provider Assistant Turn 身份为空。",
+        ));
+    }
+    let mut provider_indexes = BTreeSet::new();
+    let mut runtime_call_ids = BTreeSet::new();
+    let mut previous_index = None;
+    for mapping in &identity.tool_call_identities {
+        validate_provider_tool_call_id(&mapping.provider_call_id)?;
+        if mapping.runtime_call_id.trim().is_empty()
+            || !provider_indexes.insert(mapping.provider_tool_index)
+            || !runtime_call_ids.insert(mapping.runtime_call_id.clone())
+            || previous_index.is_some_and(|previous| mapping.provider_tool_index <= previous)
+        {
+            return Err(AgentError::new(
+                "运行检查点的 Provider Tool Call 身份映射无效或无序。",
+            ));
+        }
+        validate_model_tool_call_id(&mapping.runtime_call_id)?;
+        previous_index = Some(mapping.provider_tool_index);
+    }
+
+    let pending_mapping_index = identity
+        .tool_call_identities
+        .iter()
+        .position(|mapping| mapping.runtime_call_id == pending_tool_call_id)
+        .ok_or_else(|| AgentError::new("运行检查点的 Provider Tool Call 映射缺少待审批调用。"))?;
+    let mut unresolved_suffix = Vec::with_capacity(tool_batch.queue.len().saturating_add(1));
+    unresolved_suffix.push(pending_tool_call_id);
+    unresolved_suffix.extend(
+        tool_batch
+            .queue
+            .iter()
+            .map(|queued| queued.call.id.as_str()),
+    );
+    let unresolved_positions = unresolved_suffix
+        .iter()
+        .map(|runtime_call_id| {
+            identity
+                .tool_call_identities
+                .iter()
+                .position(|mapping| mapping.runtime_call_id == *runtime_call_id)
+                .ok_or_else(|| {
+                    AgentError::new("运行检查点的 Provider Tool Call 映射缺少未结算调用。")
+                })
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
+    if unresolved_positions.first().copied() != Some(pending_mapping_index)
+        || unresolved_positions
+            .windows(2)
+            .any(|positions| positions[0] >= positions[1])
+    {
+        return Err(AgentError::new(
+            "运行检查点中的待审批及 queued Tool Calls 未保持完整 Provider Turn 的原序。",
+        ));
+    }
+    let deferred_external_tool_call_count =
+        usize::try_from(tool_batch.deferred_external_tool_call_count)
+            .map_err(|_| AgentError::new("运行检查点中的外部 Tool Call 延后计数超出平台范围。"))?;
+    let expected_remaining = tool_batch
+        .queue
+        .len()
+        .saturating_add(1)
+        .saturating_add(deferred_external_tool_call_count);
+    if identity
+        .tool_call_identities
+        .len()
+        .saturating_sub(pending_mapping_index)
+        != expected_remaining
+    {
+        return Err(AgentError::new(
+            "运行检查点中的未结算 Tool Calls 与已延后的外部调用数量不一致。",
+        ));
+    }
+
+    for queued in &tool_batch.queue {
+        let provider_tool_index = u32::try_from(queued.provider_tool_index).unwrap_or(u32::MAX);
+        let matches = identity.tool_call_identities.iter().any(|mapping| {
+            mapping.provider_tool_index == provider_tool_index
+                && mapping.provider_call_id == queued.provider_call.id
+                && mapping.runtime_call_id == queued.call.id
+        });
+        if !matches {
+            return Err(AgentError::new(
+                "运行检查点的 queued Tool Call 与 Provider 身份映射不一致。",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -306,6 +590,22 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
             checkpoint.run_id
         )));
     }
+    checkpoint
+        .provider_profile_config
+        .validate()
+        .map_err(|error| {
+            AgentError::new(format!(
+                "无法恢复运行检查点：Provider profile 无效：{error}"
+            ))
+        })?;
+    checkpoint
+        .provider_protocol_key
+        .validate_against_config(&checkpoint.provider_profile_config)
+        .map_err(|error| {
+            AgentError::new(format!(
+                "无法恢复运行检查点：Provider protocol key 无效：{error}"
+            ))
+        })?;
     validate_model_tool_call_id(&checkpoint.pending_tool_call_id)?;
     if checkpoint
         .pending_action_id
@@ -352,6 +652,9 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
 
     let continuation_result_sequence =
         continuation_result_sequence(&checkpoint, &continuation.call.id);
+    let provider_profile_config = checkpoint.provider_profile_config.clone();
+    let provider_protocol_key = checkpoint.provider_protocol_key.clone();
+    let assistant_turn_identity = checkpoint.assistant_turn_identity.clone();
     let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
         restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
@@ -362,7 +665,39 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         checkpoint.conversation_trace_truncated,
     );
     let mut context = ContextFrame::from_checkpoint_items(checkpoint.context_items)?;
-    let checkpoint_call = context.validate_pending_tool_call(&checkpoint.pending_tool_call_id)?;
+    let queue = restore_queued_tool_calls(
+        checkpoint.queued_tool_calls,
+        &checkpoint.pending_tool_call_id,
+        &assistant_turn_identity,
+        &context,
+    )?;
+    let queued_tool_call_ids = queue
+        .iter()
+        .map(|queued| queued.call.id.clone())
+        .collect::<Vec<_>>();
+    let checkpoint_call = context
+        .validate_pending_tool_batch(&checkpoint.pending_tool_call_id, &queued_tool_call_ids)?;
+    let restored_batch = ToolCallBatch {
+        queue,
+        // The checkpoint Context already contains the continuation-free Assistant Turn. Restore
+        // must not append a second authoritative assistant message.
+        assistant_turn: None,
+        assistant_turn_identity: Some(assistant_turn_identity),
+        deferred_external_tool_call_count: checkpoint.deferred_external_tool_call_count,
+        suppressed_narration: checkpoint.suppressed_narration,
+        seen_semantic_fingerprints: restored_batch_fingerprints,
+    };
+    validate_assistant_turn_identity(
+        restored_batch.assistant_turn_identity()?,
+        &checkpoint.pending_tool_call_id,
+        &restored_batch,
+    )?;
+    context.validate_assistant_turn_checkpoint_identity(
+        restored_batch.assistant_turn_identity()?,
+        &checkpoint.pending_tool_call_id,
+        &queued_tool_call_ids,
+        false,
+    )?;
     if checkpoint_call.name != continuation.call.tool
         || checkpoint_call.args != continuation.call.args
     {
@@ -404,7 +739,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
     } else {
         model_observation.clone()
     };
-    context.append_tool_continuation(
+    context.append_tool_continuation_in_batch(
         &continuation_call,
         model_observation.clone(),
         is_mcp.then_some(persisted_model_observation.clone()),
@@ -416,6 +751,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
                 continuation_result_sequence,
             )
         }),
+        &queued_tool_call_ids,
     )?;
     let call_sequence = conversation_trace.record_tool_call(&continuation.call);
     if let Some(sequence) = call_sequence {
@@ -441,26 +777,18 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         );
     }
 
-    let queue = restore_queued_tool_calls(
-        checkpoint.queued_tool_calls,
-        &continuation.call.id,
-        &context,
-    )?;
     Ok(RestoredRunCheckpoint {
         context,
         next_model_request_index: checkpoint.next_model_request_index,
-        tool_batch: ToolCallBatch {
-            queue,
-            deferred_external_tool_call_count: checkpoint.deferred_external_tool_call_count,
-            suppressed_narration: checkpoint.suppressed_narration,
-            seen_semantic_fingerprints: restored_batch_fingerprints,
-        },
+        tool_batch: restored_batch,
         extension_snapshots: checkpoint.extension_snapshots,
         conversation_trace,
         tool_set,
         run_context: checkpoint.run_context,
         model_capabilities: checkpoint.model_capabilities,
         run_world_state: checkpoint.run_world_state,
+        provider_profile_config,
+        provider_protocol_key,
     })
 }
 
@@ -636,55 +964,24 @@ fn restore_batch_fingerprints(
                 .any(|call| call.id == pending_tool_call_id)
         })
         .ok_or_else(|| AgentError::new("运行检查点缺少冻结的待审批工具调用。"))?;
-    let pending_call = pending_item
-        .tool_calls
-        .iter()
-        .find(|call| call.id == pending_tool_call_id)
-        .expect("pending item was selected by this call");
-    let pending_group = pending_item
-        .group
-        .as_ref()
-        .ok_or_else(|| AgentError::new("运行检查点中的待审批工具调用缺少交换分组。"))?;
-    let response_group_prefix = tool_exchange_response_prefix(&pending_group.id);
-
     let mut fingerprints = BTreeSet::new();
-    // Always seed the pending call. This is sufficient for the most important approval boundary:
-    // a duplicate queued after the pending action can never execute after resume.
-    fingerprints.insert(semantic_tool_call_fingerprint(
-        &pending_call.name,
-        &pending_call.args,
-    ));
-
-    if let Some(prefix) = response_group_prefix {
-        for item in context_items {
-            let belongs_to_same_response = item
-                .group
-                .as_ref()
-                .and_then(|group| tool_exchange_response_prefix(&group.id))
-                .is_some_and(|candidate| candidate == prefix);
-            if !belongs_to_same_response {
-                continue;
-            }
-            for call in &item.tool_calls {
-                fingerprints.insert(semantic_tool_call_fingerprint(&call.name, &call.args));
-            }
+    // A complete Assistant Turn contains both the settled prefix and unresolved suffix. Seed only
+    // calls through the pending action: later queued calls have not executed and must remain
+    // eligible after approval recovery.
+    for call in &pending_item.tool_calls {
+        fingerprints.insert(semantic_tool_call_fingerprint(&call.name, &call.args));
+        if call.id == pending_tool_call_id {
+            return Ok(fingerprints);
         }
     }
-
-    Ok(fingerprints)
-}
-
-fn tool_exchange_response_prefix(group_id: &str) -> Option<&str> {
-    let (prefix, tool_index) = group_id.rsplit_once(':')?;
-    tool_index.parse::<usize>().ok()?;
-    prefix
-        .starts_with("run:")
-        .then_some(prefix)
-        .filter(|prefix| prefix.contains(":tool-exchange:"))
+    Err(AgentError::new(
+        "运行检查点的完整 Assistant Turn 缺少待审批 Tool Call。",
+    ))
 }
 
 fn queued_tool_call_checkpoint(
     call: &QueuedToolCall,
+    assistant_turn_id: &str,
 ) -> AgentResult<AgentQueuedToolCallCheckpoint> {
     if call.checkpoint_persistence != AgentToolCallCheckpointPersistence::Allowed {
         let code = match call.checkpoint_persistence {
@@ -725,9 +1022,16 @@ fn queued_tool_call_checkpoint(
             id: call.checkpoint_call.id.clone(),
             name: call.checkpoint_call.name.clone(),
             args: call.checkpoint_call.args.clone(),
+            provider_identity: Some(AgentProviderToolCallIdentity {
+                provider_tool_index: u32::try_from(call.provider_tool_index).unwrap_or(u32::MAX),
+                provider_call_id: call.provider_call.id.clone(),
+                runtime_call_id: call.call.id.clone(),
+            }),
         },
         assistant_content: call.assistant_content.clone(),
         group_id: call.group_id.clone(),
+        assistant_turn_id: assistant_turn_id.to_string(),
+        provider_tool_index: u32::try_from(call.provider_tool_index).unwrap_or(u32::MAX),
     })
 }
 
@@ -790,11 +1094,11 @@ pub(super) fn continuation_result_sequence(checkpoint: &AgentRunCheckpoint, call
 fn restore_queued_tool_calls(
     calls: Vec<AgentQueuedToolCallCheckpoint>,
     pending_tool_call_id: &str,
+    assistant_turn_identity: &AgentAssistantTurnCheckpointIdentity,
     context: &ContextFrame,
 ) -> AgentResult<VecDeque<QueuedToolCall>> {
     let mut ids = BTreeSet::new();
     ids.insert(pending_tool_call_id.to_string());
-    let mut group_ids = BTreeSet::new();
     calls
         .into_iter()
         .map(|queued| {
@@ -808,17 +1112,35 @@ fn restore_queued_tool_calls(
                     queued.call.id
                 )));
             }
-            if context.contains_tool_call_id(&queued.call.id) {
+            if !context.contains_tool_call_id(&queued.call.id) {
                 return Err(AgentError::new(format!(
-                    "运行检查点中的待执行工具调用 id `{}` 已在上下文中使用。",
+                    "运行检查点中的待执行工具调用 id `{}` 未出现在完整 Assistant Turn 中。",
                     queued.call.id
                 )));
             }
-            if queued.group_id.trim().is_empty()
-                || context.contains_group_id(&queued.group_id)
-                || !group_ids.insert(queued.group_id.clone())
+            if queued.group_id.trim().is_empty() || !context.contains_group_id(&queued.group_id) {
+                return Err(AgentError::new(
+                    "运行检查点中的 queued Tool Call 未绑定完整 Assistant Turn 的交换分组。",
+                ));
+            }
+            if queued.assistant_turn_id != assistant_turn_identity.assistant_turn_id {
+                return Err(AgentError::new(
+                    "运行检查点中的 queued Tool Call 引用了其他 Assistant Turn。",
+                ));
+            }
+            let mapping = assistant_turn_identity
+                .tool_call_identities
+                .iter()
+                .find(|mapping| mapping.provider_tool_index == queued.provider_tool_index)
+                .ok_or_else(|| {
+                    AgentError::new("运行检查点中的 queued Tool Call 缺少 Provider 身份映射。")
+                })?;
+            if mapping.runtime_call_id != queued.call.id
+                || queued.call.provider_identity.as_ref() != Some(mapping)
             {
-                return Err(AgentError::new("运行检查点中的工具交换分组为空或重复。"));
+                return Err(AgentError::new(
+                    "运行检查点中的 queued Tool Call 与 Provider 身份映射不一致。",
+                ));
             }
             let call = LlmToolCall {
                 id: queued.call.id,
@@ -826,6 +1148,16 @@ fn restore_queued_tool_calls(
                 args: queued.call.args,
             };
             Ok(QueuedToolCall {
+                provider_call: LlmToolCall {
+                    id: mapping.provider_call_id.clone(),
+                    name: call.name.clone(),
+                    // Raw Provider arguments are intentionally not durable in Round 1. The
+                    // checkpoint projection is sufficient for identity validation and execution;
+                    // a later private continuation store restores raw replay state.
+                    args: call.args.clone(),
+                },
+                provider_tool_index: usize::try_from(mapping.provider_tool_index)
+                    .unwrap_or(usize::MAX),
                 checkpoint_call: call.clone(),
                 call,
                 checkpoint_persistence: AgentToolCallCheckpointPersistence::Allowed,
@@ -843,7 +1175,7 @@ mod tests {
         ContextCapacityDetector, ContextItem, ContextMetadata, ContextRetention, ContextScope,
         ContextSource,
     };
-    use crate::llm::{model_response_tool_call_id, LlmMessageRole};
+    use crate::llm::{model_response_tool_call_id, LlmMessage, LlmMessageRole};
     use crate::protocol::{AgentApiStyle, AgentApprovalStatus, AgentToolCall, AgentToolResult};
     use crate::tools::ToolRegistry;
     use serde_json::json;
@@ -857,6 +1189,22 @@ mod tests {
 
     fn test_run_world_state() -> WorldStateSnapshot {
         test_run_world_state_for(false)
+    }
+
+    fn test_provider_profile() -> ProviderProfileConfig {
+        ProviderProfileConfig::generic_for_dialect(
+            crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions,
+        )
+    }
+
+    fn test_provider_key() -> ProviderProtocolKey {
+        ProviderProtocolKey::new(
+            crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions,
+            &test_provider_profile(),
+            "checkpoint-test-model",
+            None,
+        )
+        .unwrap()
     }
 
     fn test_run_world_state_for(image_input: bool) -> WorldStateSnapshot {
@@ -877,11 +1225,59 @@ mod tests {
         model_response_tool_call_id("checkpoint-validation-run", 0, tool_index, provider_call_id)
     }
 
+    fn test_batch_and_context_item(
+        run_id: &str,
+        assistant_content: &str,
+        calls: Vec<LlmToolCall>,
+        suppressed_narration: bool,
+    ) -> (ToolCallBatch, ContextItem) {
+        let mut batch = ToolCallBatch::from_model_response(
+            run_id,
+            0,
+            assistant_content.to_string(),
+            calls,
+            suppressed_narration,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
+        );
+        let checkpoint_message = batch
+            .checkpoint_assistant_message()
+            .unwrap()
+            .expect("test batch has one complete Assistant Turn");
+        let group = batch.context_group().expect("test batch is not empty");
+        let turn = batch
+            .take_assistant_turn()
+            .expect("test batch has one complete Assistant Turn");
+        let item = ContextItem::new(
+            LlmMessage::from_assistant_turn(turn),
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group),
+        )
+        .with_checkpoint_message(checkpoint_message);
+        (batch, item)
+    }
+
+    fn pop_test_call(batch: &mut ToolCallBatch, expected_call_id: &str) -> QueuedToolCall {
+        let queued = batch.pop_front().expect("test batch call");
+        assert_eq!(queued.call.id, expected_call_id);
+        queued
+    }
+
     #[test]
     fn approval_checkpoint_rejects_private_queued_tool_arguments_without_leaking_them() {
         let secret = "fixture-token-that-must-not-persist";
         let call_id = canonical_test_call_id(1, "provider-private-mcp");
+        let provider_call = LlmToolCall {
+            id: "provider-private-mcp".to_string(),
+            name: "mcp__fixture__credential_tool".to_string(),
+            args: json!({"token": secret, "query": "safe"}),
+        };
         let queued = QueuedToolCall {
+            provider_call,
+            provider_tool_index: 1,
             call: LlmToolCall {
                 id: call_id.clone(),
                 name: "mcp__fixture__credential_tool".to_string(),
@@ -897,7 +1293,7 @@ mod tests {
             group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
         };
 
-        let error = queued_tool_call_checkpoint(&queued).unwrap_err();
+        let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test").unwrap_err();
         assert_eq!(
             error.code(),
             Some("agent.checkpoint_private_tool_arguments")
@@ -918,6 +1314,12 @@ mod tests {
             args: json!({"text": secret}),
         };
         let queued = QueuedToolCall {
+            provider_call: LlmToolCall {
+                id: "provider-neutral-mcp".to_string(),
+                name: call.name.clone(),
+                args: call.args.clone(),
+            },
+            provider_tool_index: 1,
             checkpoint_call: call.clone(),
             call,
             checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
@@ -925,7 +1327,7 @@ mod tests {
             group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
         };
 
-        let error = queued_tool_call_checkpoint(&queued).unwrap_err();
+        let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test").unwrap_err();
         assert_eq!(
             error.code(),
             Some("agent.checkpoint_private_tool_arguments")
@@ -939,11 +1341,17 @@ mod tests {
     #[test]
     fn mcp_approval_barrier_drops_only_external_calls_and_persists_a_safe_reprepare_count() {
         let secret = "queued-mcp-secret-must-not-persist";
+        let pending = LlmToolCall {
+            id: canonical_test_call_id(0, "provider-pending"),
+            name: "write_file".to_string(),
+            args: json!({"path": "report.txt"}),
+        };
         let mut batch = ToolCallBatch::from_model_response(
             "checkpoint-validation-run",
             0,
             String::new(),
             vec![
+                pending.clone(),
                 LlmToolCall {
                     id: canonical_test_call_id(1, "provider-mcp-one"),
                     name: "mcp__fixture__first".to_string(),
@@ -980,30 +1388,34 @@ mod tests {
                 )
             },
         );
-
-        assert_eq!(
-            batch.defer_external_calls(|queued| queued.call.name.starts_with("mcp__")),
-            2
-        );
-        assert_eq!(batch.queue.len(), 1);
-        assert_eq!(batch.queue[0].call.name, "read_file");
-        assert_eq!(batch.take_deferred_external_tool_call_count(), None);
-
-        let pending = LlmToolCall {
-            id: canonical_test_call_id(0, "provider-pending"),
-            name: "write_file".to_string(),
-            args: json!({"path": "report.txt"}),
-        };
-        let context = ContextFrame::new(vec![ContextItem::assistant(
-            "",
-            vec![pending.clone()],
+        let checkpoint_message = batch.checkpoint_assistant_message().unwrap().unwrap();
+        let group = batch.context_group().unwrap();
+        let complete_turn = batch.take_assistant_turn().unwrap();
+        pop_test_call(&mut batch, &pending.id);
+        let mut context = ContextFrame::new(vec![ContextItem::new(
+            LlmMessage::from_assistant_turn(complete_turn),
             ContextMetadata::new(
                 ContextSource::ModelResponse,
                 ContextScope::Run,
                 ContextRetention::Retained,
             )
-            .with_group(ContextGroup::tool_exchange("mcp-barrier-pending")),
-        )]);
+            .with_group(group.clone()),
+        )
+        .with_checkpoint_message(checkpoint_message)]);
+
+        let deferred = batch.defer_external_calls(|queued| queued.call.name.starts_with("mcp__"));
+        assert_eq!(deferred.len(), 2);
+        let deferred_ids = deferred
+            .into_iter()
+            .map(|queued| queued.call.id)
+            .collect::<BTreeSet<_>>();
+        context
+            .omit_runtime_tool_calls_from_group(&group, &deferred_ids)
+            .unwrap();
+        assert_eq!(batch.queue.len(), 1);
+        assert_eq!(batch.queue[0].call.name, "read_file");
+        assert_eq!(batch.take_deferred_external_tool_call_count(), None);
+
         let trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
             "checkpoint-validation-run",
@@ -1018,6 +1430,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();
@@ -1034,34 +1448,39 @@ mod tests {
         assert_eq!(batch.take_deferred_external_tool_call_count(), None);
     }
 
-    fn restorable_checkpoint_fixture() -> (AgentRunCheckpoint, AgentToolContinuation) {
+    fn restorable_checkpoint_fixture_for_pending_tool(
+        pending_tool_name: &str,
+    ) -> (AgentRunCheckpoint, AgentToolContinuation) {
         let pending = LlmToolCall {
             id: canonical_test_call_id(0, "provider-pending"),
-            name: "write_file".to_string(),
+            name: pending_tool_name.to_string(),
             args: json!({ "path": "report.txt" }),
         };
-        let context = ContextFrame::new(vec![ContextItem::assistant(
-            "",
-            vec![pending.clone()],
+        let queued = LlmToolCall {
+            id: canonical_test_call_id(1, "provider-queued"),
+            name: "read_file".to_string(),
+            args: json!({ "path": "report.txt" }),
+        };
+        let mut batch = ToolCallBatch::from_model_response(
+            "checkpoint-validation-run",
+            0,
+            String::new(),
+            vec![pending.clone(), queued],
+            false,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
+        );
+        let complete_turn = batch.take_assistant_turn().unwrap();
+        let pending_queued = batch.pop_front().unwrap();
+        assert_eq!(pending_queued.call.id, pending.id);
+        let context = ContextFrame::new(vec![ContextItem::new(
+            LlmMessage::from_assistant_turn(complete_turn),
             ContextMetadata::new(
                 ContextSource::ModelResponse,
                 ContextScope::Run,
                 ContextRetention::Retained,
             )
-            .with_group(ContextGroup::tool_exchange("validation-pending")),
+            .with_group(pending_queued.context_group()),
         )]);
-        let batch = ToolCallBatch::from_model_response(
-            "checkpoint-validation-run",
-            0,
-            String::new(),
-            vec![LlmToolCall {
-                id: canonical_test_call_id(1, "provider-queued"),
-                name: "read_file".to_string(),
-                args: json!({ "path": "report.txt" }),
-            }],
-            false,
-            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
-        );
         let trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
             "checkpoint-validation-run",
@@ -1076,6 +1495,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();
@@ -1099,29 +1520,23 @@ mod tests {
         (checkpoint, continuation)
     }
 
+    fn restorable_checkpoint_fixture() -> (AgentRunCheckpoint, AgentToolContinuation) {
+        restorable_checkpoint_fixture_for_pending_tool("write_file")
+    }
+
     #[test]
     fn mcp_continuation_keeps_live_model_result_but_redacts_durable_trace_and_checkpoint() {
         const RESULT_CANARY: &str = "MCP_RESULT_CANARY_MUST_NOT_PERSIST";
-        let (mut checkpoint, mut continuation) = restorable_checkpoint_fixture();
         let model_tool_name = "mcp__fixture__secret_result".to_string();
+        let (mut checkpoint, mut continuation) =
+            restorable_checkpoint_fixture_for_pending_tool(&model_tool_name);
         checkpoint.pending_action_id = Some(uuid::Uuid::new_v4().to_string());
-        let pending_call_id = checkpoint.pending_tool_call_id.clone();
-        checkpoint
-            .context_items
-            .iter_mut()
-            .flat_map(|item| item.tool_calls.iter_mut())
-            .find(|call| call.id == pending_call_id)
-            .expect("pending checkpoint ToolCall")
-            .name
-            .clone_from(&model_tool_name);
         checkpoint
             .tool_set
             .exposed_tool_names
             .push(model_tool_name.clone());
         checkpoint.tool_set.exposed_tool_names.sort();
         checkpoint.tool_set.exposed_tool_names.dedup();
-        continuation.call.tool.clone_from(&model_tool_name);
-        continuation.result.tool = model_tool_name;
         continuation.result.result = Some(json!({
             "value": RESULT_CANARY,
             "neutral": {"data": RESULT_CANARY},
@@ -1133,7 +1548,7 @@ mod tests {
         assert!(
             live_messages
                 .iter()
-                .any(|message| message.content.contains(RESULT_CANARY)),
+                .any(|message| message.content().contains(RESULT_CANARY)),
             "the current process must still supply the bounded authoritative result to the model"
         );
         let mut live_context_items = restored.context.checkpoint_items().unwrap();
@@ -1179,6 +1594,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_oversized_raw_provider_call_identity() {
+        let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+        checkpoint.assistant_turn_identity.tool_call_identities[0].provider_call_id =
+            "x".repeat(crate::llm::MAX_PROVIDER_TOOL_CALL_ID_BYTES + 1);
+
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint,
+            "checkpoint-validation-run",
+            &continuation,
+        ));
+
+        assert_eq!(error.code(), Some("agent.invalid_provider_tool_call_id"));
     }
 
     #[test]
@@ -1232,7 +1662,7 @@ mod tests {
         )
         .unwrap();
         let messages = restored.context.to_messages();
-        let observation = &messages.last().unwrap().content;
+        let observation = messages.last().unwrap().content();
 
         assert!(!observation.contains("historyRef"));
         assert!(!observation.contains("assistantMessageId"));
@@ -1330,18 +1760,20 @@ mod tests {
             ToolCallBatchClaim::Execute
         );
 
-        let first_group = first.context_group();
-        let pending_group = pending_queued.context_group();
+        let batch_group = first.context_group();
+        assert_eq!(batch_group, pending_queued.context_group());
+        let complete_turn = batch
+            .take_assistant_turn()
+            .expect("new model response owns one complete assistant turn");
         let context = ContextFrame::new(vec![
-            ContextItem::assistant(
-                "",
-                vec![first.call.clone()],
+            ContextItem::new(
+                LlmMessage::from_assistant_turn(complete_turn),
                 ContextMetadata::new(
                     ContextSource::ModelResponse,
                     ContextScope::Run,
                     ContextRetention::Retained,
                 )
-                .with_group(first_group.clone()),
+                .with_group(batch_group.clone()),
             ),
             ContextItem::tool_result(
                 first.call.id.clone(),
@@ -1352,17 +1784,7 @@ mod tests {
                     ContextScope::Run,
                     ContextRetention::Retained,
                 )
-                .with_group(first_group),
-            ),
-            ContextItem::assistant(
-                "",
-                vec![pending_queued.call.clone()],
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                )
-                .with_group(pending_group),
+                .with_group(batch_group),
             ),
         ]);
         let checkpoint = create_run_checkpoint(
@@ -1378,9 +1800,28 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();
+        assert_eq!(
+            checkpoint
+                .assistant_turn_identity
+                .tool_call_identities
+                .len(),
+            3
+        );
+        assert_eq!(checkpoint.context_items[0].tool_calls.len(), 3);
+        assert_eq!(
+            checkpoint.context_items[1].tool_call_id.as_deref(),
+            Some(first.call.id.as_str())
+        );
+        assert_eq!(checkpoint.queued_tool_calls.len(), 1);
+        assert_eq!(
+            checkpoint.queued_tool_calls[0].call.id,
+            checkpoint.assistant_turn_identity.tool_call_identities[2].runtime_call_id
+        );
         let continuation = AgentToolContinuation {
             call: AgentToolCall {
                 id: pending.id.clone(),
@@ -1409,6 +1850,97 @@ mod tests {
     }
 
     #[test]
+    fn approval_checkpoint_uses_provider_index_when_provider_call_ids_repeat() {
+        let provider_calls = vec![
+            LlmToolCall {
+                id: "provider-reused-id".to_string(),
+                name: "write_file".to_string(),
+                args: json!({ "path": "report.txt" }),
+            },
+            LlmToolCall {
+                id: "provider-reused-id".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "report.txt" }),
+            },
+        ];
+        let runtime_calls = [
+            LlmToolCall {
+                id: canonical_test_call_id(0, "provider-reused-id"),
+                name: "write_file".to_string(),
+                args: json!({ "path": "report.txt" }),
+            },
+            LlmToolCall {
+                id: canonical_test_call_id(1, "provider-reused-id"),
+                name: "read_file".to_string(),
+                args: json!({ "path": "report.txt" }),
+            },
+        ];
+        let bindings = provider_calls
+            .iter()
+            .zip(runtime_calls.iter().cloned())
+            .enumerate()
+            .map(|(index, (provider_call, runtime_call))| {
+                LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
+            })
+            .collect::<Vec<_>>();
+        let turn = LlmAssistantTurn::from_legacy("", provider_calls);
+        let mut batch = ToolCallBatch::from_provider_response(
+            "checkpoint-validation-run",
+            0,
+            turn,
+            bindings,
+            false,
+            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
+        )
+        .unwrap();
+        let checkpoint_message = batch.checkpoint_assistant_message().unwrap().unwrap();
+        let group = batch.context_group().unwrap();
+        let complete_turn = batch.take_assistant_turn().unwrap();
+        let pending = pop_test_call(&mut batch, &runtime_calls[0].id);
+        let context = ContextFrame::new(vec![ContextItem::new(
+            LlmMessage::from_assistant_turn(complete_turn),
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group),
+        )
+        .with_checkpoint_message(checkpoint_message)]);
+        let checkpoint = create_run_checkpoint(
+            "checkpoint-validation-run",
+            RunCheckpointState {
+                context: &context,
+                next_model_request_index: 1,
+                tool_batch: &batch,
+                extension_snapshots: Vec::new(),
+                pending_tool_call_id: &pending.call.id,
+                conversation_trace: &ConversationTraceRecorder::default(),
+                tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            checkpoint
+                .assistant_turn_identity
+                .tool_call_identities
+                .iter()
+                .map(|identity| identity.provider_call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["provider-reused-id", "provider-reused-id"]
+        );
+        assert_ne!(
+            checkpoint.assistant_turn_identity.tool_call_identities[0].runtime_call_id,
+            checkpoint.assistant_turn_identity.tool_call_identities[1].runtime_call_id
+        );
+    }
+
+    #[test]
     fn checkpoint_creation_rejects_invalid_pending_queued_context_and_trace_ids() {
         let invalid_id = "legacy/provider/call".to_string();
         let pending = LlmToolCall {
@@ -1416,17 +1948,10 @@ mod tests {
             name: "write_file".to_string(),
             args: json!({ "path": "report.txt" }),
         };
-        let context = ContextFrame::new(vec![ContextItem::assistant(
-            "",
-            vec![pending.clone()],
-            ContextMetadata::new(
-                ContextSource::ModelResponse,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            )
-            .with_group(ContextGroup::tool_exchange("invalid-pending")),
-        )]);
-        let batch = ToolCallBatch::default();
+        let (mut batch, assistant_item) =
+            test_batch_and_context_item("create-invalid-pending", "", vec![pending.clone()], false);
+        pop_test_call(&mut batch, &pending.id);
+        let context = ContextFrame::new(vec![assistant_item]);
         let trace = ConversationTraceRecorder::default();
         let error = create_run_checkpoint(
             "create-invalid-pending",
@@ -1441,6 +1966,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap_err();
@@ -1451,28 +1978,21 @@ mod tests {
             name: "write_file".to_string(),
             args: json!({ "path": "report.txt" }),
         };
-        let valid_pending_context = ContextFrame::new(vec![ContextItem::assistant(
-            "",
-            vec![valid_pending.clone()],
-            ContextMetadata::new(
-                ContextSource::ModelResponse,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            )
-            .with_group(ContextGroup::tool_exchange("valid-pending")),
-        )]);
-        let invalid_queue = ToolCallBatch::from_model_response(
+        let (mut invalid_queue, valid_pending_item) = test_batch_and_context_item(
             "create-invalid-queue",
-            0,
-            String::new(),
-            vec![LlmToolCall {
-                id: invalid_id.clone(),
-                name: "read_file".to_string(),
-                args: json!({ "path": "report.txt" }),
-            }],
+            "",
+            vec![
+                valid_pending.clone(),
+                LlmToolCall {
+                    id: invalid_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "report.txt" }),
+                },
+            ],
             false,
-            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
         );
+        pop_test_call(&mut invalid_queue, &valid_pending.id);
+        let valid_pending_context = ContextFrame::new(vec![valid_pending_item]);
         let error = create_run_checkpoint(
             "create-invalid-queue",
             RunCheckpointState {
@@ -1486,10 +2006,21 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap_err();
         assert_invalid_tool_call_id(error);
+
+        let (mut valid_batch, valid_pending_item) = test_batch_and_context_item(
+            "create-valid-pending",
+            "",
+            vec![valid_pending.clone()],
+            false,
+        );
+        pop_test_call(&mut valid_batch, &valid_pending.id);
+        let valid_pending_context = ContextFrame::new(vec![valid_pending_item.clone()]);
 
         let historical_group = ContextGroup::tool_exchange("invalid-history");
         let invalid_context = ContextFrame::new(vec![
@@ -1518,23 +2049,14 @@ mod tests {
                 )
                 .with_group(historical_group),
             ),
-            ContextItem::assistant(
-                "",
-                vec![valid_pending.clone()],
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                )
-                .with_group(ContextGroup::tool_exchange("valid-context-pending")),
-            ),
+            valid_pending_item,
         ]);
         let error = create_run_checkpoint(
             "create-invalid-context",
             RunCheckpointState {
                 context: &invalid_context,
                 next_model_request_index: 1,
-                tool_batch: &batch,
+                tool_batch: &valid_batch,
                 extension_snapshots: Vec::new(),
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
@@ -1542,6 +2064,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap_err();
@@ -1560,7 +2084,7 @@ mod tests {
             RunCheckpointState {
                 context: &valid_pending_context,
                 next_model_request_index: 1,
-                tool_batch: &batch,
+                tool_batch: &valid_batch,
                 extension_snapshots: Vec::new(),
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &invalid_trace,
@@ -1568,6 +2092,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap_err();
@@ -1695,7 +2221,20 @@ mod tests {
             args: json!({ "phase": "finish" }),
         };
         let queued_call_id = canonical_test_call_id(1, "round-trip-queued");
-        let group = ContextGroup::tool_exchange("exchange-1");
+        let (mut batch, assistant_item) = test_batch_and_context_item(
+            "run-1",
+            "",
+            vec![
+                pending.clone(),
+                LlmToolCall {
+                    id: queued_call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "report.txt" }),
+                },
+            ],
+            true,
+        );
+        pop_test_call(&mut batch, &pending.id);
         let context = ContextFrame::new(vec![
             ContextItem::text(
                 LlmMessageRole::System,
@@ -1704,29 +2243,8 @@ mod tests {
                 ContextScope::Run,
                 ContextRetention::Retained,
             ),
-            ContextItem::assistant(
-                "",
-                vec![pending.clone()],
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                )
-                .with_group(group),
-            ),
+            assistant_item,
         ]);
-        let batch = ToolCallBatch::from_model_response(
-            "run-1",
-            0,
-            String::new(),
-            vec![LlmToolCall {
-                id: queued_call_id.clone(),
-                name: "read_file".to_string(),
-                args: json!({ "path": "report.txt" }),
-            }],
-            true,
-            |call| (call.clone(), AgentToolCallCheckpointPersistence::Allowed),
-        );
         let trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
             "run-1",
@@ -1741,6 +2259,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();
@@ -1764,7 +2284,10 @@ mod tests {
 
         let mut restored = restore_run_checkpoint(checkpoint, "run-1", &continuation).unwrap();
 
-        restored.context.validate_complete_tool_protocol().unwrap();
+        restored
+            .context
+            .validate_pending_tool_batch(&queued_call_id, &[])
+            .unwrap();
         assert_eq!(restored.next_model_request_index, 1);
         assert!(!restored.tool_batch.take_suppressed_narration());
         let queued = restored.tool_batch.pop_front().unwrap();
@@ -1779,17 +2302,10 @@ mod tests {
             name: "run_command".to_string(),
             args: json!({ "command": "python3 -c 'import openpyxl'" }),
         };
-        let context = ContextFrame::new(vec![ContextItem::assistant(
-            "",
-            vec![pending.clone()],
-            ContextMetadata::new(
-                ContextSource::ModelResponse,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            )
-            .with_group(ContextGroup::tool_exchange("command-exchange")),
-        )]);
-        let batch = ToolCallBatch::default();
+        let (mut batch, assistant_item) =
+            test_batch_and_context_item("run-command", "", vec![pending.clone()], false);
+        pop_test_call(&mut batch, &pending.id);
+        let context = ContextFrame::new(vec![assistant_item]);
         let trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
             "run-command",
@@ -1804,6 +2320,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();
@@ -1838,13 +2356,13 @@ mod tests {
         restored.context.validate_complete_tool_protocol().unwrap();
         let messages = restored.context.to_messages();
         let observation = messages.last().expect("restored tool observation");
-        assert_eq!(observation.role, LlmMessageRole::Tool);
-        assert!(observation.is_error);
-        assert!(observation.content.contains("\"exitCode\":1"));
-        assert!(observation.content.contains("dependency check started"));
-        assert!(observation.content.contains("ModuleNotFoundError"));
-        assert!(!observation.content.contains("\"stdoutTruncated\""));
-        assert!(!observation.content.contains("\"stderrTruncated\""));
+        assert_eq!(observation.role(), LlmMessageRole::Tool);
+        assert!(observation.is_error());
+        assert!(observation.content().contains("\"exitCode\":1"));
+        assert!(observation.content().contains("dependency check started"));
+        assert!(observation.content().contains("ModuleNotFoundError"));
+        assert!(!observation.content().contains("\"stdoutTruncated\""));
+        assert!(!observation.content().contains("\"stderrTruncated\""));
     }
 
     #[test]
@@ -1854,6 +2372,13 @@ mod tests {
             name: "write_file".to_string(),
             args: json!({ "phase": "finish", "path": "report.txt" }),
         };
+        let (mut tool_batch, assistant_item) = test_batch_and_context_item(
+            "run-compacted",
+            "I will write the report.",
+            vec![pending.clone()],
+            false,
+        );
+        pop_test_call(&mut tool_batch, &pending.id);
         let active = ContextFrame::new(vec![
             ContextItem::text(
                 LlmMessageRole::System,
@@ -1883,16 +2408,7 @@ mod tests {
                 ContextScope::Conversation,
                 ContextRetention::Retained,
             ),
-            ContextItem::assistant(
-                "I will write the report.",
-                vec![pending.clone()],
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                )
-                .with_group(ContextGroup::tool_exchange("compacted-write-exchange")),
-            ),
+            assistant_item,
         ]);
         let mut compacted = ContextFrame::new(vec![
             ContextItem::text(
@@ -1922,7 +2438,6 @@ mod tests {
         detector.prepare_frame(&mut compacted);
         let compacted_baseline = compacted.share_measured_persistent_baseline().unwrap();
         let active = active.replace_persistent_baseline(compacted_baseline);
-        let tool_batch = ToolCallBatch::default();
         let conversation_trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
             "run-compacted",
@@ -1937,6 +2452,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();
@@ -1964,7 +2481,7 @@ mod tests {
             .context
             .to_messages()
             .into_iter()
-            .map(|message| message.content)
+            .map(|message| message.content().to_string())
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -1998,8 +2515,29 @@ mod tests {
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
-        let first_group = ContextGroup::tool_exchange("first-exchange");
-        let pending_group = ContextGroup::tool_exchange("pending-exchange");
+        let completed_llm_call = LlmToolCall {
+            id: completed_call.id.clone(),
+            name: completed_call.tool.clone(),
+            args: completed_call.args.clone(),
+        };
+        let pending_llm_call = LlmToolCall {
+            id: pending_call.id.clone(),
+            name: pending_call.tool.clone(),
+            args: pending_call.args.clone(),
+        };
+        let (mut tool_batch, assistant_item) = test_batch_and_context_item(
+            "run-multi-tool",
+            "",
+            vec![completed_llm_call, pending_llm_call],
+            false,
+        );
+        let completed_queued = pop_test_call(&mut tool_batch, &completed_call.id);
+        let pending_queued = pop_test_call(&mut tool_batch, &pending_call.id);
+        assert_eq!(
+            completed_queued.context_group(),
+            pending_queued.context_group()
+        );
+        let group = completed_queued.context_group();
         let context = ContextFrame::new(vec![
             ContextItem::text(
                 LlmMessageRole::System,
@@ -2008,20 +2546,7 @@ mod tests {
                 ContextScope::Run,
                 ContextRetention::Retained,
             ),
-            ContextItem::assistant(
-                "",
-                vec![LlmToolCall {
-                    id: completed_call.id.clone(),
-                    name: completed_call.tool.clone(),
-                    args: completed_call.args.clone(),
-                }],
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                )
-                .with_group(first_group.clone()),
-            ),
+            assistant_item,
             ContextItem::tool_result(
                 completed_call.id.clone(),
                 build_tool_observation_message(&completed_result),
@@ -2031,28 +2556,13 @@ mod tests {
                     ContextScope::Run,
                     ContextRetention::Retained,
                 )
-                .with_group(first_group),
-            ),
-            ContextItem::assistant(
-                "",
-                vec![LlmToolCall {
-                    id: pending_call.id.clone(),
-                    name: pending_call.tool.clone(),
-                    args: pending_call.args.clone(),
-                }],
-                ContextMetadata::new(
-                    ContextSource::ModelResponse,
-                    ContextScope::Run,
-                    ContextRetention::Retained,
-                )
-                .with_group(pending_group),
+                .with_group(group),
             ),
         ]);
         let mut trace = ConversationTraceRecorder::default();
         trace.record_tool_call(&completed_call);
         trace.record_tool_result(&completed_call, &completed_result);
         trace.record_tool_call(&pending_call);
-        let tool_batch = ToolCallBatch::default();
         let checkpoint = create_run_checkpoint(
             "run-multi-tool",
             RunCheckpointState {
@@ -2066,6 +2576,8 @@ mod tests {
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
+                provider_profile_config: &test_provider_profile(),
+                provider_protocol_key: &test_provider_key(),
             },
         )
         .unwrap();

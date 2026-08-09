@@ -1,3 +1,5 @@
+import type { ProviderProfileConfig } from '@mycopilot/protocol'
+
 export interface ModelConfig {
   /** Opaque model identifier sent verbatim as the provider API's `model` value. */
   id: string
@@ -7,6 +9,8 @@ export interface ModelConfig {
   apiTokenOverride?: string
   supportsImage: boolean
   contextWindowTokens?: number
+  /** Provider protocol configuration is persisted but not yet exposed by the visible settings UI. */
+  providerProfileConfig?: ProviderProfileConfig
   inputPrice: string
   outputPrice: string
   enabled: boolean

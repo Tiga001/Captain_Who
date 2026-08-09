@@ -6,7 +6,10 @@ use super::{
 use crate::cancellation::AgentCancellationToken;
 #[cfg(test)]
 use crate::conversation_trace::render_tool_observation;
-use crate::llm::{model_response_tool_call_id, LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
+use crate::llm::{
+    model_response_tool_call_id, LlmImage, LlmMessage, LlmMessageRole, LlmRuntimeToolCallBinding,
+    LlmToolCall,
+};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
     AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall, AgentToolDefinition,
@@ -60,12 +63,25 @@ pub(super) fn parse_tool_call_request(content: &str) -> Option<ToolCallRequest> 
     })
 }
 
+#[cfg(test)]
 pub(super) fn tool_calls_from_response(
     native_tool_calls: Vec<LlmToolCall>,
     content: &str,
     run_id: &str,
     iteration: usize,
 ) -> Vec<LlmToolCall> {
+    tool_call_bindings_from_response(native_tool_calls, content, run_id, iteration)
+        .into_iter()
+        .map(|binding| binding.runtime_call)
+        .collect()
+}
+
+pub(super) fn tool_call_bindings_from_response(
+    native_tool_calls: Vec<LlmToolCall>,
+    content: &str,
+    run_id: &str,
+    iteration: usize,
+) -> Vec<LlmRuntimeToolCallBinding> {
     let calls = if native_tool_calls.is_empty() {
         parse_tool_call_request(content)
             .map(|request| {
@@ -85,10 +101,18 @@ pub(super) fn tool_calls_from_response(
     calls
         .into_iter()
         .enumerate()
-        .map(|(tool_index, call)| LlmToolCall {
-            id: model_response_tool_call_id(run_id, iteration, tool_index, &call.id),
-            args: normalize_tool_arguments(&call.name, call.args),
-            name: call.name,
+        .map(|(provider_tool_index, provider_call)| {
+            let runtime_call = LlmToolCall {
+                id: model_response_tool_call_id(
+                    run_id,
+                    iteration,
+                    provider_tool_index,
+                    &provider_call.id,
+                ),
+                args: normalize_tool_arguments(&provider_call.name, provider_call.args.clone()),
+                name: provider_call.name.clone(),
+            };
+            LlmRuntimeToolCallBinding::new(provider_tool_index, &provider_call, runtime_call)
         })
         .collect()
 }
@@ -147,6 +171,7 @@ fn normalize_image_generation_request(mut value: Value) -> Value {
 /// Skill's complete instructions. They are therefore discarded and must be reconsidered on the
 /// next model request. Multiple activation calls may remain in one batch so the next request sees
 /// all requested Skill instructions together.
+#[cfg(test)]
 pub(super) fn enforce_skill_activation_barrier(
     mut calls: Vec<LlmToolCall>,
 ) -> (Vec<LlmToolCall>, usize) {
@@ -155,6 +180,21 @@ pub(super) fn enforce_skill_activation_barrier(
     }
     let original_len = calls.len();
     calls.retain(|call| call.name == "skills_activate");
+    let deferred = original_len.saturating_sub(calls.len());
+    (calls, deferred)
+}
+
+pub(super) fn enforce_skill_activation_binding_barrier(
+    mut calls: Vec<LlmRuntimeToolCallBinding>,
+) -> (Vec<LlmRuntimeToolCallBinding>, usize) {
+    if !calls
+        .iter()
+        .any(|binding| binding.runtime_call.name == "skills_activate")
+    {
+        return (calls, 0);
+    }
+    let original_len = calls.len();
+    calls.retain(|binding| binding.runtime_call.name == "skills_activate");
     let deferred = original_len.saturating_sub(calls.len());
     (calls, deferred)
 }
@@ -409,10 +449,13 @@ pub(super) fn llm_image_message_from_tool_result(
             result.tool
         ),
     );
-    message.images.push(LlmImage {
-        mime_type: mime_type.to_string(),
-        data_base64: data_base64.to_string(),
-    });
+    message
+        .images_mut()
+        .expect("user tool-result image messages support images")
+        .push(LlmImage {
+            mime_type: mime_type.to_string(),
+            data_base64: data_base64.to_string(),
+        });
 
     Some(message)
 }

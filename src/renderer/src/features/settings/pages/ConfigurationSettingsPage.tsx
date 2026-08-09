@@ -6,6 +6,7 @@ import { ModelProviderSettings } from './configuration/ModelProviderSettings'
 import { WebSearchSettings } from './configuration/WebSearchSettings'
 import { ImageGenerationSettings } from './configuration/ImageGenerationSettings'
 import type { ModelConfig, ModelFormValues } from './configuration/configurationTypes'
+import { modelConfigFromForm } from './configuration/modelPersistence'
 import './ConfigurationSettingsPage.css'
 
 type ConfigurationView = 'settings' | 'manager' | 'createModel' | 'editModel'
@@ -39,20 +40,7 @@ export function ConfigurationSettingsPage() {
   }
 
   const saveModel = (values: ModelFormValues) => {
-    const savedModel: ModelConfig = {
-      id: values.id,
-      displayName: values.displayName || values.id,
-      apiUrlOverride: values.apiUrlOverride || undefined,
-      apiTokenOverride: values.apiTokenOverride || undefined,
-      supportsImage: values.supportsImage,
-      contextWindowTokens:
-        values.contextWindowTokens.trim().length > 0
-          ? Number(values.contextWindowTokens.replaceAll(',', ''))
-          : undefined,
-      inputPrice: values.inputPrice,
-      outputPrice: values.outputPrice,
-      enabled: editingModel?.enabled ?? true
-    }
+    const savedModel = modelConfigFromForm(values, editingModel)
 
     upsertModel(savedModel, editingModel?.id)
     setEditingModel(undefined)

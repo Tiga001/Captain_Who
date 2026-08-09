@@ -41,11 +41,27 @@ pub(crate) fn prepare_conversation_turn(
     if !model.enabled {
         return Err(format!("模型未启用：{model_id}").into());
     }
+    let provider_connection_revision = settings_snapshot
+        .provider_connection_revisions
+        .get(&model.id)
+        .cloned()
+        .ok_or_else(|| format!("模型 {model_id} 的 Provider 连接身份缺失。"))?;
     let context_window_tokens = model.effective_context_window_tokens();
     // Resolve the complete pair once and carry it through the run. Model-level credentials
     // take priority; otherwise both values come from global settings. This prevents a URL
     // from one provider from ever being combined with a token from another.
     let connection = settings.effective_connection_for(&model)?;
+    let provider_dialect = ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
+    let provider_profile_config = model
+        .resolved_provider_profile_config(provider_dialect)
+        .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
+    let provider_protocol_key = ProviderProtocolKey::new(
+        provider_dialect,
+        &provider_profile_config,
+        model.id.clone(),
+        Some(settings_snapshot.configuration_revision.clone()),
+    )
+    .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
     if !model.supports_image
         && input
             .attachments
@@ -180,6 +196,7 @@ pub(crate) fn prepare_conversation_turn(
             effective_before_message_id: &user_message_id,
             context: Some(&run_context),
             prompt_preferences: Some(&prompt_preferences),
+            model_id: &model.id,
             model_capabilities,
             active_summary: context_compaction_summary.as_ref(),
             created_at: timestamp,
@@ -200,9 +217,13 @@ pub(crate) fn prepare_conversation_turn(
         api_url: connection.api_url,
         api_token: connection.api_token,
         provider_configuration_revision: Some(settings_snapshot.configuration_revision),
+        provider_connection_revision: Some(provider_connection_revision),
+        search_connection_revision: Some(settings_snapshot.search_connection_revision),
+        provider_profile_config: Some(provider_profile_config),
+        provider_protocol_key: Some(provider_protocol_key),
         model: model.id.clone(),
         model_capabilities,
-        api_style: None,
+        api_style: Some(provider_dialect.api_style()),
         context_window_tokens: Some(context_window_tokens),
         context_window_indicator_enabled: input.context_window_indicator_enabled,
         max_tokens: input.max_tokens,

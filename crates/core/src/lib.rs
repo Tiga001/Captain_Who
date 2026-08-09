@@ -18,6 +18,7 @@ pub mod office;
 pub mod patch;
 mod prompts;
 pub mod protocol;
+pub mod provider_profile;
 mod revision;
 mod runtime;
 pub mod skills;
@@ -68,6 +69,12 @@ pub use model_request_observation::{
     ProviderCacheTopology, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
+pub use provider_profile::{
+    ProviderProfileConfig, ProviderProfileId, ProviderProfileRef, ProviderProfileValidationError,
+    ProviderProtocolDialect, ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
+    DEEPSEEK_V4_CHAT_PROFILE_VERSION, GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION,
+    GENERIC_OPENAI_CHAT_PROFILE_VERSION, PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+};
 
 /// Rebuilds the model-only projection for a result restored from an approval checkpoint.
 ///
@@ -153,10 +160,10 @@ pub fn validate_frozen_agent_command_args(
 
 pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
-    AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAttachmentLibraryContext,
-    AgentAttachmentReference, AgentChatInput, AgentChatMessage, AgentChatOutput,
-    AgentCommandArtifactChange, AgentCommandArtifactChangeKind, AgentCommandArtifactKind,
-    AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
+    AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAssistantTurnCheckpointIdentity,
+    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentChatMessage,
+    AgentChatOutput, AgentCommandArtifactChange, AgentCommandArtifactChangeKind,
+    AgentCommandArtifactKind, AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
     AgentCommandArtifactObservationCoverage, AgentCommandArtifactObservationKind,
     AgentCommandArtifactObservationPhase, AgentCommandArtifactObservationRequest,
     AgentCommandArtifactObservationStatus, AgentCommandArtifactObservationWarning,
@@ -187,20 +194,20 @@ pub use protocol::{
     AgentMcpToolProvenance, AgentMcpToolRisk, AgentOfficeOperationRequest, AgentPatchOperation,
     AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
-    AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission, AgentResult,
-    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRunToolSetCheckpoint,
-    AgentSearchConfig, AgentSearchMode, AgentSkillActivation, AgentSkillDependencyCheck,
-    AgentSkillDependencyKind, AgentSkillDependencyStatus, AgentSkillInstallationPreview,
-    AgentSkillInstallationRequest, AgentSkillInstallationResourceSummary,
-    AgentSkillInstallationWarning, AgentSkillMaterializationRequest,
-    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
-    AgentSkillScriptInterpreter, AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus,
-    AgentSkillScriptRequest, AgentSkillScriptRequirements, AgentSkillScriptResult,
-    AgentStateSnapshot, AgentSteerInput, AgentSteerRunInput, AgentSteerRunOutput,
-    AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolApprovalMode, AgentToolCall,
-    AgentToolContinuation, AgentToolDefinition, AgentToolIdentity, AgentToolResult,
-    AgentToolSafety, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
-    AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentProposedAction, AgentProviderToolCallIdentity, AgentQueuedToolCallCheckpoint,
+    AgentReadPermission, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
+    AgentRunToolSetCheckpoint, AgentSearchConfig, AgentSearchMode, AgentSkillActivation,
+    AgentSkillDependencyCheck, AgentSkillDependencyKind, AgentSkillDependencyStatus,
+    AgentSkillInstallationPreview, AgentSkillInstallationRequest,
+    AgentSkillInstallationResourceSummary, AgentSkillInstallationWarning,
+    AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
+    AgentSkillMaterializationResultStatus, AgentSkillScriptInterpreter,
+    AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
+    AgentSkillScriptRequirements, AgentSkillScriptResult, AgentStateSnapshot, AgentSteerInput,
+    AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus,
+    AgentToolApprovalMode, AgentToolCall, AgentToolContinuation, AgentToolDefinition,
+    AgentToolIdentity, AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput,
+    AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission, ModelCapabilities,
     AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,

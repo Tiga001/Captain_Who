@@ -195,14 +195,43 @@ fn auto_mcp_action(
     action
 }
 
-fn auto_mcp_agent_input() -> AgentChatInput {
-    serde_json::from_value(json!({
+fn auto_mcp_agent_input(storage: &StorageService) -> AgentChatInput {
+    let mut input = serde_json::from_value(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
         "messages": []
     }))
-    .unwrap()
+    .unwrap();
+    freeze_test_pending_provider_configuration(storage, &mut input);
+    input
+}
+
+fn freeze_generic_provider_protocol(
+    input: &mut AgentChatInput,
+    provider_configuration_revision: String,
+) {
+    let dialect = input
+        .api_style
+        .map(mycopilot_core::ProviderProtocolDialect::from)
+        .unwrap_or_else(|| {
+            mycopilot_core::ProviderProtocolDialect::detect_from_api_url(&input.api_url)
+        });
+    let config = mycopilot_core::ProviderProfileConfig::generic_for_dialect(dialect);
+    let key = mycopilot_core::ProviderProtocolKey::new(
+        dialect,
+        &config,
+        input.model.clone(),
+        Some(provider_configuration_revision.clone()),
+    )
+    .unwrap();
+    input.provider_configuration_revision = Some(provider_configuration_revision);
+    input.provider_connection_revision =
+        Some(format!("provider-connection-v1:{}", uuid::Uuid::new_v4()));
+    input.search_connection_revision =
+        Some(format!("search-connection-v1:{}", uuid::Uuid::new_v4()));
+    input.provider_profile_config = Some(config);
+    input.provider_protocol_key = Some(key);
 }
 
 #[tokio::test]
@@ -235,7 +264,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
     };
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let context = AutoApprovedActionContext::new(
-        auto_mcp_agent_input(),
+        auto_mcp_agent_input(&storage),
         run_id.to_string(),
         Some("auto-mcp-conversation".to_string()),
         Some("auto-mcp-assistant".to_string()),
@@ -316,7 +345,7 @@ async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_f
         unreachable!();
     };
     let context = AutoApprovedActionContext::new(
-        auto_mcp_agent_input(),
+        auto_mcp_agent_input(&storage),
         run_id.to_string(),
         None,
         None,
@@ -391,7 +420,13 @@ fn startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unk
         let invocation_id = uuid::Uuid::new_v4().to_string();
         let action = auto_mcp_action(&run_id, &action_id, &invocation_id, now);
         let mut record = service
-            .prepare_auto_mcp_action_journal(&run_id, None, None, action, auto_mcp_agent_input())
+            .prepare_auto_mcp_action_journal(
+                &run_id,
+                None,
+                None,
+                action,
+                auto_mcp_agent_input(&storage),
+            )
             .unwrap();
         if should_claim {
             service.claim_auto_mcp_dispatch(&mut record).unwrap();
@@ -459,7 +494,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         "",
     );
     let service = AgentService::new(Arc::clone(&storage));
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
@@ -498,7 +533,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         },
     };
 
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     assert!(service
         .store_pending_action(
             "managed-runtime-profile-run",
@@ -545,13 +580,14 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
         "",
     );
     let service = AgentService::new(Arc::clone(&storage));
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     let action = AgentProposedAction::Command {
         command: AgentCommandRequest {
             id: "managed-runtime-pending".to_string(),
@@ -626,7 +662,7 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new(Arc::clone(&storage));
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
@@ -642,7 +678,7 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
             reason: None,
         },
     };
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     assert!(service
         .store_pending_action(
             "run-original",
@@ -847,7 +883,14 @@ fn test_mcp_call_id(seed: &str) -> String {
     format!("tc1_{}", URL_SAFE_NO_PAD.encode(Sha256::digest(seed)))
 }
 
-fn test_mcp_resume_checkpoint(run_id: &str, action_id: &str) -> AgentRunCheckpoint {
+fn test_mcp_resume_checkpoint(
+    storage: &StorageService,
+    run_id: &str,
+    action_id: &str,
+) -> AgentRunCheckpoint {
+    let pending_tool_call_id = test_mcp_call_id(action_id);
+    let (_, provider_profile_config, provider_protocol_key) =
+        test_frozen_provider_protocol(storage, "test-model", None);
     serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         "runId": run_id,
@@ -859,9 +902,14 @@ fn test_mcp_resume_checkpoint(run_id: &str, action_id: &str) -> AgentRunCheckpoi
         "toolSet": crate::test_tool_set_checkpoint(),
         "runContext": null,
         "modelCapabilities": { "imageInput": false },
+        "providerProfileConfig": provider_profile_config,
+        "providerProtocolKey": provider_protocol_key,
+        "assistantTurnIdentity": crate::test_assistant_turn_identity(&[
+            pending_tool_call_id.as_str()
+        ]),
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
-        "pendingToolCallId": test_mcp_call_id(action_id),
+        "pendingToolCallId": pending_tool_call_id,
         "conversationTraceItems": [],
         "nextConversationTraceSequence": 0,
         "conversationTraceTruncated": false
@@ -912,7 +960,8 @@ fn assert_recovered_approved_cancellation() {
         "messages": []
     }))
     .unwrap();
-    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(run_id, &action_id));
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
+    freeze_test_pending_provider_configuration(&storage, &mut input);
     assert!(service
         .store_pending_action(
             run_id,
@@ -1031,7 +1080,8 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
         "messages": []
     }))
     .unwrap();
-    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(run_id, &action_id));
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
+    freeze_test_pending_provider_configuration(&storage, &mut input);
     assert!(initial
         .store_pending_action(
             run_id,
@@ -1142,6 +1192,16 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
 
 #[test]
 fn mcp_pending_and_checkpoint_json_freeze_only_the_safe_payload_capability() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
     let run_id = "mcp-safe-persistence-marker";
     let action_id = uuid::Uuid::new_v4().to_string();
     let action = test_mcp_pending_action(
@@ -1150,7 +1210,7 @@ fn mcp_pending_and_checkpoint_json_freeze_only_the_safe_payload_capability() {
         &uuid::Uuid::new_v4().to_string(),
         mycopilot_core::storage::now_ms(),
     );
-    let checkpoint = test_mcp_resume_checkpoint(run_id, &action_id);
+    let checkpoint = test_mcp_resume_checkpoint(&storage, run_id, &action_id);
     let persisted = serde_json::to_string(&json!({
         "pendingAction": action,
         "checkpoint": checkpoint,
@@ -1213,7 +1273,12 @@ fn store_test_mcp_action_for_source(
         "messages": []
     }))
     .unwrap();
-    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(run_id, &action_id));
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(
+        &service.storage,
+        run_id,
+        &action_id,
+    ));
+    freeze_test_pending_provider_configuration(&service.storage, &mut input);
     assert!(service
         .store_pending_action(
             run_id,
@@ -1325,13 +1390,14 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         "",
     );
     let service = AgentService::new(Arc::clone(&storage));
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     let now = mycopilot_core::storage::now_ms();
     let live_run_id = "mcp-envelope-live-run";
     let expired_run_id = "mcp-envelope-expired-run";
@@ -1341,10 +1407,14 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
     let expired_invocation_id = uuid::Uuid::new_v4().to_string();
     let orphan_invocation_id = uuid::Uuid::new_v4().to_string();
     let mut live_agent_input = agent_input.clone();
-    live_agent_input.resume_checkpoint =
-        Some(test_mcp_resume_checkpoint(live_run_id, &live_action_id));
+    live_agent_input.resume_checkpoint = Some(test_mcp_resume_checkpoint(
+        &storage,
+        live_run_id,
+        &live_action_id,
+    ));
     let mut expired_agent_input = agent_input;
     expired_agent_input.resume_checkpoint = Some(test_mcp_resume_checkpoint(
+        &storage,
         expired_run_id,
         &expired_action_id,
     ));
@@ -1638,7 +1708,8 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
             "messages": []
         }))
         .unwrap();
-        input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&run_id, &action_id));
+        input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, &run_id, &action_id));
+        freeze_test_pending_provider_configuration(&storage, &mut input);
         assert!(service
             .store_pending_action(
                 &run_id,
@@ -1809,7 +1880,8 @@ fn expired_mcp_approval_is_atomically_failed_before_concurrent_approval_can_disp
         "messages": []
     }))
     .unwrap();
-    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(run_id, &action_id));
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
+    freeze_test_pending_provider_configuration(&storage, &mut input);
     assert!(service
         .store_pending_action(
             run_id,
@@ -1969,13 +2041,14 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
     let non_mcp_run_id = "server-removal-non-mcp-run";
     let non_mcp_action_id = "server-removal-non-mcp-action";
     let non_mcp_storage_id = pending_action_storage_id(non_mcp_run_id, non_mcp_action_id);
-    let non_mcp_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut non_mcp_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut non_mcp_input);
     assert!(service
         .store_pending_action(
             non_mcp_run_id,
@@ -2295,13 +2368,14 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_retired_on_reload() {
         "",
     );
     let service = AgentService::new(Arc::clone(&storage));
-    let base_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut base_input);
     let now = mycopilot_core::storage::now_ms();
 
     let rejected_run_id = "mcp-identity-rejected-run";
@@ -2309,6 +2383,7 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_retired_on_reload() {
     let rejected_invocation_id = uuid::Uuid::new_v4().to_string();
     let mut rejected_input = base_input.clone();
     rejected_input.resume_checkpoint = Some(test_mcp_resume_checkpoint(
+        &storage,
         rejected_run_id,
         &uuid::Uuid::new_v4().to_string(),
     ));
@@ -2337,6 +2412,7 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_retired_on_reload() {
     let persisted_invocation_id = uuid::Uuid::new_v4().to_string();
     let mut persisted_input = base_input;
     persisted_input.resume_checkpoint = Some(test_mcp_resume_checkpoint(
+        &storage,
         persisted_run_id,
         &persisted_action_id,
     ));
@@ -2387,6 +2463,16 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_retired_on_reload() {
 
 #[test]
 fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
     let run_id = "mcp-binding-run";
     let action_id = uuid::Uuid::new_v4().to_string();
     let invocation_id = uuid::Uuid::new_v4().to_string();
@@ -2403,7 +2489,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
         "messages": []
     }))
     .unwrap();
-    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(run_id, &action_id));
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
     let model_tool_name = match &action {
         AgentProposedAction::McpToolCall { approval } => {
             approval.identity.provenance.model_tool_name.clone()
@@ -2519,7 +2605,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         SEARCH_CANARY,
     );
     let service = AgentService::new(Arc::clone(&storage));
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": format!("https://example.test/v1?authorization={URL_CANARY}"),
         "apiToken": API_TOKEN_CANARY,
         "model": "test-model",
@@ -2530,6 +2616,9 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    let frozen_profile = agent_input.provider_profile_config.clone().unwrap();
+    let frozen_key = agent_input.provider_protocol_key.clone().unwrap();
     let action = AgentProposedAction::ToolCall {
         call: AgentToolCall {
             id: "secret-free-resume-call".to_string(),
@@ -2553,7 +2642,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     let row = storage.list_pending_agent_actions().unwrap().remove(0);
     assert!(row
         .agent_input_json
-        .contains("\"resumeInputSchemaVersion\":3"));
+        .contains("\"resumeInputSchemaVersion\":5"));
     for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
         assert!(!row.agent_input_json.contains(forbidden_key));
     }
@@ -2561,12 +2650,38 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         assert!(!row.agent_input_json.contains(canary));
     }
 
+    // A broad settings save during the approval pause changes the global revision but not this
+    // model's effective connection or search connection. Restart must retain the run's original
+    // profile/key instead of recomputing them from the edited model.
+    let mut edited = storage.load_model_settings().unwrap().unwrap();
+    edited.models[0].context_window_tokens = Some(256_000);
+    edited.models[0].provider_profile_config =
+        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+    edited.models.push(ModelConfigRecord {
+        id: "unrelated-restart-model".to_string(),
+        display_name: "Unrelated Restart Model".to_string(),
+        api_url_override: Some("https://unrelated-restart.example/v1".to_string()),
+        api_token_override: Some("unrelated-restart-token".to_string()),
+        supports_image: false,
+        context_window_tokens: Some(64_000),
+        provider_profile_config: None,
+        input_price: "0".to_string(),
+        output_price: "0".to_string(),
+        enabled: true,
+    });
+    storage.save_model_settings(edited).unwrap();
+
     let reloaded = AgentService::new(storage);
     let pending = reloaded
         .pending_actions
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let restored = &pending.values().next().unwrap().agent_input;
+    assert_eq!(
+        restored.provider_profile_config.as_ref(),
+        Some(&frozen_profile)
+    );
+    assert_eq!(restored.provider_protocol_key.as_ref(), Some(&frozen_key));
     assert_eq!(
         persisted_endpoint_digest(&restored.api_url),
         persisted_endpoint_digest(&format!(
@@ -2589,11 +2704,8 @@ fn frozen_provider_resume_input(
     search_mode: &str,
     search_key: Option<&str>,
 ) -> DecodedPersistedAgentResumeInput {
-    let revision = storage
-        .load_model_settings_snapshot()
-        .unwrap()
-        .unwrap()
-        .configuration_revision;
+    let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
+    let revision = snapshot.configuration_revision.clone();
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": api_url,
         "apiToken": api_token,
@@ -2607,9 +2719,21 @@ fn frozen_provider_resume_input(
         "messages": []
     }))
     .unwrap();
-    input.provider_configuration_revision = Some(revision);
-    PersistedAgentResumeInput::decode(&PersistedAgentResumeInput::from_agent_input(&input).encode())
-        .unwrap()
+    freeze_generic_provider_protocol(&mut input, revision);
+    input.provider_connection_revision = Some(
+        snapshot
+            .provider_connection_revisions
+            .get("test-model")
+            .unwrap()
+            .clone(),
+    );
+    input.search_connection_revision = Some(snapshot.search_connection_revision);
+    PersistedAgentResumeInput::decode(
+        &PersistedAgentResumeInput::from_agent_input(&input)
+            .unwrap()
+            .encode(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -2638,7 +2762,7 @@ fn pending_resume_rejects_provider_token_replacement_at_the_same_endpoint() {
     );
 
     let error = restore_agent_input_secrets(&storage, frozen).unwrap_err();
-    assert!(error.contains("provider configuration no longer matches"));
+    assert!(error.contains("provider connection no longer matches"));
 }
 
 #[test]
@@ -2663,7 +2787,7 @@ fn pending_resume_rejects_tokenless_to_token_presence_drift() {
 }
 
 #[test]
-fn pending_resume_rejects_model_configuration_resave() {
+fn pending_resume_preserves_frozen_profile_across_unrelated_model_settings_edits() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let endpoint = "https://provider-model.example/v1";
@@ -2677,12 +2801,64 @@ fn pending_resume_rejects_model_configuration_resave() {
     );
     let frozen =
         frozen_provider_resume_input(&storage, endpoint, "fixed-model-token", "disabled", None);
+    let frozen_profile = frozen.agent_input.provider_profile_config.clone().unwrap();
+    let frozen_key = frozen.agent_input.provider_protocol_key.clone().unwrap();
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     settings.models[0].context_window_tokens = Some(256_000);
+    settings.models[0].input_price = "1.5".to_string();
+    settings.models[0].provider_profile_config =
+        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+    settings.models.push(ModelConfigRecord {
+        id: "unrelated-model".to_string(),
+        display_name: "Unrelated Model".to_string(),
+        api_url_override: Some("https://unrelated-provider.example/v1".to_string()),
+        api_token_override: Some("unrelated-token".to_string()),
+        supports_image: false,
+        context_window_tokens: Some(64_000),
+        provider_profile_config: None,
+        input_price: "0".to_string(),
+        output_price: "0".to_string(),
+        enabled: true,
+    });
     storage.save_model_settings(settings).unwrap();
 
+    let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
+    assert_eq!(
+        restored.provider_profile_config.as_ref(),
+        Some(&frozen_profile)
+    );
+    assert_eq!(restored.provider_protocol_key.as_ref(), Some(&frozen_key));
+    assert_eq!(restored.context_window_tokens, Some(128_000));
+    assert_eq!(restored.api_token, "fixed-model-token");
+}
+
+#[test]
+fn pending_resume_rejects_provider_endpoint_replacement() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let endpoint = "https://provider-endpoint.example/v1";
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        endpoint,
+        "fixed-model-token",
+        "disabled",
+        "",
+    );
+    let frozen =
+        frozen_provider_resume_input(&storage, endpoint, "fixed-model-token", "disabled", None);
+
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://replacement-provider.example/v1",
+        "fixed-model-token",
+        "disabled",
+        "",
+    );
+
     let error = restore_agent_input_secrets(&storage, frozen).unwrap_err();
-    assert!(error.contains("provider configuration no longer matches"));
+    assert!(error.contains("provider connection no longer matches"));
 }
 
 #[test]
@@ -2715,7 +2891,7 @@ fn pending_resume_rejects_search_credential_replacement() {
     );
 
     let error = restore_agent_input_secrets(&storage, frozen).unwrap_err();
-    assert!(error.contains("provider configuration no longer matches"));
+    assert!(error.contains("search connection no longer matches"));
 }
 
 #[test]
@@ -2761,8 +2937,10 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
         "messages": []
     }))
     .unwrap();
-    agent_input.provider_configuration_revision =
-        Some(format!("model-settings-v1:{}", uuid::Uuid::new_v4()));
+    freeze_generic_provider_protocol(
+        &mut agent_input,
+        format!("model-settings-v1:{}", uuid::Uuid::new_v4()),
+    );
     storage
         .store_pending_agent_action(AgentPendingActionRecord {
             action_id: pending_action_storage_id(
@@ -2780,7 +2958,9 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
             action_json: serialize_json(&action),
             // Keep this row on the supported Host projection so the test exercises the generic
             // interrupted-action reconciliation failure rather than legacy-format retirement.
-            agent_input_json: PersistedAgentResumeInput::from_agent_input(&agent_input).encode(),
+            agent_input_json: PersistedAgentResumeInput::from_agent_input(&agent_input)
+                .unwrap()
+                .encode(),
             created_at: 1,
             updated_at: 1,
         })
@@ -2884,8 +3064,22 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         "messages": []
     }))
     .unwrap();
-    agent_input.provider_configuration_revision =
-        Some(format!("model-settings-v1:{}", uuid::Uuid::new_v4()));
+    let provider_configuration_revision = format!("model-settings-v1:{}", uuid::Uuid::new_v4());
+    let provider_profile_config = crate::test_provider_profile_config();
+    let provider_protocol_key = mycopilot_core::ProviderProtocolKey::new(
+        mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        &provider_profile_config,
+        "test-model",
+        Some(provider_configuration_revision.clone()),
+    )
+    .unwrap();
+    agent_input.provider_configuration_revision = Some(provider_configuration_revision);
+    agent_input.provider_connection_revision =
+        Some(format!("provider-connection-v1:{}", uuid::Uuid::new_v4()));
+    agent_input.search_connection_revision =
+        Some(format!("search-connection-v1:{}", uuid::Uuid::new_v4()));
+    agent_input.provider_profile_config = Some(provider_profile_config.clone());
+    agent_input.provider_protocol_key = Some(provider_protocol_key.clone());
     agent_input.skill_activation = Some(AgentSkillActivation {
         activation_revision: "activation-revision".to_string(),
         skills: vec![AgentActivatedSkill {
@@ -2992,6 +3186,9 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config,
+        provider_protocol_key,
+        assistant_turn_identity: crate::test_assistant_turn_identity(&["action-skill-redaction"]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "action-skill-redaction".to_string(),
         conversation_model_context_items: Vec::new(),
@@ -3030,7 +3227,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         PendingActionStatus::Executing,
     ] {
         record.snapshot.status = status;
-        let persisted = pending_storage_record(&record, 2);
+        let persisted = pending_storage_record(&record, 2).unwrap();
         assert!(persisted.agent_input_json.contains(MARKER));
         assert!(persisted.agent_input_json.contains(CATALOG_MARKER));
     }
@@ -3042,7 +3239,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         PendingActionStatus::Failed,
     ] {
         record.snapshot.status = status;
-        let persisted = pending_storage_record(&record, 3);
+        let persisted = pending_storage_record(&record, 3).unwrap();
         assert!(!persisted.agent_input_json.contains(MARKER));
         assert!(!persisted.agent_input_json.contains(CATALOG_MARKER));
         assert!(!persisted.agent_input_json.contains("secret"));
@@ -3084,9 +3281,11 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
 
     record.snapshot.status = PendingActionStatus::Pending;
     assert!(pending_storage_record(&record, 4)
+        .unwrap()
         .agent_input_json
         .contains(MARKER));
     assert!(pending_storage_record(&record, 4)
+        .unwrap()
         .agent_input_json
         .contains(CATALOG_MARKER));
 }
@@ -3123,7 +3322,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
         approval_status: AgentApprovalStatus::Required,
         reason: None,
     };
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-missing-transition-row",
@@ -3195,6 +3394,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
                 id: call.id.clone(),
                 name: "tampered_tool".to_string(),
                 args: call.args.clone(),
+                provider_identity: None,
             }],
             is_error: false,
             sources: vec!["tool_call".to_string()],
@@ -3211,6 +3411,9 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -3218,7 +3421,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
     });
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-invalid-checkpoint",
@@ -3298,6 +3501,9 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -3315,7 +3521,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
     });
     // These durable owner rows intentionally do not exist, forcing final trace persistence to
     // fail after the action has first transitioned to cancelled.
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-cancel-rollback",
@@ -3422,6 +3628,9 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
         conversation_model_context_items: Vec::new(),
@@ -3437,7 +3646,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
     });
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-cancel-usage-failure",
@@ -3576,6 +3785,9 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
         model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[action_id]),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: action_id.to_string(),
         conversation_model_context_items: Vec::new(),
@@ -3591,7 +3803,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
     });
-    save_test_pending_provider_for_input(&storage, &agent_input);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-file-write-cancel-failure",

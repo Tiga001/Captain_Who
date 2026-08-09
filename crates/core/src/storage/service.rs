@@ -28,10 +28,9 @@ use crate::storage::{
 };
 use crate::{
     AgentApiStyle, AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction,
-    AgentRunCheckpoint, AgentToolCall, AgentToolContinuation, AgentToolResult,
-    AgentTurnDiffIdentity, AgentTurnDiffRecord, AgentTurnFileChange, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction, AgentToolCall,
+    AgentToolResult, AgentTurnDiffIdentity, AgentTurnDiffRecord, AgentTurnFileChange,
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionPrefix, ContextCompactionReceipt, ContextCompactionSummary,
     ContextCompactionSummaryDraft, ContextJournalCursor, ConversationGoal,
     ConversationGoalMutationActor, ConversationGoalRevision, ConversationGoalStatus,

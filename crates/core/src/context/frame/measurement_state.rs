@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContextFrame {
@@ -164,10 +165,10 @@ impl ContextFrame {
         gate: &crate::context::ModelToolResultGate,
     ) -> AgentResult<()> {
         for item in self.iter_items() {
-            if item.message.role == LlmMessageRole::Tool && !gate.admits_message(&item.message) {
+            if item.message.role() == LlmMessageRole::Tool && !gate.admits_message(&item.message) {
                 return Err(AgentError::new(format!(
                     "模型上下文中的工具结果 `{}` 超过统一 10K token 上限，且无法在发送前安全重建。",
-                    item.message.tool_call_id.as_deref().unwrap_or("unknown")
+                    item.message.tool_call_id().unwrap_or("unknown")
                 )));
             }
         }
@@ -402,17 +403,16 @@ impl ContextFrame {
                     index,
                     usage_class: item.metadata.usage_class(),
                     estimated_tokens: estimate.total_tokens(),
-                    role: item.message.role,
+                    role: item.message.role(),
                     sources: item.metadata.sources().to_vec(),
                     group_id: item.metadata.group().map(|group| group.id().to_string()),
                     tool_names: item
                         .message
-                        .tool_calls
-                        .iter()
+                        .tool_calls()
                         .map(|call| call.name.clone())
                         .collect(),
                     image_count: estimate.image_count,
-                    is_error: item.message.is_error,
+                    is_error: item.message.is_error(),
                     origin: item.metadata.origin().cloned(),
                 })
             })
@@ -438,15 +438,36 @@ impl ContextFrame {
         Ok(frame)
     }
 
-    pub(crate) fn validate_pending_tool_call(
+    /// Validates an approval boundary inside one provider assistant Tool Call batch.
+    ///
+    /// A provider turn can declare more than one Tool Call in one assistant message. The
+    /// currently pending call and every not-yet-executed queued call therefore remain unresolved
+    /// together. The checkpoint supplies the exact queued runtime identities; accepting any
+    /// additional or missing unresolved call would detach execution state from model protocol
+    /// state.
+    pub(crate) fn validate_pending_tool_batch(
         &self,
         pending_tool_call_id: &str,
+        queued_tool_call_ids: &[String],
     ) -> AgentResult<LlmToolCall> {
         let unresolved = self.unresolved_tool_calls()?;
-        if unresolved.len() != 1 {
+        let mut expected = BTreeSet::new();
+        if !expected.insert(pending_tool_call_id.to_string()) {
+            return Err(AgentError::new("运行检查点中的待审批工具调用身份重复。"));
+        }
+        for call_id in queued_tool_call_ids {
+            if !expected.insert(call_id.clone()) {
+                return Err(AgentError::new(format!(
+                    "运行检查点中的同批工具调用 id `{call_id}` 重复。",
+                )));
+            }
+        }
+        let actual = unresolved.keys().cloned().collect::<BTreeSet<_>>();
+        if actual != expected {
             return Err(AgentError::new(format!(
-                "运行检查点必须恰好包含一个待审批工具调用，实际为 {} 个。",
-                unresolved.len()
+                "运行检查点中的未结算工具调用与冻结批次不一致：期望 {} 个，实际 {} 个。",
+                expected.len(),
+                actual.len()
             )));
         }
         unresolved
@@ -459,7 +480,87 @@ impl ContextFrame {
             })
     }
 
-    pub(crate) fn append_tool_continuation(
+    /// Validates the full provider/runtime identity mapping against the one complete Assistant
+    /// Turn retained in Context. Settled calls remain in this turn even when only a suffix is
+    /// unresolved at an approval boundary.
+    pub(crate) fn validate_assistant_turn_checkpoint_identity(
+        &self,
+        identity: &AgentAssistantTurnCheckpointIdentity,
+        pending_tool_call_id: &str,
+        queued_tool_call_ids: &[String],
+        require_live_provider_identity: bool,
+    ) -> AgentResult<()> {
+        let pending_mapping_index = identity
+            .tool_call_identities
+            .iter()
+            .position(|mapping| mapping.runtime_call_id == pending_tool_call_id)
+            .ok_or_else(|| {
+                AgentError::new("运行检查点的 Provider Tool Call 映射缺少待审批调用。")
+            })?;
+        let mut expected_runtime_ids = identity.tool_call_identities[..pending_mapping_index]
+            .iter()
+            .map(|mapping| mapping.runtime_call_id.as_str())
+            .collect::<Vec<_>>();
+        expected_runtime_ids.push(pending_tool_call_id);
+        expected_runtime_ids.extend(queued_tool_call_ids.iter().map(String::as_str));
+        let mut matching_turns = self.iter_items().filter_map(|item| {
+            let turn = item.message.assistant_turn()?;
+            let runtime_ids = turn
+                .runtime_tool_bindings()?
+                .iter()
+                .map(|binding| binding.runtime_call.id.as_str())
+                .collect::<Vec<_>>();
+            (runtime_ids == expected_runtime_ids
+                && (!require_live_provider_identity
+                    || (turn.stable_id() == identity.assistant_turn_id
+                        && turn.stable_digest() == identity.assistant_turn_digest)))
+                .then_some(turn)
+        });
+        let turn = matching_turns.next().ok_or_else(|| {
+            AgentError::new("运行检查点的完整 Provider Assistant Turn 不存在于模型上下文。")
+        })?;
+        if matching_turns.next().is_some() {
+            return Err(AgentError::new(
+                "运行检查点的 Provider Assistant Turn 身份在模型上下文中不唯一。",
+            ));
+        }
+        let bindings = turn.runtime_tool_bindings().ok_or_else(|| {
+            AgentError::new("运行检查点的 Assistant Turn 缺少 Provider/Runtime 身份映射。")
+        })?;
+        let actual_runtime_ids = bindings
+            .iter()
+            .map(|binding| binding.runtime_call.id.as_str())
+            .collect::<Vec<_>>();
+        if actual_runtime_ids != expected_runtime_ids {
+            return Err(AgentError::new(
+                "运行检查点的 Context Assistant Turn 未完整保留已结算前缀，或未按原序保留未结算调用。",
+            ));
+        }
+        for binding in bindings {
+            let mapping = identity
+                .tool_call_identities
+                .iter()
+                .find(|mapping| mapping.runtime_call_id == binding.runtime_call.id)
+                .ok_or_else(|| {
+                    AgentError::new(
+                        "运行检查点的 Context Assistant Turn 包含未冻结的 Runtime Tool Call。",
+                    )
+                })?;
+            if u32::try_from(binding.provider_tool_index).ok() != Some(mapping.provider_tool_index)
+                || binding.provider_call_id != mapping.provider_call_id
+            {
+                return Err(AgentError::new(
+                    "运行检查点的 Context Assistant Turn 与 Provider/Runtime 身份映射不一致。",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    // The arguments mirror the immutable approval-boundary record. Keeping them explicit makes
+    // it harder to accidentally substitute live runtime state during recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn append_tool_continuation_in_batch(
         &mut self,
         call: &LlmToolCall,
         observation: String,
@@ -467,8 +568,10 @@ impl ContextFrame {
         is_error: bool,
         is_mcp: bool,
         origin: Option<ContextOrigin>,
+        remaining_tool_call_ids: &[String],
     ) -> AgentResult<()> {
-        let checkpoint_call = self.validate_pending_tool_call(&call.id)?;
+        let checkpoint_call =
+            self.validate_pending_tool_batch(&call.id, remaining_tool_call_ids)?;
         if checkpoint_call.name != call.name {
             return Err(AgentError::new(format!(
                 "审批续跑工具不一致：检查点为 `{}`，续跑结果为 `{}`。",
@@ -480,8 +583,7 @@ impl ContextFrame {
             .rev()
             .find(|item| {
                 item.message
-                    .tool_calls
-                    .iter()
+                    .tool_calls()
                     .any(|tool_call| tool_call.id == call.id)
             })
             .and_then(|item| item.metadata.group().cloned())
@@ -506,7 +608,16 @@ impl ContextFrame {
                 item.with_checkpoint_tool_result(call.id.clone(), checkpoint_observation, is_error);
         }
         self.push(item);
-        self.validate_complete_tool_protocol()
+        let unresolved = self.unresolved_tool_calls()?;
+        let expected = remaining_tool_call_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual = unresolved.keys().cloned().collect::<BTreeSet<_>>();
+        if actual != expected {
+            return Err(AgentError::new("审批续跑后剩余工具调用与冻结批次不一致。"));
+        }
+        Ok(())
     }
 
     pub(crate) fn validate_complete_tool_protocol(&self) -> AgentResult<()> {
@@ -551,10 +662,67 @@ impl ContextFrame {
     pub(crate) fn contains_tool_call_id(&self, tool_call_id: &str) -> bool {
         self.iter_items().any(|item| {
             item.message
-                .tool_calls
-                .iter()
+                .tool_calls()
                 .any(|call| call.id == tool_call_id)
         })
+    }
+
+    /// Removes runtime-visible calls which the approval barrier deliberately deferred while
+    /// retaining the raw provider turn in memory. Durable Context then contains neither their
+    /// arguments nor external Tool names, and the provider-neutral protocol has no orphan call.
+    pub(crate) fn omit_runtime_tool_calls_from_group(
+        &mut self,
+        group: &ContextGroup,
+        omitted_call_ids: &BTreeSet<String>,
+    ) -> AgentResult<()> {
+        if omitted_call_ids.is_empty() {
+            return Ok(());
+        }
+        self.materialize_baseline();
+        let mut matched = false;
+        for item in &mut self.items {
+            if item.metadata.group() != Some(group) {
+                continue;
+            }
+            let Some(turn) = item.message.assistant_turn_mut() else {
+                continue;
+            };
+            let bindings = turn
+                .runtime_tool_bindings()
+                .ok_or_else(|| {
+                    AgentError::new("无法延后 Tool Call：Assistant Turn 缺少 Runtime 身份映射。")
+                })?
+                .iter()
+                .filter(|binding| !omitted_call_ids.contains(&binding.runtime_call.id))
+                .cloned()
+                .collect();
+            turn.set_runtime_tool_bindings(bindings)?;
+            if let Some(checkpoint_message) = item.checkpoint_message.as_mut() {
+                let checkpoint_turn = checkpoint_message.assistant_turn_mut().ok_or_else(|| {
+                    AgentError::new("无法延后 Tool Call：Checkpoint 投影不再是 Assistant Turn。")
+                })?;
+                let checkpoint_bindings = checkpoint_turn
+                    .runtime_tool_bindings()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|binding| !omitted_call_ids.contains(&binding.runtime_call.id))
+                    .cloned()
+                    .collect();
+                checkpoint_turn.set_runtime_tool_bindings(checkpoint_bindings)?;
+            }
+            item.measurement = None;
+            matched = true;
+            break;
+        }
+        if !matched {
+            return Err(AgentError::new(
+                "无法延后 Tool Call：模型上下文缺少对应的完整 Assistant Turn。",
+            ));
+        }
+        self.persistent_revision = persistent_frame_revision(&self.items);
+        self.revision = self.revision.saturating_add(1);
+        self.measurement = None;
+        Ok(())
     }
 
     #[cfg(test)]
@@ -582,7 +750,7 @@ impl ContextFrame {
                 .enumerate()
                 .map(|(index, item)| ContextManifestEntry {
                     index,
-                    role: item.message.role.as_str(),
+                    role: item.message.role().as_str(),
                     sources: item
                         .metadata
                         .sources()
@@ -595,24 +763,23 @@ impl ContextFrame {
                     group_kind: item.metadata.group().map(|group| group.kind().as_str()),
                     origin_kind: item.metadata.origin().map(|origin| origin.kind().as_str()),
                     origin_id: item.metadata.origin().map(ContextOrigin::id),
-                    text_character_count: item.message.content.chars().count(),
-                    image_count: item.message.images.len(),
+                    text_character_count: item.message.content().chars().count(),
+                    image_count: item.message.images().len(),
                     image_base64_bytes: item
                         .message
-                        .images
+                        .images()
                         .iter()
                         .map(|image| image.data_base64.len())
                         .sum(),
-                    tool_call_count: item.message.tool_calls.len(),
+                    tool_call_count: item.message.tool_calls().len(),
                     tool_argument_character_count: item
                         .message
-                        .tool_calls
-                        .iter()
+                        .tool_calls()
                         .filter_map(|call| serde_json::to_string(&call.args).ok())
                         .map(|args| args.chars().count())
                         .sum(),
-                    tool_call_id: item.message.tool_call_id.as_deref(),
-                    is_error: item.message.is_error,
+                    tool_call_id: item.message.tool_call_id(),
+                    is_error: item.message.is_error(),
                 })
                 .collect(),
         }
@@ -620,10 +787,12 @@ impl ContextFrame {
 
     fn unresolved_tool_calls(&self) -> AgentResult<BTreeMap<String, (LlmToolCall, ContextGroup)>> {
         let mut unresolved = BTreeMap::new();
+        let mut unresolved_order = VecDeque::new();
         let mut seen_call_ids = BTreeSet::new();
+        let mut current_exchange_has_result = false;
         for item in self.iter_items() {
-            match item.message.role {
-                LlmMessageRole::Assistant if !item.message.tool_calls.is_empty() => {
+            match item.message.role() {
+                LlmMessageRole::Assistant if !item.message.tool_calls().is_empty() => {
                     if !unresolved.is_empty() {
                         return Err(AgentError::new(
                             "工具调用协议无效：上一组工具调用尚未获得完整结果。",
@@ -632,7 +801,8 @@ impl ContextFrame {
                     let group = item.metadata.group().cloned().ok_or_else(|| {
                         AgentError::new("工具调用协议无效：assistant 工具调用缺少交换分组。")
                     })?;
-                    for call in &item.message.tool_calls {
+                    current_exchange_has_result = false;
+                    for call in item.message.tool_calls() {
                         if call.id.trim().is_empty() || call.name.trim().is_empty() {
                             return Err(AgentError::new(
                                 "工具调用协议无效：工具调用 id 和名称不能为空。",
@@ -653,12 +823,23 @@ impl ContextFrame {
                                 call.id
                             )));
                         }
+                        unresolved_order.push_back(call.id.clone());
                     }
                 }
                 LlmMessageRole::Tool => {
-                    let call_id = item.message.tool_call_id.as_deref().ok_or_else(|| {
+                    let call_id = item.message.tool_call_id().ok_or_else(|| {
                         AgentError::new("工具调用协议无效：工具结果缺少 tool_call_id。")
                     })?;
+                    let Some(expected_call_id) = unresolved_order.pop_front() else {
+                        return Err(AgentError::new(format!(
+                            "工具调用协议无效：工具结果 `{call_id}` 没有对应的未结算调用。"
+                        )));
+                    };
+                    if expected_call_id != call_id {
+                        return Err(AgentError::new(format!(
+                            "工具调用协议无效：工具结果 `{call_id}` 未按 Assistant Turn 的调用顺序结算。"
+                        )));
+                    }
                     let Some((_, expected_group)) = unresolved.remove(call_id) else {
                         return Err(AgentError::new(format!(
                             "工具调用协议无效：工具结果 `{call_id}` 没有对应的未结算调用。"
@@ -669,8 +850,9 @@ impl ContextFrame {
                             "工具调用协议无效：工具结果 `{call_id}` 的交换分组不匹配。"
                         )));
                     }
+                    current_exchange_has_result = true;
                 }
-                _ if !unresolved.is_empty() => {
+                _ if !unresolved.is_empty() && !current_exchange_has_result => {
                     return Err(AgentError::new(
                         "工具调用协议无效：工具调用与结果之间出现了其他消息。",
                     ));
