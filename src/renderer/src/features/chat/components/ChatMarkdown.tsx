@@ -210,6 +210,65 @@ function findNextUnescaped(value: string, search: string, fromIndex: number) {
   return matchIndex
 }
 
+function hasOnlyWhitespaceBeforeOnLine(value: string, index: number) {
+  let lineStart = index
+  while (lineStart > 0 && value[lineStart - 1] !== '\n' && value[lineStart - 1] !== '\r') {
+    lineStart -= 1
+  }
+  return value.slice(lineStart, index).trim() === ''
+}
+
+function hasOnlyWhitespaceAfterOnLine(value: string, index: number) {
+  let lineEnd = index
+  while (lineEnd < value.length && value[lineEnd] !== '\n' && value[lineEnd] !== '\r') {
+    lineEnd += 1
+  }
+  return value.slice(index, lineEnd).trim() === ''
+}
+
+function normalizeMultilineDollarMathBlocks(value: string) {
+  let result = ''
+  let index = 0
+
+  while (index < value.length) {
+    const openingIndex = findNextUnescaped(value, '$$', index)
+    if (openingIndex === -1) {
+      result += value.slice(index)
+      break
+    }
+
+    const closingIndex = findNextUnescaped(value, '$$', openingIndex + 2)
+    if (closingIndex === -1) {
+      result += value.slice(index)
+      break
+    }
+
+    const expression = value.slice(openingIndex + 2, closingIndex)
+    const lineBreak = expression.match(/\r\n|\n|\r/)?.[0]
+    const hasBlockBoundaries =
+      hasOnlyWhitespaceBeforeOnLine(value, openingIndex) &&
+      hasOnlyWhitespaceAfterOnLine(value, closingIndex + 2)
+
+    if (!lineBreak || !hasBlockBoundaries) {
+      result += value.slice(index, closingIndex + 2)
+      index = closingIndex + 2
+      continue
+    }
+
+    const normalizedExpression = expression
+      .replace(/^[\t ]*(?:\r\n|\n|\r)/, '')
+      .replace(/(?:\r\n|\n|\r)[\t ]*$/, '')
+
+    result += value.slice(index, openingIndex)
+    // remark-math treats text beside a multiline $$ delimiter as metadata. Put both delimiters on
+    // their own lines so later Markdown prose cannot be consumed by the KaTeX expression.
+    result += `$$${lineBreak}${normalizedExpression}${lineBreak}$$`
+    index = closingIndex + 2
+  }
+
+  return result
+}
+
 function transformDollarMathAware(value: string, transform: (segment: string) => string) {
   let result = ''
   let index = 0
@@ -306,7 +365,8 @@ function normalizeMarkdownMath(content: string) {
   return transformFencedCodeAware(content, (segment) => {
     const normalizedBoxes = unwrapLatexBoxCommands(normalizeBracketMathBlocks(segment))
     const normalizedDelimitedMath = normalizeLatexDelimiters(normalizedBoxes)
-    return transformDollarMathAware(normalizedDelimitedMath, normalizeBareParentheticalMath)
+    const normalizedDollarBlocks = normalizeMultilineDollarMathBlocks(normalizedDelimitedMath)
+    return transformDollarMathAware(normalizedDollarBlocks, normalizeBareParentheticalMath)
   })
 }
 

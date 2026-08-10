@@ -1,4 +1,4 @@
-// Browser coverage for chat Markdown URL boundaries and explicit-link compatibility.
+// Browser coverage for chat Markdown URL boundaries, math normalization, and link compatibility.
 
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -53,5 +53,42 @@ describe('ChatMarkdown URL boundaries', () => {
 
     expect(link?.textContent).toBe(content)
     expect(screen.container.querySelectorAll('a')).toHaveLength(1)
+  })
+})
+
+describe('ChatMarkdown math normalization', () => {
+  it('renders multiline dollar math whose delimiters share the first and last formula lines', async () => {
+    const content = String.raw`$$f(x)=\sum_{n=0}^{\infty}\frac{f^{(n)}(a)}{n!}(x-a)^n
+=f(a)+f'(a)(x-a)+\cdots$$
+
+**截断与余项**：保留有限项后，正文仍应正常显示。
+
+麦克劳林展开和浙大搜索摘要也不能被吞进公式。`
+    const screen = await render(<ChatMarkdown content={content} />)
+
+    expect(screen.container.querySelector('.katex-error')).toBeNull()
+    expect(screen.container.querySelector('.katex-display')).not.toBeNull()
+    await expect.element(screen.getByText('截断与余项')).toBeVisible()
+    expect(screen.container.textContent).toContain('麦克劳林展开和浙大搜索摘要也不能被吞进公式。')
+  })
+
+  it('preserves standard math blocks and dollar markers inside fenced code', async () => {
+    const content = [
+      '$$',
+      'x^2+y^2=z^2',
+      '$$',
+      '',
+      '```text',
+      '$$not math',
+      'still code$$',
+      '```'
+    ].join('\n')
+    const screen = await render(<ChatMarkdown content={content} />)
+
+    expect(screen.container.querySelector('.katex-error')).toBeNull()
+    expect(screen.container.querySelectorAll('.katex-display')).toHaveLength(1)
+    expect(screen.container.querySelector('pre code')?.textContent).toBe(
+      '$$not math\nstill code$$\n'
+    )
   })
 })
