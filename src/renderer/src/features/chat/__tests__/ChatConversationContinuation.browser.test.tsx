@@ -89,3 +89,54 @@ it('renders the fork divider immediately after the inherited boundary and opens 
     boundaryMessageId: 'forked-boundary'
   })
 })
+
+it('emits distinct fork points before and after a completed provider transition', async () => {
+  const onContinueInNewTask = vi.fn()
+  const screen = await render(
+    <ChatMessageList
+      conversation={conversation()}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      modelTransitionOperations={[
+        {
+          schemaVersion: 1,
+          status: 'completed',
+          conversationId: 'forked-task',
+          targetModelId: 'model-2',
+          operationId: 'transition-1',
+          coveredThroughMessageId: 'forked-boundary',
+          startedAt: 10,
+          completedAt: 20,
+          conversationUpdatedAt: 21,
+          modelId: 'model-2',
+          summaryId: 'summary-1'
+        }
+      ]}
+      onContinueInNewTask={onContinueInNewTask}
+      showTokenUsageDetails={false}
+    />
+  )
+
+  const assistant = document.querySelector<HTMLElement>('[data-message-id="forked-boundary"]')
+  const assistantFork = assistant?.querySelector<HTMLButtonElement>(
+    'button[aria-label="chat.continueInNewTask"]'
+  )
+  expect(assistantFork).not.toBeNull()
+  assistantFork?.click()
+  expect(onContinueInNewTask).toHaveBeenNthCalledWith(1, {
+    kind: 'assistant_reply',
+    assistantMessageId: 'forked-boundary'
+  })
+
+  const divider = screen.getByTestId('model-transition-divider').element()
+  const boundaryFork = divider.querySelector<HTMLButtonElement>(
+    'button[aria-label="chat.continueInNewTask"]'
+  )
+  expect(boundaryFork).not.toBeNull()
+  boundaryFork?.click()
+  expect(onContinueInNewTask).toHaveBeenNthCalledWith(2, {
+    kind: 'provider_transition_boundary',
+    operationId: 'transition-1'
+  })
+})

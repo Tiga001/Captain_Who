@@ -1,4 +1,5 @@
-import { FoldVertical, RotateCcw } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { FoldVertical, LoaderCircle, RotateCcw, Split } from 'lucide-react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -40,13 +41,17 @@ export function ModelTransitionConfirmationDialog({
 }
 
 export function ConversationModelTransitionDivider({
+  onContinueInNewTask,
   onRetry,
   operation
 }: {
+  onContinueInNewTask?: () => void | Promise<void>
   onRetry?: () => void | Promise<void>
   operation: AgentProviderTransitionOperation
 }) {
   const { t } = useFrontendConfig()
+  const [isContinuing, setIsContinuing] = useState(false)
+  const isContinuingRef = useRef(false)
   const content =
     operation.status === 'running'
       ? t('chat.modelTransition.running')
@@ -68,7 +73,7 @@ export function ConversationModelTransitionDivider({
         })
       : null
 
-  const button = (
+  const statusButton = (
     <button
       aria-label={content}
       disabled={operation.status !== 'failed' || !onRetry}
@@ -83,6 +88,17 @@ export function ConversationModelTransitionDivider({
       </span>
     </button>
   )
+  const status = tooltip ? (
+    <Tooltip
+      anchorClassName="conversation-model-transition__tooltip-anchor"
+      content={tooltip}
+      describeTrigger
+    >
+      {statusButton}
+    </Tooltip>
+  ) : (
+    statusButton
+  )
 
   return (
     <div
@@ -92,17 +108,35 @@ export function ConversationModelTransitionDivider({
       role="status"
     >
       <span aria-hidden="true" />
-      {tooltip ? (
-        <Tooltip
-          anchorClassName="conversation-model-transition__tooltip-anchor"
-          content={tooltip}
-          describeTrigger
-        >
-          {button}
-        </Tooltip>
-      ) : (
-        button
-      )}
+      <div className="conversation-model-transition__content">
+        {status}
+        {operation.status === 'completed' && operation.summaryId && onContinueInNewTask && (
+          <Tooltip content={t('chat.continueInNewTask')}>
+            <button
+              aria-label={t('chat.continueInNewTask')}
+              className="conversation-model-transition__fork"
+              disabled={isContinuing}
+              onClick={() => {
+                if (isContinuingRef.current) return
+                isContinuingRef.current = true
+                setIsContinuing(true)
+                void Promise.resolve(onContinueInNewTask()).finally(() => {
+                  isContinuingRef.current = false
+                  setIsContinuing(false)
+                })
+              }}
+              title={t('chat.continueInNewTask')}
+              type="button"
+            >
+              {isContinuing ? (
+                <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
+              ) : (
+                <Split aria-hidden="true" />
+              )}
+            </button>
+          </Tooltip>
+        )}
+      </div>
       <span aria-hidden="true" />
     </div>
   )

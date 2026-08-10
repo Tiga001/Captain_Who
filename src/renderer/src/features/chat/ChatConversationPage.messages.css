@@ -117,6 +117,30 @@
   min-width: 0;
 }
 
+.conversation-model-transition__content {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.conversation-model-transition .conversation-model-transition__fork {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  justify-content: center;
+  border-radius: var(--mc-radius-sm);
+}
+
+.conversation-model-transition__fork:not(:disabled):hover {
+  color: var(--mc-color-text-accent);
+  background: var(--mc-color-state-hover);
+}
+
+.conversation-model-transition__fork .chat-message__action-spinner {
+  animation: chat-message-action-spin 800ms linear infinite;
+}
+
 .chat-message {
   position: relative;
   display: grid;

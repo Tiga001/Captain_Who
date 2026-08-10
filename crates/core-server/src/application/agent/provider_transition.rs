@@ -520,30 +520,40 @@ impl AgentService {
             ));
         }
 
-        let host_services = self.context_window_provider_host_services();
-        let compatibility = create_conversation_context_state_with_host_services(
-            preview_input.clone(),
-            conversation_id,
-            &host_services,
-        );
-        let requires_compaction = match compatibility {
-            Ok(_) => false,
-            Err(error) if provider_transition_error_requires_compaction(error.code()) => {
-                // The transition request is deliberately tool-free and receives only the
-                // provider-neutral durable journal rendered as untrusted text. It does not need
-                // to decrypt or replay the old opaque continuation. Prefix construction and the
-                // atomic coverage commit below remain the authoritative safety checks.
-                true
-            }
-            Err(_) => {
-                return Ok(ProviderTransitionPreparation::Blocked(
-                    provider_transition_blocked_output(
-                        conversation_id,
-                        target_model_id,
-                        AgentProviderTransitionReason::UnsupportedTarget,
-                        "目标模型无法安全使用当前会话。",
-                    ),
-                ));
+        let fork_requires_context_adaptation = self
+            .storage
+            .conversation_requires_context_adaptation(conversation_id)?;
+        let requires_compaction = if fork_requires_context_adaptation {
+            // A timeline fork may intentionally retain only the durable, Provider-neutral raw
+            // journal after the source ciphertext was released. Never let a superficially
+            // compatible target bypass the one required tool-free adaptation compaction.
+            true
+        } else {
+            let host_services = self.context_window_provider_host_services();
+            let compatibility = create_conversation_context_state_with_host_services(
+                preview_input.clone(),
+                conversation_id,
+                &host_services,
+            );
+            match compatibility {
+                Ok(_) => false,
+                Err(error) if provider_transition_error_requires_compaction(error.code()) => {
+                    // The transition request is deliberately tool-free and receives only the
+                    // provider-neutral durable journal rendered as untrusted text. It does not
+                    // need to decrypt or replay the old opaque continuation. Prefix construction
+                    // and the atomic coverage commit below remain the authoritative safety checks.
+                    true
+                }
+                Err(_) => {
+                    return Ok(ProviderTransitionPreparation::Blocked(
+                        provider_transition_blocked_output(
+                            conversation_id,
+                            target_model_id,
+                            AgentProviderTransitionReason::UnsupportedTarget,
+                            "目标模型无法安全使用当前会话。",
+                        ),
+                    ));
+                }
             }
         };
 

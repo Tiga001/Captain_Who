@@ -1663,6 +1663,19 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
         None,
     )
     .unwrap();
+    crate::storage::conversation_context_adaptation_repository::insert_in_connection(
+        &connection,
+        &crate::storage::conversation_context_adaptation_repository::ConversationContextAdaptationRequirement {
+            conversation_id: "conversation-1".to_string(),
+            reason: crate::storage::conversation_context_adaptation_repository::FORK_RELEASED_PROVIDER_STATE_REASON.to_string(),
+            source_conversation_id: "conversation-source".to_string(),
+            source_message_id: "assistant-source".to_string(),
+            created_at: 8,
+            resolved_summary_id: None,
+            resolved_at: None,
+        },
+    )
+    .unwrap();
 
     let (summary, committed_updated_at) = commit_provider_transition_with_receipt(
         &mut connection,
@@ -1678,6 +1691,17 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
     .unwrap();
 
     assert_eq!(summary.id, "summary-provider-transition");
+    let adaptation = crate::storage::conversation_context_adaptation_repository::get(
+        &connection,
+        "conversation-1",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        adaptation.resolved_summary_id.as_deref(),
+        Some("summary-provider-transition")
+    );
+    assert!(!adaptation.is_required());
     assert_eq!(
         connection
             .query_row(
@@ -1818,6 +1842,16 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
             .unwrap(),
         1
     );
+    let rollback = rollback_active_summary(
+        &mut connection,
+        "conversation-1",
+        "summary-provider-transition",
+        committed_updated_at.saturating_add(1),
+    )
+    .unwrap_err();
+    assert!(rollback
+        .to_string()
+        .contains("provider_context_boundary_required"));
 }
 
 #[test]

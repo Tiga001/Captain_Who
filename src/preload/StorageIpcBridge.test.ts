@@ -60,7 +60,7 @@ describe('Storage IPC bridge', () => {
     const input = {
       requestId: 'conversation-fork-request-1',
       sourceConversationId: 'conversation-1',
-      throughAssistantMessageId: 'assistant-1'
+      forkPoint: { kind: 'assistant_reply', assistantMessageId: 'assistant-1' } as const
     }
 
     await expect(bridge.forkConversation(input)).resolves.toBe(response)

@@ -9,6 +9,66 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::{AgentCommandSessionSnapshot, AgentCommandSessionStatus};
 
 #[test]
+fn fork_request_accepts_camel_case_assistant_reply_point() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let response = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications,
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: JsonRpcId::Number(15),
+            method: STORAGE_FORK_CONVERSATION_METHOD.to_string(),
+            params: Some(serde_json::json!({
+                "requestId": "fork-assistant-reply-request",
+                "sourceConversationId": "missing-conversation",
+                "forkPoint": {
+                    "kind": "assistant_reply",
+                    "assistantMessageId": "assistant-1"
+                }
+            })),
+        },
+    );
+
+    assert_eq!(response["error"]["code"], -32000, "{response}");
+    assert_eq!(response["error"]["message"], "原任务不存在。");
+}
+
+#[test]
+fn fork_request_accepts_camel_case_provider_transition_boundary_point() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let response = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications,
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: JsonRpcId::Number(16),
+            method: STORAGE_FORK_CONVERSATION_METHOD.to_string(),
+            params: Some(serde_json::json!({
+                "requestId": "fork-provider-transition-request",
+                "sourceConversationId": "missing-conversation",
+                "forkPoint": {
+                    "kind": "provider_transition_boundary",
+                    "operationId": "provider-transition-operation-1"
+                }
+            })),
+        },
+    );
+
+    assert_eq!(response["error"]["code"], -32000, "{response}");
+    assert_eq!(response["error"]["message"], "原任务不存在。");
+}
+
+#[test]
 fn fork_request_reports_active_command_as_structured_domain_error() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());

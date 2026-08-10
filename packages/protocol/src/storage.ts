@@ -192,11 +192,33 @@ export interface StorageChatConversationRecord extends StorageChatConversationMe
   continuationOrigin?: StorageConversationContinuationOriginRecord | null
 }
 
-export interface StorageForkConversationRequest {
+export type StorageConversationForkPoint =
+  | {
+      kind: 'assistant_reply'
+      assistantMessageId: string
+    }
+  | {
+      kind: 'provider_transition_boundary'
+      operationId: string
+    }
+
+interface StorageForkConversationRequestBase {
   requestId: string
   sourceConversationId: string
-  throughAssistantMessageId: string
 }
+
+export type StorageForkConversationRequest = StorageForkConversationRequestBase &
+  (
+    | {
+        forkPoint: StorageConversationForkPoint
+        throughAssistantMessageId?: never
+      }
+    | {
+        /** Legacy wire shape. New clients must send an explicit forkPoint. */
+        throughAssistantMessageId: string
+        forkPoint?: never
+      }
+  )
 
 /** Stable recovery metadata returned when Core rejects a conversation fork. */
 export interface StorageForkConversationErrorData {

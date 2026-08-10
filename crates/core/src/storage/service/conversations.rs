@@ -128,13 +128,51 @@ impl StorageService {
         input: ForkConversationInput,
         provider_continuation_vault: Option<&ProviderContinuationVault>,
     ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
+        let point = ConversationForkPoint::AssistantReply {
+            assistant_message_id: input.through_assistant_message_id,
+        };
+        self.fork_conversation_at_point_with_domain_error(
+            input.request_id,
+            input.source_conversation_id,
+            point,
+            provider_continuation_vault,
+        )
+    }
+
+    fn fork_conversation_request_with_domain_error(
+        &self,
+        input: ForkConversationRequest,
+        provider_continuation_vault: Option<&ProviderContinuationVault>,
+    ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
+        let point = input.resolve_point().map_err(|message| {
+            conversation_fork_repository::ConversationForkError::Other(message)
+        })?;
+        self.fork_conversation_at_point_with_domain_error(
+            input.request_id,
+            input.source_conversation_id,
+            point,
+            provider_continuation_vault,
+        )
+    }
+
+    fn fork_conversation_at_point_with_domain_error(
+        &self,
+        request_id: String,
+        source_conversation_id: String,
+        point: ConversationForkPoint,
+        provider_continuation_vault: Option<&ProviderContinuationVault>,
+    ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
         let mut connection = self.state.connection()?;
         if let Some(existing) =
-            conversation_fork_repository::find_existing_fork(&connection, input.request_id.trim())
+            conversation_fork_repository::find_existing_fork(&connection, request_id.trim())
                 .map_err(storage_error)?
         {
-            if existing.source_conversation_id != input.source_conversation_id
-                || existing.source_message_id != input.through_assistant_message_id
+            let existing_point = existing.source_fork_point.unwrap_or_else(|| {
+                ConversationForkPoint::AssistantReply {
+                    assistant_message_id: existing.source_message_id.clone(),
+                }
+            });
+            if existing.source_conversation_id != source_conversation_id || existing_point != point
             {
                 return Err("同一个分叉请求 ID 不能用于不同的历史快照。"
                     .to_string()
@@ -152,8 +190,13 @@ impl StorageService {
             return Ok(conversation);
         }
 
-        let mut plan =
-            conversation_fork_repository::build_fork_plan(&connection, &input, now_ms())?;
+        let mut plan = conversation_fork_repository::build_fork_plan_at_point(
+            &connection,
+            request_id.trim(),
+            source_conversation_id.trim(),
+            &point,
+            now_ms(),
+        )?;
         ensure_project_reference_exists(&connection, plan.target.project_id.as_deref())?;
         let provider_continuations = if plan.provider_continuation_mappings.is_empty() {
             Vec::new()
@@ -260,6 +303,28 @@ impl StorageService {
     {
         let conversation =
             self.fork_conversation_with_domain_error(input, Some(provider_continuation_vault))?;
+        self.decorate_fork_conversation_view(conversation)
+    }
+
+    pub fn fork_conversation_request_view(
+        &self,
+        input: ForkConversationRequest,
+    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
+    {
+        let conversation = self.fork_conversation_request_with_domain_error(input, None)?;
+        self.decorate_fork_conversation_view(conversation)
+    }
+
+    pub fn fork_conversation_request_view_with_provider_continuation_vault(
+        &self,
+        input: ForkConversationRequest,
+        provider_continuation_vault: &ProviderContinuationVault,
+    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
+    {
+        let conversation = self.fork_conversation_request_with_domain_error(
+            input,
+            Some(provider_continuation_vault),
+        )?;
         self.decorate_fork_conversation_view(conversation)
     }
 

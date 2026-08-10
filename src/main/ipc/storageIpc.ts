@@ -6,6 +6,7 @@ import {
 } from '@mycopilot/host-api'
 import {
   parseStorageForkConversationErrorData,
+  parseStorageForkConversationRequest,
   type StorageImageFileRecord,
   type StorageProjectRecord
 } from '@mycopilot/protocol'
@@ -68,7 +69,9 @@ export function registerStorageIpc(
     coreServer.loadConversation(conversationId)
   )
   ipcMain.handle(HOST_CHANNELS.storage.forkConversation, (_event, input) =>
-    captureConversationForkInvocation(() => coreServer.forkConversation(input))
+    captureConversationForkInvocation(() =>
+      coreServer.forkConversation(parseStorageForkConversationRequest(input))
+    )
   )
   ipcMain.handle(HOST_CHANNELS.storage.saveConversationMeta, (_event, conversation) =>
     coreServer.saveConversationMeta(conversation)

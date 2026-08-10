@@ -102,6 +102,43 @@ pub fn get_receipt(
     row.map(decode_receipt).transpose()
 }
 
+/// Resolves the one applied Provider-transition receipt that authoritatively introduced a summary.
+/// Duplicate bindings are treated as corruption instead of choosing one by timestamp.
+pub(crate) fn get_applied_provider_transition_receipt_for_summary(
+    connection: &Connection,
+    conversation_id: &str,
+    summary_id: &str,
+) -> Result<Option<ContextCompactionReceipt>, ContextCompactionReceiptRepositoryError> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT status, stage, receipt_json
+             FROM context_compaction_receipts
+             WHERE conversation_id = ?1
+               AND summary_id = ?2
+               AND operation_id LIKE 'provider-transition-%'
+               AND status = 'applied'
+             ORDER BY operation_id ASC
+             LIMIT 2",
+        )?;
+        let rows = statement
+            .query_map(params![conversation_id, summary_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    if rows.len() > 1 {
+        return Err(ContextCompactionReceiptRepositoryError::Invalid(
+            "同一个摘要绑定了多个 Provider transition receipt。".to_string(),
+        ));
+    }
+    rows.into_iter().next().map(decode_receipt).transpose()
+}
+
 pub fn list_provider_transition_receipts(
     connection: &Connection,
     conversation_id: &str,

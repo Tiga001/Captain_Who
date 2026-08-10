@@ -495,6 +495,51 @@ pub struct ForkConversationInput {
     pub through_assistant_message_id: String,
 }
 
+/// Wire-compatible request accepted by the fork RPC.
+///
+/// `throughAssistantMessageId` remains accepted for older clients. New clients send an explicit
+/// timeline point so an assistant reply and a later Provider-transition divider owned by that
+/// same reply cannot collapse into the same snapshot.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkConversationRequest {
+    pub request_id: String,
+    pub source_conversation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through_assistant_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_point: Option<ConversationForkPoint>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ConversationForkPoint {
+    AssistantReply { assistant_message_id: String },
+    ProviderTransitionBoundary { operation_id: String },
+}
+
+impl ForkConversationRequest {
+    pub fn resolve_point(&self) -> Result<ConversationForkPoint, String> {
+        match (
+            self.through_assistant_message_id.as_deref(),
+            self.fork_point.as_ref(),
+        ) {
+            (Some(_), Some(_)) => {
+                Err("分叉请求不能同时提供旧版回复边界和新版时间线边界。".to_string())
+            }
+            (Some(assistant_message_id), None) => Ok(ConversationForkPoint::AssistantReply {
+                assistant_message_id: assistant_message_id.to_string(),
+            }),
+            (None, Some(point)) => Ok(point.clone()),
+            (None, None) => Err("分叉请求缺少时间线边界。".to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSearchInput {

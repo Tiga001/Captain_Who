@@ -13,7 +13,8 @@ import type {
   AgentContextWindowSnapshot,
   AgentProposedAction,
   AgentProviderTransitionOperation,
-  GitTurnDiffSummary
+  GitTurnDiffSummary,
+  StorageConversationForkPoint
 } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
@@ -65,12 +66,11 @@ interface ChatConversationPageProps {
   onComposerDraftChange: (draft: ChatComposerDraft) => void
   onComposerDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
-  onModelChangeRequested?: (modelId: string) => void | Promise<void>
   onModelTransitionCancel?: () => void
   onModelTransitionConfirm?: () => void | Promise<void>
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
-  onContinueInNewTask?: (messageId: string) => void | Promise<void>
+  onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void | Promise<void>
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
@@ -156,7 +156,7 @@ interface ChatMessageListProps {
     options?: AgentApprovalOptions
   ) => void
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
-  onContinueInNewTask?: (messageId: string) => void | Promise<void>
+  onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void | Promise<void>
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
@@ -204,7 +204,13 @@ export const ChatMessageList = memo(function ChatMessageList({
               message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
             }
             onContinueInNewTask={
-              isAssistantReplyComplete(message) ? onContinueInNewTask : undefined
+              isAssistantReplyComplete(message) && onContinueInNewTask
+                ? (messageId) =>
+                    onContinueInNewTask({
+                      kind: 'assistant_reply',
+                      assistantMessageId: messageId
+                    })
+                : undefined
             }
             onReject={onRejectAgentAction}
             onReviewLastTurn={onReviewLastTurn}
@@ -230,6 +236,15 @@ export const ChatMessageList = memo(function ChatMessageList({
             .map((operation) => (
               <ConversationModelTransitionDivider
                 key={operation.operationId}
+                onContinueInNewTask={
+                  operation.status === 'completed' && operation.summaryId && onContinueInNewTask
+                    ? () =>
+                        onContinueInNewTask({
+                          kind: 'provider_transition_boundary',
+                          operationId: operation.operationId
+                        })
+                    : undefined
+                }
                 operation={operation}
               />
             ))}
@@ -245,6 +260,15 @@ export const ChatMessageList = memo(function ChatMessageList({
         .map((operation) => (
           <ConversationModelTransitionDivider
             key={operation.operationId}
+            onContinueInNewTask={
+              operation.status === 'completed' && operation.summaryId && onContinueInNewTask
+                ? () =>
+                    onContinueInNewTask({
+                      kind: 'provider_transition_boundary',
+                      operationId: operation.operationId
+                    })
+                : undefined
+            }
             onRetry={
               operation.status === 'failed' && onModelTransitionRetry
                 ? () => onModelTransitionRetry(operation)
@@ -307,7 +331,6 @@ export function ChatConversationPage({
   onComposerDraftChange,
   onComposerDraftMessageChange,
   onGuideQueuedMessage,
-  onModelChangeRequested,
   onModelTransitionCancel,
   onModelTransitionConfirm,
   onModelTransitionRetry,
@@ -496,7 +519,6 @@ export function ChatConversationPage({
             onDraftChange={onComposerDraftChange}
             onDraftMessageChange={onComposerDraftMessageChange}
             onGuideQueuedMessage={onGuideQueuedMessage}
-            onModelChangeRequested={onModelChangeRequested}
             onOpenQueuedMessageInSideChat={setSideChatPlaceholder}
             onStopGenerating={onStopGenerating}
             onSubmitMessage={onSubmitMessage}

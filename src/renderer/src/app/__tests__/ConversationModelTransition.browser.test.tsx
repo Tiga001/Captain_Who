@@ -4,7 +4,10 @@ import { render } from 'vitest-browser-react'
 import '../../styles/global.css'
 import '../../features/chat/ChatConversationPage.messages.css'
 
-const { retrySpy } = vi.hoisted(() => ({ retrySpy: vi.fn() }))
+const { continueSpy, retrySpy } = vi.hoisted(() => ({
+  continueSpy: vi.fn(),
+  retrySpy: vi.fn()
+}))
 
 const translations: Record<string, string> = {
   'chat.modelTransition.cancel': '取消',
@@ -16,7 +19,8 @@ const translations: Record<string, string> = {
   'chat.modelTransition.running': '正在压缩历史并切换模型…',
   'chat.modelTransition.succeeded': '切换API厂商，历史已压缩',
   'chat.modelTransition.failed': '历史压缩失败 · 重试',
-  'chat.modelTransition.modelChangeTooltip': '从 {source} 切换到 {target}'
+  'chat.modelTransition.modelChangeTooltip': '从 {source} 切换到 {target}',
+  'chat.continueInNewTask': '在新任务中继续'
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -26,7 +30,10 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 const { ConversationModelTransitionDivider, ModelTransitionConfirmationDialog } =
   await import('../../features/chat/components/ConversationModelTransition')
 
-beforeEach(() => retrySpy.mockReset())
+beforeEach(() => {
+  continueSpy.mockReset().mockResolvedValue(undefined)
+  retrySpy.mockReset()
+})
 
 describe('provider transition presentation', () => {
   it('uses the approved API-provider confirmation copy', async () => {
@@ -78,6 +85,7 @@ describe('provider transition presentation', () => {
   it('renders running state as a divider rather than a chat bubble', async () => {
     const screen = await render(
       <ConversationModelTransitionDivider
+        onContinueInNewTask={continueSpy}
         operation={{
           schemaVersion: 1,
           status: 'running',
@@ -100,11 +108,13 @@ describe('provider transition presentation', () => {
       .element(screen.getByRole('button', { name: '正在压缩历史并切换模型…' }))
       .toBeDisabled()
     expect(divider.querySelector('.lucide-fold-vertical')).not.toBeNull()
+    expect(divider.querySelector('button[aria-label="在新任务中继续"]')).toBeNull()
   })
 
   it('uses the compaction icon and shows the durable model transition on hover', async () => {
     const screen = await render(
       <ConversationModelTransitionDivider
+        onContinueInNewTask={continueSpy}
         operation={{
           schemaVersion: 1,
           status: 'completed',
@@ -136,11 +146,15 @@ describe('provider transition presentation', () => {
     await expect
       .element(screen.getByRole('tooltip'))
       .toHaveTextContent('从 GPT-5.2 切换到 DeepSeek V4')
+
+    await userEvent.click(screen.getByRole('button', { name: '在新任务中继续' }))
+    expect(continueSpy).toHaveBeenCalledTimes(1)
   })
 
   it('offers retry only for a failed transition', async () => {
     const screen = await render(
       <ConversationModelTransitionDivider
+        onContinueInNewTask={continueSpy}
         operation={{
           schemaVersion: 1,
           status: 'failed',
@@ -163,5 +177,38 @@ describe('provider transition presentation', () => {
     await userEvent.click(screen.getByRole('button', { name: '历史压缩失败 · 重试' }))
     expect(screen.getByText('历史压缩失败 · 重试').element()).not.toHaveClass('agent-running-text')
     expect(retrySpy).toHaveBeenCalledTimes(1)
+    expect(
+      screen
+        .getByTestId('model-transition-divider')
+        .element()
+        .querySelector('button[aria-label="在新任务中继续"]')
+    ).toBeNull()
+  })
+
+  it('does not offer a fork when a completed operation has no compaction summary', async () => {
+    const screen = await render(
+      <ConversationModelTransitionDivider
+        onContinueInNewTask={continueSpy}
+        operation={{
+          schemaVersion: 1,
+          status: 'completed',
+          conversationId: 'conversation-1',
+          targetModelId: 'model-1',
+          operationId: 'compatible-operation',
+          coveredThroughMessageId: 'assistant-1',
+          startedAt: 10,
+          completedAt: 20,
+          conversationUpdatedAt: 21,
+          modelId: 'model-1'
+        }}
+      />
+    )
+
+    expect(
+      screen
+        .getByTestId('model-transition-divider')
+        .element()
+        .querySelector('button[aria-label="在新任务中继续"]')
+    ).toBeNull()
   })
 })

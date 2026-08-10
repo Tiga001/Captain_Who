@@ -1,6 +1,7 @@
 import { useCallback, type Dispatch, type SetStateAction } from 'react'
 import { HostInvocationError } from '@mycopilot/host-api'
 import { parseStorageForkConversationErrorData } from '@mycopilot/protocol'
+import type { StorageConversationForkPoint } from '@mycopilot/protocol'
 import type {
   ChatComposerDraft,
   ChatConversation,
@@ -12,7 +13,7 @@ import {
   saveComposerDraft,
   saveConversationMeta
 } from '../features/storage/storageClient'
-import { createComposerDraft, createId } from './chatMessageFactory'
+import { createComposerDraft, createForkComposerDraft, createId } from './chatMessageFactory'
 
 type MutableRef<T> = { current: T }
 
@@ -119,24 +120,20 @@ export function useConversationNavigation({
   )
 
   const continueInNewTask = useCallback(
-    async (sourceConversationId: string, throughAssistantMessageId: string) => {
+    async (sourceConversationId: string, forkPoint: StorageConversationForkPoint) => {
       try {
-        const newConversation = await forkConversation(
+        const newConversation = await forkConversation({
+          requestId: createId('conversation-fork-request'),
           sourceConversationId,
-          throughAssistantMessageId,
-          createId('conversation-fork-request')
-        )
+          forkPoint
+        })
         const sourceDraft =
           drafts[sourceConversationId] ??
           createComposerDraft({
             modelId: newConversation.modelId ?? undefined,
             projectId: newConversation.projectId
           })
-        const newDraft = createComposerDraft({
-          modelId: newConversation.modelId ?? sourceDraft.modelId,
-          permissionMode: sourceDraft.permissionMode,
-          projectId: newConversation.projectId
-        })
+        const newDraft = createForkComposerDraft(sourceDraft, newConversation)
 
         setConversationsWithRef((currentConversations) => [
           newConversation,

@@ -286,7 +286,6 @@ pub(crate) fn command_tool_call(command: &AgentCommandRequest) -> AgentToolCall 
         args: json!({
             "command": command.command.clone(),
             "cwd": command.cwd.clone(),
-            "timeoutMs": command.timeout_ms,
             "reason": command.reason.clone(),
             "observe": command.observe.clone(),
             "inputs": command.inputs.iter().map(|binding| serde_json::json!({

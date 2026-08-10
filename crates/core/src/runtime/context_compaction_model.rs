@@ -408,7 +408,7 @@ fn build_compaction_request_context(
         .iter()
         // Storage normally supplies only model-visible journal records. Keep this final boundary
         // defensive so a legacy/custom host cannot leak Host-owned command lifecycle audit into
-        // a compaction request and bypass the explicit command_session poll contract.
+        // a compaction request and bypass the explicit command_session observation contract.
         .filter(|item| item.is_model_visible())
         .map(|item| {
             let mut payload = serde_json::to_value(item).map_err(|error| {

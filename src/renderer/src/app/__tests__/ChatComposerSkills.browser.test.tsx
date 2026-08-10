@@ -7,10 +7,9 @@ import { render } from 'vitest-browser-react'
 import '../../styles/global.css'
 import '../../features/chat/components/ChatComposer.css'
 
-const { draftChangeSpy, listSkillsSpy, modelChangeSpy, submitSpy } = vi.hoisted(() => ({
+const { draftChangeSpy, listSkillsSpy, submitSpy } = vi.hoisted(() => ({
   draftChangeSpy: vi.fn(),
   listSkillsSpy: vi.fn(),
-  modelChangeSpy: vi.fn(),
   submitSpy: vi.fn()
 }))
 
@@ -183,7 +182,6 @@ function TestComposer({
   initialDraft = createComposerDraft({ modelId: 'model-1', projectId: 'project-a' }),
   isGenerating = false,
   isModelTransitionRunning = false,
-  onModelChangeRequested,
   onSubmitMessage = submitSpy,
   onGuideQueuedMessage,
   skillCatalogRefreshToken = 0,
@@ -192,7 +190,6 @@ function TestComposer({
   initialDraft?: ChatComposerProps['draft']
   isGenerating?: boolean
   isModelTransitionRunning?: boolean
-  onModelChangeRequested?: ChatComposerProps['onModelChangeRequested']
   onSubmitMessage?: ChatComposerProps['onSubmitMessage']
   onGuideQueuedMessage?: ChatComposerProps['onGuideQueuedMessage']
   skillCatalogRefreshToken?: number
@@ -211,7 +208,6 @@ function TestComposer({
           setDraft(nextDraft)
         }}
         onSubmitMessage={onSubmitMessage}
-        onModelChangeRequested={onModelChangeRequested}
         onGuideQueuedMessage={onGuideQueuedMessage}
         skillCatalogRefreshToken={skillCatalogRefreshToken}
         showProjectSelector={showProjectSelector}
@@ -223,7 +219,6 @@ function TestComposer({
 beforeEach(() => {
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
-  modelChangeSpy.mockReset()
   listSkillsSpy.mockImplementation(async (projectId: string | null) => {
     if (projectId === null) {
       return catalog([bundledDocumentsSkill, bundledImageGenerationSkill, installedAuditorSkill])
@@ -249,17 +244,16 @@ describe('ChatComposer model picker', () => {
     expect(options[0]?.getBoundingClientRect().height).toBeLessThanOrEqual(36)
   })
 
-  it('delegates a model change without optimistically replacing the draft model', async () => {
-    const screen = await render(<TestComposer onModelChangeRequested={modelChangeSpy} />)
+  it('updates only the composer draft when a model is selected', async () => {
+    const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.selectModel' }).click()
     await screen.getByRole('option', { name: /Model 2/ }).click()
 
-    expect(modelChangeSpy).toHaveBeenCalledWith('model-2')
-    expect(draftChangeSpy).not.toHaveBeenCalled()
+    expect(draftChangeSpy).toHaveBeenCalledWith(expect.objectContaining({ modelId: 'model-2' }))
     await expect
       .element(screen.getByRole('button', { name: 'chat.selectModel' }))
-      .toHaveTextContent('Model One')
+      .toHaveTextContent('Model 2')
   })
 
   it('locks text input and model selection while history is being compacted', async () => {

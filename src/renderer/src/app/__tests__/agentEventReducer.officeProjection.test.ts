@@ -22,6 +22,31 @@ function projectApproval(action: AgentProposedAction) {
   return message.agentRun?.toolCalls[0]?.args
 }
 
+describe('Command frozen action projection', () => {
+  it('keeps a Host-owned timeout out of reconstructed run_command arguments', () => {
+    const action: AgentProposedAction = {
+      type: 'command',
+      command: {
+        id: 'command-with-host-timeout',
+        command: 'cargo test',
+        cwd: 'crates/core',
+        timeoutMs: 30_000,
+        approvalStatus: 'required',
+        riskLevel: 'read_only',
+        reason: 'Verify the core crate'
+      }
+    }
+
+    expect(action.command.timeoutMs).toBe(30_000)
+    expect(projectApproval(action)).toEqual({
+      command: 'cargo test',
+      cwd: 'crates/core',
+      riskLevel: 'read_only',
+      reason: 'Verify the core crate'
+    })
+  })
+})
+
 describe('Office frozen action projection', () => {
   it('reconstructs the nested typed v4 model call without exposing execution authority', () => {
     const action: AgentProposedAction = {

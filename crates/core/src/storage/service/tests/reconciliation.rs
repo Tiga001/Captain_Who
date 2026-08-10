@@ -54,7 +54,7 @@ fn manual_command_settlement(
             id: call_id.to_string(),
             command: "node script.mjs".to_string(),
             cwd: None,
-            timeout_ms: Some(5_000),
+            timeout_ms: None,
             approval_status: crate::AgentApprovalStatus::Required,
             risk_level: None,
             reason: Some("test atomic settlement".to_string()),
@@ -138,7 +138,6 @@ fn manual_command_settlement(
     terminal_audit.completed_at = Some(12);
     let trace_operation = serde_json::json!({
         "command": "node script.mjs",
-        "timeoutMs": 5_000,
         "reason": "test atomic settlement",
     });
     let trace_call = AgentToolCall {
@@ -2153,7 +2152,6 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
         tool: "run_command".to_string(),
         args: serde_json::json!({
             "command": "node script.mjs",
-            "timeoutMs": 5_000,
             "reason": "test atomic settlement",
         }),
         approval_status: crate::AgentApprovalStatus::Approved,
@@ -3067,7 +3065,6 @@ fn tampered_trace_evidence_never_settles_a_manual_file_effect() {
 fn tampered_command_trace_arguments_restore_the_durable_blocker() {
     let base_operation = serde_json::json!({
         "command": "node script.mjs",
-        "timeoutMs": 5_000,
         "reason": "test atomic settlement",
     });
     let mut cases = Vec::new();
@@ -3323,7 +3320,6 @@ fn command_terminal_outcome_cannot_diverge_from_execution_evidence() {
             tool: "run_command".to_string(),
             args: serde_json::json!({
                 "command": "node script.mjs",
-                "timeoutMs": 5_000,
                 "reason": "test atomic settlement",
             }),
             approval_status: crate::AgentApprovalStatus::Approved,

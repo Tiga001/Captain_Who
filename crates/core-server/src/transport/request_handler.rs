@@ -169,7 +169,7 @@ pub(crate) fn handle_request(
             )
         }
         STORAGE_FORK_CONVERSATION_METHOD => {
-            let input = match parse_params::<ForkConversationInput>(request.params) {
+            let input = match parse_params::<ForkConversationRequest>(request.params) {
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };

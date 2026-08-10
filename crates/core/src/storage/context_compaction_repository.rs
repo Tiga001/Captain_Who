@@ -5,8 +5,8 @@ use crate::context::{
     ContextJournalCursor,
 };
 use crate::storage::{
-    context_compaction_receipt_repository, conversation_trace_repository,
-    provider_continuation_repository, world_state_repository,
+    context_compaction_receipt_repository, conversation_context_adaptation_repository,
+    conversation_trace_repository, provider_continuation_repository, world_state_repository,
 };
 use crate::{ContextCompactionReceipt, ContextCompactionReceiptStatus, ModelRequestObservation};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -123,6 +123,15 @@ pub(crate) fn prepare_message_deletion_compaction_rewind(
     }
 
     let generated_summary_ids = previous_by_summary.keys().cloned().collect::<Vec<_>>();
+    if conversation_context_adaptation_repository::get(connection, conversation_id)?
+        .and_then(|requirement| requirement.resolved_summary_id)
+        .is_some_and(|summary_id| generated_summary_ids.contains(&summary_id))
+    {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "provider_context_boundary_required: 删除该回复会移除已完成的历史适配边界。"
+                .to_string(),
+        ));
+    }
     let (restore_summary_id, restore_active_head, previous_head_revision) =
         match active_head.as_ref() {
             Some((active_summary_id, revision))
@@ -265,10 +274,15 @@ pub fn get_active_summary(
     if !summary_matches_current_raw_prefix(connection, &summary)?
         || !continuity_refs_exist(connection, &summary)?
     {
-        if provider_continuation_repository::has_released_for_conversation(
-            connection,
-            conversation_id,
-        )? {
+        let has_resolved_adaptation_boundary =
+            conversation_context_adaptation_repository::get(connection, conversation_id)?
+                .is_some_and(|requirement| requirement.resolved_summary_id.is_some());
+        if has_resolved_adaptation_boundary
+            || provider_continuation_repository::has_released_for_conversation(
+                connection,
+                conversation_id,
+            )?
+        {
             // Invalidating the summary would make its raw prefix model-visible again. A released
             // tombstone proves at least one provider-native Tool turn in this conversation can no
             // longer be reconstructed, so falling back to the split durable log is unsafe.
@@ -492,6 +506,15 @@ pub fn commit_provider_transition_with_receipt(
         &transaction,
         &expected_prefix.conversation_id,
         target_model_id,
+        transition_updated_at,
+    )?;
+    // The summary/head, Provider-state release, model switch and removal of a fork's adaptation
+    // gate become visible atomically. A crash can therefore never expose an unadapted fork as
+    // sendable or leave an already adapted fork permanently blocked.
+    conversation_context_adaptation_repository::resolve_in_connection(
+        &transaction,
+        &expected_prefix.conversation_id,
+        &summary.id,
         transition_updated_at,
     )?;
     transaction.commit()?;
@@ -790,6 +813,15 @@ pub fn rollback_active_summary(
     if active.id != expected_summary_id {
         return Err(ContextCompactionRepositoryError::Stale(
             "active summary 已发生变化，拒绝回滚旧版本。".to_string(),
+        ));
+    }
+    if conversation_context_adaptation_repository::get(&transaction, conversation_id)?
+        .and_then(|requirement| requirement.resolved_summary_id)
+        .as_deref()
+        == Some(active.id.as_str())
+    {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "provider_context_boundary_required: 已完成的历史适配边界不能回滚。".to_string(),
         ));
     }
     let restored = active

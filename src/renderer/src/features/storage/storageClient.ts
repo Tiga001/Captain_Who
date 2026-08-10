@@ -15,6 +15,7 @@ import type {
   StorageChatMessageStateRecord,
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
+  StorageForkConversationRequest,
   StorageImageFileRecord,
   StorageModelConfigRecord,
   StorageModelSettingsRecord,
@@ -159,18 +160,10 @@ export async function loadConversation(conversationId: string): Promise<ChatConv
 }
 
 export async function forkConversation(
-  sourceConversationId: string,
-  throughAssistantMessageId: string,
-  requestId: string
+  input: StorageForkConversationRequest
 ): Promise<ChatConversation> {
   return mapConversationFromStorage(
-    unwrapHostInvocation(
-      await hostClient.storage.forkConversation({
-        requestId,
-        sourceConversationId,
-        throughAssistantMessageId
-      })
-    )
+    unwrapHostInvocation(await hostClient.storage.forkConversation(input))
   )
 }
 

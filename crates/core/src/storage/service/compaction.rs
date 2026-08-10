@@ -1,6 +1,16 @@
 use super::*;
 
 impl StorageService {
+    pub fn conversation_requires_context_adaptation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bool, String> {
+        let connection = self.state.connection()?;
+        conversation_context_adaptation_repository::get(&connection, conversation_id)
+            .map(|requirement| requirement.is_some_and(|requirement| requirement.is_required()))
+            .map_err(storage_error)
+    }
+
     pub fn get_active_context_compaction_summary(
         &self,
         conversation_id: &str,

@@ -29,9 +29,6 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
-const MAX_TIMEOUT_MS: u64 = 600_000;
-const LEGACY_DEFAULT_TIMEOUT_MS: u64 = 120_000;
-
 pub(super) struct RunCommandTool;
 
 impl AgentTool for RunCommandTool {
@@ -46,18 +43,12 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. A command that outlives the Host's short initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
+            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. The Host owns process lifetime and its short initial yield; do not add a deadline merely to bound tool waiting or confirm startup. A command that outlives that initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "A single-line, non-interactive shell command without literal newline or null characters. Side effects and every compound shell segment are evaluated by the host policy." },
                     "cwd": { "type": "string", "description": "Working directory. May be workspace-relative, absolute, or @home/@desktop/@documents/@downloads when permissions allow. Required when no workspace exists." },
-                    "timeoutMs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": MAX_TIMEOUT_MS,
-                        "description": "Optional hard process lifetime. Omit it for no hard deadline; this is independent from the Host's short initial wait before returning a running Session."
-                    },
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
@@ -309,7 +300,6 @@ fn project_artifact_observation(value: &Value) -> Option<Value> {
 struct RunCommandArgs {
     command: String,
     cwd: Option<String>,
-    timeout_ms: Option<u64>,
     reason: Option<String>,
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
@@ -402,9 +392,7 @@ fn command_request_from_call(
         id: call.id.clone(),
         command: command.clone(),
         cwd,
-        timeout_ms: args
-            .timeout_ms
-            .map(|timeout| timeout.clamp(1, MAX_TIMEOUT_MS)),
+        timeout_ms: None,
         approval_status: AgentApprovalStatus::Required,
         risk_level: Some(classify_command_risk(&command)),
         reason,
@@ -942,14 +930,6 @@ pub(crate) fn validate_frozen_command_trace_args(
         .map_err(|_| "run_command frozen ToolCall command is invalid".to_string())?;
     let cwd = normalize_trace_cwd(args.cwd)
         .map_err(|_| "run_command frozen ToolCall cwd is invalid".to_string())?;
-    let timeout_ms = args
-        .timeout_ms
-        .map(|timeout| timeout.clamp(1, MAX_TIMEOUT_MS));
-    // Older pending actions materialized an omitted timeout as a two-minute hard deadline. Keep
-    // validating that already-frozen authority during restart/approval recovery without applying
-    // the legacy default to any newly prepared command.
-    let timeout_matches = timeout_ms == frozen.timeout_ms
-        || (timeout_ms.is_none() && frozen.timeout_ms == Some(LEGACY_DEFAULT_TIMEOUT_MS));
     let reason_was_present = args.reason.is_some();
     let reason = args
         .reason
@@ -1013,7 +993,6 @@ pub(crate) fn validate_frozen_command_trace_args(
 
     if command != frozen.command
         || cwd != frozen.cwd
-        || !timeout_matches
         || expected_observe != frozen.observe
         || inputs != frozen_inputs
         || !runtime_matches
@@ -1031,7 +1010,6 @@ pub(crate) fn validate_frozen_command_trace_args(
 struct FrozenRunCommandArgs {
     command: String,
     cwd: Option<String>,
-    timeout_ms: Option<u64>,
     reason: Option<String>,
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
@@ -1393,10 +1371,11 @@ mod tests {
     }
 
     #[test]
-    fn model_schema_exposes_profiles_but_no_runtime_authority() {
+    fn model_schema_exposes_profiles_without_timeout_or_runtime_authority() {
         let definition = RunCommandTool.definition();
         let properties = definition.input_schema["properties"].as_object().unwrap();
         assert!(properties.contains_key("runtimeProfile"));
+        assert!(!properties.contains_key("timeoutMs"));
         assert!(!properties.contains_key("runtime"));
         let input_item = &properties["inputs"]["items"];
         assert_eq!(input_item["required"], json!(["path"]));
@@ -1448,7 +1427,6 @@ mod tests {
             args: json!({
                 "command": " cargo test ",
                 "cwd": "agent/rust",
-                "timeoutMs": 999_999,
                 "reason": "verify tests"
             }),
             approval_status: AgentApprovalStatus::Required,
@@ -1473,7 +1451,7 @@ mod tests {
         assert_eq!(request.id, "tool-1");
         assert_eq!(request.command, "cargo test");
         assert_eq!(request.cwd.as_deref(), Some("agent/rust"));
-        assert_eq!(request.timeout_ms, Some(MAX_TIMEOUT_MS));
+        assert_eq!(request.timeout_ms, None);
         assert_eq!(request.approval_status, AgentApprovalStatus::Required);
         assert_eq!(
             request.risk_level,
@@ -1510,10 +1488,35 @@ mod tests {
 
         assert_eq!(request.timeout_ms, None);
         validate_frozen_command_trace_args(&request, &call.args).unwrap();
+    }
 
-        let mut legacy_frozen = request;
-        legacy_frozen.timeout_ms = Some(LEGACY_DEFAULT_TIMEOUT_MS);
-        validate_frozen_command_trace_args(&legacy_frozen, &call.args).unwrap();
+    #[test]
+    fn live_model_arguments_reject_removed_timeout_field() {
+        let call = AgentToolCall {
+            id: "tool-with-live-timeout".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "pwd",
+                "timeoutMs": 15_000
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("temp".to_string()),
+                root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        }));
+
+        let error = command_request_from_call(&context, &call).unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `timeoutMs`"));
     }
 
     #[test]
@@ -1884,10 +1887,9 @@ mod tests {
 
     #[test]
     fn frozen_trace_argument_verifier_binds_every_command_authority_field() {
-        let args = json!({
+        let live_args = json!({
             "command": "node scripts/build.mjs --output outputs/report.xlsx",
             "cwd": "scripts/.",
-            "timeoutMs": 999_999,
             "reason": "build the reviewed workbook",
             "observe": {
                 "kinds": ["office"],
@@ -1899,7 +1901,7 @@ mod tests {
         let call = AgentToolCall {
             id: "tool-runtime-trace".to_string(),
             tool: "run_command".to_string(),
-            args: args.clone(),
+            args: live_args.clone(),
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
@@ -1925,13 +1927,18 @@ mod tests {
             ),
         );
         let frozen = command_request_from_call(&context, &call).unwrap();
+        let args = live_args;
         validate_frozen_command_trace_args(&frozen, &args).unwrap();
+
+        let mut removed_timeout = args.clone();
+        removed_timeout["timeoutMs"] = json!(15_000);
+        let error = validate_frozen_command_trace_args(&frozen, &removed_timeout).unwrap_err();
+        assert!(error.contains("arguments are invalid"));
 
         let mut tampered = Vec::new();
         for (field, value) in [
             ("command", json!("node scripts/other.mjs")),
             ("cwd", json!("other")),
-            ("timeoutMs", json!(1)),
             ("reason", json!("different authority")),
         ] {
             let mut candidate = args.clone();
@@ -2193,6 +2200,12 @@ mod tests {
         assert!(definition
             .description
             .contains("running is not final success"));
+        assert!(definition
+            .description
+            .contains("Host owns process lifetime"));
+        assert!(definition
+            .description
+            .contains("do not add a deadline merely to bound tool waiting or confirm startup"));
         assert!(definition
             .description
             .contains("GUI app or long-lived server"));

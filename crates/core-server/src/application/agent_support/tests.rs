@@ -137,6 +137,8 @@ fn command_tool_call_projects_only_the_model_visible_runtime_profile() {
     let call = command_tool_call(&request);
     assert_eq!(call.args["runtimeProfile"], "presentations");
     assert!(call.args["runtime"].is_null());
+    assert!(call.args.get("timeoutMs").is_none());
+    assert_eq!(request.timeout_ms, Some(30_000));
     let model_args = serde_json::to_string(&call.args).unwrap();
     assert!(!model_args.contains("pptxgenjs"));
     assert!(!model_args.contains("4.0.1"));

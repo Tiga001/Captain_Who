@@ -41,7 +41,7 @@ fn persist_settled_manual_command(
             id: call_id.to_string(),
             command: "node build.mjs".to_string(),
             cwd: None,
-            timeout_ms: Some(5_000),
+            timeout_ms: None,
             approval_status: crate::AgentApprovalStatus::Required,
             risk_level: None,
             reason: Some("build the reviewed artifact".to_string()),
@@ -59,7 +59,6 @@ fn persist_settled_manual_command(
         provenance: None,
         operation: serde_json::json!({
             "command": "node build.mjs",
-            "timeoutMs": 5_000,
         }),
         approval_status: crate::AgentApprovalStatus::Required,
         truncated: false,
@@ -159,7 +158,6 @@ fn persist_settled_manual_command(
         tool: "run_command".to_string(),
         args: serde_json::json!({
             "command": "node build.mjs",
-            "timeoutMs": 5_000,
         }),
         approval_status: crate::AgentApprovalStatus::Approved,
         reason: Some("build the reviewed artifact".to_string()),

@@ -105,7 +105,6 @@ export function getActionToolCall(action: AgentProposedAction): AgentToolCall | 
     args: {
       command: action.command.command,
       cwd: action.command.cwd,
-      timeoutMs: action.command.timeoutMs,
       riskLevel: action.command.riskLevel,
       reason: action.command.reason
     },

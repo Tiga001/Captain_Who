@@ -3170,6 +3170,41 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (target_message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
+        -- A backend-owned, Provider-neutral gate for a fork whose exact historical Provider
+        -- payload had already been cryptographically released in the source conversation. The
+        -- fork keeps the visible durable timeline but cannot run until a tool-free compaction
+        -- establishes a new safe Context epoch. This state is never accepted from Renderer IPC.
+        CREATE TABLE IF NOT EXISTS conversation_context_adaptation_requirements (
+            conversation_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            reason TEXT NOT NULL CHECK (
+                reason = 'fork_released_provider_state_requires_compaction'
+            ),
+            source_conversation_id TEXT NOT NULL CHECK (
+                typeof(source_conversation_id) = 'text'
+                AND length(CAST(source_conversation_id AS BLOB)) BETWEEN 1 AND 512
+                AND source_conversation_id = trim(source_conversation_id)
+            ),
+            source_message_id TEXT NOT NULL CHECK (
+                typeof(source_message_id) = 'text'
+                AND length(CAST(source_message_id AS BLOB)) BETWEEN 1 AND 512
+                AND source_message_id = trim(source_message_id)
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            resolved_summary_id TEXT,
+            resolved_at INTEGER CHECK (resolved_at IS NULL OR resolved_at >= created_at),
+            CHECK (
+                (resolved_summary_id IS NULL AND resolved_at IS NULL)
+                OR (
+                    typeof(resolved_summary_id) = 'text'
+                    AND length(CAST(resolved_summary_id AS BLOB)) BETWEEN 1 AND 512
+                    AND resolved_summary_id = trim(resolved_summary_id)
+                    AND resolved_at IS NOT NULL
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_models_position ON models(position);
         CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
         CREATE INDEX IF NOT EXISTS idx_conversations_project_id ON conversations(project_id);
@@ -3403,6 +3438,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "target_message_id",
         "TEXT REFERENCES messages(id) ON DELETE CASCADE",
     )?;
+    add_column_if_missing(
+        connection,
+        "conversation_forks",
+        "source_fork_point_json",
+        "TEXT",
+    )?;
     // A fork preserves message order while replacing identities. Existing development rows can
     // therefore recover the cloned boundary by matching the source cutoff's position. If the
     // source task was already deleted, leave the legacy row unprojected rather than guessing.
@@ -3420,6 +3461,15 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         )
         WHERE target_message_id IS NULL
         ",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE conversation_forks
+         SET source_fork_point_json = json_object(
+             'kind', 'assistant_reply',
+             'assistantMessageId', source_message_id
+         )
+         WHERE source_fork_point_json IS NULL",
         [],
     )?;
     add_column_if_missing(connection, "agent_usage_records", "started_at", "INTEGER")?;

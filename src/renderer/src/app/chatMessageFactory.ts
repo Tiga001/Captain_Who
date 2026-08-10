@@ -1,6 +1,6 @@
 import type { AgentConversationMessage, AgentInputAttachment } from '@mycopilot/protocol'
 import { modelConfig } from '../config/modelConfig'
-import type { ChatComposerDraft, ChatMessage } from '../features/chat/chatTypes'
+import type { ChatComposerDraft, ChatConversation, ChatMessage } from '../features/chat/chatTypes'
 import { normalizeSkillSelections } from '../features/skills/skillSelection'
 
 export function createId(prefix: string) {
@@ -79,6 +79,18 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
     skills: normalizeSkillSelections(draft.skills),
     queuedMessages: draft.queuedMessages ?? []
   }
+}
+
+export function createForkComposerDraft(
+  sourceDraft: ChatComposerDraft,
+  forkedConversation: Pick<ChatConversation, 'modelId' | 'projectId'>
+): ChatComposerDraft {
+  return createComposerDraft({
+    // The fork point owns history; the source composer independently owns the next-run model.
+    modelId: sourceDraft.modelId || forkedConversation.modelId || undefined,
+    permissionMode: sourceDraft.permissionMode,
+    projectId: forkedConversation.projectId
+  })
 }
 
 export function synchronizeComposerDraftForScope(

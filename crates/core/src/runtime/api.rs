@@ -196,7 +196,7 @@ pub type AgentHostActionExecutor = Arc<
 pub const AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS: u64 = 120_000;
 /// Default bounded settlement wait after a controlled interrupt.
 pub const AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS: u64 = 5_000;
-/// Hard upper bound for a legacy Session wait hint after Host normalization.
+/// Hard upper bound for Host-controlled Session observation waits.
 pub const AGENT_COMMAND_SESSION_MAX_WAIT_MS: u64 = 300_000;
 /// Maximum incremental command output admitted by one model Tool call.
 ///

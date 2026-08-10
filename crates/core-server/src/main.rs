@@ -128,7 +128,7 @@ use mycopilot_core::skills::{
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
-    ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord, ForkConversationInput,
+    ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord, ForkConversationRequest,
     ModelSettingsSaveRequest, ProjectRecord, UiPreferencesRecord,
 };
 use mycopilot_core::storage::service::StorageService;

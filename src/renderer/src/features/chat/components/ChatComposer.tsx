@@ -84,7 +84,6 @@ interface ChatComposerProps {
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
-  onModelChangeRequested?: (modelId: string) => void | Promise<void>
   onOpenQueuedMessageInSideChat?: (message: ChatQueuedMessage) => void
   onSubmitMessage?: (
     message: string,
@@ -111,7 +110,6 @@ export function ChatComposer({
   onDraftChange,
   onDraftMessageChange,
   onGuideQueuedMessage,
-  onModelChangeRequested,
   onOpenQueuedMessageInSideChat,
   onSubmitMessage,
   onStopGenerating,
@@ -918,11 +916,7 @@ export function ChatComposer({
                         onClick={() => {
                           setIsModelMenuOpen(false)
                           if (model.id === selectedModel?.id) return
-                          if (onModelChangeRequested) {
-                            void onModelChangeRequested(model.id)
-                          } else {
-                            updateDraft({ modelId: model.id })
-                          }
+                          updateDraft({ modelId: model.id })
                         }}
                       >
                         <span className="composer-model-option__name">{model.displayName}</span>

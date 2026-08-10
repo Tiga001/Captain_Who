@@ -613,7 +613,7 @@ impl AgentService {
 
     pub(crate) fn fork_conversation_view(
         &self,
-        input: mycopilot_core::storage::models::ForkConversationInput,
+        input: mycopilot_core::storage::models::ForkConversationRequest,
     ) -> Result<
         mycopilot_core::storage::models::ChatConversationViewRecord,
         mycopilot_core::storage::conversation_fork_repository::ConversationForkError,
@@ -621,8 +621,8 @@ impl AgentService {
         match self.provider_continuation_vault.as_deref() {
             Some(vault) => self
                 .storage
-                .fork_conversation_view_with_provider_continuation_vault(input, vault),
-            None => self.storage.fork_conversation_view(input),
+                .fork_conversation_request_view_with_provider_continuation_vault(input, vault),
+            None => self.storage.fork_conversation_request_view(input),
         }
     }
 

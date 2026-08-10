@@ -2499,12 +2499,11 @@ mod tests {
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
         let call = AgentToolCall {
-            id: "command-session-poll".to_string(),
+            id: "command-session-wait".to_string(),
             tool: "command_session".to_string(),
             args: json!({
                 "sessionId": "cmd_0123456789abcdef0123456789abcdef",
-                "action": "poll",
-                "waitMs": 1_000,
+                "action": "wait",
             }),
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,

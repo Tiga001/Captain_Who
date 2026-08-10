@@ -439,6 +439,85 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
 }
 
 #[tokio::test]
+async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and_resolves_atomically(
+) {
+    for (suffix, source_is_deepseek, target_is_deepseek) in [
+        ("deepseek-to-generic", true, false),
+        ("generic-to-deepseek", false, true),
+    ] {
+        let fixture = tempdir().unwrap();
+        let database_path = fixture.path().join("storage.sqlite");
+        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let mut settings = two_model_settings(
+            target_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_v4_default),
+        );
+        settings.models[0].provider_profile_config =
+            source_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_v4_default);
+        storage.save_model_settings(settings).unwrap();
+        let conversation_id = format!("conversation-fork-adaptation-{suffix}");
+        let conversation = conversation_with_completed_history(&conversation_id, Some("model-1"));
+        storage.save_conversation(conversation).unwrap();
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversation_context_adaptation_requirements (
+                    conversation_id, schema_version, reason, source_conversation_id,
+                    source_message_id, created_at
+                 ) VALUES (?1, 1, 'fork_released_provider_state_requires_compaction',
+                           'source-conversation', 'source-assistant', 3)",
+                [&conversation_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let service = AgentService::new(storage.clone())
+            .with_context_compaction_summary_generator(provider_transition_generator("model-2"));
+        let preflight = service
+            .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                conversation_id: conversation_id.clone(),
+                target_model_id: "model-2".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            preflight.decision,
+            AgentProviderTransitionDecision::RequiresCompaction,
+            "marker must win for {suffix}"
+        );
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        service
+            .start_provider_transition(
+                AgentProviderTransitionStartInput {
+                    conversation_id: conversation_id.clone(),
+                    target_model_id: "model-2".to_string(),
+                    transition_token: preflight.transition_token.unwrap(),
+                },
+                notifications,
+            )
+            .unwrap();
+        let completed = wait_for_provider_transition_completed(&mut receiver).await;
+        assert_eq!(completed["modelId"], "model-2");
+        assert!(completed.get("summaryId").and_then(Value::as_str).is_some());
+
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversation_context_adaptation_requirements
+                     WHERE conversation_id = ?1 AND resolved_summary_id IS NOT NULL",
+                    [&conversation_id],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            1,
+            "marker must resolve to the successful summary for {suffix}"
+        );
+        assert!(!storage
+            .conversation_requires_context_adaptation(&conversation_id)
+            .unwrap());
+    }
+}
+
+#[tokio::test]
 async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_generic_epoch() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("deepseek-to-generic-transition.sqlite");

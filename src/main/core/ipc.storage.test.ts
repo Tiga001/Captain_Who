@@ -5,7 +5,7 @@ import { registerStorageIpc } from '../ipc/storageIpc'
 const forkInput = {
   requestId: 'conversation-fork-request-1',
   sourceConversationId: 'conversation-1',
-  throughAssistantMessageId: 'assistant-1'
+  forkPoint: { kind: 'assistant_reply', assistantMessageId: 'assistant-1' } as const
 }
 
 function registerForkHandler(forkConversation: ReturnType<typeof vi.fn>) {
@@ -24,6 +24,54 @@ function registerForkHandler(forkConversation: ReturnType<typeof vi.fn>) {
 }
 
 describe('conversation fork IPC', () => {
+  it('forwards a validated provider-transition boundary fork point', async () => {
+    const forkConversation = vi.fn().mockResolvedValue({ id: 'conversation-2' })
+    const handler = registerForkHandler(forkConversation)
+    const input = {
+      requestId: 'conversation-fork-request-2',
+      sourceConversationId: 'conversation-1',
+      forkPoint: { kind: 'provider_transition_boundary', operationId: 'operation-1' }
+    }
+
+    await expect(handler({} as IpcMainInvokeEvent, input)).resolves.toEqual({
+      ok: true,
+      value: { id: 'conversation-2' }
+    })
+    expect(forkConversation).toHaveBeenCalledWith(input)
+  })
+
+  it('keeps the legacy assistant cutoff wire-compatible', async () => {
+    const forkConversation = vi.fn().mockResolvedValue({ id: 'conversation-legacy' })
+    const handler = registerForkHandler(forkConversation)
+    const input = {
+      requestId: 'conversation-fork-request-1',
+      sourceConversationId: 'conversation-1',
+      throughAssistantMessageId: 'assistant-1'
+    }
+
+    await expect(handler({} as IpcMainInvokeEvent, input)).resolves.toEqual({
+      ok: true,
+      value: { id: 'conversation-legacy' }
+    })
+    expect(forkConversation).toHaveBeenCalledWith(input)
+  })
+
+  it('rejects ambiguous dual fork points before calling Core', async () => {
+    const forkConversation = vi.fn()
+    const handler = registerForkHandler(forkConversation)
+
+    await expect(
+      handler({} as IpcMainInvokeEvent, {
+        ...forkInput,
+        throughAssistantMessageId: 'assistant-1'
+      })
+    ).resolves.toEqual({
+      ok: false,
+      error: { message: 'Conversation fork failed.' }
+    })
+    expect(forkConversation).not.toHaveBeenCalled()
+  })
+
   it('preserves the stable active-command code without leaking Core error text', async () => {
     const data = {
       type: 'conversation_fork',

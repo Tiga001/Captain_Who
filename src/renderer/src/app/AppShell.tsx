@@ -1245,17 +1245,6 @@ export function AppShell() {
     [activeProviderTransitionConversationId, providerTransitionStore]
   )
 
-  const requestConversationModelChange = useCallback(
-    async (targetModelId: string) => {
-      const conversationId = activeConversationIdRef.current
-      if (!conversationId) return
-      pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
-      await waitForConversationSaves(conversationId)
-      await requestProviderTransition(conversationId, targetModelId)
-    },
-    [requestProviderTransition, waitForConversationSaves]
-  )
-
   const cancelActiveProviderTransition = useCallback(() => {
     const conversationId = activeConversationIdRef.current
     if (!conversationId) return
@@ -1599,13 +1588,12 @@ export function AppShell() {
                   persistDraftMessageOnly(activeConversation.id, draft)
                 }
                 onGuideQueuedMessage={guideQueuedMessage}
-                onModelChangeRequested={requestConversationModelChange}
                 onModelTransitionCancel={cancelActiveProviderTransition}
                 onModelTransitionConfirm={confirmActiveProviderTransition}
                 onModelTransitionRetry={retryActiveProviderTransition}
                 onEditLastUserMessage={submitEditedLastUserMessage}
-                onContinueInNewTask={(messageId) =>
-                  continueInNewTask(activeConversation.id, messageId)
+                onContinueInNewTask={(forkPoint) =>
+                  continueInNewTask(activeConversation.id, forkPoint)
                 }
                 onOpenContinuationOrigin={openContinuationOrigin}
                 onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {

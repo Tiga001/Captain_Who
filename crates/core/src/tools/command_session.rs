@@ -11,14 +11,12 @@ use crate::runtime::{
     AgentCommandSessionAction, AgentCommandSessionExecutionControl,
     AgentCommandSessionExecutionOutput, AgentCommandSessionExecutionRequest,
     AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS, AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
-    AGENT_COMMAND_SESSION_MAX_WAIT_MS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-
-const LEGACY_COMMAND_SESSION_MIN_WAIT_MS: u64 = 30_000;
 
 pub(super) struct CommandSessionTool;
 
@@ -34,7 +32,7 @@ impl AgentTool for CommandSessionTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "command_session".to_string(),
-            description: "Wait for or interrupt a managed command returned by run_command with status=running. action defaults to wait. wait lets the Host quietly collect incremental output until the command reaches a terminal state or the Host's bounded deadline; ordinary output does not require repeated calls. For a GUI app or long-lived server, normally continue without waiting for natural exit. For a build or test whose result is required, call wait and do not emit repeated waiting narration. A running status is not final success, and background exit never starts a new model turn. Arbitrary stdin is not supported.".to_string(),
+            description: "Wait for or interrupt a managed command returned by run_command with status=running. action defaults to wait. wait lets the Host quietly collect incremental output until the command reaches a terminal state or the Host's bounded deadline; ordinary output does not require repeated calls. For a GUI app or long-lived server, normally continue without waiting for natural exit. For a build or test whose result is required, call wait and do not emit repeated waiting narration. The latest command_session status supersedes any earlier run_command status: starting/running are non-terminal; exited/interrupted/timed_out/failed are terminal and mean the process is no longer running; outcome_unknown is terminal for Session tracking, but the process outcome is unknown, so do not claim continued execution or success. Background exit never starts a new model turn. Arbitrary stdin is not supported.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -139,11 +137,10 @@ fn prepare_execution(
         CommandSessionInputAction::Wait => AgentCommandSessionAction::Poll,
         CommandSessionInputAction::Interrupt => AgentCommandSessionAction::Interrupt,
     };
-    // `waitMs` was exposed by the v1 model contract. Keep accepting it so a durable
-    // checkpoint or an older provider response can resume safely, but make timing a Host
-    // policy for new calls and clamp the legacy hint instead of spending another model turn on
-    // a harmless range error.
-    let wait_ms = normalize_legacy_wait_ms(input.wait_ms, action);
+    let wait_ms = match action {
+        AgentCommandSessionAction::Poll => AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
+        AgentCommandSessionAction::Interrupt => AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
+    };
     let request = AgentCommandSessionExecutionRequest {
         conversation_id: context.conversation_id()?.to_string(),
         run_id: context.run_id()?.to_string(),
@@ -160,34 +157,18 @@ fn prepare_execution(
     Ok((session_id.as_str().to_string(), request, control))
 }
 
-fn normalize_legacy_wait_ms(wait_ms: Option<u64>, action: AgentCommandSessionAction) -> u64 {
-    match wait_ms {
-        None | Some(0) => match action {
-            AgentCommandSessionAction::Poll => AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
-            AgentCommandSessionAction::Interrupt => AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
-        },
-        Some(wait_ms) => wait_ms.clamp(
-            LEGACY_COMMAND_SESSION_MIN_WAIT_MS.min(AGENT_COMMAND_SESSION_MAX_WAIT_MS),
-            AGENT_COMMAND_SESSION_MAX_WAIT_MS,
-        ),
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CommandSessionInput {
     session_id: String,
     #[serde(default)]
     action: Option<CommandSessionInputAction>,
-    #[serde(default)]
-    wait_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CommandSessionInputAction {
     #[default]
-    #[serde(alias = "poll")]
     Wait,
     Interrupt,
 }
@@ -396,6 +377,15 @@ mod tests {
         assert!(definition
             .description
             .contains("ordinary output does not require repeated calls"));
+        assert!(definition
+            .description
+            .contains("latest command_session status supersedes any earlier run_command status"));
+        assert!(definition.description.contains(
+            "exited/interrupted/timed_out/failed are terminal and mean the process is no longer running"
+        ));
+        assert!(definition.description.contains(
+            "outcome_unknown is terminal for Session tracking, but the process outcome is unknown"
+        ));
 
         let result = execute(&context, json!({ "sessionId": session_id() }));
 
@@ -415,6 +405,21 @@ mod tests {
         assert_eq!(value["output"], "next output");
         assert_eq!(value["read"]["requestedAfterSequence"], 4);
         assert_eq!(value["read"]["throughSequence"], 6);
+    }
+
+    #[test]
+    fn model_result_preserves_terminal_session_statuses() {
+        for (status, expected) in [
+            (AgentCommandSessionStatus::Exited, "exited"),
+            (AgentCommandSessionStatus::Interrupted, "interrupted"),
+            (AgentCommandSessionStatus::TimedOut, "timed_out"),
+            (AgentCommandSessionStatus::Failed, "failed"),
+            (AgentCommandSessionStatus::OutcomeUnknown, "outcome_unknown"),
+        ] {
+            let value = model_result(output(status, ""));
+
+            assert_eq!(value["status"], expected);
+        }
     }
 
     #[test]
@@ -453,60 +458,32 @@ mod tests {
             &context,
             json!({
                 "sessionId": session_id(),
-                "action": "interrupt",
-                "waitMs": 2_500
+                "action": "interrupt"
             }),
         );
 
         assert!(result.ok, "{result:?}");
         let request = requests.lock().unwrap().first().unwrap().clone();
         assert_eq!(request.action, AgentCommandSessionAction::Interrupt);
-        assert_eq!(
-            request.wait_ms,
-            LEGACY_COMMAND_SESSION_MIN_WAIT_MS.min(AGENT_COMMAND_SESSION_MAX_WAIT_MS)
-        );
+        assert_eq!(request.wait_ms, AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS);
     }
 
     #[test]
-    fn accepts_legacy_poll_and_clamps_legacy_wait_hint() {
+    fn rejects_removed_poll_action_and_wait_hint() {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let legacy_context = context(Arc::new(RecordingExecutor {
+        let context = context(Arc::new(RecordingExecutor {
             requests: Arc::clone(&requests),
             output: output(AgentCommandSessionStatus::Running, ""),
         }));
 
-        let result = execute(
-            &legacy_context,
-            json!({
-                "sessionId": session_id(),
-                "action": "poll",
-                "waitMs": AGENT_COMMAND_SESSION_MAX_WAIT_MS + 1
-            }),
-        );
-
-        assert!(result.ok, "{result:?}");
-        let request = requests.lock().unwrap().first().unwrap().clone();
-        assert_eq!(request.action, AgentCommandSessionAction::Poll);
-        assert_eq!(request.wait_ms, AGENT_COMMAND_SESSION_MAX_WAIT_MS);
-
-        let zero_wait_requests = Arc::new(Mutex::new(Vec::new()));
-        let zero_wait_context = context(Arc::new(RecordingExecutor {
-            requests: Arc::clone(&zero_wait_requests),
-            output: output(AgentCommandSessionStatus::Running, ""),
-        }));
-        let zero_wait_result = execute(
-            &zero_wait_context,
-            json!({
-                "sessionId": session_id(),
-                "action": "poll",
-                "waitMs": 0
-            }),
-        );
-        assert!(zero_wait_result.ok, "{zero_wait_result:?}");
-        assert_eq!(
-            zero_wait_requests.lock().unwrap()[0].wait_ms,
-            AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS
-        );
+        for args in [
+            json!({ "sessionId": session_id(), "action": "poll" }),
+            json!({ "sessionId": session_id(), "waitMs": 30_000 }),
+        ] {
+            let result = execute(&context, args);
+            assert!(!result.ok, "{result:?}");
+        }
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -9,7 +9,8 @@ import type {
   AgentProviderTransitionOperation,
   PendingAgentActionSnapshot,
   AgentSteerRunOutput,
-  SkillSelection
+  SkillSelection,
+  StorageConversationForkPoint
 } from '@mycopilot/protocol'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -200,7 +201,6 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onContinueInNewTask,
     onEditLastUserMessage,
     onGuideQueuedMessage,
-    onModelChangeRequested,
     onModelTransitionCancel,
     onModelTransitionConfirm,
     onModelTransitionRetry,
@@ -214,10 +214,9 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     composerDraft: ChatComposerDraft
     conversation: ChatConversation
     onComposerDraftChange: (draft: ChatComposerDraft) => void
-    onContinueInNewTask?: (messageId: string) => void
+    onContinueInNewTask?: (forkPoint: StorageConversationForkPoint) => void
     onEditLastUserMessage: (messageId: string, content: string) => Promise<void>
     onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
-    onModelChangeRequested?: (modelId: string) => void
     onModelTransitionCancel?: () => void
     onModelTransitionConfirm?: () => void
     onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void
@@ -247,6 +246,16 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       <output data-testid="draft-model-id">{composerDraft.modelId}</output>
       <output data-testid="draft-updated-at">{composerDraft.updatedAt}</output>
       <output data-testid="draft-message">{composerDraft.message}</output>
+      <output data-testid="draft-payload">
+        {JSON.stringify({
+          attachments: composerDraft.attachments,
+          message: composerDraft.message,
+          modelId: composerDraft.modelId,
+          permissionMode: composerDraft.permissionMode,
+          projectId: composerDraft.projectId,
+          skills: composerDraft.skills
+        })}
+      </output>
       <output data-testid="model-transition-confirmation">
         {modelTransitionConfirmation?.reason ?? ''}
       </output>
@@ -301,7 +310,12 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       </button>
       <button
         type="button"
-        onClick={() => onContinueInNewTask?.(conversation.messages.at(-1)?.id ?? '')}
+        onClick={() =>
+          onContinueInNewTask?.({
+            kind: 'assistant_reply',
+            assistantMessageId: conversation.messages.at(-1)?.id ?? ''
+          })
+        }
       >
         continue-in-new-task
       </button>
@@ -335,7 +349,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
         type="button"
         onClick={() =>
           onSubmitMessage('follow up', {
-            modelId: 'model-1',
+            modelId: composerDraft.modelId,
             permissionMode: 'full',
             projectId: 'project-a',
             skills: [skillSelection]
@@ -348,7 +362,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
         type="button"
         onClick={() =>
           onSubmitMessage('follow up', {
-            modelId: 'model-1',
+            modelId: composerDraft.modelId,
             permissionMode: 'full',
             projectId: 'project-a',
             skills: []
@@ -357,7 +371,16 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       >
         submit-without-skill
       </button>
-      <button type="button" onClick={() => onModelChangeRequested?.('model-2')}>
+      <button
+        type="button"
+        onClick={() =>
+          onComposerDraftChange({
+            ...composerDraft,
+            modelId: 'model-2',
+            updatedAt: Math.max(Date.now(), composerDraft.updatedAt + 1)
+          })
+        }
+      >
         select-model-2
       </button>
       <button type="button" onClick={onModelTransitionCancel}>
@@ -787,7 +810,8 @@ async function renderSelectedConversation() {
 }
 
 describe('provider transition guard', () => {
-  it('preflights a model-picker change and commits the draft only after compaction completes', async () => {
+  it('keeps model selection in the draft and preflights only when the user sends', async () => {
+    mockSuccessfulTurnStarts()
     const running = runningProviderTransition('model-2')
     testState.preflightProviderTransition.mockResolvedValueOnce({
       conversationId: 'conversation-a',
@@ -801,18 +825,27 @@ describe('provider transition guard', () => {
     const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
+    expect(testState.preflightProviderTransition).not.toHaveBeenCalled()
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    expect(testState.saveConversationMeta).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+    await expect.poll(() => testState.saveComposerDraft.mock.calls.length).toBeGreaterThan(0)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     await expect.poll(() => testState.preflightProviderTransition.mock.calls.length).toBe(1)
     await expect
       .element(screen.getByTestId('model-transition-confirmation'))
       .toHaveTextContent('api_provider_changed')
-    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-1')
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
 
     await screen.getByRole('button', { name: 'confirm-model-transition' }).click()
     await expect.poll(() => testState.startProviderTransition.mock.calls.length).toBe(1)
     await expect
       .element(screen.getByTestId('model-transition-operations'))
       .toHaveTextContent(`${running.operationId}:running`)
-    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-1')
+    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
 
     const conversationUpdatedAt = running.startedAt + 11
     emitProviderTransition({
@@ -825,12 +858,15 @@ describe('provider transition guard', () => {
     })
     await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
     await expect
-      .element(screen.getByTestId('conversation-updated-at'))
-      .toHaveTextContent(String(conversationUpdatedAt))
+      .poll(() => Number(screen.getByTestId('conversation-updated-at').element().textContent))
+      .toBeGreaterThanOrEqual(conversationUpdatedAt)
     await expect
       .poll(() => Number(screen.getByTestId('draft-updated-at').element().textContent))
       .toBeGreaterThanOrEqual(conversationUpdatedAt)
-    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    expect(
+      (testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput).modelId
+    ).toBe('model-2')
   })
 
   it('preflights a same-model submit before creating messages and resumes it after confirmation', async () => {
@@ -873,6 +909,62 @@ describe('provider transition guard', () => {
     ).toBe('follow up')
   })
 
+  it('keeps the full composer payload and target model when transition confirmation is cancelled', async () => {
+    const retainedDraft = createComposerDraft({
+      attachments: [
+        {
+          id: 'attachment-retained',
+          kind: 'file',
+          name: 'retained.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 8,
+          encoding: 'base64',
+          data: 'cmV0YWluZWQ='
+        }
+      ],
+      message: 'keep this draft',
+      modelId: 'model-1',
+      permissionMode: 'custom',
+      projectId: 'project-a',
+      skills: [skillSelection]
+    })
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': retainedDraft
+    })
+    testState.preflightProviderTransition.mockResolvedValueOnce({
+      conversationId: 'conversation-a',
+      targetModelId: 'model-1',
+      decision: 'requires_compaction',
+      reason: 'provider_protocol_changed',
+      operationId: 'provider-transition-cancelled',
+      transitionToken: 'transition-token-cancelled'
+    })
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-with-skill' }).click()
+    await expect
+      .element(screen.getByTestId('model-transition-confirmation'))
+      .toHaveTextContent('provider_protocol_changed')
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    expect(testState.preflightProviderTransition).toHaveBeenCalledTimes(1)
+    await expect
+      .element(screen.getByTestId('model-transition-confirmation'))
+      .toHaveTextContent('provider_protocol_changed')
+    await screen.getByRole('button', { name: 'cancel-model-transition' }).click()
+
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+    expect(JSON.parse(screen.getByTestId('draft-payload').element().textContent ?? '{}')).toEqual({
+      attachments: retainedDraft.attachments,
+      message: retainedDraft.message,
+      modelId: 'model-2',
+      permissionMode: retainedDraft.permissionMode,
+      projectId: retainedDraft.projectId,
+      skills: retainedDraft.skills
+    })
+  })
+
   it('keeps the original model after failure and switches only after an explicit retry succeeds', async () => {
     const running = runningProviderTransition('model-2')
     const completedRetry = completedProviderTransition('model-2', {
@@ -902,11 +994,12 @@ describe('provider transition guard', () => {
     const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     await screen.getByRole('button', { name: 'confirm-model-transition' }).click()
     await expect
       .element(screen.getByTestId('model-transition-operations'))
       .toHaveTextContent(`${running.operationId}:failed`)
-    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-1')
+    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
 
     await screen.getByRole('button', { name: 'retry-model-transition' }).click()
     await expect.poll(() => testState.startProviderTransition.mock.calls.length).toBe(2)

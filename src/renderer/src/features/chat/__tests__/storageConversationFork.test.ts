@@ -10,7 +10,7 @@ const { forkConversation } = await import('../../storage/storageClient')
 
 const input = {
   sourceConversationId: 'conversation-1',
-  throughAssistantMessageId: 'assistant-1',
+  forkPoint: { kind: 'assistant_reply', assistantMessageId: 'assistant-1' } as const,
   requestId: 'conversation-fork-request-1'
 }
 
@@ -27,9 +27,11 @@ describe('conversation fork storage client', () => {
     } satisfies StorageChatConversationRecord
     storage.forkConversation.mockResolvedValueOnce({ ok: true, value: conversation })
 
-    await expect(
-      forkConversation(input.sourceConversationId, input.throughAssistantMessageId, input.requestId)
-    ).resolves.toMatchObject({ id: conversation.id, title: conversation.title })
+    await expect(forkConversation(input)).resolves.toMatchObject({
+      id: conversation.id,
+      title: conversation.title
+    })
+    expect(storage.forkConversation).toHaveBeenCalledWith(input)
   })
 
   it('restores a typed HostInvocationError from the serializable failure envelope', async () => {
@@ -45,11 +47,7 @@ describe('conversation fork storage client', () => {
     })
 
     try {
-      await forkConversation(
-        input.sourceConversationId,
-        input.throughAssistantMessageId,
-        input.requestId
-      )
+      await forkConversation(input)
       expect.fail('a rejected fork must throw')
     } catch (error) {
       expect(error).toBeInstanceOf(HostInvocationError)
