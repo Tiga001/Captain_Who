@@ -1,5 +1,5 @@
 import { Check, ChevronDown } from 'lucide-react'
-import { useCallback, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { FocusEvent, KeyboardEvent, ReactNode } from 'react'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import './SettingsSelect.css'
@@ -13,6 +13,7 @@ export interface SettingsSelectOption<Value extends string = string> {
 interface SettingsSelectProps<Value extends string> {
   ariaLabel: string
   className?: string
+  disabled?: boolean
   leadingIcon?: ReactNode
   onChange: (value: Value) => void
   options: ReadonlyArray<SettingsSelectOption<Value>>
@@ -23,6 +24,7 @@ interface SettingsSelectProps<Value extends string> {
 export function SettingsSelect<Value extends string>({
   ariaLabel,
   className,
+  disabled = false,
   leadingIcon,
   onChange,
   options,
@@ -42,6 +44,10 @@ export function SettingsSelect<Value extends string>({
   const closeMenu = useCallback(() => setOpen(false), [])
 
   useDismissOnOutsidePointer(rootRef, isOpen, closeMenu)
+
+  useEffect(() => {
+    if (disabled) closeMenu()
+  }, [closeMenu, disabled])
 
   if (!selectedOption) return null
 
@@ -117,6 +123,7 @@ export function SettingsSelect<Value extends string>({
   return (
     <span
       className={['settings-select', className].filter(Boolean).join(' ')}
+      data-disabled={disabled || undefined}
       data-open={isOpen || undefined}
       onBlur={handleBlur}
       ref={rootRef}
@@ -127,6 +134,7 @@ export function SettingsSelect<Value extends string>({
         aria-haspopup="listbox"
         aria-label={`${ariaLabel}: ${selectedOption.label}`}
         className="settings-select__button"
+        disabled={disabled}
         onClick={() => (isOpen ? closeMenu() : openMenu())}
         onKeyDown={handleTriggerKeyDown}
         ref={triggerRef}

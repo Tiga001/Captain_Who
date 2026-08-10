@@ -8,11 +8,6 @@ vi.mock('../../config/FrontendConfigProvider', () => ({
 const { DeepSeekProviderSettingsEditor } =
   await import('../../features/settings/pages/configuration/providerSettingsEditors')
 
-function changeSelect(select: HTMLSelectElement, value: string) {
-  select.value = value
-  select.dispatchEvent(new Event('change', { bubbles: true }))
-}
-
 describe('DeepSeekProviderSettingsEditor', () => {
   it('keeps edits local until confirm and normalizes disabled Thinking', async () => {
     const onCancel = vi.fn()
@@ -25,35 +20,53 @@ describe('DeepSeekProviderSettingsEditor', () => {
       />
     )
 
-    const mode = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="configuration.deepSeekSettings.thinkingMode"]'
-    )
-    const effort = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="configuration.deepSeekSettings.reasoningEffort"]'
-    )
+    const effort = screen.getByRole('button', {
+      name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortMax'
+    })
 
-    // Labels wrap the native controls, so their accessible names are supplied by their text.
-    expect(mode).not.toBeNull()
-    expect(effort).not.toBeNull()
-    expect(Array.from(mode!.options).map((option) => option.value)).toEqual([
-      'provider_default',
-      'enabled',
-      'disabled'
+    await effort.click()
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '.provider-settings-dialog__select .settings-select__option-label'
+        )
+      ).map((option) => option.textContent)
+    ).toEqual([
+      'configuration.deepSeekSettings.effortProviderDefault',
+      'configuration.deepSeekSettings.effortHigh',
+      'configuration.deepSeekSettings.effortMax'
     ])
-    expect(Array.from(effort!.options).map((option) => option.value)).toEqual([
-      'provider_default',
-      'high',
-      'max'
+    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortMax' }).click()
+
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingEnabled'
+      })
+      .click()
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          '.provider-settings-dialog__select .settings-select__option-label'
+        )
+      ).map((option) => option.textContent)
+    ).toEqual([
+      'configuration.deepSeekSettings.thinkingProviderDefault',
+      'configuration.deepSeekSettings.thinkingEnabled',
+      'configuration.deepSeekSettings.thinkingDisabled'
     ])
     expect(document.body.textContent).toContain(
       'configuration.deepSeekSettings.defaultThinkingDescription'
     )
     expect(document.querySelector('.provider-settings-dialog__notes')).toBeNull()
     expect(document.querySelectorAll('.provider-settings-dialog__card li')).toHaveLength(0)
-    changeSelect(mode!, 'disabled')
+    await screen
+      .getByRole('option', { name: 'configuration.deepSeekSettings.thinkingDisabled' })
+      .click()
 
-    await expect.poll(() => effort!.value).toBe('provider_default')
-    expect(effort!.disabled).toBe(true)
+    const disabledEffort = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortProviderDefault"]'
+    )
+    await expect.poll(() => disabledEffort?.disabled).toBe(true)
     expect(onConfirm).not.toHaveBeenCalled()
 
     await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
@@ -73,14 +86,50 @@ describe('DeepSeekProviderSettingsEditor', () => {
         onConfirm={onConfirm}
       />
     )
-    const mode = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="configuration.deepSeekSettings.thinkingMode"]'
-    )!
-    changeSelect(mode, 'enabled')
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingProviderDefault'
+      })
+      .click()
+    await screen
+      .getByRole('option', { name: 'configuration.deepSeekSettings.thinkingEnabled' })
+      .click()
 
     await screen.getByText('configuration.providerSettings.cancel').click()
 
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onConfirm).not.toHaveBeenCalled()
+  })
+
+  it('closes an open settings menu before closing the dialog with Escape', async () => {
+    const onCancel = vi.fn()
+    const screen = await render(
+      <DeepSeekProviderSettingsEditor
+        initialSettings={{ reasoning: { mode: 'enabled', effort: 'high' } }}
+        onCancel={onCancel}
+        onConfirm={vi.fn()}
+      />
+    )
+
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingEnabled'
+      })
+      .click()
+    expect(
+      document.querySelector('.provider-settings-dialog__select[data-open="true"]')
+    ).not.toBeNull()
+
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' })
+    )
+
+    await expect
+      .poll(() => document.querySelector('.provider-settings-dialog__select[data-open="true"]'))
+      .toBeNull()
+    expect(onCancel).not.toHaveBeenCalled()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    expect(onCancel).toHaveBeenCalledOnce()
   })
 })

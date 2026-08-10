@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type ComponentType } from 'react'
 import { createPortal } from 'react-dom'
 import type { ProviderReasoningEffort, ProviderReasoningMode } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
+import { SettingsSelect, type SettingsSelectOption } from '../../components/SettingsSelect'
 
 export interface DeepSeekProviderSettingsDraft {
   reasoning: {
@@ -45,6 +46,22 @@ export function DeepSeekProviderSettingsEditor({
   const [settings, setSettings] = useState<DeepSeekProviderSettingsDraft>(() => ({
     reasoning: { ...initialSettings.reasoning }
   }))
+  const thinkingModeOptions: ReadonlyArray<SettingsSelectOption<ProviderReasoningMode>> = [
+    {
+      value: 'provider_default',
+      label: t('configuration.deepSeekSettings.thinkingProviderDefault')
+    },
+    { value: 'enabled', label: t('configuration.deepSeekSettings.thinkingEnabled') },
+    { value: 'disabled', label: t('configuration.deepSeekSettings.thinkingDisabled') }
+  ]
+  const reasoningEffortOptions: ReadonlyArray<SettingsSelectOption<ProviderReasoningEffort>> = [
+    {
+      value: 'provider_default',
+      label: t('configuration.deepSeekSettings.effortProviderDefault')
+    },
+    { value: 'high', label: t('configuration.deepSeekSettings.effortHigh') },
+    { value: 'max', label: t('configuration.deepSeekSettings.effortMax') }
+  ]
 
   useEffect(() => {
     previouslyFocusedRef.current =
@@ -59,7 +76,9 @@ export function DeepSeekProviderSettingsEditor({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
       if (event.key === 'Escape') {
+        if (cardRef.current?.querySelector('.settings-select[data-open="true"]')) return
         event.preventDefault()
         onCancel()
         return
@@ -126,45 +145,35 @@ export function DeepSeekProviderSettingsEditor({
         </p>
 
         <div className="provider-settings-dialog__fields">
-          <label className="provider-settings-dialog__field">
+          <div className="provider-settings-dialog__field">
             <span>{t('configuration.deepSeekSettings.thinkingMode')}</span>
-            <select
-              aria-label={t('configuration.deepSeekSettings.thinkingMode')}
+            <SettingsSelect
+              ariaLabel={t('configuration.deepSeekSettings.thinkingMode')}
+              className="provider-settings-dialog__select"
+              options={thinkingModeOptions}
               value={settings.reasoning.mode}
-              onChange={(event) => updateMode(event.target.value as ProviderReasoningMode)}
-            >
-              <option value="provider_default">
-                {t('configuration.deepSeekSettings.thinkingProviderDefault')}
-              </option>
-              <option value="enabled">{t('configuration.deepSeekSettings.thinkingEnabled')}</option>
-              <option value="disabled">
-                {t('configuration.deepSeekSettings.thinkingDisabled')}
-              </option>
-            </select>
-          </label>
+              onChange={updateMode}
+            />
+          </div>
 
-          <label className="provider-settings-dialog__field">
+          <div className="provider-settings-dialog__field">
             <span>{t('configuration.deepSeekSettings.reasoningEffort')}</span>
-            <select
-              aria-label={t('configuration.deepSeekSettings.reasoningEffort')}
+            <SettingsSelect
+              ariaLabel={t('configuration.deepSeekSettings.reasoningEffort')}
+              className="provider-settings-dialog__select"
+              options={reasoningEffortOptions}
               value={settings.reasoning.effort}
               disabled={settings.reasoning.mode === 'disabled'}
-              onChange={(event) =>
+              onChange={(effort) =>
                 setSettings((current) => ({
                   reasoning: {
                     ...current.reasoning,
-                    effort: event.target.value as ProviderReasoningEffort
+                    effort
                   }
                 }))
               }
-            >
-              <option value="provider_default">
-                {t('configuration.deepSeekSettings.effortProviderDefault')}
-              </option>
-              <option value="high">{t('configuration.deepSeekSettings.effortHigh')}</option>
-              <option value="max">{t('configuration.deepSeekSettings.effortMax')}</option>
-            </select>
-          </label>
+            />
+          </div>
         </div>
 
         <div className="provider-settings-dialog__actions">

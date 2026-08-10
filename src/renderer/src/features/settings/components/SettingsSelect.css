@@ -25,7 +25,7 @@
     border-color 120ms ease;
 }
 
-.settings-select__button:hover,
+.settings-select__button:hover:not(:disabled),
 .settings-select[data-open='true'] .settings-select__button {
   background: color-mix(
     in srgb,
@@ -33,6 +33,11 @@
     var(--mc-color-text-primary) 8%
   );
   border-color: var(--mc-color-border-default);
+}
+
+.settings-select__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .settings-select__button:focus-visible {

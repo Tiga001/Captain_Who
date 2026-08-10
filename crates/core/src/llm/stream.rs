@@ -509,7 +509,10 @@ impl OpenAiStreamAccumulator {
                     .and_then(Value::as_u64)
                     .map(|index| index as usize);
                 let provider_index = explicit_index.unwrap_or(fallback_index);
-                let id = call.get("id").and_then(Value::as_str);
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty());
                 let slot = self.resolve_tool_call_slot(provider_index, id);
                 let entry = &mut self.tool_calls[slot];
                 if let Some(function) = call.get("function") {
@@ -871,6 +874,70 @@ mod tests {
             "conda env list"
         );
         assert_eq!(response.provider_tool_calls()[0].args["reason"], "检查环境");
+    }
+
+    #[test]
+    fn openai_stream_treats_empty_continuation_ids_as_absent() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        let frames = [
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call-web-search",
+                            "function": { "name": "web_search" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "",
+                            "function": { "name": "", "arguments": "{\"query\":" }
+                        }]
+                    }
+                }]
+            }),
+            json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "",
+                            "function": { "name": "", "arguments": "\"浙江大学最新信息\"}" }
+                        }]
+                    }
+                }]
+            }),
+        ];
+
+        for frame in frames {
+            process_sse_frame(
+                &format!("data: {frame}\n\n"),
+                &mut accumulator,
+                &mut |delta| deltas.push(delta),
+            )
+            .unwrap();
+        }
+
+        let response = accumulator.finish().unwrap();
+        assert_eq!(
+            joined_tool_input(&deltas),
+            "{\"query\":\"浙江大学最新信息\"}"
+        );
+        assert_eq!(response.provider_tool_calls().len(), 1);
+        assert_eq!(response.provider_tool_calls()[0].id, "call-web-search");
+        assert_eq!(response.provider_tool_calls()[0].name, "web_search");
+        assert_eq!(
+            response.provider_tool_calls()[0].args["query"],
+            "浙江大学最新信息"
+        );
     }
 
     #[test]
