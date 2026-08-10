@@ -1,4 +1,6 @@
-import { Check } from 'lucide-react'
+import { Check, CircleHelp } from 'lucide-react'
+import { useState } from 'react'
+import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
 import { formatContextWindow } from './modelPresentation'
@@ -24,6 +26,10 @@ export function ModelProviderSettings({
   onToggleModel
 }: ModelProviderSettingsProps) {
   const { t } = useFrontendConfig()
+  const [isDefaultApiHelpOpen, setDefaultApiHelpOpen] = useState(false)
+  const helpDescription = `${t('configuration.modelSettingsHelp.description')} ${t(
+    'configuration.modelSettingsHelp.note'
+  )}`
 
   return (
     <section
@@ -33,7 +39,20 @@ export function ModelProviderSettings({
       <h1 id="model-settings-heading">{t('configuration.model')}</h1>
 
       <div className="configuration-form-block settings-list-section">
-        <h2>{t('configuration.modelSettings')}</h2>
+        <div className="model-settings-heading">
+          <h2>{t('configuration.modelSettings')}</h2>
+          <button
+            className="model-settings-help-button"
+            type="button"
+            aria-expanded={isDefaultApiHelpOpen}
+            aria-haspopup="dialog"
+            aria-label={t('configuration.modelSettingsHelp.open')}
+            title={t('configuration.modelSettingsHelp.open')}
+            onClick={() => setDefaultApiHelpOpen(true)}
+          >
+            <CircleHelp aria-hidden="true" />
+          </button>
+        </div>
 
         <div className="settings-list">
           <label className="configuration-field settings-list-row">
@@ -102,6 +121,19 @@ export function ModelProviderSettings({
           </label>
         ))}
       </div>
+
+      {isDefaultApiHelpOpen && (
+        <ConfirmationDialog
+          cancelLabel={t('configuration.modelSettingsHelp.close')}
+          confirmLabel={t('configuration.modelSettingsHelp.acknowledge')}
+          confirmVariant="primary"
+          description={helpDescription}
+          onCancel={() => setDefaultApiHelpOpen(false)}
+          onConfirm={() => setDefaultApiHelpOpen(false)}
+          showCancelButton={false}
+          title={t('configuration.modelSettingsHelp.title')}
+        />
+      )}
     </section>
   )
 }

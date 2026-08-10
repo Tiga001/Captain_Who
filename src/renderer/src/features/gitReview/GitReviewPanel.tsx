@@ -8,6 +8,7 @@ import {
   Ellipsis,
   FileSearch,
   FileText,
+  Files,
   FolderOpen,
   ListCollapse,
   LoaderCircle,
@@ -24,6 +25,7 @@ import { GitReviewDiffCard } from './GitReviewDiffCard'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
 import { canHydrateGitReviewFile } from './gitReviewFileCapabilities'
 import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewPreferences'
+import { projectGitReviewSummary } from './gitReviewSummaryProjection'
 import { getTargetGitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewViewMode } from './gitReviewViewMode'
 import { useGitReview } from './useGitReview'
@@ -93,6 +95,7 @@ export function GitReviewPanel({
   scopeNavigation
 }: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
+  const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
   const {
     cancelQueuedFileContentsExcept,
     cancelQueuedFileDiffsExcept,
@@ -110,8 +113,31 @@ export function GitReviewPanel({
     setHotDiffFileIds,
     setHotFullContentFileIds,
     setScope,
-    summaryState
+    summaryState: sourceSummaryState
   } = useGitReview(projectId, isActive, conversationId, scopeNavigation?.scope)
+  const projectedSummary = useMemo(() => {
+    if (!sourceSummaryState.value) return undefined
+    return projectGitReviewSummary(sourceSummaryState.value, {
+      includeFilesWithoutStats: reviewPreferences.showAllFileTypes
+    })
+  }, [reviewPreferences.showAllFileTypes, sourceSummaryState.value])
+  const summaryError = sourceSummaryState.status === 'error' ? sourceSummaryState.error : ''
+  const summaryState = useMemo((): typeof sourceSummaryState => {
+    if (sourceSummaryState.status === 'ready') {
+      return { status: 'ready', value: projectedSummary ?? sourceSummaryState.value }
+    }
+    if (sourceSummaryState.status === 'error') {
+      return {
+        error: summaryError,
+        status: 'error',
+        ...(projectedSummary ? { value: projectedSummary } : {})
+      }
+    }
+    return {
+      status: sourceSummaryState.status,
+      ...(projectedSummary ? { value: projectedSummary } : {})
+    }
+  }, [projectedSummary, sourceSummaryState.status, sourceSummaryState.value, summaryError])
   const handledScopeNavigationRequestRef = useRef<number | null>(null)
   const [expandedFileIds, setExpandedFileIds] = useState<Set<string>>(() => new Set())
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
@@ -119,7 +145,6 @@ export function GitReviewPanel({
     useState<PendingReviewFileNavigation | null>(null)
   const [viewMode, setViewMode] = useState<GitReviewViewMode>('unified')
   const [wrapLines, setWrapLines] = useState(false)
-  const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
   const [showFileList, setShowFileList] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -640,6 +665,26 @@ export function GitReviewPanel({
                   <WrapText aria-hidden="true" />
                   {t('gitReview.wrapLines')}
                   {wrapLines && <Check className="git-review__menu-check" aria-hidden="true" />}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setReviewPreferences((current) => {
+                      const next = {
+                        ...current,
+                        showAllFileTypes: !current.showAllFileTypes
+                      }
+                      saveGitReviewPreferences(next)
+                      return next
+                    })
+                    setOpenMenu(null)
+                  }}
+                >
+                  <Files aria-hidden="true" />
+                  {reviewPreferences.showAllFileTypes
+                    ? t('gitReview.dontShowAllFileTypes')
+                    : t('gitReview.showAllFileTypes')}
                 </button>
                 <div className="git-review__menu-separator" role="separator" />
                 <button

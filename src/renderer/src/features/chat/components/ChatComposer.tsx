@@ -81,6 +81,7 @@ interface ChatComposerProps {
   canGuideQueuedMessages?: boolean
   isGenerating?: boolean
   isModelTransitionRunning?: boolean
+  messageSyncKey?: string
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
@@ -107,6 +108,7 @@ export function ChatComposer({
   canGuideQueuedMessages = false,
   isGenerating = false,
   isModelTransitionRunning = false,
+  messageSyncKey,
   onDraftChange,
   onDraftMessageChange,
   onGuideQueuedMessage,
@@ -145,6 +147,7 @@ export function ChatComposer({
   const [message, setMessage] = useState(draft.message)
   const previousSkillScopeRef = useRef({ projectId: draft.projectId, resetKey })
   const previousResetKeyRef = useRef(resetKey)
+  const previousMessageSyncKeyRef = useRef(messageSyncKey)
   const lastExternalMessageRef = useRef(draft.message)
   const permissionOptions = useMemo(
     () =>
@@ -254,6 +257,20 @@ export function ChatComposer({
   useEffect(() => {
     if (previousResetKeyRef.current !== resetKey) {
       previousResetKeyRef.current = resetKey
+      previousMessageSyncKeyRef.current = messageSyncKey
+      lastExternalMessageRef.current = draft.message
+      setMessage(draft.message)
+      draftRef.current = draft
+      return
+    }
+
+    // Message keystrokes are persisted through a ref-only fast path so the whole shell does not
+    // rerender on every character. A committed user message is the explicit signal that a later
+    // parent draft (including an empty one after a deferred provider transition) is authoritative.
+    // Without this key, empty -> typed locally -> empty externally is indistinguishable from a
+    // stale parent render because both parent values are the same empty string.
+    if (previousMessageSyncKeyRef.current !== messageSyncKey) {
+      previousMessageSyncKeyRef.current = messageSyncKey
       lastExternalMessageRef.current = draft.message
       setMessage(draft.message)
       draftRef.current = draft
@@ -271,7 +288,7 @@ export function ChatComposer({
       ...draft,
       message
     }
-  }, [draft, message, resetKey])
+  }, [draft, message, messageSyncKey, resetKey])
 
   useEffect(() => {
     if (!isModelTransitionRunning) return

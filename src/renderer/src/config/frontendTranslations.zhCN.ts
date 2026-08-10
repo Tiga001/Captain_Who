@@ -204,6 +204,8 @@ export const zhCNTranslations = {
   'gitReview.refresh': '刷新更改',
   'gitReview.refreshing': '正在刷新更改…',
   'gitReview.wrapLines': '自动换行',
+  'gitReview.showAllFileTypes': '展示全部类型',
+  'gitReview.dontShowAllFileTypes': '不展示全部类型',
   'gitReview.loadFullFiles': '加载完整文件',
   'gitReview.dontLoadFullFiles': '不加载完整文件',
   'gitReview.expandAll': '展开全部差异',
@@ -1349,6 +1351,13 @@ export const zhCNTranslations = {
 
   'configuration.model': '对话模型',
   'configuration.modelSettings': '模型配置',
+  'configuration.modelSettingsHelp.open': '查看配置说明',
+  'configuration.modelSettingsHelp.title': '默认接口配置',
+  'configuration.modelSettingsHelp.description':
+    '这里设置模型默认使用的 API 地址和 Token。模型未单独配置时会使用这里的值；模型内部填写了对应配置时，则优先使用模型自己的配置。',
+  'configuration.modelSettingsHelp.note': '修改这里的配置，只会影响仍在使用默认配置的模型。',
+  'configuration.modelSettingsHelp.acknowledge': '知道了',
+  'configuration.modelSettingsHelp.close': '关闭默认接口配置',
   'configuration.availableModels': '可用模型',
   'configuration.manageModels': '管理模型',
   'configuration.availableModelList': '可用模型列表',

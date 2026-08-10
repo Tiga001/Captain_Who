@@ -2,10 +2,12 @@ const GIT_REVIEW_PREFERENCES_KEY = 'mycopilot.gitReview.preferences.v1'
 
 export interface GitReviewPreferences {
   loadFullFiles: boolean
+  showAllFileTypes: boolean
 }
 
 const DEFAULT_GIT_REVIEW_PREFERENCES: GitReviewPreferences = {
-  loadFullFiles: true
+  loadFullFiles: true,
+  showAllFileTypes: false
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -26,7 +28,13 @@ export function loadGitReviewPreferences(): GitReviewPreferences {
     if (!isRecord(value) || typeof value.loadFullFiles !== 'boolean') {
       return DEFAULT_GIT_REVIEW_PREFERENCES
     }
-    return { loadFullFiles: value.loadFullFiles }
+    return {
+      loadFullFiles: value.loadFullFiles,
+      showAllFileTypes:
+        typeof value.showAllFileTypes === 'boolean'
+          ? value.showAllFileTypes
+          : DEFAULT_GIT_REVIEW_PREFERENCES.showAllFileTypes
+    }
   } catch {
     return DEFAULT_GIT_REVIEW_PREFERENCES
   }
@@ -38,7 +46,10 @@ export function saveGitReviewPreferences(preferences: GitReviewPreferences): voi
   try {
     window.localStorage.setItem(
       GIT_REVIEW_PREFERENCES_KEY,
-      JSON.stringify({ loadFullFiles: preferences.loadFullFiles })
+      JSON.stringify({
+        loadFullFiles: preferences.loadFullFiles,
+        showAllFileTypes: preferences.showAllFileTypes
+      })
     )
   } catch {
     // Preference persistence is best-effort; Review remains fully usable without localStorage.

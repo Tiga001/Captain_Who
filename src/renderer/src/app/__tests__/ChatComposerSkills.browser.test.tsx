@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ComponentProps } from 'react'
 import type { SkillDescriptor, SkillsListOutput } from '@mycopilot/protocol'
 import { userEvent } from 'vitest/browser'
@@ -216,6 +216,70 @@ function TestComposer({
   )
 }
 
+function RefPersistedMessageComposer() {
+  const [renderedDraft, setRenderedDraft] = useState(() =>
+    createComposerDraft({ modelId: 'model-1', projectId: 'project-a' })
+  )
+  const authoritativeDraftRef = useRef(renderedDraft)
+  const [messageSyncKey, setMessageSyncKey] = useState('user-before-transition')
+
+  return (
+    <div style={{ margin: 120, width: 620 }}>
+      <ChatComposer
+        draft={renderedDraft}
+        messageSyncKey={messageSyncKey}
+        onDraftChange={(nextDraft) => {
+          authoritativeDraftRef.current = nextDraft
+          setRenderedDraft(nextDraft)
+        }}
+        onDraftMessageChange={(nextDraft) => {
+          // Match AppShell's keystroke fast path: persist the authoritative value without forcing
+          // the whole shell to rerender.
+          authoritativeDraftRef.current = nextDraft
+        }}
+        onSubmitMessage={() => false}
+      />
+      <button
+        type="button"
+        onClick={() => setRenderedDraft((currentDraft) => ({ ...currentDraft }))}
+      >
+        rerender-stale-draft
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          const currentDraft = authoritativeDraftRef.current
+          const committedDraft = {
+            ...currentDraft,
+            message: '',
+            updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
+          }
+          authoritativeDraftRef.current = committedDraft
+          setRenderedDraft(committedDraft)
+          setMessageSyncKey('user-after-transition')
+        }}
+      >
+        commit-user-message
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          const currentDraft = authoritativeDraftRef.current
+          const committedDraft = {
+            ...currentDraft,
+            updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
+          }
+          authoritativeDraftRef.current = committedDraft
+          setRenderedDraft(committedDraft)
+          setMessageSyncKey('queued-user-after-transition')
+        }}
+      >
+        commit-queued-user-message
+      </button>
+    </div>
+  )
+}
+
 beforeEach(() => {
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
@@ -304,6 +368,33 @@ describe('ChatComposer model picker', () => {
     await expect
       .element(screen.getByRole('button', { name: /^chat\.removeSkill Repository auditor/ }))
       .toBeVisible()
+  })
+
+  it('clears ref-persisted input when a deferred transition commits the user message', async () => {
+    const screen = await render(<RefPersistedMessageComposer />)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+
+    await input.fill('send after provider transition')
+    await screen.getByRole('button', { name: 'chat.send' }).click()
+    await expect.element(input).toHaveValue('send after provider transition')
+
+    // A stale parent rerender must not overwrite local keystrokes while the transition is pending.
+    await screen.getByRole('button', { name: 'rerender-stale-draft' }).click()
+    await expect.element(input).toHaveValue('send after provider transition')
+
+    // The committed user-message identity is the explicit authority boundary for clearing it.
+    await screen.getByRole('button', { name: 'commit-user-message' }).click()
+    await expect.element(input).toHaveValue('')
+  })
+
+  it('keeps a newer ref-persisted draft when a queued message commits', async () => {
+    const screen = await render(<RefPersistedMessageComposer />)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+
+    await input.fill('new draft while the queued message runs')
+    await screen.getByRole('button', { name: 'commit-queued-user-message' }).click()
+
+    await expect.element(input).toHaveValue('new draft while the queued message runs')
   })
 })
 

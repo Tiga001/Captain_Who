@@ -863,6 +863,7 @@ describe('provider transition guard', () => {
     await expect
       .poll(() => Number(screen.getByTestId('draft-updated-at').element().textContent))
       .toBeGreaterThanOrEqual(conversationUpdatedAt)
+    await expect.poll(() => screen.getByTestId('draft-message').element().textContent).toBe('')
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
     expect(
       (testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput).modelId

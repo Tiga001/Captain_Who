@@ -204,6 +204,8 @@ export const enUSTranslations = {
   'gitReview.refresh': 'Refresh changes',
   'gitReview.refreshing': 'Refreshing changes…',
   'gitReview.wrapLines': 'Wrap lines',
+  'gitReview.showAllFileTypes': 'Show all file types',
+  'gitReview.dontShowAllFileTypes': "Don't show all file types",
   'gitReview.loadFullFiles': 'Load full files',
   'gitReview.dontLoadFullFiles': "Don't load full files",
   'gitReview.expandAll': 'Expand all diffs',
@@ -1410,6 +1412,14 @@ export const enUSTranslations = {
 
   'configuration.model': 'Chat model',
   'configuration.modelSettings': 'Model configuration',
+  'configuration.modelSettingsHelp.open': 'View configuration details',
+  'configuration.modelSettingsHelp.title': 'Default API configuration',
+  'configuration.modelSettingsHelp.description':
+    'Set the default API URL and token for models here. Models use these values unless they have their own corresponding configuration, which takes precedence.',
+  'configuration.modelSettingsHelp.note':
+    'Changes here affect only models that still use the defaults.',
+  'configuration.modelSettingsHelp.acknowledge': 'Got it',
+  'configuration.modelSettingsHelp.close': 'Close default API configuration',
   'configuration.availableModels': 'Available models',
   'configuration.manageModels': 'Manage models',
   'configuration.availableModelList': 'Available models list',

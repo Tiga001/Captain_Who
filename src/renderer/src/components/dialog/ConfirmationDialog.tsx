@@ -13,6 +13,7 @@ interface ConfirmationDialogProps {
   fallbackFocusRef?: RefObject<HTMLElement | null>
   onCancel: () => void
   onConfirm: () => void | Promise<void>
+  showCancelButton?: boolean
   title: string
 }
 
@@ -24,6 +25,7 @@ export function ConfirmationDialog({
   fallbackFocusRef,
   onCancel,
   onConfirm,
+  showCancelButton = true,
   title
 }: ConfirmationDialogProps) {
   const titleId = useId()
@@ -32,13 +34,20 @@ export function ConfirmationDialog({
   const confirmingRef = useRef(false)
   const cardRef = useRef<HTMLElement>(null)
   const cancelButtonRef = useRef<HTMLButtonElement>(null)
+  const confirmButtonRef = useRef<HTMLButtonElement>(null)
   const previouslyFocusedRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     previouslyFocusedRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null
     const fallbackFocus = fallbackFocusRef?.current ?? null
-    const frameId = window.requestAnimationFrame(() => cancelButtonRef.current?.focus())
+    const frameId = window.requestAnimationFrame(() => {
+      if (showCancelButton) {
+        cancelButtonRef.current?.focus()
+      } else {
+        confirmButtonRef.current?.focus()
+      }
+    })
 
     return () => {
       window.cancelAnimationFrame(frameId)
@@ -49,7 +58,7 @@ export function ConfirmationDialog({
         fallbackFocus?.focus()
       }
     }
-  }, [fallbackFocusRef])
+  }, [fallbackFocusRef, showCancelButton])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -119,16 +128,19 @@ export function ConfirmationDialog({
         <h2 id={titleId}>{title}</h2>
         {description && <p id={descriptionId}>{description}</p>}
         <div className="app-confirm-dialog__actions">
+          {showCancelButton && (
+            <button
+              ref={cancelButtonRef}
+              className="app-confirm-dialog__button app-confirm-dialog__button--cancel"
+              type="button"
+              disabled={isConfirming}
+              onClick={onCancel}
+            >
+              {cancelLabel}
+            </button>
+          )}
           <button
-            ref={cancelButtonRef}
-            className="app-confirm-dialog__button app-confirm-dialog__button--cancel"
-            type="button"
-            disabled={isConfirming}
-            onClick={onCancel}
-          >
-            {cancelLabel}
-          </button>
-          <button
+            ref={confirmButtonRef}
             className={`app-confirm-dialog__button app-confirm-dialog__button--${confirmVariant}`}
             type="button"
             disabled={isConfirming}

@@ -21,15 +21,22 @@ vi.mock('../useGitReview', async () => {
     status: 'modified' as const
   }))
   const summary = {
-    files,
+    files: [
+      ...files,
+      {
+        id: 'binary-image',
+        path: 'assets/preview.png',
+        status: 'added' as const
+      }
+    ],
     repositoryId: 'repository-1',
     scope: 'unstaged',
     snapshotId: 'snapshot-1',
     stats: {
-      additions: files.length,
-      deletions: 0,
-      fileCount: files.length,
-      lineCountsComplete: true
+      additions: 999,
+      deletions: 888,
+      fileCount: files.length + 1,
+      lineCountsComplete: false
     },
     truncated: false
   }
@@ -111,6 +118,59 @@ beforeEach(() => {
 })
 
 describe('GitReviewPanel interactions', () => {
+  it('shows and totals only files with concrete line statistics', async () => {
+    const screen = await render(
+      <div style={{ height: 500, width: 440 }}>
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
+      </div>
+    )
+
+    expect(screen.container.querySelectorAll('.git-review__diff-card')).toHaveLength(3)
+    expect(screen.container.textContent).not.toContain('assets/preview.png')
+    expect(screen.container.querySelector('.git-review__file-count')?.textContent).toBe('3')
+    expect(screen.container.querySelector('.git-review__line-stats')?.textContent).toBe('+3-0')
+    expect(screen.container.querySelector('.git-review__line-stats')?.textContent).not.toContain(
+      '?'
+    )
+  })
+
+  it('shows every file type while totaling only concrete line statistics', async () => {
+    const screen = await render(
+      <div style={{ height: 500, width: 440 }}>
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
+      </div>
+    )
+
+    await screen.getByRole('button', { name: 'gitReview.options' }).click()
+    await screen.getByRole('menuitem', { name: 'gitReview.showAllFileTypes' }).click()
+
+    await expect
+      .poll(() => screen.container.querySelectorAll('.git-review__diff-card').length)
+      .toBe(4)
+    expect(screen.container.textContent).toContain('assets/preview.png')
+    expect(screen.container.querySelector('.git-review__file-count')?.textContent).toBe('4')
+    expect(screen.container.querySelector('.git-review__line-stats')?.textContent).toBe('+3-0')
+    expect(screen.container.querySelector('.git-review__line-stats')?.textContent).not.toContain(
+      '?'
+    )
+    expect(window.localStorage.getItem('mycopilot.gitReview.preferences.v1')).toBe(
+      JSON.stringify({ loadFullFiles: true, showAllFileTypes: true })
+    )
+
+    await screen.getByRole('button', { name: 'gitReview.options' }).click()
+    await screen.getByRole('menuitem', { name: 'gitReview.dontShowAllFileTypes' }).click()
+
+    await expect
+      .poll(() => screen.container.querySelectorAll('.git-review__diff-card').length)
+      .toBe(3)
+    expect(screen.container.textContent).not.toContain('assets/preview.png')
+    expect(screen.container.querySelector('.git-review__file-count')?.textContent).toBe('3')
+    expect(screen.container.querySelector('.git-review__line-stats')?.textContent).toBe('+3-0')
+    expect(window.localStorage.getItem('mycopilot.gitReview.preferences.v1')).toBe(
+      JSON.stringify({ loadFullFiles: true, showAllFileTypes: false })
+    )
+  })
+
   it('persists the load-full-files action inside the review module', async () => {
     const screen = await render(
       <div style={{ height: 300, width: 440 }}>
@@ -121,7 +181,7 @@ describe('GitReviewPanel interactions', () => {
     await screen.getByRole('button', { name: 'gitReview.options' }).click()
     await screen.getByRole('menuitem', { name: 'gitReview.dontLoadFullFiles' }).click()
     expect(window.localStorage.getItem('mycopilot.gitReview.preferences.v1')).toBe(
-      JSON.stringify({ loadFullFiles: false })
+      JSON.stringify({ loadFullFiles: false, showAllFileTypes: false })
     )
 
     await screen.getByRole('button', { name: 'gitReview.options' }).click()

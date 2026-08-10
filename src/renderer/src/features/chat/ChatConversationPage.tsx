@@ -358,6 +358,9 @@ export function ChatConversationPage({
   const lastAssistantMessageId = [...conversation.messages]
     .reverse()
     .find((message) => message.role === 'assistant')?.id
+  const lastCommittedUserMessageId = [...conversation.messages]
+    .reverse()
+    .find((message) => message.role === 'user')?.id
   const activeAssistantRun = [...conversation.messages]
     .reverse()
     .find((message) => message.role === 'assistant' && message.status === 'pending')?.agentRun
@@ -516,6 +519,7 @@ export function ChatConversationPage({
             isModelTransitionRunning={modelTransitionOperations.some(
               (operation) => operation.status === 'running'
             )}
+            messageSyncKey={lastCommittedUserMessageId}
             onDraftChange={onComposerDraftChange}
             onDraftMessageChange={onComposerDraftMessageChange}
             onGuideQueuedMessage={onGuideQueuedMessage}
