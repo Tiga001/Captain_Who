@@ -58,6 +58,8 @@ pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
 pub const GIT_GET_REVIEW_FILE_CONTENT_METHOD: &str = "git.getReviewFileContent";
 pub const GIT_MUTATE_REVIEW_FILE_METHOD: &str = "git.mutateReviewFile";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
+pub const STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD: &str =
+    "storage.loadProviderProfileUiDescriptors";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
 pub const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.loadAgentPromptPreferences";
 pub const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.saveAgentPromptPreferences";

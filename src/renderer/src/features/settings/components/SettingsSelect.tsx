@@ -5,6 +5,7 @@ import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePo
 import './SettingsSelect.css'
 
 export interface SettingsSelectOption<Value extends string = string> {
+  disabled?: boolean
   label: string
   value: Value
 }
@@ -15,6 +16,7 @@ interface SettingsSelectProps<Value extends string> {
   leadingIcon?: ReactNode
   onChange: (value: Value) => void
   options: ReadonlyArray<SettingsSelectOption<Value>>
+  tabIndex?: number
   value: Value
 }
 
@@ -24,6 +26,7 @@ export function SettingsSelect<Value extends string>({
   leadingIcon,
   onChange,
   options,
+  tabIndex,
   value
 }: SettingsSelectProps<Value>): React.JSX.Element | null {
   const [isOpen, setOpen] = useState(false)
@@ -42,14 +45,19 @@ export function SettingsSelect<Value extends string>({
 
   if (!selectedOption) return null
 
-  const focusOption = (index: number) => {
-    const normalizedIndex = (index + options.length) % options.length
-    optionRefs.current[normalizedIndex]?.focus()
+  const focusOption = (index: number, direction: 1 | -1 = 1) => {
+    for (let offset = 0; offset < options.length; offset += 1) {
+      const normalizedIndex = (index + direction * offset + options.length) % options.length
+      if (!options[normalizedIndex]?.disabled) {
+        optionRefs.current[normalizedIndex]?.focus()
+        return
+      }
+    }
   }
 
-  const openMenu = (focusIndex = selectedIndex) => {
+  const openMenu = (focusIndex = selectedIndex, direction: 1 | -1 = 1) => {
     setOpen(true)
-    window.requestAnimationFrame(() => focusOption(focusIndex))
+    window.requestAnimationFrame(() => focusOption(focusIndex, direction))
   }
 
   const closeMenuAndRestoreFocus = () => {
@@ -58,6 +66,7 @@ export function SettingsSelect<Value extends string>({
   }
 
   const selectOption = (option: SettingsSelectOption<Value>) => {
+    if (option.disabled) return
     onChange(option.value)
     closeMenuAndRestoreFocus()
   }
@@ -69,13 +78,17 @@ export function SettingsSelect<Value extends string>({
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
-      openMenu(selectedIndex)
+      openMenu(
+        selectedIndex + (event.key === 'ArrowDown' ? 1 : -1),
+        event.key === 'ArrowDown' ? 1 : -1
+      )
     } else if (event.key === 'Home') {
       event.preventDefault()
       openMenu(0)
     } else if (event.key === 'End') {
       event.preventDefault()
-      openMenu(options.length - 1)
+      setOpen(true)
+      window.requestAnimationFrame(() => focusOption(options.length - 1, -1))
     } else if (event.key === 'Escape' && isOpen) {
       event.preventDefault()
       closeMenu()
@@ -88,13 +101,13 @@ export function SettingsSelect<Value extends string>({
       focusOption(index + 1)
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
-      focusOption(index - 1)
+      focusOption(index - 1, -1)
     } else if (event.key === 'Home') {
       event.preventDefault()
       focusOption(0)
     } else if (event.key === 'End') {
       event.preventDefault()
-      focusOption(options.length - 1)
+      focusOption(options.length - 1, -1)
     } else if (event.key === 'Escape') {
       event.preventDefault()
       closeMenuAndRestoreFocus()
@@ -117,6 +130,7 @@ export function SettingsSelect<Value extends string>({
         onClick={() => (isOpen ? closeMenu() : openMenu())}
         onKeyDown={handleTriggerKeyDown}
         ref={triggerRef}
+        tabIndex={tabIndex}
         type="button"
       >
         {leadingIcon && (
@@ -139,9 +153,11 @@ export function SettingsSelect<Value extends string>({
             const isSelected = option.value === selectedOption.value
             return (
               <button
+                aria-disabled={option.disabled || undefined}
                 aria-selected={isSelected}
                 className="settings-select__option"
                 data-selected={isSelected || undefined}
+                disabled={option.disabled}
                 key={option.value}
                 onClick={() => selectOption(option)}
                 onKeyDown={(event) => handleOptionKeyDown(event, index)}
@@ -149,7 +165,7 @@ export function SettingsSelect<Value extends string>({
                   optionRefs.current[index] = node
                 }}
                 role="option"
-                tabIndex={isSelected ? 0 : -1}
+                tabIndex={!option.disabled && isSelected ? 0 : -1}
                 type="button"
               >
                 <span className="settings-select__option-label">{option.label}</span>

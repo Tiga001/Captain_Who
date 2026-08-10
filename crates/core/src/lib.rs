@@ -20,6 +20,7 @@ mod prompts;
 pub mod protocol;
 mod provider_continuation_store;
 pub mod provider_profile;
+mod provider_registration;
 mod revision;
 mod runtime;
 pub mod skills;
@@ -75,10 +76,22 @@ pub use provider_continuation_store::{
     PROVIDER_CONTINUATION_CREDENTIAL_SERVICE,
 };
 pub use provider_profile::{
-    ProviderProfileConfig, ProviderProfileId, ProviderProfileRef, ProviderProfileValidationError,
-    ProviderProtocolDialect, ProviderProtocolKey, ReasoningEffort, ReasoningMode, ReasoningPolicy,
-    DEEPSEEK_V4_CHAT_PROFILE_VERSION, GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION,
-    GENERIC_OPENAI_CHAT_PROFILE_VERSION, PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+    ProviderProfileConfig, ProviderProfileId, ProviderProfilePublicSettings, ProviderProfileRef,
+    ProviderProfileValidationError, ProviderProtocolDialect, ProviderProtocolKey, ReasoningEffort,
+    ReasoningMode, ReasoningPolicy, DEEPSEEK_V4_CHAT_PROFILE_VERSION,
+    GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION, GENERIC_OPENAI_CHAT_PROFILE_VERSION,
+    PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+};
+pub use provider_registration::{
+    provider_profile_ui_descriptors, resolve_provider_registration,
+    resolve_provider_registration_for_key, resolve_provider_runtime_capabilities,
+    resolve_ui_selectable_provider_registration, ProviderCheckpointPrivateArgumentsSemantics,
+    ProviderContextProjectionSemantics, ProviderContinuationRequirement,
+    ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileSettingsKind,
+    ProviderProfileUiDescriptor, ProviderRegistration, ProviderRuntimeCapabilities,
+    ProviderSameTurnSkillActivationSemantics, ProviderTerminalBatchSemantics,
+    ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics, ProviderTurnRuntimePolicy,
+    ProviderUsageSemantics,
 };
 
 /// Rebuilds the model-only projection for a result restored from an approval checkpoint.

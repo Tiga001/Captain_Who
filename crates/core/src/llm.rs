@@ -21,11 +21,9 @@ use crate::protocol::{
     AgentApiStyle, AgentAssistantTurnCheckpointIdentity, AgentError, AgentProviderToolCallIdentity,
     AgentResult, AgentToolDefinition, AgentUsage, ProviderContinuationRef,
 };
-use crate::provider_profile::{ProviderProfileConfig, ProviderProfileId, ProviderProtocolKey};
+use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
 use crate::tools::schema::validate_portable_tool_input_schema;
-use crate::usage::{
-    merge_total_usage, merge_total_usage_with_disjoint_reasoning, usage_for_request,
-};
+use crate::usage::usage_for_request;
 use adapter::ProviderAdapterRegistry;
 use payload::is_sse_response;
 use provider_cooldown::{

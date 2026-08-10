@@ -1,4 +1,5 @@
 use crate::protocol::AgentUsage;
+use crate::provider_registration::ProviderUsageSemantics;
 use serde_json::Value;
 
 pub(crate) fn extract_usage(value: &Value) -> Option<AgentUsage> {
@@ -79,6 +80,40 @@ pub(crate) fn merge_total_usage_with_disjoint_reasoning(
     next: Option<AgentUsage>,
 ) {
     merge_total_usage_with_output_breakdown(total, next, true);
+}
+
+impl ProviderUsageSemantics {
+    /// Merges usage from another billable Provider request using the registered output contract.
+    pub fn merge_usage(self, total: &mut Option<AgentUsage>, next: Option<AgentUsage>) {
+        match self {
+            Self::StandardAdditive => merge_total_usage(total, next),
+            Self::CompletionIncludesReasoning => {
+                merge_total_usage_with_disjoint_reasoning(total, next);
+            }
+        }
+    }
+
+    /// Returns the output token count used for billing without double-counting private reasoning.
+    pub fn billable_output_tokens(self, usage: &AgentUsage) -> Option<u64> {
+        let visible_output = usage.output_tokens;
+        if self == Self::StandardAdditive {
+            return visible_output;
+        }
+        match (usage.total_tokens, usage.input_tokens) {
+            (Some(total), Some(input)) => total
+                .checked_sub(input)
+                .or_else(|| {
+                    visible_output
+                        .zip(usage.output_thinking_tokens)
+                        .and_then(|(visible, thinking)| visible.checked_add(thinking))
+                })
+                .or(visible_output),
+            _ => visible_output
+                .zip(usage.output_thinking_tokens)
+                .and_then(|(visible, thinking)| visible.checked_add(thinking))
+                .or(visible_output),
+        }
+    }
 }
 
 fn merge_total_usage_with_output_breakdown(
@@ -399,5 +434,47 @@ mod tests {
         assert_eq!(usage.billable_request_count, Some(1));
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn registered_usage_semantics_preserve_standard_and_reasoning_inclusive_billing() {
+        let usage = AgentUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            output_thinking_tokens: Some(80),
+            total_tokens: Some(200),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: Some(1),
+        };
+        assert_eq!(
+            ProviderUsageSemantics::StandardAdditive.billable_output_tokens(&usage),
+            Some(20)
+        );
+        assert_eq!(
+            ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&usage),
+            Some(100)
+        );
+
+        let mut total = Some(usage);
+        ProviderUsageSemantics::CompletionIncludesReasoning.merge_usage(
+            &mut total,
+            Some(AgentUsage {
+                input_tokens: Some(120),
+                output_tokens: None,
+                output_thinking_tokens: None,
+                total_tokens: Some(170),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(1),
+            }),
+        );
+        let total = total.unwrap();
+        assert_eq!(total.output_tokens, None);
+        assert_eq!(total.output_thinking_tokens, None);
+        assert_eq!(
+            ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&total),
+            Some(150)
+        );
     }
 }

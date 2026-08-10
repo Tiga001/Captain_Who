@@ -1,6 +1,7 @@
 use crate::protocol::{AgentGuidanceStatus, AgentPermissions};
 use crate::provider_profile::{
-    ProviderProfileConfig, ProviderProfileValidationError, ProviderProtocolDialect,
+    ProviderProfileConfig, ProviderProfileId, ProviderProfilePublicSettings,
+    ProviderProfileValidationError, ProviderProtocolDialect,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,92 @@ pub struct ModelSettingsRecord {
 impl std::fmt::Debug for ModelSettingsRecord {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ModelSettingsRecord([REDACTED])")
+    }
+}
+
+/// Explicit Host-authoritative mutation of a model's Provider Profile.
+///
+/// Omission and `unchanged` deliberately have identical semantics for old-client compatibility.
+/// Registered selections carry no version or Runtime policy; the Host resolves both from its
+/// code-owned Registry.
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum ProviderProfileUpdate {
+    Unchanged,
+    SelectGeneric,
+    SelectRegisteredProfile {
+        profile_id: ProviderProfileId,
+        settings: ProviderProfilePublicSettings,
+    },
+}
+
+/// Wire-only model mutation DTO. It is converted into [`ModelConfigRecord`] before persistence,
+/// so update intent can never become a second stored fact.
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelConfigSaveRequest {
+    pub id: String,
+    /// Stable edit identity used only to merge an id rename with the persisted record. It is
+    /// omitted from the authoritative response and never participates in Provider wire identity.
+    #[serde(default)]
+    pub previous_model_id: Option<String>,
+    pub display_name: String,
+    #[serde(default)]
+    pub api_url_override: Option<String>,
+    #[serde(default)]
+    pub api_token_override: Option<String>,
+    pub supports_image: bool,
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    /// Accepted only as a compatibility echo from older clients. It is never authoritative and
+    /// must equal the already persisted value when present.
+    #[serde(default)]
+    pub provider_profile_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub provider_profile_update: Option<ProviderProfileUpdate>,
+    pub input_price: String,
+    pub output_price: String,
+    pub enabled: bool,
+}
+
+impl ModelConfigSaveRequest {
+    pub fn into_record(
+        self,
+        provider_profile_config: Option<ProviderProfileConfig>,
+    ) -> ModelConfigRecord {
+        ModelConfigRecord {
+            id: self.id,
+            display_name: self.display_name,
+            api_url_override: self.api_url_override,
+            api_token_override: self.api_token_override,
+            supports_image: self.supports_image,
+            context_window_tokens: self.context_window_tokens,
+            provider_profile_config,
+            input_price: self.input_price,
+            output_price: self.output_price,
+            enabled: self.enabled,
+        }
+    }
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelSettingsSaveRequest {
+    pub api_url: String,
+    pub api_token: String,
+    pub search_mode: String,
+    pub tavily_api_key: String,
+    pub models: Vec<ModelConfigSaveRequest>,
+}
+
+impl std::fmt::Debug for ModelSettingsSaveRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ModelSettingsSaveRequest([REDACTED])")
     }
 }
 

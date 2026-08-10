@@ -37,7 +37,7 @@ fn persists_usage_for_failed_runs() {
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
-            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
             output_price: None,
             started_at: 1,
@@ -124,7 +124,7 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
-            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
             output_price: None,
             started_at: 1,
@@ -263,7 +263,7 @@ fn deleting_project_cancels_runs_and_discards_usage_contexts() {
             project_id: Some("project-1".to_string()),
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
-            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
             output_price: None,
             started_at: 1,
@@ -404,6 +404,20 @@ fn pending_approval_persists_full_run_checkpoint() {
     assert!(base_input.resume_checkpoint.is_none());
 
     let reloaded = AgentService::new(storage);
+    {
+        let usage_contexts = reloaded
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let restored = usage_contexts.get("run-checkpoint").unwrap();
+        assert_eq!(
+            restored.context.provider_usage_semantics,
+            ProviderUsageSemantics::StandardAdditive
+        );
+        assert!(restored.usage.is_none());
+        assert!(restored.context.input_price.is_none());
+        assert!(restored.context.output_price.is_none());
+    }
     let pending = reloaded
         .pending_actions
         .lock()

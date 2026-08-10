@@ -109,9 +109,14 @@
   font-weight: var(--mc-font-weight-select);
 }
 
-.settings-select__option:hover,
+.settings-select__option:hover:not(:disabled),
 .settings-select__option[data-selected='true'] {
   background: var(--mc-color-state-hover);
+}
+
+.settings-select__option:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
 }
 
 .settings-select__option:focus-visible {

@@ -17,6 +17,7 @@ export function ConfigurationSettingsPage() {
     apiUrl,
     deleteModel,
     models,
+    providerProfileDescriptors,
     searchMode,
     setApiToken,
     setApiUrl,
@@ -39,10 +40,10 @@ export function ConfigurationSettingsPage() {
     setView('editModel')
   }
 
-  const saveModel = (values: ModelFormValues) => {
+  const saveModel = async (values: ModelFormValues) => {
     const savedModel = modelConfigFromForm(values, editingModel)
 
-    upsertModel(savedModel, editingModel?.id)
+    await upsertModel(savedModel, editingModel?.id)
     setEditingModel(undefined)
     setView('manager')
   }
@@ -63,6 +64,7 @@ export function ConfigurationSettingsPage() {
     return (
       <ModelForm
         model={view === 'editModel' ? editingModel : undefined}
+        providerProfileDescriptors={providerProfileDescriptors}
         onCancel={() => setView('manager')}
         onSave={saveModel}
       />

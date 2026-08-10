@@ -135,9 +135,9 @@ impl CoreServerBootstrap {
             ) {
                 Ok(vault) => Some(Arc::new(vault)),
                 Err(error) => {
-                    // Provider continuation is an optional Host capability. Generic runs and
-                    // DeepSeek text-only runs remain available; any Tool-bearing persist/replay
-                    // path fails closed inside Core before a provider or Host side effect.
+                    // Provider continuation is an optional Host capability. Runs that do not
+                    // require private replay remain available; any required persist/replay path
+                    // fails closed inside Core before a provider or Host side effect.
                     eprintln!(
                         "Provider continuation vault is unavailable: {}",
                         error.code()

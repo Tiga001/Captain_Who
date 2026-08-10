@@ -452,10 +452,10 @@ pub struct AgentQueuedToolCallCheckpoint {
     /// Reference into `AgentRunCheckpoint.assistant_turn_identity.tool_call_identities`.
     pub assistant_turn_id: String,
     pub provider_tool_index: u32,
-    /// Host policy attached to this exact Provider batch. When a DeepSeek response combines
-    /// `skills_activate` with other calls, those other calls must be closed with a fixed guard
-    /// result and re-evaluated after the Skill instructions are available. Persisting the bit
-    /// prevents an approval/restart boundary from turning a deferred call into a side effect.
+    /// Host policy attached to this exact Provider batch. When a provider-native grouped response
+    /// combines `skills_activate` with other calls, those other calls must be closed with a fixed
+    /// guard result and re-evaluated after the Skill instructions are available. Persisting the
+    /// bit prevents an approval/restart boundary from turning a deferred call into a side effect.
     #[serde(default)]
     pub deferred_by_skill_activation: bool,
 }
@@ -950,8 +950,8 @@ pub struct AgentContextCostBreakdown {
     pub world_state_tokens: u64,
     pub goal_tokens: u64,
     pub todo_tokens: u64,
-    /// Hidden Provider protocol state (for example DeepSeek tool-turn reasoning) included in the
-    /// final wire request. This is a token count only; no continuation content crosses the API.
+    /// Hidden Provider protocol state included in the final wire request. This is a token count
+    /// only; no continuation content crosses the API.
     #[serde(default)]
     pub provider_continuation_tokens: u64,
     /// Uncovered history plus current-run messages, attachments, Skills, guards, and tool

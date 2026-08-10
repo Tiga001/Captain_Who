@@ -1,14 +1,28 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { ChevronDown } from 'lucide-react'
+import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS } from '../../../../config/modelConfig'
+import { SettingsSelect } from '../../components/SettingsSelect'
+import type { SettingsSelectOption } from '../../components/SettingsSelect'
 import type { ModelConfig, ModelFormValues } from './configurationTypes'
+import {
+  initialProviderProfileFormState,
+  selectProviderProfile,
+  updateDeepSeekProviderSettings,
+  type ProviderProfileSelection
+} from './providerProfileForm'
+import {
+  providerSettingsEditors,
+  type DeepSeekProviderSettingsDraft
+} from './providerSettingsEditors'
 import { SecretInput } from './SecretInput'
 
 interface ModelFormProps {
   model?: ModelConfig
+  providerProfileDescriptors: readonly ProviderProfileUiDescriptor[]
   onCancel: () => void
-  onSave: (values: ModelFormValues) => void
+  onSave: (values: ModelFormValues) => void | Promise<void>
 }
 
 function isValidPriceInput(value: string): boolean {
@@ -51,12 +65,24 @@ function toFormValues(model?: ModelConfig): ModelFormValues {
   }
 }
 
-export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
+export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave }: ModelFormProps) {
   const { t } = useFrontendConfig()
   const initialValues = useMemo(() => toFormValues(model), [model])
+  const initialProviderProfile = useMemo(
+    () => initialProviderProfileFormState(model?.providerProfileConfig, providerProfileDescriptors),
+    [model, providerProfileDescriptors]
+  )
   const [values, setValues] = useState<ModelFormValues>(initialValues)
+  const [providerProfile, setProviderProfile] = useState(initialProviderProfile)
+  const [isProviderSettingsOpen, setProviderSettingsOpen] = useState(false)
+  const [isSaving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState(false)
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(
-    Boolean(initialValues.apiUrlOverride.trim() || initialValues.apiTokenOverride.trim())
+    Boolean(
+      initialValues.apiUrlOverride.trim() ||
+      initialValues.apiTokenOverride.trim() ||
+      initialProviderProfile.selection !== 'generic'
+    )
   )
   const isEditing = Boolean(model)
   const isContextWindowValid = isValidContextWindowInput(values.contextWindowTokens)
@@ -74,26 +100,75 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
     isConnectionPairComplete &&
     isOverrideUrlValid
 
+  const deepSeekDescriptor = providerProfileDescriptors.find(
+    (descriptor) =>
+      descriptor.profileId === 'deepseek_v4_chat' &&
+      descriptor.settingsKind === 'deepseek_v4_chat' &&
+      descriptor.selectable
+  )
+  const providerProfileOptions: SettingsSelectOption<ProviderProfileSelection>[] = [
+    ...(providerProfile.unsupportedProfile
+      ? [
+          {
+            disabled: true,
+            label: `${t('configuration.providerProfile.unsupported')} (${providerProfile.unsupportedProfile.id}@${providerProfile.unsupportedProfile.version})`,
+            value: 'unsupported' as const
+          }
+        ]
+      : []),
+    {
+      label: t('configuration.providerProfile.generic'),
+      value: 'generic'
+    },
+    ...(deepSeekDescriptor
+      ? [
+          {
+            label: deepSeekDescriptor.displayName,
+            value: 'deepseek_v4_chat' as const
+          }
+        ]
+      : [])
+  ]
+  const ProviderSettingsEditor = deepSeekDescriptor
+    ? providerSettingsEditors[deepSeekDescriptor.settingsKind]
+    : undefined
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!canSave || isSaving) return
+    setSaving(true)
+    setSaveError(false)
+    try {
+      await onSave({
+        ...values,
+        id: values.id.trim(),
+        displayName: values.displayName.trim(),
+        apiUrlOverride: values.apiUrlOverride.trim(),
+        apiTokenOverride: values.apiTokenOverride.trim(),
+        contextWindowTokens:
+          values.contextWindowTokens.trim().replaceAll(',', '') ||
+          DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS.toString(),
+        inputPrice: values.inputPrice.trim() || '0',
+        outputPrice: values.outputPrice.trim() || '0',
+        providerProfileUpdate: providerProfile.update
+      })
+    } catch {
+      // The settings provider restores the last Host-authoritative snapshot and presents the
+      // sanitized failure. Restore this local draft too, without reflecting raw Provider details.
+      setValues(initialValues)
+      setProviderProfile(initialProviderProfile)
+      setProviderSettingsOpen(false)
+      setSaveError(true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <form
       className="model-form-page"
       aria-labelledby="model-form-heading"
-      onSubmit={(event) => {
-        event.preventDefault()
-        if (!canSave) return
-        onSave({
-          ...values,
-          id: values.id.trim(),
-          displayName: values.displayName.trim(),
-          apiUrlOverride: values.apiUrlOverride.trim(),
-          apiTokenOverride: values.apiTokenOverride.trim(),
-          contextWindowTokens:
-            values.contextWindowTokens.trim().replaceAll(',', '') ||
-            DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS.toString(),
-          inputPrice: values.inputPrice.trim() || '0',
-          outputPrice: values.outputPrice.trim() || '0'
-        })
-      }}
+      onSubmit={(event) => void submit(event)}
     >
       <h1 id="model-form-heading">
         {isEditing ? t('configuration.editModel') : t('configuration.newModel')}
@@ -252,12 +327,17 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
                   value={values.apiUrlOverride}
                   placeholder={t('configuration.modelApiUrlPlaceholder')}
                   tabIndex={isAdvancedOpen ? 0 : -1}
-                  onChange={(event) =>
+                  onChange={(event) => {
                     setValues((current) => ({
                       ...current,
                       apiUrlOverride: event.target.value
                     }))
-                  }
+                    setProviderProfile((current) =>
+                      current.selection === 'generic'
+                        ? selectProviderProfile(current, 'generic')
+                        : current
+                    )
+                  }}
                 />
                 {!isOverrideUrlValid && (
                   <small className="model-form-field-error">
@@ -291,18 +371,81 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
                 )}
               </span>
             </div>
+
+            <div className="configuration-field settings-list-row">
+              <span className="settings-list-row__text">
+                <span className="settings-list-row__title">
+                  {t('configuration.providerProfile.vendor')}
+                </span>
+              </span>
+              <span className="settings-list-row__control model-provider-profile-control">
+                <SettingsSelect
+                  ariaLabel={t('configuration.providerProfile.vendor')}
+                  className="model-provider-profile-select"
+                  options={providerProfileOptions}
+                  tabIndex={isAdvancedOpen ? 0 : -1}
+                  value={providerProfile.selection}
+                  onChange={(selection) => {
+                    if (selection === 'unsupported') return
+                    setProviderProfile((current) => selectProviderProfile(current, selection))
+                  }}
+                />
+              </span>
+            </div>
+
+            {providerProfile.selection === 'deepseek_v4_chat' && deepSeekDescriptor && (
+              <div className="configuration-field settings-list-row">
+                <span className="settings-list-row__text">
+                  <span className="settings-list-row__title">
+                    {t('configuration.providerSettings.title')}
+                  </span>
+                </span>
+                <button
+                  className="secondary-settings-button model-provider-settings-button"
+                  type="button"
+                  tabIndex={isAdvancedOpen ? 0 : -1}
+                  onClick={() => setProviderSettingsOpen(true)}
+                >
+                  {t('configuration.providerSettings.open')}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
+      {saveError && (
+        <p className="model-form-field-error" role="alert">
+          {t('configuration.saveFailedSafe')}
+        </p>
+      )}
+
       <div className="model-form-page__actions">
-        <button className="secondary-settings-button" type="button" onClick={onCancel}>
+        <button
+          className="secondary-settings-button"
+          type="button"
+          disabled={isSaving}
+          onClick={onCancel}
+        >
           {t('configuration.cancel')}
         </button>
-        <button className="primary-settings-button" type="submit" disabled={!canSave}>
-          {t('configuration.save')}
+        <button className="primary-settings-button" type="submit" disabled={!canSave || isSaving}>
+          {isSaving ? t('configuration.saving') : t('configuration.save')}
         </button>
       </div>
+
+      {isProviderSettingsOpen && ProviderSettingsEditor && (
+        <ProviderSettingsEditor
+          initialSettings={{ reasoning: providerProfile.reasoning }}
+          onCancel={() => setProviderSettingsOpen(false)}
+          onConfirm={(settings: DeepSeekProviderSettingsDraft) => {
+            setProviderProfile((current) =>
+              updateDeepSeekProviderSettings(current, settings.reasoning)
+            )
+            setProviderSettingsOpen(false)
+          }}
+        />
+      )}
     </form>
   )
 }

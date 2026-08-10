@@ -19,17 +19,31 @@ use super::{
 use crate::protocol::{AgentError, AgentResult, AgentUsage};
 use crate::provider_profile::{
     ProviderProfileConfig, ProviderProfileId, ProviderProfileRef, ProviderProtocolDialect,
-    ProviderProtocolKey, ReasoningMode, DEEPSEEK_V4_CHAT_PROFILE_VERSION,
-    GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION, GENERIC_OPENAI_CHAT_PROFILE_VERSION,
+    ProviderProtocolKey, ReasoningMode,
+};
+use crate::provider_registration::{
+    resolve_provider_registration_for_key, ProviderAdapterKind, ProviderRegistration,
+    ProviderRuntimeCapabilities, DEEPSEEK_V4_CHAT_REGISTRATION,
+    GENERIC_ANTHROPIC_MESSAGES_REGISTRATION, GENERIC_OPENAI_CHAT_REGISTRATION,
 };
 use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub(super) trait ProviderAdapter: Sync {
-    fn profile(&self) -> ProviderProfileRef;
+    fn registration(&self) -> &'static ProviderRegistration;
 
-    fn dialect(&self) -> ProviderProtocolDialect;
+    fn profile(&self) -> ProviderProfileRef {
+        self.registration().profile()
+    }
+
+    fn dialect(&self) -> ProviderProtocolDialect {
+        self.registration().dialect()
+    }
+
+    fn capabilities(&self) -> ProviderRuntimeCapabilities {
+        self.registration().runtime_capabilities()
+    }
 
     fn validate_profile_settings(&self, request: &LlmChatRequest) -> AgentResult<()>;
 
@@ -80,11 +94,6 @@ const DEEPSEEK_REASONING_FRAGMENT_V1: u8 = 1;
 static GENERIC_OPENAI_ADAPTER: GenericOpenAiAdapter = GenericOpenAiAdapter;
 static GENERIC_ANTHROPIC_ADAPTER: GenericAnthropicAdapter = GenericAnthropicAdapter;
 static DEEPSEEK_V4_CHAT_ADAPTER: DeepSeekV4ChatAdapter = DeepSeekV4ChatAdapter;
-static PROVIDER_ADAPTERS: [&'static dyn ProviderAdapter; 3] = [
-    &GENERIC_OPENAI_ADAPTER,
-    &GENERIC_ANTHROPIC_ADAPTER,
-    &DEEPSEEK_V4_CHAT_ADAPTER,
-];
 
 pub(super) struct ProviderAdapterRegistry;
 
@@ -102,35 +111,21 @@ impl ProviderAdapterRegistry {
     pub(super) fn resolve_key(
         protocol: &ProviderProtocolKey,
     ) -> AgentResult<&'static dyn ProviderAdapter> {
-        protocol
-            .validate()
+        let registration = resolve_provider_registration_for_key(protocol)
             .map_err(|error| AgentError::new(format!("Provider protocol key 无效：{error}")))?;
-        let adapter = PROVIDER_ADAPTERS
-            .iter()
-            .copied()
-            .find(|adapter| {
-                adapter.profile() == protocol.profile && adapter.dialect() == protocol.dialect
-            })
-            .ok_or_else(|| {
-                AgentError::new(format!(
-                    "当前版本没有注册 {:?} v{} / {:?} 的 Provider Adapter。",
-                    protocol.profile.id, protocol.profile.version, protocol.dialect
-                ))
-            })?;
+        let adapter: &'static dyn ProviderAdapter = match registration.adapter_kind() {
+            ProviderAdapterKind::GenericOpenAi => &GENERIC_OPENAI_ADAPTER,
+            ProviderAdapterKind::GenericAnthropic => &GENERIC_ANTHROPIC_ADAPTER,
+            ProviderAdapterKind::DeepSeekV4Chat => &DEEPSEEK_V4_CHAT_ADAPTER,
+        };
+        debug_assert_eq!(adapter.registration(), registration);
         Ok(adapter)
     }
 }
 
 impl ProviderAdapter for GenericOpenAiAdapter {
-    fn profile(&self) -> ProviderProfileRef {
-        ProviderProfileRef {
-            id: ProviderProfileId::GenericOpenAiChat,
-            version: GENERIC_OPENAI_CHAT_PROFILE_VERSION,
-        }
-    }
-
-    fn dialect(&self) -> ProviderProtocolDialect {
-        ProviderProtocolDialect::OpenAiChatCompletions
+    fn registration(&self) -> &'static ProviderRegistration {
+        &GENERIC_OPENAI_CHAT_REGISTRATION
     }
 
     fn validate_profile_settings(&self, request: &LlmChatRequest) -> AgentResult<()> {
@@ -204,15 +199,8 @@ impl ProviderAdapter for GenericOpenAiAdapter {
 }
 
 impl ProviderAdapter for GenericAnthropicAdapter {
-    fn profile(&self) -> ProviderProfileRef {
-        ProviderProfileRef {
-            id: ProviderProfileId::GenericAnthropicMessages,
-            version: GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION,
-        }
-    }
-
-    fn dialect(&self) -> ProviderProtocolDialect {
-        ProviderProtocolDialect::AnthropicMessages
+    fn registration(&self) -> &'static ProviderRegistration {
+        &GENERIC_ANTHROPIC_MESSAGES_REGISTRATION
     }
 
     fn validate_profile_settings(&self, request: &LlmChatRequest) -> AgentResult<()> {
@@ -286,15 +274,8 @@ impl ProviderAdapter for GenericAnthropicAdapter {
 }
 
 impl ProviderAdapter for DeepSeekV4ChatAdapter {
-    fn profile(&self) -> ProviderProfileRef {
-        ProviderProfileRef {
-            id: ProviderProfileId::DeepSeekV4Chat,
-            version: DEEPSEEK_V4_CHAT_PROFILE_VERSION,
-        }
-    }
-
-    fn dialect(&self) -> ProviderProtocolDialect {
-        ProviderProtocolDialect::OpenAiChatCompletions
+    fn registration(&self) -> &'static ProviderRegistration {
+        &DEEPSEEK_V4_CHAT_REGISTRATION
     }
 
     fn validate_profile_settings(&self, request: &LlmChatRequest) -> AgentResult<()> {

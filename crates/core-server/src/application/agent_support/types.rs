@@ -20,7 +20,7 @@ pub(crate) fn agent_input_belongs_to_project(
         == Some(project_id)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AgentRunUsageContext {
     pub(crate) conversation_id: String,
     pub(crate) assistant_message_id: String,
@@ -28,13 +28,13 @@ pub(crate) struct AgentRunUsageContext {
     pub(crate) project_id: Option<String>,
     pub(crate) model_id: String,
     pub(crate) model_name: String,
-    pub(crate) provider_profile_id: ProviderProfileId,
+    pub(crate) provider_usage_semantics: ProviderUsageSemantics,
     pub(crate) input_price: Option<String>,
     pub(crate) output_price: Option<String>,
     pub(crate) started_at: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AgentRunUsageState {
     pub(crate) context: AgentRunUsageContext,
     pub(crate) usage: Option<AgentUsage>,

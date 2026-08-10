@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider_registration::ProviderUsageSemantics;
 use futures_util::StreamExt;
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -53,6 +54,9 @@ pub(super) async fn complete_chat_with_validation(
 ) -> AgentResult<LlmChatResponse> {
     let mut request = request;
     request.stream = false;
+    let usage_semantics = ProviderAdapterRegistry::resolve(&request)?
+        .capabilities()
+        .usage();
 
     let mut last_error = None;
     let mut total_usage = None;
@@ -68,24 +72,16 @@ pub(super) async fn complete_chat_with_validation(
                 merge_provider_attempt_usage(
                     &mut total_usage,
                     response.usage.take(),
-                    request.provider_protocol.profile.id,
+                    usage_semantics,
                 );
                 response.usage = total_usage;
                 return Ok(response);
             }
             Err(error) if error.is_cancelled() => {
-                return Err(merge_error_usage(
-                    error,
-                    &mut total_usage,
-                    request.provider_protocol.profile.id,
-                ));
+                return Err(merge_error_usage(error, &mut total_usage, usage_semantics));
             }
             Err(error) => {
-                let error = merge_error_usage(
-                    error,
-                    &mut total_usage,
-                    request.provider_protocol.profile.id,
-                );
+                let error = merge_error_usage(error, &mut total_usage, usage_semantics);
                 let Some(plan) = retry_plan(
                     &error,
                     attempt,
@@ -172,6 +168,9 @@ where
 {
     let mut request = request;
     request.stream = true;
+    let usage_semantics = ProviderAdapterRegistry::resolve(&request)?
+        .capabilities()
+        .usage();
 
     let mut last_error = None;
     let mut total_usage = None;
@@ -207,25 +206,17 @@ where
                 merge_provider_attempt_usage(
                     &mut total_usage,
                     response.usage.take(),
-                    request.provider_protocol.profile.id,
+                    usage_semantics,
                 );
                 response.usage = total_usage;
                 on_event(LlmStreamEvent::Committed);
                 return Ok(response);
             }
             Err(error) if error.is_cancelled() => {
-                return Err(merge_error_usage(
-                    error,
-                    &mut total_usage,
-                    request.provider_protocol.profile.id,
-                ));
+                return Err(merge_error_usage(error, &mut total_usage, usage_semantics));
             }
             Err(error) => {
-                let error = merge_error_usage(
-                    error,
-                    &mut total_usage,
-                    request.provider_protocol.profile.id,
-                );
+                let error = merge_error_usage(error, &mut total_usage, usage_semantics);
                 let reason = safe_retry_reason(&error);
                 on_event(LlmStreamEvent::AttemptReset {
                     reason: reason.clone(),
@@ -329,16 +320,12 @@ pub(super) fn parse_non_stream_response(
     provider_protocol: &ProviderProtocolKey,
     validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
-    let provider_profile = match provider_protocol.profile.id {
-        crate::provider_profile::ProviderProfileId::GenericOpenAiChat
-        | crate::provider_profile::ProviderProfileId::GenericAnthropicMessages => {
-            crate::provider_profile::ProviderProfileConfig::generic_for_dialect(
-                provider_protocol.dialect,
-            )
-        }
-        crate::provider_profile::ProviderProfileId::DeepSeekV4Chat => {
-            crate::provider_profile::ProviderProfileConfig::deepseek_v4_default()
-        }
+    let registration = crate::resolve_provider_registration_for_key(provider_protocol)
+        .map_err(|error| AgentError::new(format!("Provider protocol key 无效：{error}")))?;
+    let provider_profile = crate::ProviderProfileConfig {
+        schema_version: crate::PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
+        profile: registration.profile(),
+        reasoning: crate::ReasoningPolicy::provider_default(),
     };
     parse_non_stream_response_with_profile(body, &provider_profile, provider_protocol, validation)
 }
@@ -401,21 +388,17 @@ pub(super) fn with_request_usage(error: AgentError) -> AgentError {
 fn merge_provider_attempt_usage(
     total: &mut Option<AgentUsage>,
     next: Option<AgentUsage>,
-    profile_id: ProviderProfileId,
+    usage_semantics: ProviderUsageSemantics,
 ) {
-    if profile_id == ProviderProfileId::DeepSeekV4Chat {
-        merge_total_usage_with_disjoint_reasoning(total, next);
-    } else {
-        merge_total_usage(total, next);
-    }
+    usage_semantics.merge_usage(total, next);
 }
 
 pub(super) fn merge_error_usage(
     error: AgentError,
     total: &mut Option<AgentUsage>,
-    profile_id: ProviderProfileId,
+    usage_semantics: ProviderUsageSemantics,
 ) -> AgentError {
-    merge_provider_attempt_usage(total, error.usage().cloned(), profile_id);
+    merge_provider_attempt_usage(total, error.usage().cloned(), usage_semantics);
     error.with_usage(total.clone())
 }
 

@@ -2597,6 +2597,76 @@ fn deepseek_disabled_reasoning_maps_without_generic_tool_choice() {
 }
 
 #[test]
+fn deepseek_reasoning_settings_map_to_the_exact_request_fields() {
+    let cases = [
+        (
+            ReasoningMode::ProviderDefault,
+            ReasoningEffort::ProviderDefault,
+            None,
+            None,
+        ),
+        (
+            ReasoningMode::Enabled,
+            ReasoningEffort::ProviderDefault,
+            Some("enabled"),
+            None,
+        ),
+        (
+            ReasoningMode::Enabled,
+            ReasoningEffort::High,
+            Some("enabled"),
+            Some("high"),
+        ),
+        (
+            ReasoningMode::Enabled,
+            ReasoningEffort::Max,
+            Some("enabled"),
+            Some("max"),
+        ),
+        (
+            ReasoningMode::Disabled,
+            ReasoningEffort::ProviderDefault,
+            Some("disabled"),
+            None,
+        ),
+    ];
+
+    for (mode, effort, expected_thinking, expected_effort) in cases {
+        let provider_profile = deepseek_provider_profile(mode, effort);
+        let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");
+        let request = LlmChatRequest {
+            api_url: "https://api.deepseek.test/chat/completions".to_string(),
+            api_token: "token".to_string(),
+            provider_profile,
+            provider_protocol,
+            max_tokens: 512,
+            temperature: 0.7,
+            stream: false,
+            messages: vec![LlmMessage::text(LlmMessageRole::User, "hello")],
+            tools: vec![tool_definition()],
+        };
+
+        let payload = build_payload(&request);
+        assert_eq!(
+            payload
+                .get("thinking")
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str),
+            expected_thinking,
+            "unexpected thinking mapping for {mode:?}/{effort:?}"
+        );
+        assert_eq!(
+            payload
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str),
+            expected_effort,
+            "unexpected reasoning_effort mapping for {mode:?}/{effort:?}"
+        );
+        assert!(payload.get("tool_choice").is_none());
+    }
+}
+
+#[test]
 fn deepseek_nonstream_preserves_a_present_empty_reasoning_field() {
     let provider_profile = deepseek_provider_profile(ReasoningMode::Enabled, ReasoningEffort::High);
     let provider_protocol = deepseek_provider_protocol(&provider_profile, "deepseek-v4-flash");

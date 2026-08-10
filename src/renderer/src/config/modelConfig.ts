@@ -1,4 +1,8 @@
-import type { ProviderProfileConfig } from '@mycopilot/protocol'
+import type {
+  ProviderProfileConfig,
+  ProviderProfileUiDescriptor,
+  StorageProviderProfileUpdate
+} from '@mycopilot/protocol'
 
 export interface ModelConfig {
   /** Opaque model identifier sent verbatim as the provider API's `model` value. */
@@ -9,8 +13,12 @@ export interface ModelConfig {
   apiTokenOverride?: string
   supportsImage: boolean
   contextWindowTokens?: number
-  /** Provider protocol configuration is persisted but not yet exposed by the visible settings UI. */
+  /** Host-authoritative, normalized Provider Profile used for safe presentation only. */
   providerProfileConfig?: ProviderProfileConfig
+  /** One-shot, explicit profile mutation sent to the authoritative Host save boundary. */
+  providerProfileUpdate?: StorageProviderProfileUpdate
+  /** One-shot previous identity used by Host while saving an edited model rename. */
+  previousModelId?: string
   inputPrice: string
   outputPrice: string
   enabled: boolean
@@ -29,6 +37,7 @@ export interface ModelFormValues {
   inputPrice: string
   outputPrice: string
   supportsImage: boolean
+  providerProfileUpdate?: StorageProviderProfileUpdate
 }
 
 function hasCompleteConnectionPair(apiUrl: string | undefined, apiToken: string | undefined) {
@@ -59,6 +68,51 @@ export function isModelConnectionAvailable(
   }
 
   return hasCompleteConnectionPair(globalApiUrl, globalApiToken)
+}
+
+function inheritsGlobalConnection(model: ModelConfig): boolean {
+  return !model.apiUrlOverride?.trim() && !model.apiTokenOverride?.trim()
+}
+
+function hasRegisteredGenericProfile(
+  model: ModelConfig,
+  descriptors: readonly ProviderProfileUiDescriptor[]
+): boolean {
+  const config = model.providerProfileConfig
+  if (!config) return true
+  if (config.schemaVersion !== 1) return false
+  const profileId = String(config.profile.id)
+  if (profileId !== 'generic_openai_chat' && profileId !== 'generic_anthropic_messages') {
+    return false
+  }
+  return descriptors.some(
+    (descriptor) =>
+      descriptor.profileId === config.profile.id &&
+      descriptor.profileVersion === config.profile.version &&
+      descriptor.settingsKind === 'none'
+  )
+}
+
+/**
+ * Atomically asks Host to resolve inherited Generic models against a user-edited global API URL.
+ * Renderer never chooses the resulting dialect, Profile version, or runtime policy.
+ */
+export function prepareModelsForGlobalApiUrlChange(
+  models: readonly ModelConfig[],
+  descriptors: readonly ProviderProfileUiDescriptor[]
+): ModelConfig[] {
+  return models.map((model) => {
+    if (!inheritsGlobalConnection(model) || !hasRegisteredGenericProfile(model, descriptors)) {
+      return model
+    }
+    if (model.providerProfileUpdate && model.providerProfileUpdate.kind !== 'unchanged') {
+      return model
+    }
+    return {
+      ...model,
+      providerProfileUpdate: { kind: 'select_generic' }
+    }
+  })
 }
 
 export const modelConfig = {

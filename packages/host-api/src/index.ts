@@ -59,6 +59,7 @@ import type {
   McpServerListOutput,
   McpServerMutationInput,
   McpServerUpdateInput,
+  ProviderProfileUiDescriptor,
   ResourceFaviconRequest,
   ResourceFaviconResponse,
   ChatSearchInput,
@@ -96,6 +97,7 @@ import type {
   StorageComposerDraftRecord,
   StorageImageFileRecord,
   StorageModelSettingsRecord,
+  StorageModelSettingsUpdateRecord,
   StorageProjectRecord,
   StorageUiPreferencesRecord,
   TerminalCreateSessionRequest,
@@ -125,7 +127,8 @@ export interface OfficeHostApi {
 
 export interface StorageHostApi {
   loadModelSettings(): Promise<StorageModelSettingsRecord | null>
-  saveModelSettings(settings: StorageModelSettingsRecord): Promise<void>
+  loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]>
+  saveModelSettings(settings: StorageModelSettingsUpdateRecord): Promise<StorageModelSettingsRecord>
   loadAgentPromptPreferences(): Promise<StorageAgentPromptPreferencesRecord>
   saveAgentPromptPreferences(
     preferences: StorageAgentPromptPreferencesRecord

@@ -6,7 +6,7 @@
 
 use crate::llm::{LlmAssistantTurn, LlmMessage, LlmMessageRole};
 use crate::protocol::AgentToolDefinition;
-use crate::provider_profile::ProviderProfileId;
+use crate::provider_profile::ProviderProtocolKey;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -20,6 +20,20 @@ const TOOL_CALL_STRUCTURE_TOKENS: u64 = 12;
 const IMAGE_TOKEN_RESERVE: u64 = 4_096;
 const CONTEXT_REVISION_FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const CONTEXT_REVISION_FNV_PRIME: u64 = 0x100000001b3;
+
+fn context_projection_semantics(
+    protocol: Option<&ProviderProtocolKey>,
+) -> crate::ProviderContextProjectionSemantics {
+    let Some(protocol) = protocol else {
+        return crate::ProviderContextProjectionSemantics::LegacyEffectiveCalls;
+    };
+    crate::resolve_provider_runtime_capabilities(protocol)
+        .map(|capabilities| capabilities.context_projection())
+        // Measurement cannot return an error. Treat an unregistered protocol as the richer exact
+        // projection so this diagnostic path never silently undercounts it as Generic; request
+        // admission still rejects the unsupported registration before any provider call.
+        .unwrap_or(crate::ProviderContextProjectionSemantics::ExactProviderTurn)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ContextRevisionHasher {
@@ -262,12 +276,12 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
     }
 
     fn estimate_message(&self, message: &LlmMessage) -> ContextMessageEstimate {
-        let deepseek_turn = message.assistant_turn().filter(|turn| {
-            turn.provider_protocol()
-                .is_some_and(|key| key.profile.id == ProviderProfileId::DeepSeekV4Chat)
+        let exact_provider_turn = message.assistant_turn().filter(|turn| {
+            context_projection_semantics(turn.provider_protocol())
+                == crate::ProviderContextProjectionSemantics::ExactProviderTurn
         });
         let message_content_tokens = self.estimate_text(
-            deepseek_turn
+            exact_provider_turn
                 .map(LlmAssistantTurn::provider_visible_text)
                 .unwrap_or_else(|| message.content()),
         );
@@ -277,7 +291,7 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
             message_structure_tokens =
                 message_structure_tokens.saturating_add(self.estimate_text(tool_call_id));
         }
-        let mut tool_call_tokens = if let Some(turn) = deepseek_turn {
+        let mut tool_call_tokens = if let Some(turn) = exact_provider_turn {
             turn.provider_tool_calls()
                 .iter()
                 .fold(0_u64, |total, call| {
@@ -296,8 +310,8 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
                     .saturating_add(estimate_json_tokens(&call.args))
             })
         };
-        if let Some(turn) = deepseek_turn {
-            // DeepSeek tool results replay the original provider call id. Context stores the
+        if let Some(turn) = exact_provider_turn {
+            // Exact provider projections replay the original provider call id. Context stores the
             // bounded runtime id, so reserve the positive difference here for every result.
             for binding in turn.runtime_tool_bindings().unwrap_or_default() {
                 let provider_id_tokens = self.estimate_text(&binding.provider_call_id);
@@ -308,13 +322,9 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
         }
         if let Some(turn) = message.assistant_turn() {
             let effective_call_count = turn.effective_tool_calls().len();
-            let uses_legacy_split_projection = turn.provider_protocol().is_none_or(|key| {
-                matches!(
-                    key.profile.id,
-                    ProviderProfileId::GenericOpenAiChat
-                        | ProviderProfileId::GenericAnthropicMessages
-                )
-            });
+            let uses_legacy_split_projection =
+                context_projection_semantics(turn.provider_protocol())
+                    == crate::ProviderContextProjectionSemantics::LegacyEffectiveCalls;
             if turn.runtime_tool_bindings().is_some()
                 && uses_legacy_split_projection
                 && effective_call_count > 1
@@ -393,7 +403,8 @@ mod tests {
     use super::*;
     use crate::llm::{LlmAssistantTurn, LlmRuntimeToolCallBinding, LlmToolCall};
     use crate::provider_profile::{
-        ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
+        ProviderProfileConfig, ProviderProfileId, ProviderProfileRef, ProviderProtocolDialect,
+        ProviderProtocolKey,
     };
     use serde_json::json;
 
@@ -532,6 +543,24 @@ mod tests {
         assert!(
             estimator.estimate_message(&grouped).total_tokens()
                 < estimator.estimate_message(&generic_live).total_tokens()
+        );
+    }
+
+    #[test]
+    fn unknown_provider_registration_uses_conservative_exact_projection_for_measurement() {
+        let unsupported = ProviderProtocolKey {
+            dialect: ProviderProtocolDialect::OpenAiChatCompletions,
+            profile: ProviderProfileRef {
+                id: ProviderProfileId::DeepSeekV4Chat,
+                version: u32::MAX,
+            },
+            model_id: "unsupported-provider-version".to_string(),
+            provider_configuration_revision: None,
+        };
+
+        assert_eq!(
+            context_projection_semantics(Some(&unsupported)),
+            crate::ProviderContextProjectionSemantics::ExactProviderTurn
         );
     }
 

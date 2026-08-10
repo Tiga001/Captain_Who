@@ -218,7 +218,10 @@ pub(crate) fn prepare_conversation_turn(
     });
     let goal = storage.load_visible_conversation_goal(&conversation_id)?;
 
-    let usage_provider_profile_id = provider_profile_config.profile.id;
+    let provider_usage_semantics =
+        mycopilot_core::resolve_provider_runtime_capabilities(&provider_protocol_key)
+            .map_err(|error| error.to_string())?
+            .usage();
     let agent_input = AgentChatInput {
         api_url: connection.api_url,
         api_token: connection.api_token,
@@ -271,7 +274,7 @@ pub(crate) fn prepare_conversation_turn(
             project_id: resolved_project_id.clone(),
             model_id: model.id.clone(),
             model_name: model.display_name.clone(),
-            provider_profile_id: usage_provider_profile_id,
+            provider_usage_semantics,
             input_price: Some(model.input_price.clone()),
             output_price: Some(model.output_price.clone()),
             started_at: timestamp,

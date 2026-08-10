@@ -3,7 +3,7 @@ use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput,
     AgentUsageSummaryOutput, AgentUsageSummaryRange,
 };
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -120,6 +120,74 @@ pub fn upsert_usage_record(
         ],
     )?;
     Ok(())
+}
+
+pub fn load_usage_record_for_owner(
+    connection: &Connection,
+    run_id: &str,
+    conversation_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<Option<AgentUsageRecordInsert>> {
+    connection
+        .query_row(
+            "
+            SELECT
+                id,
+                conversation_id,
+                message_id,
+                run_id,
+                project_id,
+                model_id,
+                model_name,
+                started_at,
+                completed_at,
+                status,
+                error,
+                created_at,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                billable_request_count,
+                input_price,
+                output_price,
+                estimated_cost
+            FROM agent_usage_records
+            WHERE run_id = ?1
+              AND conversation_id = ?2
+              AND message_id = ?3
+            ",
+            params![run_id, conversation_id, message_id],
+            |row| {
+                Ok(AgentUsageRecordInsert {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    message_id: row.get(2)?,
+                    run_id: row.get(3)?,
+                    project_id: row.get(4)?,
+                    model_id: row.get(5)?,
+                    model_name: row.get(6)?,
+                    started_at: row.get(7)?,
+                    completed_at: row.get(8)?,
+                    status: row.get(9)?,
+                    error: row.get(10)?,
+                    created_at: row.get(11)?,
+                    input_tokens: checked_optional_i64_to_u64(row.get(12)?, 12)?,
+                    output_tokens: checked_optional_i64_to_u64(row.get(13)?, 13)?,
+                    output_thinking_tokens: checked_optional_i64_to_u64(row.get(14)?, 14)?,
+                    total_tokens: checked_optional_i64_to_u64(row.get(15)?, 15)?,
+                    cached_input_tokens: checked_optional_i64_to_u64(row.get(16)?, 16)?,
+                    cache_creation_input_tokens: checked_optional_i64_to_u64(row.get(17)?, 17)?,
+                    billable_request_count: checked_i64_to_u64(row.get(18)?, 18)?,
+                    input_price: row.get(19)?,
+                    output_price: row.get(20)?,
+                    estimated_cost: row.get(21)?,
+                })
+            },
+        )
+        .optional()
 }
 
 pub fn roll_up_deleted_usage_for_conversation(
@@ -606,6 +674,16 @@ fn u64_to_i64(value: u64) -> i64 {
 
 fn optional_i64_to_u64(value: Option<i64>) -> Option<u64> {
     value.map(i64_to_u64)
+}
+
+fn checked_optional_i64_to_u64(value: Option<i64>, column: usize) -> rusqlite::Result<Option<u64>> {
+    value
+        .map(|value| checked_i64_to_u64(value, column))
+        .transpose()
+}
+
+fn checked_i64_to_u64(value: i64, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(column, value))
 }
 
 fn i64_to_u64(value: i64) -> u64 {

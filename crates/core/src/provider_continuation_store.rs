@@ -269,7 +269,7 @@ impl ProviderContinuationVault {
         binding: ProviderContinuationBinding<'_>,
         turn: &LlmAssistantTurn,
     ) -> Result<Option<ProviderContinuationRef>, ProviderContinuationStoreError> {
-        if !requires_private_provider_replay(turn) {
+        if !requires_private_provider_replay(turn)? {
             return Ok(None);
         }
         validate_binding(binding, turn)?;
@@ -388,12 +388,20 @@ impl ProviderContinuationVault {
     pub fn validate_approval_checkpoint_refs(
         &self,
         conversation_id: &str,
+        assistant_message_id: &str,
+        run_id: &str,
         expected_protocol: &ProviderProtocolKey,
         refs: &[ProviderContinuationRef],
         assistant_turn_identity: &AgentAssistantTurnCheckpointIdentity,
     ) -> Result<(), ProviderContinuationStoreError> {
+        if assistant_message_id.trim().is_empty() || run_id.trim().is_empty() {
+            return Err(ProviderContinuationStoreError::InvalidBinding);
+        }
         let loaded = self.load_checkpoint_refs_exact(conversation_id, expected_protocol, refs)?;
         let owns_pending_turn = loaded.iter().any(|loaded| {
+            if loaded.assistant_message_id != assistant_message_id || loaded.run_id != run_id {
+                return false;
+            }
             let turn = &loaded.assistant_turn;
             if turn.stable_id() != assistant_turn_identity.assistant_turn_id
                 || turn.stable_digest() != assistant_turn_identity.assistant_turn_digest
@@ -790,18 +798,33 @@ fn validate_binding(
         || turn.provider_protocol() != Some(binding.provider_protocol)
         || turn.stable_id() != binding.assistant_turn_id
         || turn.stable_digest() != binding.assistant_turn_digest
-        || !requires_private_provider_replay(turn)
     {
+        return Err(ProviderContinuationStoreError::InvalidBinding);
+    }
+    if !requires_private_provider_replay(turn)? {
         return Err(ProviderContinuationStoreError::InvalidBinding);
     }
     Ok(())
 }
 
-fn requires_private_provider_replay(turn: &LlmAssistantTurn) -> bool {
-    turn.provider_continuation().is_some()
-        || (turn.provider_protocol().is_some_and(|protocol| {
-            protocol.profile.id == crate::provider_profile::ProviderProfileId::DeepSeekV4Chat
-        }) && !turn.provider_tool_calls().is_empty())
+fn requires_private_provider_replay(
+    turn: &LlmAssistantTurn,
+) -> Result<bool, ProviderContinuationStoreError> {
+    let protocol = turn
+        .provider_protocol()
+        .ok_or(ProviderContinuationStoreError::InvalidBinding)?;
+    protocol
+        .validate()
+        .map_err(|_| ProviderContinuationStoreError::InvalidBinding)?;
+    let capabilities = crate::resolve_provider_runtime_capabilities(protocol)
+        .map_err(|_| ProviderContinuationStoreError::InvalidBinding)?;
+    Ok(capabilities
+        .classify_turn(
+            !turn.provider_tool_calls().is_empty(),
+            turn.provider_continuation().is_some(),
+            crate::ReasoningMode::ProviderDefault,
+        )
+        .requires_private_replay())
 }
 
 fn runtime_tool_identities(
@@ -1654,11 +1677,29 @@ mod tests {
             .vault
             .validate_approval_checkpoint_refs(
                 CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+                RUN_ID,
                 &fixture.protocol,
                 std::slice::from_ref(&continuation_ref),
                 &identity,
             )
             .unwrap();
+        for (assistant_message_id, run_id) in [
+            ("assistant-from-another-turn", RUN_ID),
+            (ASSISTANT_MESSAGE_ID, "run-from-another-turn"),
+        ] {
+            assert_eq!(
+                fixture.vault.validate_approval_checkpoint_refs(
+                    CONVERSATION_ID,
+                    assistant_message_id,
+                    run_id,
+                    &fixture.protocol,
+                    std::slice::from_ref(&continuation_ref),
+                    &identity,
+                ),
+                Err(ProviderContinuationStoreError::CheckpointStateMissing)
+            );
+        }
         assert_eq!(
             fixture
                 .vault
@@ -1736,11 +1777,60 @@ mod tests {
             .vault
             .validate_approval_checkpoint_refs(
                 CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+                RUN_ID,
                 &fixture.protocol,
                 std::slice::from_ref(&continuation_ref),
                 &fixture.turn.checkpoint_identity().unwrap(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn generic_tool_turn_does_not_allocate_private_provider_replay_state() {
+        let fixture = build_fixture();
+        let profile = ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        );
+        let protocol = ProviderProtocolKey::new(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+            &profile,
+            "generic-openai-model",
+            Some("generic-protocol-revision-1".to_string()),
+        )
+        .unwrap();
+        let turn = LlmAssistantTurn::from_provider(
+            protocol.clone(),
+            fixture.turn.provider_visible_text(),
+            fixture.turn.provider_tool_calls().to_vec(),
+        )
+        .unwrap()
+        .with_runtime_tool_bindings(fixture.turn.runtime_tool_bindings().unwrap().to_vec())
+        .unwrap();
+        let assistant_turn_id = turn.stable_id();
+        let assistant_turn_digest = turn.stable_digest();
+
+        let continuation_ref = fixture
+            .vault
+            .persist_staged(
+                ProviderContinuationBinding {
+                    conversation_id: CONVERSATION_ID,
+                    assistant_message_id: ASSISTANT_MESSAGE_ID,
+                    run_id: RUN_ID,
+                    request_index: 0,
+                    assistant_turn_id: &assistant_turn_id,
+                    assistant_turn_digest: &assistant_turn_digest,
+                    provider_protocol: &protocol,
+                },
+                &turn,
+            )
+            .unwrap();
+
+        assert!(continuation_ref.is_none());
+        assert!(!fixture
+            .vault
+            .has_replayable_for_conversation(CONVERSATION_ID)
+            .unwrap());
     }
 
     #[test]

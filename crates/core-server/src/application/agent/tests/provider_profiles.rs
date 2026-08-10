@@ -147,6 +147,123 @@ fn legacy_model_freezes_the_generic_profile_for_the_resolved_dialect() {
 }
 
 #[test]
+fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let request =
+        serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
+            json!({
+                "apiUrl": "https://api.deepseek.com/v1/chat/completions",
+                "apiToken": "provider-profile-token",
+                "searchMode": "disabled",
+                "tavilyApiKey": "",
+                "models": [{
+                    "id": "model-1",
+                    "displayName": "DeepSeek V4 Chat",
+                    "supportsImage": false,
+                    "contextWindowTokens": 128000,
+                    "providerProfileUpdate": {
+                        "kind": "select_registered_profile",
+                        "profileId": "deepseek_v4_chat",
+                        "settings": {
+                            "kind": "deepseek_v4_chat",
+                            "reasoning": {"mode": "enabled", "effort": "high"}
+                        }
+                    },
+                    "inputPrice": "0",
+                    "outputPrice": "0",
+                    "enabled": true
+                }]
+            }),
+        )
+        .unwrap();
+    let authoritative = storage.save_model_settings_request(request).unwrap();
+    let stored = authoritative.models[0]
+        .provider_profile_config
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        stored.profile,
+        mycopilot_core::ProviderProfileRef::deepseek_v4_chat()
+    );
+    assert_eq!(
+        stored.reasoning.mode,
+        mycopilot_core::ReasoningMode::Enabled
+    );
+    assert_eq!(
+        stored.reasoning.effort,
+        mycopilot_core::ReasoningEffort::High
+    );
+
+    let prepared = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        turn_input("model-1"),
+        "run-provider-profile-renderer-selection",
+    )
+    .unwrap();
+    let frozen_config = prepared.agent_input.provider_profile_config.unwrap();
+    let frozen_key = prepared.agent_input.provider_protocol_key.unwrap();
+    assert_eq!(frozen_config, stored.clone());
+    assert_eq!(frozen_key.profile, stored.profile);
+    let registration = mycopilot_core::resolve_provider_registration_for_key(&frozen_key).unwrap();
+    assert_eq!(registration.profile(), stored.profile);
+    assert_eq!(
+        registration.runtime_capabilities().tool_exchange(),
+        mycopilot_core::ProviderToolExchangeSemantics::ExactProviderGrouped
+    );
+}
+
+#[test]
+fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let request =
+        serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
+            json!({
+                "apiUrl": "https://api.anthropic.com/v1/messages",
+                "apiToken": "provider-profile-token",
+                "searchMode": "disabled",
+                "tavilyApiKey": "",
+                "models": [{
+                    "id": "model-1",
+                    "displayName": "Anthropic-compatible",
+                    "supportsImage": false,
+                    "contextWindowTokens": 128000,
+                    "providerProfileUpdate": {"kind": "select_generic"},
+                    "inputPrice": "0",
+                    "outputPrice": "0",
+                    "enabled": true
+                }]
+            }),
+        )
+        .unwrap();
+    storage.save_model_settings_request(request).unwrap();
+
+    let prepared = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        turn_input("model-1"),
+        "run-provider-profile-anthropic-selection",
+    )
+    .unwrap();
+    let frozen_config = prepared.agent_input.provider_profile_config.unwrap();
+    let frozen_key = prepared.agent_input.provider_protocol_key.unwrap();
+    assert_eq!(
+        frozen_config.profile,
+        mycopilot_core::ProviderProfileRef::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::AnthropicMessages
+        )
+    );
+    assert_eq!(
+        mycopilot_core::resolve_provider_registration_for_key(&frozen_key)
+            .unwrap()
+            .profile(),
+        frozen_config.profile
+    );
+}
+
+#[test]
 fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();

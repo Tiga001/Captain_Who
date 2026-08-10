@@ -1,5 +1,6 @@
 use crate::protocol::AgentApiStyle;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeserializeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -53,16 +54,96 @@ impl ProviderProtocolDialect {
 
 /// Stable identity of a code-owned provider protocol profile.
 ///
-/// Unknown ids fail during Serde decoding. Known ids with unknown versions fail validation, so a
-/// newer persisted wire contract is never silently interpreted with older replay semantics.
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProviderProfileId {
-    #[serde(rename = "generic_openai_chat")]
-    GenericOpenAiChat,
-    #[serde(rename = "generic_anthropic_messages")]
-    GenericAnthropicMessages,
-    #[serde(rename = "deepseek_v4_chat")]
-    DeepSeekV4Chat,
+/// Persisted ids are deliberately lossless so settings created by a newer binary can still be
+/// shown as unsupported and replaced explicitly by an older UI. Runtime authority remains the
+/// exact code-owned Registration lookup: an unknown id or version can be represented, but can
+/// never acquire an Adapter or Runtime Capability.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ProviderProfileId {
+    bytes: [u8; Self::MAX_BYTES],
+    len: u8,
+}
+
+impl ProviderProfileId {
+    pub const MAX_BYTES: usize = 64;
+
+    #[allow(non_upper_case_globals)]
+    pub const GenericOpenAiChat: Self = Self::from_static("generic_openai_chat");
+    #[allow(non_upper_case_globals)]
+    pub const GenericAnthropicMessages: Self = Self::from_static("generic_anthropic_messages");
+    #[allow(non_upper_case_globals)]
+    pub const DeepSeekV4Chat: Self = Self::from_static("deepseek_v4_chat");
+
+    const fn from_static(value: &str) -> Self {
+        let source = value.as_bytes();
+        assert!(!source.is_empty() && source.len() <= Self::MAX_BYTES);
+        let mut bytes = [0_u8; Self::MAX_BYTES];
+        let mut index = 0;
+        while index < source.len() {
+            bytes[index] = source[index];
+            index += 1;
+        }
+        Self {
+            bytes,
+            len: source.len() as u8,
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        if value.is_empty() {
+            return Err("provider profile id is empty");
+        }
+        if value.len() > Self::MAX_BYTES {
+            return Err("provider profile id is too long");
+        }
+        if !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        }) {
+            return Err("provider profile id contains unsupported characters");
+        }
+        let mut bytes = [0_u8; Self::MAX_BYTES];
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(Self {
+            bytes,
+            len: value.len() as u8,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len as usize])
+            .expect("ProviderProfileId is constructed from UTF-8")
+    }
+}
+
+impl std::fmt::Debug for ProviderProfileId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Display for ProviderProfileId {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ProviderProfileId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,14 +175,7 @@ impl ProviderProfileRef {
     }
 
     pub fn validate(self) -> Result<(), ProviderProfileValidationError> {
-        let expected = match self.id {
-            ProviderProfileId::GenericOpenAiChat => GENERIC_OPENAI_CHAT_PROFILE_VERSION,
-            ProviderProfileId::GenericAnthropicMessages => {
-                GENERIC_ANTHROPIC_MESSAGES_PROFILE_VERSION
-            }
-            ProviderProfileId::DeepSeekV4Chat => DEEPSEEK_V4_CHAT_PROFILE_VERSION,
-        };
-        if self.version != expected {
+        if !crate::provider_registration::is_registered_provider_profile(self) {
             return Err(ProviderProfileValidationError::UnsupportedProfileVersion {
                 id: self.id,
                 version: self.version,
@@ -114,24 +188,7 @@ impl ProviderProfileRef {
         self,
         dialect: ProviderProtocolDialect,
     ) -> Result<(), ProviderProfileValidationError> {
-        self.validate()?;
-        let compatible = matches!(
-            (self.id, dialect),
-            (
-                ProviderProfileId::GenericOpenAiChat | ProviderProfileId::DeepSeekV4Chat,
-                ProviderProtocolDialect::OpenAiChatCompletions
-            ) | (
-                ProviderProfileId::GenericAnthropicMessages,
-                ProviderProtocolDialect::AnthropicMessages
-            )
-        );
-        if !compatible {
-            return Err(ProviderProfileValidationError::IncompatibleDialect {
-                id: self.id,
-                dialect,
-            });
-        }
-        Ok(())
+        crate::provider_registration::resolve_provider_registration(self, dialect).map(|_| ())
     }
 }
 
@@ -160,6 +217,36 @@ pub struct ReasoningPolicy {
     pub mode: ReasoningMode,
     #[serde(default)]
     pub effort: ReasoningEffort,
+}
+
+/// Strict, user-editable settings accepted by the Host Profile-selection boundary.
+///
+/// This union is intentionally separate from persisted [`ProviderProfileConfig`]. Clients choose
+/// a registered profile id and its public settings; the Host supplies the current registered
+/// version and every private runtime policy.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderProfilePublicSettings {
+    DeepseekV4Chat { reasoning: ReasoningPolicy },
+}
+
+impl ProviderProfilePublicSettings {
+    pub const fn normalized(self) -> Self {
+        match self {
+            Self::DeepseekV4Chat { mut reasoning } => {
+                if matches!(reasoning.mode, ReasoningMode::Disabled) {
+                    reasoning.effort = ReasoningEffort::ProviderDefault;
+                }
+                Self::DeepseekV4Chat { reasoning }
+            }
+        }
+    }
+
+    pub const fn reasoning(self) -> ReasoningPolicy {
+        match self {
+            Self::DeepseekV4Chat { reasoning } => reasoning,
+        }
+    }
 }
 
 impl ReasoningPolicy {
@@ -334,6 +421,12 @@ pub enum ProviderProfileValidationError {
     EmptyModelId,
     EmptyConfigurationRevision,
     ProfileKeyMismatch,
+    ProfileIsNotUiSelectable {
+        id: ProviderProfileId,
+    },
+    PublicSettingsKindMismatch {
+        id: ProviderProfileId,
+    },
 }
 
 impl Display for ProviderProfileValidationError {
@@ -369,6 +462,12 @@ impl Display for ProviderProfileValidationError {
             }
             Self::ProfileKeyMismatch => {
                 formatter.write_str("provider protocol key does not match profile configuration")
+            }
+            Self::ProfileIsNotUiSelectable { id } => {
+                write!(formatter, "provider profile {id} is not selectable")
+            }
+            Self::PublicSettingsKindMismatch { id } => {
+                write!(formatter, "provider settings do not match profile {id}")
             }
         }
     }
@@ -426,13 +525,26 @@ mod tests {
     }
 
     #[test]
-    fn explicit_profile_with_unknown_id_fails_during_decode() {
+    fn explicit_profile_with_unknown_id_is_preserved_but_fails_registration_validation() {
         let decoded = serde_json::from_value::<ProviderProfileConfig>(json!({
             "schemaVersion": 1,
             "profile": { "id": "future_profile", "version": 1 },
             "reasoning": { "mode": "provider_default", "effort": "provider_default" }
-        }));
-        assert!(decoded.is_err());
+        }))
+        .unwrap();
+        assert_eq!(decoded.profile.id.as_str(), "future_profile");
+        assert!(matches!(
+            decoded.validate(),
+            Err(ProviderProfileValidationError::UnsupportedProfileVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn profile_id_rejects_control_characters_and_oversized_values() {
+        assert!(ProviderProfileId::parse("future_profile-v2.1").is_ok());
+        assert!(ProviderProfileId::parse("future\nprofile").is_err());
+        assert!(ProviderProfileId::parse("future profile").is_err());
+        assert!(ProviderProfileId::parse(&"a".repeat(ProviderProfileId::MAX_BYTES + 1)).is_err());
     }
 
     #[test]

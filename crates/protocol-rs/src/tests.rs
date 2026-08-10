@@ -3,6 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[test]
+fn provider_profile_ui_descriptor_method_is_stable() {
+    assert_eq!(
+        STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD,
+        "storage.loadProviderProfileUiDescriptors"
+    );
+}
+
+#[test]
 fn agent_method_names_match_the_cross_language_golden_contract() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/agent-contract-v1.json"

@@ -285,20 +285,59 @@ async fn run_deepseek_missing_reasoning_restart(
     reasoning_mode: mycopilot_core::ReasoningMode,
     decision: RestartedApprovalDecision,
     response_reasoning: Option<&'static str>,
+    switch_to_generic_while_pending: bool,
 ) -> (Value, u64) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let model_server = tokio::spawn(async move {
         let (mut first, _) = listener.accept().await.unwrap();
         let first_request = read_json_request(&mut first).await;
-        write_tool_call_stream_with_reasoning(&mut first, response_reasoning).await;
+        write_tool_call_stream_with_reasoning_and_usage(
+            &mut first,
+            response_reasoning,
+            Some(json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 30,
+                "completion_tokens_details": { "reasoning_tokens": 20 },
+                "total_tokens": 130
+            })),
+        )
+        .await;
         drop(first);
 
         let (mut second, _) = listener.accept().await.unwrap();
         let second_request = read_json_request(&mut second).await;
-        write_text_stream(&mut second, "Restarted approval completed.").await;
+        write_text_stream_with_usage(
+            &mut second,
+            "Restarted approval completed.",
+            Some(json!({
+                "prompt_tokens": 200,
+                "completion_tokens": 50,
+                "total_tokens": 250
+            })),
+        )
+        .await;
         drop(second);
-        (first_request, second_request)
+
+        let third_request = if switch_to_generic_while_pending {
+            let (mut third, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut third).await;
+            write_text_stream_with_usage(
+                &mut third,
+                "New Generic run completed.",
+                Some(json!({
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "total_tokens": 15
+                })),
+            )
+            .await;
+            drop(third);
+            Some(request)
+        } else {
+            None
+        };
+        (first_request, second_request, third_request)
     });
 
     let fixture = tempdir().unwrap();
@@ -367,6 +406,61 @@ async fn run_deepseek_missing_reasoning_restart(
     let pending = service.list_pending_actions();
     assert_eq!(pending.len(), 1);
     assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 0);
+    let first_segment_usage = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(usage) = storage
+                .load_agent_usage_for_owner(
+                    &turn.run_id,
+                    "conversation-deepseek-approval-restart",
+                    "assistant-deepseek-approval-restart",
+                )
+                .unwrap()
+            {
+                break usage;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("waiting-for-approval usage must become durable");
+    assert_eq!(first_segment_usage.input_tokens, Some(100));
+    assert_eq!(first_segment_usage.output_tokens, Some(10));
+    assert_eq!(first_segment_usage.output_thinking_tokens, Some(20));
+    assert_eq!(first_segment_usage.total_tokens, Some(130));
+    assert_eq!(first_segment_usage.billable_request_count, 1);
+
+    let mut changed_settings = storage.load_model_settings().unwrap().unwrap();
+    changed_settings.models[0].display_name = "Changed while approval was pending".to_string();
+    changed_settings.models[0].input_price = "999".to_string();
+    changed_settings.models[0].output_price = "999".to_string();
+    if switch_to_generic_while_pending {
+        let mut changed_request = serde_json::to_value(changed_settings).unwrap();
+        changed_request["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("providerProfileConfig");
+        changed_request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
+        let changed_settings =
+            storage
+                .save_model_settings_request(
+                    serde_json::from_value::<
+                        mycopilot_core::storage::models::ModelSettingsSaveRequest,
+                    >(changed_request)
+                    .unwrap(),
+                )
+                .unwrap();
+        assert_eq!(
+            changed_settings.models[0]
+                .provider_profile_config
+                .as_ref()
+                .unwrap()
+                .profile
+                .id,
+            mycopilot_core::ProviderProfileId::GenericOpenAiChat
+        );
+    } else {
+        storage.save_model_settings(changed_settings).unwrap();
+    }
 
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     let (active_envelopes, encrypted_envelopes): (i64, i64) = connection
@@ -435,6 +529,24 @@ async fn run_deepseek_missing_reasoning_restart(
         )
         .unwrap()
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    {
+        let usage_contexts = restarted
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let restored = usage_contexts.get(&turn.run_id).unwrap();
+        assert_eq!(
+            restored.context.provider_usage_semantics,
+            mycopilot_core::ProviderUsageSemantics::CompletionIncludesReasoning
+        );
+        assert_eq!(
+            restored.context.model_name,
+            "DeepSeek approval continuation fixture"
+        );
+        assert_eq!(restored.context.input_price.as_deref(), Some("0"));
+        assert_eq!(restored.context.output_price.as_deref(), Some("0"));
+        assert_eq!(restored.usage.as_ref().unwrap().input_tokens, Some(100));
+    }
     let pending = restarted.list_pending_actions();
     assert_eq!(pending.len(), 1);
     let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -461,8 +573,54 @@ async fn run_deepseek_missing_reasoning_restart(
         })
         .await;
     assert_eq!(done["params"]["status"], "completed");
+    let cumulative_usage = reopened_storage
+        .load_agent_usage_for_owner(
+            &turn.run_id,
+            "conversation-deepseek-approval-restart",
+            "assistant-deepseek-approval-restart",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(cumulative_usage.input_tokens, Some(300));
+    assert_eq!(cumulative_usage.total_tokens, Some(380));
+    assert_eq!(cumulative_usage.billable_request_count, 2);
+    assert_eq!(cumulative_usage.output_tokens, None);
+    assert_eq!(cumulative_usage.output_thinking_tokens, None);
+    assert_eq!(cumulative_usage.input_price.as_deref(), Some("0"));
+    assert_eq!(cumulative_usage.output_price.as_deref(), Some("0"));
 
-    let (first_request, second_request) = model_server.await.unwrap();
+    if switch_to_generic_while_pending {
+        let (generic_notifications, mut generic_receiver) = tokio::sync::mpsc::unbounded_channel();
+        restarted
+            .start_conversation_turn(
+                AgentConversationTurnInput {
+                    conversation_id: Some("conversation-after-profile-change".to_string()),
+                    project_id: None,
+                    model_id: model_id.to_string(),
+                    context_window_indicator_enabled: false,
+                    content: "Use the newly selected Generic profile.".to_string(),
+                    attachments: Vec::new(),
+                    skills: Vec::new(),
+                    title: None,
+                    user_message_id: Some("user-after-profile-change".to_string()),
+                    assistant_message_id: Some("assistant-after-profile-change".to_string()),
+                    max_tokens: Some(1_024),
+                    temperature: None,
+                    prompt_preferences: None,
+                    permissions: Default::default(),
+                },
+                generic_notifications,
+            )
+            .unwrap();
+        let (generic_done, _) =
+            wait_for_notification_matching_with_seen(&mut generic_receiver, |notification| {
+                notification["params"]["type"] == "done"
+            })
+            .await;
+        assert_eq!(generic_done["params"]["status"], "completed");
+    }
+
+    let (first_request, second_request, third_request) = model_server.await.unwrap();
     assert!(first_request["messages"]
         .as_array()
         .is_some_and(|messages| messages
@@ -480,6 +638,16 @@ async fn run_deepseek_missing_reasoning_restart(
         replayed_provider_call["function"]["name"],
         "mcp__approval_fixture__echo"
     );
+    assert!(second_request.get("tool_choice").is_none());
+    if switch_to_generic_while_pending {
+        assert_eq!(
+            third_request.as_ref().unwrap()["tool_choice"],
+            "auto",
+            "the next Run must use the newly selected Generic adapter"
+        );
+    } else {
+        assert!(third_request.is_none());
+    }
     if let Some(reasoning) = response_reasoning {
         let replayed_assistant = second_request["messages"]
             .as_array()
@@ -513,23 +681,36 @@ async fn run_deepseek_missing_reasoning_restart(
             .max()
             .expect("resumed real run must publish exact continuation accounting");
         assert!(runtime_continuation_tokens > 0);
-        let preview = restarted
-            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
-                conversation_id: Some("conversation-deepseek-approval-restart".to_string()),
-                project_id: None,
-                model_id: "deepseek-approval-restart-model".to_string(),
-                max_tokens: Some(1_024),
-                prompt_preferences: None,
-                permissions: Default::default(),
-                skills: Vec::new(),
-            })
-            .unwrap()
-            .snapshot
-            .unwrap();
-        assert_eq!(
-            preview.cost_breakdown.provider_continuation_tokens, runtime_continuation_tokens,
-            "Host preview and real resumed request must hydrate the same private continuation"
-        );
+        let preview_input = AgentContextWindowSnapshotInput {
+            conversation_id: Some("conversation-deepseek-approval-restart".to_string()),
+            project_id: None,
+            model_id: "deepseek-approval-restart-model".to_string(),
+            max_tokens: Some(1_024),
+            prompt_preferences: None,
+            permissions: Default::default(),
+            skills: Vec::new(),
+        };
+        if switch_to_generic_while_pending {
+            let error = restarted
+                .get_context_window_snapshot(preview_input)
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Provider continuation 不能通过当前 Profile 回放"),
+                "{error}"
+            );
+        } else {
+            let preview = restarted
+                .get_context_window_snapshot(preview_input)
+                .unwrap()
+                .snapshot
+                .unwrap();
+            assert_eq!(
+                preview.cost_breakdown.provider_continuation_tokens, runtime_continuation_tokens,
+                "Host preview and real resumed request must hydrate the same private continuation"
+            );
+        }
     }
     (
         second_request,
@@ -543,6 +724,7 @@ async fn deepseek_disabled_tool_turn_without_reasoning_survives_restart_and_appr
         mycopilot_core::ReasoningMode::Disabled,
         RestartedApprovalDecision::Approve,
         None,
+        false,
     )
     .await;
     assert_eq!(invocation_count, 1);
@@ -557,6 +739,7 @@ async fn deepseek_provider_default_tool_turn_without_reasoning_survives_restart_
         mycopilot_core::ReasoningMode::ProviderDefault,
         RestartedApprovalDecision::Reject,
         None,
+        false,
     )
     .await;
     assert_eq!(invocation_count, 0);
@@ -571,10 +754,198 @@ async fn deepseek_enabled_reasoning_restarts_privately_and_replays_byte_exact_wi
         mycopilot_core::ReasoningMode::Enabled,
         RestartedApprovalDecision::Approve,
         Some(REASONING_CANARY),
+        false,
     )
     .await;
     assert_eq!(invocation_count, 1);
     assert!(second_request.to_string().contains(REASONING_CANARY));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_deepseek_run_stays_frozen_when_next_run_switches_to_generic() {
+    let (second_request, invocation_count) = run_deepseek_missing_reasoning_restart(
+        mycopilot_core::ReasoningMode::Enabled,
+        RestartedApprovalDecision::Approve,
+        Some(REASONING_CANARY),
+        true,
+    )
+    .await;
+    assert_eq!(invocation_count, 1);
+    assert!(serde_json::to_string(&second_request)
+        .unwrap()
+        .contains(RESULT_CANARY));
+    assert_eq!(
+        second_request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message.get("reasoning_content").is_some())
+            .and_then(|message| message["reasoning_content"].as_str()),
+        Some(REASONING_CANARY)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let first_request = read_json_request(&mut first).await;
+        write_tool_call_stream(&mut first).await;
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let second_request = read_json_request(&mut second).await;
+        write_text_stream(&mut second, "Frozen Generic approval completed.").await;
+        drop(second);
+
+        let (mut third, _) = listener.accept().await.unwrap();
+        let third_request = read_json_request(&mut third).await;
+        write_text_stream(&mut third, "New DeepSeek run completed.").await;
+        drop(third);
+        (first_request, second_request, third_request)
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture
+        .path()
+        .join("generic-to-deepseek-approval-restart.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let model_id = "generic-to-deepseek-model";
+    save_test_pending_provider(
+        &storage,
+        model_id,
+        &format!("http://{address}/v1/chat/completions"),
+        "fixed-test-model-token",
+        "disabled",
+        "",
+    );
+    let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-generic-to-deepseek".to_string()),
+                project_id: None,
+                model_id: model_id.to_string(),
+                context_window_indicator_enabled: false,
+                content: "Call the approval fixture, then wait.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-generic-to-deepseek".to_string()),
+                assistant_message_id: Some("assistant-generic-to-deepseek".to_string()),
+                max_tokens: Some(1_024),
+                temperature: None,
+                prompt_preferences: None,
+                permissions: Default::default(),
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+    wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "approval_required"
+    })
+    .await;
+    wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "done"
+            && notification["params"]["status"] == "waiting_for_approval"
+    })
+    .await;
+    assert_eq!(service.list_pending_actions().len(), 1);
+
+    let current = storage.load_model_settings().unwrap().unwrap();
+    let mut update = serde_json::to_value(current).unwrap();
+    update["models"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("providerProfileConfig");
+    update["models"][0]["providerProfileUpdate"] = json!({
+        "kind": "select_registered_profile",
+        "profileId": "deepseek_v4_chat",
+        "settings": {
+            "kind": "deepseek_v4_chat",
+            "reasoning": {"mode": "enabled", "effort": "provider_default"}
+        }
+    });
+    storage
+        .save_model_settings_request(
+            serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
+                update,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(notifications);
+    drop(receiver);
+    drop(service);
+    drop(storage);
+
+    let reopened_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted =
+        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&reopened_storage))
+            .unwrap()
+            .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let pending = restarted.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    let (resume_notifications, mut resume_receiver) = tokio::sync::mpsc::unbounded_channel();
+    restarted
+        .approve_action(&turn.run_id, &pending[0].action_id, resume_notifications)
+        .unwrap();
+    let (resumed_done, _) =
+        wait_for_notification_matching_with_seen(&mut resume_receiver, |notification| {
+            notification["params"]["type"] == "done"
+        })
+        .await;
+    assert_eq!(resumed_done["params"]["status"], "completed");
+
+    let (next_notifications, mut next_receiver) = tokio::sync::mpsc::unbounded_channel();
+    restarted
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-after-deepseek-selection".to_string()),
+                project_id: None,
+                model_id: model_id.to_string(),
+                context_window_indicator_enabled: false,
+                content: "Use the newly selected DeepSeek profile.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-after-deepseek-selection".to_string()),
+                assistant_message_id: Some("assistant-after-deepseek-selection".to_string()),
+                max_tokens: Some(1_024),
+                temperature: None,
+                prompt_preferences: None,
+                permissions: Default::default(),
+            },
+            next_notifications,
+        )
+        .unwrap();
+    let (next_done, _) =
+        wait_for_notification_matching_with_seen(&mut next_receiver, |notification| {
+            notification["params"]["type"] == "done"
+        })
+        .await;
+    assert_eq!(next_done["params"]["status"], "completed");
+
+    let (first_request, second_request, third_request) = model_server.await.unwrap();
+    assert_eq!(first_request["tool_choice"], "auto");
+    assert_eq!(
+        second_request["tool_choice"], "auto",
+        "the pending Run must resume with its frozen Generic adapter"
+    );
+    assert!(serde_json::to_string(&second_request)
+        .unwrap()
+        .contains(RESULT_CANARY));
+    assert!(third_request.get("tool_choice").is_none());
+    assert_eq!(
+        third_request["thinking"],
+        json!({"type": "enabled"}),
+        "the next Run must use the newly selected DeepSeek adapter"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -655,6 +1026,59 @@ async fn restarted_approval_rejects_swapped_valid_provider_refs_before_dispatch(
     model_server.await.unwrap();
     assert_eq!(service.list_pending_actions().len(), 2);
     assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 0);
+
+    let first_record = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+        .find(|record| record.snapshot.run_id == run_ids[0])
+        .cloned()
+        .unwrap();
+    for (assistant_message_id, run_id) in [
+        (
+            "assistant-same-conversation-different-turn",
+            first_record.snapshot.run_id.as_str(),
+        ),
+        (
+            first_record
+                .snapshot
+                .assistant_message_id
+                .as_deref()
+                .unwrap(),
+            "run-same-conversation-different-turn",
+        ),
+    ] {
+        let mut wrong_owner = first_record.clone();
+        wrong_owner.snapshot.assistant_message_id = Some(assistant_message_id.to_string());
+        wrong_owner.snapshot.run_id = run_id.to_string();
+        let error = service
+            .validate_provider_continuations_before_dispatch(&wrong_owner)
+            .unwrap_err();
+        assert!(error.contains("provider_continuation"));
+        assert_eq!(
+            invoker.invocation_count.load(Ordering::SeqCst),
+            0,
+            "same-conversation continuation from another message/run must fail before dispatch"
+        );
+    }
+    let mut unknown_registration = first_record.clone();
+    let checkpoint = unknown_registration
+        .agent_input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap();
+    checkpoint.provider_protocol_key.profile.version = u32::MAX;
+    checkpoint.provider_profile_config.profile.version = u32::MAX;
+    let error = service
+        .validate_provider_continuations_before_dispatch(&unknown_registration)
+        .unwrap_err();
+    assert!(error.contains("provider_context_boundary_required"));
+    assert_eq!(
+        invoker.invocation_count.load(Ordering::SeqCst),
+        0,
+        "unknown Provider registration must fail before approval dispatch"
+    );
 
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     let refs = ["a", "b"].map(|suffix| {
@@ -2544,22 +2968,32 @@ async fn write_tool_call_stream_with_reasoning(
     stream: &mut TcpStream,
     reasoning_content: Option<&str>,
 ) {
+    write_tool_call_stream_with_reasoning_and_usage(stream, reasoning_content, None).await;
+}
+
+async fn write_tool_call_stream_with_reasoning_and_usage(
+    stream: &mut TcpStream,
+    reasoning_content: Option<&str>,
+    usage: Option<Value>,
+) {
     write_tool_call_stream_with_id_and_reasoning(
         stream,
         "mcp-approval-provider-call",
         reasoning_content,
+        usage,
     )
     .await;
 }
 
 async fn write_tool_call_stream_with_id(stream: &mut TcpStream, call_id: &str) {
-    write_tool_call_stream_with_id_and_reasoning(stream, call_id, None).await;
+    write_tool_call_stream_with_id_and_reasoning(stream, call_id, None, None).await;
 }
 
 async fn write_tool_call_stream_with_id_and_reasoning(
     stream: &mut TcpStream,
     call_id: &str,
     reasoning_content: Option<&str>,
+    usage: Option<Value>,
 ) {
     stream
         .write_all(
@@ -2594,9 +3028,13 @@ async fn write_tool_call_stream_with_id_and_reasoning(
     let finish_frame = json!({
         "choices": [{ "delta": {}, "finish_reason": "tool_calls" }]
     });
+    let usage_frame = usage
+        .map(|usage| format!("data: {}\n\n", json!({ "choices": [], "usage": usage })))
+        .unwrap_or_default();
     stream
         .write_all(
-            format!("data: {tool_frame}\n\ndata: {finish_frame}\n\ndata: [DONE]\n\n").as_bytes(),
+            format!("data: {tool_frame}\n\ndata: {finish_frame}\n\n{usage_frame}data: [DONE]\n\n")
+                .as_bytes(),
         )
         .await
         .unwrap();
@@ -2673,6 +3111,10 @@ async fn write_grouped_two_tool_call_stream(
 }
 
 async fn write_text_stream(stream: &mut TcpStream, content: &str) {
+    write_text_stream_with_usage(stream, content, None).await;
+}
+
+async fn write_text_stream_with_usage(stream: &mut TcpStream, content: &str, usage: Option<Value>) {
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
@@ -2688,9 +3130,15 @@ async fn write_text_stream(stream: &mut TcpStream, content: &str) {
     let finish_frame = json!({
         "choices": [{"delta": {}, "finish_reason": "stop"}]
     });
+    let usage_frame = usage
+        .map(|usage| format!("data: {}\n\n", json!({ "choices": [], "usage": usage })))
+        .unwrap_or_default();
     stream
         .write_all(
-            format!("data: {content_frame}\n\ndata: {finish_frame}\n\ndata: [DONE]\n\n").as_bytes(),
+            format!(
+                "data: {content_frame}\n\ndata: {finish_frame}\n\n{usage_frame}data: [DONE]\n\n"
+            )
+            .as_bytes(),
         )
         .await
         .unwrap();

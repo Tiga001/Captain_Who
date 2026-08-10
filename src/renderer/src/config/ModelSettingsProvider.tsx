@@ -1,10 +1,21 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
 import { useToast } from '../components/toast/ToastContext'
-import { loadModelSettings, saveModelSettings } from '../features/storage/storageClient'
+import {
+  loadModelSettings,
+  loadProviderProfileUiDescriptors,
+  saveModelSettings
+} from '../features/storage/storageClient'
+import type { ModelSettingsSnapshot } from '../features/storage/storageClient'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import { useFrontendConfig } from './FrontendConfigProvider'
-import { INITIAL_MODELS, isModelConnectionAvailable, modelConfig } from './modelConfig'
+import {
+  INITIAL_MODELS,
+  isModelConnectionAvailable,
+  modelConfig,
+  prepareModelsForGlobalApiUrlChange
+} from './modelConfig'
 import type { ModelConfig, SearchMode } from './modelConfig'
 
 interface ModelSettingsContextValue {
@@ -12,6 +23,7 @@ interface ModelSettingsContextValue {
   apiToken: string
   enabledModels: ModelConfig[]
   models: ModelConfig[]
+  providerProfileDescriptors: ProviderProfileUiDescriptor[]
   searchMode: SearchMode
   tavilyApiKey: string
   deleteModel: (modelId: string) => void
@@ -20,7 +32,7 @@ interface ModelSettingsContextValue {
   setSearchMode: (value: SearchMode) => void
   setTavilyApiKey: (value: string) => void
   toggleModel: (modelId: string) => void
-  upsertModel: (model: ModelConfig, previousModelId?: string) => void
+  upsertModel: (model: ModelConfig, previousModelId?: string) => Promise<ModelConfig>
 }
 
 const ModelSettingsContext = createContext<ModelSettingsContextValue | null>(null)
@@ -44,22 +56,68 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     markPending: markStartupPending,
     markReady: markStartupReady
   } = useAppStartupStage('modelSettings')
-  const [apiUrl, setApiUrl] = useState<string>(modelConfig.api.defaultUrl)
-  const [apiToken, setApiToken] = useState<string>(modelConfig.api.defaultToken)
-  const [searchMode, setSearchMode] = useState<SearchMode>(modelConfig.webSearch.defaultMode)
-  const [tavilyApiKey, setTavilyApiKey] = useState<string>(
-    modelConfig.webSearch.defaultTavilyApiKey
-  )
-  const [models, setModels] = useState<ModelConfig[]>(INITIAL_MODELS)
+  const [settings, setSettings] = useState<ModelSettingsSnapshot>(() => ({
+    apiUrl: modelConfig.api.defaultUrl,
+    apiToken: modelConfig.api.defaultToken,
+    searchMode: modelConfig.webSearch.defaultMode,
+    tavilyApiKey: modelConfig.webSearch.defaultTavilyApiKey,
+    models: INITIAL_MODELS
+  }))
+  const [providerProfileDescriptors, setProviderProfileDescriptors] = useState<
+    ProviderProfileUiDescriptor[]
+  >([])
   const [hydrationStatus, setHydrationStatus] = useState<ModelSettingsHydrationStatus>('loading')
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const latestSaveRevisionRef = useRef(0)
-  const skipNextSaveRef = useRef(false)
+  const settingsRef = useRef(settings)
+  const lastSuccessfulSettingsRef = useRef<ModelSettingsSnapshot | null>(null)
   const loadFailurePresentationRef = useRef({ showToast, t })
 
   useEffect(() => {
     loadFailurePresentationRef.current = { showToast, t }
   }, [showToast, t])
+
+  const applySettings = useCallback((nextSettings: ModelSettingsSnapshot) => {
+    settingsRef.current = nextSettings
+    setSettings(nextSettings)
+  }, [])
+
+  const persistSettings = useCallback(
+    (nextSettings: ModelSettingsSnapshot): Promise<ModelSettingsSnapshot> => {
+      const revision = latestSaveRevisionRef.current + 1
+      latestSaveRevisionRef.current = revision
+      applySettings(nextSettings)
+
+      const save = saveQueueRef.current
+        .catch(() => undefined)
+        .then(() => saveModelSettings(nextSettings))
+        .then((authoritativeSettings) => {
+          lastSuccessfulSettingsRef.current = authoritativeSettings
+          if (latestSaveRevisionRef.current === revision) {
+            applySettings(authoritativeSettings)
+          }
+          return authoritativeSettings
+        })
+        .catch(() => {
+          if (latestSaveRevisionRef.current === revision) {
+            const lastSuccessfulSettings = lastSuccessfulSettingsRef.current
+            if (lastSuccessfulSettings) {
+              applySettings(lastSuccessfulSettings)
+            }
+            const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
+            presentToast(translate('configuration.saveFailed'), { durationMs: 5000 })
+          }
+          throw new Error('Model settings could not be saved')
+        })
+
+      saveQueueRef.current = save.then(
+        () => undefined,
+        () => undefined
+      )
+      return save
+    },
+    [applySettings]
+  )
 
   useEffect(() => {
     let isCancelled = false
@@ -77,22 +135,23 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
         }
 
         try {
-          const settings = await loadModelSettings()
+          const [storedSettings, descriptors] = await Promise.all([
+            loadModelSettings(),
+            loadProviderProfileUiDescriptors().catch(() => [])
+          ])
           if (isCancelled) return
 
-          if (settings) {
-            // Loading a stored snapshot updates every dependency of the persistence effect.
-            // It is already durable, so do not immediately write it back unchanged.
-            skipNextSaveRef.current = true
-            setApiUrl(settings.apiUrl)
-            setApiToken(settings.apiToken)
-            setSearchMode(settings.searchMode)
-            setTavilyApiKey(settings.tavilyApiKey)
-            setModels(settings.models)
+          setProviderProfileDescriptors(descriptors)
+          if (storedSettings) {
+            lastSuccessfulSettingsRef.current = storedSettings
+            applySettings(storedSettings)
           }
 
           setHydrationStatus('ready')
           markStartupReady()
+          if (!storedSettings) {
+            void persistSettings(settingsRef.current).catch(() => undefined)
+          }
           return
         } catch (error) {
           lastError = error
@@ -114,38 +173,63 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     return () => {
       isCancelled = true
     }
-  }, [markStartupFailed, markStartupPending, markStartupReady, startupAttempt])
+  }, [
+    applySettings,
+    markStartupFailed,
+    markStartupPending,
+    markStartupReady,
+    persistSettings,
+    startupAttempt
+  ])
 
-  useEffect(() => {
-    // A failed read must never authorize default in-memory values to overwrite SQLite.
-    if (hydrationStatus !== 'ready') return
-    if (skipNextSaveRef.current) {
-      skipNextSaveRef.current = false
-      return
-    }
+  const updateSettings = useCallback(
+    (update: (current: ModelSettingsSnapshot) => ModelSettingsSnapshot): void => {
+      if (hydrationStatus !== 'ready') return
+      void persistSettings(update(settingsRef.current)).catch(() => undefined)
+    },
+    [hydrationStatus, persistSettings]
+  )
 
-    const revision = latestSaveRevisionRef.current + 1
-    latestSaveRevisionRef.current = revision
-    const settings = {
-      apiToken,
-      apiUrl,
-      models,
-      searchMode,
-      tavilyApiKey
-    }
-    const save = saveQueueRef.current.catch(() => undefined).then(() => saveModelSettings(settings))
-    saveQueueRef.current = save
-    void save.catch((error) => {
-      console.error('Failed to save model settings to SQLite', error)
-      if (latestSaveRevisionRef.current === revision) {
-        const detail = error instanceof Error ? error.message : String(error)
-        showToast(`${t('configuration.saveFailed')}: ${detail}`, { durationMs: 5000 })
+  const upsertModel = useCallback(
+    async (savedModel: ModelConfig, previousModelId?: string): Promise<ModelConfig> => {
+      if (hydrationStatus !== 'ready') {
+        throw new Error('Model settings are not ready')
       }
-    })
-  }, [apiToken, apiUrl, hydrationStatus, models, searchMode, showToast, t, tavilyApiKey])
+      const targetId = previousModelId ?? savedModel.id
+      const modelForSave =
+        previousModelId && previousModelId !== savedModel.id
+          ? { ...savedModel, previousModelId }
+          : savedModel
+      const currentSettings = settingsRef.current
+      const existingIndex = currentSettings.models.findIndex((model) => model.id === targetId)
+      let nextModels: ModelConfig[]
+
+      if (existingIndex === -1) {
+        nextModels = [...currentSettings.models, modelForSave]
+      } else {
+        const before = currentSettings.models.slice(0, existingIndex)
+        const after = currentSettings.models.slice(existingIndex + 1)
+        nextModels = [...before, modelForSave, ...after]
+      }
+
+      const authoritativeSettings = await persistSettings({
+        ...currentSettings,
+        models: nextModels
+      })
+      const authoritativeModel = authoritativeSettings.models.find(
+        (model) => model.id === savedModel.id
+      )
+      if (!authoritativeModel) {
+        throw new Error('Host did not return the saved model')
+      }
+      return authoritativeModel
+    },
+    [hydrationStatus, persistSettings]
+  )
 
   const value = useMemo<ModelSettingsContextValue>(() => {
-    const enabledModels = models.filter(
+    const { apiToken, apiUrl, models, searchMode, tavilyApiKey } = settings
+    const enabledModels = settings.models.filter(
       (model) => model.enabled && isModelConnectionAvailable(model, apiUrl, apiToken)
     )
 
@@ -154,43 +238,36 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       apiToken,
       enabledModels,
       models,
+      providerProfileDescriptors,
       searchMode,
       tavilyApiKey,
       deleteModel: (modelId) => {
-        setModels((currentModels) => currentModels.filter((model) => model.id !== modelId))
+        updateSettings((current) => ({
+          ...current,
+          models: current.models.filter((model) => model.id !== modelId)
+        }))
       },
-      setApiToken,
-      setApiUrl,
-      setSearchMode,
-      setTavilyApiKey,
+      setApiToken: (value) => updateSettings((current) => ({ ...current, apiToken: value })),
+      setApiUrl: (value) =>
+        updateSettings((current) => ({
+          ...current,
+          apiUrl: value,
+          models: prepareModelsForGlobalApiUrlChange(current.models, providerProfileDescriptors)
+        })),
+      setSearchMode: (value) => updateSettings((current) => ({ ...current, searchMode: value })),
+      setTavilyApiKey: (value) =>
+        updateSettings((current) => ({ ...current, tavilyApiKey: value })),
       toggleModel: (modelId) => {
-        setModels((currentModels) =>
-          currentModels.map((model) =>
+        updateSettings((current) => ({
+          ...current,
+          models: current.models.map((model) =>
             model.id === modelId ? { ...model, enabled: !model.enabled } : model
           )
-        )
+        }))
       },
-      upsertModel: (savedModel, previousModelId) => {
-        setModels((currentModels) => {
-          const targetId = previousModelId ?? savedModel.id
-          const existingIndex = currentModels.findIndex((model) => model.id === targetId)
-
-          if (existingIndex === -1) {
-            return [...currentModels.filter((model) => model.id !== savedModel.id), savedModel]
-          }
-
-          const before = currentModels
-            .slice(0, existingIndex)
-            .filter((model) => model.id !== savedModel.id)
-          const after = currentModels
-            .slice(existingIndex + 1)
-            .filter((model) => model.id !== savedModel.id)
-
-          return [...before, savedModel, ...after]
-        })
-      }
+      upsertModel
     }
-  }, [apiToken, apiUrl, models, searchMode, tavilyApiKey])
+  }, [providerProfileDescriptors, settings, updateSettings, upsertModel])
 
   return <ModelSettingsContext.Provider value={value}>{children}</ModelSettingsContext.Provider>
 }

@@ -11,7 +11,8 @@ use crate::storage::models::{
     ChatConversationViewRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
     ChatMessageStateRecord, ChatSearchInput, ChatSearchResult, ComposerDraftRecord,
     ForkConversationInput, ImageGenerationProfileRecord, McpApprovalEnvelopeRecord,
-    ModelSettingsRecord, ModelSettingsSnapshot, ProjectRecord, UiPreferencesRecord,
+    ModelConfigRecord, ModelSettingsRecord, ModelSettingsSaveRequest, ModelSettingsSnapshot,
+    ProjectRecord, ProviderProfileUpdate, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_command_session_repository,

@@ -88,3 +88,36 @@ describe('conversation fork IPC', () => {
     })
   })
 })
+
+describe('model settings IPC', () => {
+  it('routes the safe descriptor projection and returns the authoritative save result', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const descriptors = [{ profileId: 'deepseek_v4_chat', profileVersion: 1 }]
+    const settings = {
+      apiUrl: '',
+      apiToken: '',
+      searchMode: 'auto',
+      tavilyApiKey: '',
+      models: []
+    }
+    const coreServer = {
+      loadProviderProfileUiDescriptors: vi.fn().mockResolvedValue(descriptors),
+      saveModelSettings: vi.fn().mockResolvedValue(settings)
+    }
+    registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
+
+    await expect(handlers.get('host:storage.loadProviderProfileUiDescriptors')?.({})).resolves.toBe(
+      descriptors
+    )
+    await expect(handlers.get('host:storage.saveModelSettings')?.({}, settings)).resolves.toBe(
+      settings
+    )
+    expect(coreServer.saveModelSettings).toHaveBeenCalledWith(settings)
+  })
+})

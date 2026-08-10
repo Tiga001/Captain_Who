@@ -38,7 +38,7 @@ const editedValues: ModelFormValues = {
 }
 
 describe('modelConfigFromForm', () => {
-  it('preserves the hidden Provider Profile while editing an existing model', () => {
+  it('preserves the Host-authoritative Provider Profile while editing visible fields', () => {
     const saved = modelConfigFromForm(editedValues, existingModel)
 
     expect(saved.providerProfileConfig).toEqual(deepSeekProfile)
@@ -48,5 +48,32 @@ describe('modelConfigFromForm', () => {
 
   it('does not invent a Provider Profile for a newly created model', () => {
     expect(modelConfigFromForm(editedValues).providerProfileConfig).toBeUndefined()
+  })
+
+  it('passes the explicit one-shot selection separately from the stored profile config', () => {
+    const saved = modelConfigFromForm(
+      {
+        ...editedValues,
+        providerProfileUpdate: {
+          kind: 'select_registered_profile',
+          profileId: 'deepseek_v4_chat',
+          settings: {
+            kind: 'deepseek_v4_chat',
+            reasoning: { mode: 'enabled', effort: 'max' }
+          }
+        }
+      },
+      existingModel
+    )
+
+    expect(saved.providerProfileConfig).toEqual(deepSeekProfile)
+    expect(saved.providerProfileUpdate).toEqual({
+      kind: 'select_registered_profile',
+      profileId: 'deepseek_v4_chat',
+      settings: {
+        kind: 'deepseek_v4_chat',
+        reasoning: { mode: 'enabled', effort: 'max' }
+      }
+    })
   })
 })

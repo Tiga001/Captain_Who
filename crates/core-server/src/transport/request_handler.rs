@@ -91,12 +91,16 @@ pub(crate) fn handle_request(
         STORAGE_LOAD_MODEL_SETTINGS_METHOD => {
             storage_response(request.id, storage.load_model_settings())
         }
+        STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD => response_success(
+            request.id,
+            mycopilot_core::provider_profile_ui_descriptors(),
+        ),
         STORAGE_SAVE_MODEL_SETTINGS_METHOD => {
-            let settings = match parse_params::<ModelSettingsRecord>(request.params) {
+            let settings = match parse_params::<ModelSettingsSaveRequest>(request.params) {
                 Ok(settings) => settings,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            let result = storage.save_model_settings(settings).map(|_| json!(null));
+            let result = storage.save_model_settings_request(settings);
             if result.is_ok() {
                 agent_service.invalidate_all_conversation_context_states();
             }

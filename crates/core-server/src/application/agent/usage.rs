@@ -1,5 +1,166 @@
 use super::*;
 
+pub(super) fn restore_pending_usage_contexts(
+    storage: &StorageService,
+    pending_actions: &HashMap<String, PendingActionRecord>,
+) -> Result<HashMap<String, AgentRunUsageState>, String> {
+    let mut restored = HashMap::new();
+    for record in pending_actions.values() {
+        let Some(conversation_id) = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(assistant_message_id) = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let (provider_protocol_key, provider_profile_config) =
+            if let Some(checkpoint) = record.agent_input.resume_checkpoint.as_ref() {
+                if checkpoint.run_id != record.snapshot.run_id {
+                    return Err(format!(
+                        "pending run {} usage checkpoint owner mismatch",
+                        record.snapshot.run_id
+                    ));
+                }
+                (
+                    &checkpoint.provider_protocol_key,
+                    &checkpoint.provider_profile_config,
+                )
+            } else {
+                let (Some(provider_protocol_key), Some(provider_profile_config)) = (
+                    record.agent_input.provider_protocol_key.as_ref(),
+                    record.agent_input.provider_profile_config.as_ref(),
+                ) else {
+                    continue;
+                };
+                (provider_protocol_key, provider_profile_config)
+            };
+        provider_protocol_key
+            .validate_against_config(provider_profile_config)
+            .map_err(|error| {
+                format!(
+                    "pending run {} usage Provider identity mismatch: {error}",
+                    record.snapshot.run_id
+                )
+            })?;
+        let usage_semantics =
+            mycopilot_core::resolve_provider_runtime_capabilities(provider_protocol_key)
+                .map_err(|error| {
+                    format!(
+                        "pending run {} usage capability unavailable: {error}",
+                        record.snapshot.run_id
+                    )
+                })?
+                .usage();
+        let Some(persisted) = storage.load_agent_usage_for_owner(
+            &record.snapshot.run_id,
+            conversation_id,
+            assistant_message_id,
+        )?
+        else {
+            // Legacy pending rows and Providers that supplied no usage may lack an authoritative
+            // usage record. Resume them with an explicitly unpriced, empty accumulator derived
+            // only from the frozen owner/protocol; never borrow the current model Profile or
+            // prices, which may have changed while approval was pending.
+            let state = AgentRunUsageState {
+                context: AgentRunUsageContext {
+                    conversation_id: conversation_id.to_string(),
+                    assistant_message_id: assistant_message_id.to_string(),
+                    run_id: record.snapshot.run_id.clone(),
+                    project_id: record
+                        .agent_input
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.project_id.clone()),
+                    model_id: provider_protocol_key.model_id.clone(),
+                    model_name: provider_protocol_key.model_id.clone(),
+                    provider_usage_semantics: usage_semantics,
+                    input_price: None,
+                    output_price: None,
+                    started_at: record.snapshot.created_at,
+                },
+                usage: None,
+                status: AgentRunStatus::WaitingForApproval,
+                error: None,
+            };
+            insert_restored_usage_state(&mut restored, &record.snapshot.run_id, state)?;
+            continue;
+        };
+        if persisted.model_id != provider_protocol_key.model_id
+            || persisted.model_id != record.agent_input.model
+        {
+            return Err(format!(
+                "pending run {} usage model owner mismatch",
+                record.snapshot.run_id
+            ));
+        }
+        let started_at = persisted.started_at.ok_or_else(|| {
+            format!(
+                "pending run {} authoritative usage has no start time",
+                record.snapshot.run_id
+            )
+        })?;
+        let usage = (persisted.input_tokens.is_some()
+            || persisted.output_tokens.is_some()
+            || persisted.output_thinking_tokens.is_some()
+            || persisted.total_tokens.is_some()
+            || persisted.cached_input_tokens.is_some()
+            || persisted.cache_creation_input_tokens.is_some()
+            || persisted.billable_request_count > 0)
+            .then_some(AgentUsage {
+                input_tokens: persisted.input_tokens,
+                output_tokens: persisted.output_tokens,
+                output_thinking_tokens: persisted.output_thinking_tokens,
+                total_tokens: persisted.total_tokens,
+                cached_input_tokens: persisted.cached_input_tokens,
+                cache_creation_input_tokens: persisted.cache_creation_input_tokens,
+                billable_request_count: Some(persisted.billable_request_count),
+            });
+        let state = AgentRunUsageState {
+            context: AgentRunUsageContext {
+                conversation_id: persisted.conversation_id,
+                assistant_message_id: persisted.message_id,
+                run_id: persisted.run_id.clone(),
+                project_id: persisted.project_id,
+                model_id: persisted.model_id,
+                model_name: persisted.model_name,
+                provider_usage_semantics: usage_semantics,
+                input_price: persisted.input_price,
+                output_price: persisted.output_price,
+                started_at,
+            },
+            usage,
+            status: AgentRunStatus::WaitingForApproval,
+            error: persisted.error,
+        };
+        insert_restored_usage_state(&mut restored, &persisted.run_id, state)?;
+    }
+    Ok(restored)
+}
+
+fn insert_restored_usage_state(
+    restored: &mut HashMap<String, AgentRunUsageState>,
+    run_id: &str,
+    state: AgentRunUsageState,
+) -> Result<(), String> {
+    if let Some(existing) = restored.insert(run_id.to_string(), state.clone()) {
+        if existing != state {
+            return Err(format!(
+                "pending run {run_id} has conflicting authoritative usage owners"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl AgentService {
     pub(super) fn register_usage_context(&self, run_id: &str, context: AgentRunUsageContext) {
         let mut contexts = self
@@ -55,15 +216,15 @@ impl AgentService {
         run_id: &str,
         next: Option<AgentUsage>,
     ) -> Option<AgentUsage> {
-        let (mut usage, provider_profile_id) = {
+        let (mut usage, usage_semantics) = {
             let contexts = self
                 .usage_contexts
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let state = contexts.get(run_id)?;
-            (state.usage.clone(), state.context.provider_profile_id)
+            (state.usage.clone(), state.context.provider_usage_semantics)
         };
-        merge_usage_for_profile(&mut usage, next, provider_profile_id);
+        usage_semantics.merge_usage(&mut usage, next);
         usage
     }
 
@@ -103,7 +264,10 @@ impl AgentService {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             let state = contexts.get_mut(run_id)?;
-            merge_usage_for_profile(&mut state.usage, usage, state.context.provider_profile_id);
+            state
+                .context
+                .provider_usage_semantics
+                .merge_usage(&mut state.usage, usage);
             state.status = status;
             if let Some(error) = error {
                 state.error = Some(error);
@@ -116,9 +280,12 @@ impl AgentService {
                 .unwrap_or(0);
             let input_tokens = usage.as_ref().and_then(|usage| usage.input_tokens);
             let output_tokens = usage.as_ref().and_then(|usage| usage.output_tokens);
-            let billable_output_tokens = usage
-                .as_ref()
-                .and_then(|usage| billable_output_tokens(usage, state.context.provider_profile_id));
+            let billable_output_tokens = usage.as_ref().and_then(|usage| {
+                state
+                    .context
+                    .provider_usage_semantics
+                    .billable_output_tokens(usage)
+            });
             let estimated_cost = self.storage.estimate_usage_cost(
                 input_tokens,
                 billable_output_tokens,
@@ -182,46 +349,10 @@ impl AgentService {
     }
 }
 
-fn merge_usage_for_profile(
-    total: &mut Option<AgentUsage>,
-    next: Option<AgentUsage>,
-    provider_profile_id: ProviderProfileId,
-) {
-    if provider_profile_id == ProviderProfileId::DeepSeekV4Chat {
-        merge_usage_with_disjoint_reasoning(total, next);
-    } else {
-        merge_usage(total, next);
-    }
-}
-
-fn billable_output_tokens(
-    usage: &AgentUsage,
-    provider_profile_id: ProviderProfileId,
-) -> Option<u64> {
-    let visible_output = usage.output_tokens;
-    if provider_profile_id != ProviderProfileId::DeepSeekV4Chat {
-        return visible_output;
-    }
-    match (usage.total_tokens, usage.input_tokens) {
-        (Some(total), Some(input)) => total
-            .checked_sub(input)
-            .or_else(|| {
-                visible_output
-                    .zip(usage.output_thinking_tokens)
-                    .and_then(|(visible, thinking)| visible.checked_add(thinking))
-            })
-            .or(visible_output),
-        _ => visible_output
-            .zip(usage.output_thinking_tokens)
-            .and_then(|(visible, thinking)| visible.checked_add(thinking))
-            .or(visible_output),
-    }
-}
-
 #[cfg(test)]
 mod thinking_usage_tests {
-    use super::{billable_output_tokens, merge_usage_for_profile, ProviderProfileId};
-    use mycopilot_core::AgentUsage;
+    use super::AgentUsage;
+    use mycopilot_core::ProviderUsageSemantics;
 
     fn usage(output: u64, thinking: u64, total: u64) -> AgentUsage {
         AgentUsage {
@@ -238,15 +369,17 @@ mod thinking_usage_tests {
     #[test]
     fn bills_provider_authoritative_completion_without_double_counting_generic_usage() {
         assert_eq!(
-            billable_output_tokens(&usage(20, 80, 200), ProviderProfileId::DeepSeekV4Chat),
+            ProviderUsageSemantics::CompletionIncludesReasoning
+                .billable_output_tokens(&usage(20, 80, 200)),
             Some(100)
         );
         assert_eq!(
-            billable_output_tokens(&usage(100, 80, 200), ProviderProfileId::GenericOpenAiChat),
+            ProviderUsageSemantics::StandardAdditive.billable_output_tokens(&usage(100, 80, 200)),
             Some(100)
         );
         assert_eq!(
-            billable_output_tokens(&usage(20, 80, 110), ProviderProfileId::DeepSeekV4Chat),
+            ProviderUsageSemantics::CompletionIncludesReasoning
+                .billable_output_tokens(&usage(20, 80, 110)),
             Some(10)
         );
         let missing_breakdown = AgentUsage {
@@ -259,7 +392,8 @@ mod thinking_usage_tests {
             billable_request_count: Some(1),
         };
         assert_eq!(
-            billable_output_tokens(&missing_breakdown, ProviderProfileId::DeepSeekV4Chat),
+            ProviderUsageSemantics::CompletionIncludesReasoning
+                .billable_output_tokens(&missing_breakdown),
             Some(75)
         );
     }
@@ -267,7 +401,7 @@ mod thinking_usage_tests {
     #[test]
     fn deepseek_approval_segments_do_not_revive_partial_output_breakdowns() {
         let mut total = Some(usage(20, 80, 200));
-        merge_usage_for_profile(
+        ProviderUsageSemantics::CompletionIncludesReasoning.merge_usage(
             &mut total,
             Some(AgentUsage {
                 input_tokens: Some(120),
@@ -278,7 +412,6 @@ mod thinking_usage_tests {
                 cache_creation_input_tokens: None,
                 billable_request_count: Some(1),
             }),
-            ProviderProfileId::DeepSeekV4Chat,
         );
         let total = total.unwrap();
         assert_eq!(total.input_tokens, Some(220));
@@ -286,7 +419,7 @@ mod thinking_usage_tests {
         assert_eq!(total.output_tokens, None);
         assert_eq!(total.output_thinking_tokens, None);
         assert_eq!(
-            billable_output_tokens(&total, ProviderProfileId::DeepSeekV4Chat),
+            ProviderUsageSemantics::CompletionIncludesReasoning.billable_output_tokens(&total),
             Some(150)
         );
     }

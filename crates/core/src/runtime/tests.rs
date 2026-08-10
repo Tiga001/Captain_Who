@@ -282,7 +282,7 @@ fn deepseek_cancellation_closes_current_and_queued_calls_in_original_order() {
     )
     .model_tool_result_gate();
 
-    settle_cancelled_deepseek_tool_batch(
+    settle_cancelled_grouped_tool_batch(
         Some(TerminalToolCallSettlement {
             queued: current,
             call: Some(current_call),
@@ -1666,6 +1666,89 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         skill_discovery: None,
         messages,
     }
+}
+
+#[tokio::test]
+async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_or_tools() {
+    use crate::storage::service::StorageService;
+    use crate::{ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    const MODEL_ID: &str = "unknown-provider-registration-model";
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_requests = Arc::new(AtomicUsize::new(0));
+    let model_requests_for_server = Arc::clone(&model_requests);
+    let server = tokio::spawn(async move {
+        if let Ok(Ok((mut stream, _))) =
+            timeout(Duration::from_millis(300), listener.accept()).await
+        {
+            model_requests_for_server.fetch_add(1, Ordering::SeqCst);
+            write_runtime_test_json_response(
+                &mut stream,
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": "must not be reached" },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+            .await;
+        }
+    });
+
+    let mut profile = ProviderProfileConfig::deepseek_v4_default();
+    let mut protocol = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &profile,
+        MODEL_ID,
+        None,
+    )
+    .unwrap();
+    profile.profile.version = 99;
+    protocol.profile.version = 99;
+
+    let tool_executions = Arc::new(AtomicUsize::new(0));
+    let tool_executions_for_executor = Arc::clone(&tool_executions);
+    let forbidden_executor: AgentHostActionExecutor = Arc::new(move |_, _| {
+        tool_executions_for_executor.fetch_add(1, Ordering::SeqCst);
+        Err(AgentError::new(
+            "tool executor must not run for an unknown Provider registration",
+        ))
+    });
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("runtime.sqlite")).unwrap());
+
+    let mut input = conversation_context_input(vec![message("user", "Do not execute this run.")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.model = MODEL_ID.to_string();
+    input.stream = Some(false);
+    input.provider_profile_config = Some(profile);
+    input.provider_protocol_key = Some(protocol);
+
+    let error = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-unknown-provider-registration".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_host_actions(forbidden_executor, storage)),
+        )
+        .await
+        .unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(
+        error.to_string(),
+        "Provider profile configuration is invalid: unsupported provider profile deepseek_v4_chat version 99"
+    );
+    assert_eq!(model_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(tool_executions.load(Ordering::SeqCst), 0);
 }
 
 async fn read_runtime_test_json_request(stream: &mut tokio::net::TcpStream) -> Value {

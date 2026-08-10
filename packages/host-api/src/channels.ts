@@ -105,6 +105,7 @@ export const HOST_CHANNELS = {
     loadImageFile: 'host:storage.loadImageFile',
     loadInputAttachments: 'host:storage.loadInputAttachments',
     loadModelSettings: 'host:storage.loadModelSettings',
+    loadProviderProfileUiDescriptors: 'host:storage.loadProviderProfileUiDescriptors',
     loadProjects: 'host:storage.loadProjects',
     loadUiPreferences: 'host:storage.loadUiPreferences',
     revealProjectFile: 'host:storage.revealProjectFile',

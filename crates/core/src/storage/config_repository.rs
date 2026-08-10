@@ -336,9 +336,6 @@ fn decode_provider_profile_config(
                 serde_json::from_str::<ProviderProfileConfig>(&encoded).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
                 })?;
-            config.validate().map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-            })?;
             Ok(config)
         })
         .transpose()
@@ -404,7 +401,10 @@ fn same_effective_provider_protocol(
         current_model.resolved_provider_profile_config(current_dialect),
     ) {
         (Ok(previous), Ok(current)) => previous == current,
-        _ => false,
+        // Unsupported persisted profiles remain visible and replaceable without becoming a
+        // runtime capability. If the exact opaque configuration is preserved, unrelated edits do
+        // not manufacture a wire change; any Run still fails at exact Registration resolution.
+        _ => previous_model.provider_profile_config == current_model.provider_profile_config,
     }
 }
 

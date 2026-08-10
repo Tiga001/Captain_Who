@@ -21,19 +21,40 @@ pub(super) fn publish_inline_file_write_tool_result(
 }
 
 impl AgentService {
-    fn validate_provider_continuations_before_dispatch(
+    pub(super) fn validate_provider_continuations_before_dispatch(
         &self,
         record: &PendingActionRecord,
     ) -> Result<(), String> {
         let Some(checkpoint) = record.agent_input.resume_checkpoint.as_ref() else {
             return Ok(());
         };
-        let requires_provider_continuation = checkpoint.provider_protocol_key.profile.id
-            == mycopilot_core::ProviderProfileId::DeepSeekV4Chat
-            && !checkpoint
-                .assistant_turn_identity
-                .tool_call_identities
-                .is_empty();
+        let has_provider_tool_calls = !checkpoint
+            .assistant_turn_identity
+            .tool_call_identities
+            .is_empty();
+        checkpoint
+            .provider_protocol_key
+            .validate_against_config(&checkpoint.provider_profile_config)
+            .map_err(|error| {
+                format!(
+                    "provider_context_boundary_required: frozen Provider profile/key mismatch before approved action dispatch: {error}"
+                )
+            })?;
+        let capabilities = mycopilot_core::resolve_provider_runtime_capabilities(
+            &checkpoint.provider_protocol_key,
+        )
+        .map_err(|error| {
+            format!(
+                "provider_context_boundary_required: Provider runtime capability unavailable before approved action dispatch: {error}"
+            )
+        })?;
+        let requires_provider_continuation = capabilities
+            .classify_turn(
+                has_provider_tool_calls,
+                !checkpoint.provider_continuation_refs.is_empty(),
+                checkpoint.provider_profile_config.reasoning.mode,
+            )
+            .requires_exact_approval_refs();
         if checkpoint.provider_continuation_refs.is_empty() {
             return if requires_provider_continuation {
                 Err("provider_continuation_missing: approved action was not dispatched".to_string())
@@ -45,6 +66,22 @@ impl AgentService {
             "provider_continuation.invalid_approval_scope: approved action was not dispatched"
                 .to_string()
         })?;
+        let assistant_message_id = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .filter(|assistant_message_id| !assistant_message_id.trim().is_empty())
+            .ok_or_else(|| {
+                "provider_continuation.invalid_approval_scope: approved action was not dispatched"
+                    .to_string()
+            })?;
+        let run_id = record.snapshot.run_id.trim();
+        if run_id.is_empty() {
+            return Err(
+                "provider_continuation.invalid_approval_scope: approved action was not dispatched"
+                    .to_string(),
+            );
+        }
         self.provider_continuation_vault
             .as_deref()
             .ok_or_else(|| {
@@ -53,6 +90,8 @@ impl AgentService {
             })?
             .validate_approval_checkpoint_refs(
                 conversation_id,
+                assistant_message_id,
+                run_id,
                 &checkpoint.provider_protocol_key,
                 &checkpoint.provider_continuation_refs,
                 &checkpoint.assistant_turn_identity,

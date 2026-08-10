@@ -28,7 +28,8 @@ use crate::protocol::{
     AgentRunContext, AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
     AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
-use crate::provider_profile::{ProviderProfileConfig, ProviderProfileId, ProviderProtocolKey};
+use crate::provider_profile::{ProviderProfileConfig, ProviderProtocolKey};
+use crate::resolve_provider_runtime_capabilities;
 use crate::tools::{
     validate_tool_set_checkpoint_shape, AgentToolCallCheckpointPersistence, EffectiveToolSet,
 };
@@ -375,7 +376,7 @@ impl ToolCallBatch {
     ) -> AgentResult<()> {
         if self.deferred_external_tool_call_count != 0 {
             return Err(AgentError::new(
-                "DeepSeek 审批检查点包含旧版延后调用，无法安全恢复完整 Provider Turn。",
+                "Provider 审批检查点包含旧版延后调用，无法安全恢复完整 Provider Turn。",
             ));
         }
         let expected_identity = self.assistant_turn_identity()?.clone();
@@ -489,6 +490,10 @@ pub(super) fn create_run_checkpoint(
     provider_protocol_key
         .validate_against_config(provider_profile_config)
         .map_err(|error| AgentError::new(format!("运行检查点的 Provider key 无效：{error}")))?;
+    let provider_runtime_capabilities =
+        resolve_provider_runtime_capabilities(provider_protocol_key).map_err(|error| {
+            AgentError::new(format!("运行检查点的 Provider capabilities 无效：{error}"))
+        })?;
     let assistant_turn_identity = tool_batch.assistant_turn_identity()?.clone();
     validate_assistant_turn_identity(&assistant_turn_identity, pending_tool_call_id, tool_batch)?;
     context.validate_assistant_turn_checkpoint_identity(
@@ -521,7 +526,7 @@ pub(super) fn create_run_checkpoint(
                 queued_tool_call_checkpoint(
                     queued,
                     &assistant_turn_identity.assistant_turn_id,
-                    provider_profile_config.profile.id == ProviderProfileId::DeepSeekV4Chat,
+                    provider_runtime_capabilities.allows_encrypted_checkpoint_rehydration(),
                 )
             })
             .collect::<AgentResult<Vec<_>>>()?,
@@ -1103,9 +1108,9 @@ fn restore_batch_fingerprints(
 fn queued_tool_call_checkpoint(
     call: &QueuedToolCall,
     assistant_turn_id: &str,
-    allow_encrypted_provider_rehydration: bool,
+    allows_encrypted_checkpoint_rehydration: bool,
 ) -> AgentResult<AgentQueuedToolCallCheckpoint> {
-    let rehydrates_from_encrypted_provider_turn = allow_encrypted_provider_rehydration
+    let rehydrates_from_encrypted_provider_turn = allows_encrypted_checkpoint_rehydration
         && call.checkpoint_persistence == AgentToolCallCheckpointPersistence::DeniedMcp;
     if call.checkpoint_persistence != AgentToolCallCheckpointPersistence::Allowed
         && !rehydrates_from_encrypted_provider_turn
@@ -1824,6 +1829,24 @@ mod tests {
         assert!(error
             .to_string()
             .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_unknown_frozen_provider_registration() {
+        let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+        checkpoint.provider_profile_config.profile.version = 99;
+        checkpoint.provider_protocol_key.profile.version = 99;
+
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint,
+            "checkpoint-validation-run",
+            &continuation,
+        ));
+
+        assert_eq!(
+            error.to_string(),
+            "无法恢复运行检查点：Provider profile 无效：unsupported provider profile generic_openai_chat version 99"
+        );
     }
 
     #[test]

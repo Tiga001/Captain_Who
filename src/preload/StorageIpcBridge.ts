@@ -6,6 +6,8 @@ type StorageIpcRenderer = Pick<IpcRenderer, 'invoke'>
 export function createStorageIpcBridge(ipcRenderer: StorageIpcRenderer): StorageHostApi {
   return {
     loadModelSettings: () => ipcRenderer.invoke(HOST_CHANNELS.storage.loadModelSettings),
+    loadProviderProfileUiDescriptors: () =>
+      ipcRenderer.invoke(HOST_CHANNELS.storage.loadProviderProfileUiDescriptors),
     saveModelSettings: (settings) =>
       ipcRenderer.invoke(HOST_CHANNELS.storage.saveModelSettings, settings),
     loadAgentPromptPreferences: () =>

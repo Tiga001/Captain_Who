@@ -14,6 +14,7 @@ use tokio::io::AsyncReadExt;
 
 mod bootstrap;
 mod conversation_fork;
+mod provider_profiles;
 mod request_loop;
 mod skills_catalog;
 mod source_resolution;

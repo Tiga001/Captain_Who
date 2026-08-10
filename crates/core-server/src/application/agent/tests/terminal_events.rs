@@ -1377,7 +1377,7 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
                 project_id: None,
                 model_id: "test-model".to_string(),
                 model_name: "Test model".to_string(),
-                provider_profile_id: ProviderProfileId::GenericOpenAiChat,
+                provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
                 input_price: None,
                 output_price: None,
                 started_at: 1,

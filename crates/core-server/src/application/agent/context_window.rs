@@ -1,5 +1,26 @@
 use super::*;
 
+fn should_defer_partial_provider_trace(
+    semantics: mycopilot_core::ProviderPartialTraceSemantics,
+    trace: &ConversationTurnTrace,
+) -> bool {
+    semantics == mycopilot_core::ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed
+        && !trace.terminal_status.is_terminal()
+        && trace
+            .items
+            .iter()
+            .any(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
+}
+
+fn resolve_context_window_provider_capabilities(
+    provider_protocol_key: Option<&ProviderProtocolKey>,
+) -> Result<Option<mycopilot_core::ProviderRuntimeCapabilities>, String> {
+    provider_protocol_key
+        .map(mycopilot_core::resolve_provider_runtime_capabilities)
+        .transpose()
+        .map_err(|error| error.to_string())
+}
+
 impl AgentService {
     pub fn get_context_window_snapshot(
         &self,
@@ -486,11 +507,18 @@ impl AgentService {
         let configuration_revision = conversation_context_configuration_revision(agent_input)
             .map_err(|error| error.to_string())?;
         let access = self.next_conversation_context_state_access();
-        let provider_native_replay = agent_input
-            .provider_profile_config
-            .as_ref()
-            .is_some_and(|profile| profile.profile.id == ProviderProfileId::DeepSeekV4Chat);
-        if provider_native_replay && !trace.terminal_status.is_terminal() {
+        let provider_runtime_capabilities = resolve_context_window_provider_capabilities(
+            agent_input.provider_protocol_key.as_ref(),
+        )?;
+        let exact_provider_replay = provider_runtime_capabilities.is_some_and(|capabilities| {
+            capabilities.context_projection()
+                == mycopilot_core::ProviderContextProjectionSemantics::ExactProviderTurn
+        });
+        let partial_trace_semantics = provider_runtime_capabilities.map_or(
+            mycopilot_core::ProviderPartialTraceSemantics::IncrementalBaseline,
+            |capabilities| capabilities.partial_trace(),
+        );
+        if should_defer_partial_provider_trace(partial_trace_semantics, &trace) {
             // Approval boundaries can durably expose only the first call of a grouped Provider
             // turn. Runtime owns the exact checkpoint/raw replay for that in-progress exchange;
             // rebuilding a Host preview here would incorrectly require later queued calls to be
@@ -498,10 +526,12 @@ impl AgentService {
             // trace can be privately hydrated.
             return Ok(None);
         }
-        // Provider-native Assistant Turns are restored from the encrypted Host sidecar. Never
-        // incrementally extend a split durable projection because that would lose opaque replay
-        // state and undercount the next provider request.
-        let mut needs_rebuild = provider_native_replay;
+        // A nonterminal grouped exchange can briefly end at a safe ToolResult while a later call
+        // from the same Provider turn has not been published yet. Its durable trace is useful for
+        // an incremental UI preview, but it is not a complete exact turn and must not be hydrated
+        // as one. Once terminal, rebuild from the encrypted Host sidecar so the next Provider
+        // request and its budget use the complete original turn.
+        let mut needs_rebuild = exact_provider_replay && trace.terminal_status.is_terminal();
         {
             let mut states = self
                 .conversation_context_states
@@ -666,5 +696,89 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clear();
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    fn in_progress_trace(items: Vec<ConversationTurnTraceItem>) -> ConversationTurnTrace {
+        ConversationTurnTrace {
+            schema_version: mycopilot_core::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-capability-trace".to_string(),
+            conversation_id: "conversation-capability-trace".to_string(),
+            assistant_message_id: "assistant-capability-trace".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: false,
+            items,
+        }
+    }
+
+    #[test]
+    fn deferred_provider_projection_only_applies_to_an_unclosed_tool_call() {
+        let text_only = in_progress_trace(vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: "still sampling".to_string(),
+            truncated: false,
+        }]);
+        assert!(!should_defer_partial_provider_trace(
+            mycopilot_core::ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
+            &text_only,
+        ));
+
+        let unclosed_tool = in_progress_trace(vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: "call-capability-trace".to_string(),
+            tool: "read_file".to_string(),
+            provenance: None,
+            operation: serde_json::json!({ "path": "README.md" }),
+            approval_status: AgentApprovalStatus::Required,
+            truncated: false,
+        }]);
+        assert!(should_defer_partial_provider_trace(
+            mycopilot_core::ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
+            &unclosed_tool,
+        ));
+        assert!(!should_defer_partial_provider_trace(
+            mycopilot_core::ProviderPartialTraceSemantics::IncrementalBaseline,
+            &unclosed_tool,
+        ));
+
+        let provider_turn_still_open = in_progress_trace(vec![
+            unclosed_tool.items[0].clone(),
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: "call-capability-trace".to_string(),
+                tool: "read_file".to_string(),
+                status: mycopilot_core::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({ "content": "done" }),
+                approval_status: AgentApprovalStatus::Required,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+        ]);
+        assert!(should_defer_partial_provider_trace(
+            mycopilot_core::ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
+            &provider_turn_still_open,
+        ));
+    }
+
+    #[test]
+    fn context_preview_rejects_an_unknown_frozen_provider_registration() {
+        let unsupported = ProviderProtocolKey {
+            dialect: ProviderProtocolDialect::OpenAiChatCompletions,
+            profile: mycopilot_core::ProviderProfileRef {
+                id: mycopilot_core::ProviderProfileId::DeepSeekV4Chat,
+                version: u32::MAX,
+            },
+            model_id: "unsupported-preview-provider".to_string(),
+            provider_configuration_revision: None,
+        };
+
+        assert!(resolve_context_window_provider_capabilities(Some(&unsupported)).is_err());
     }
 }

@@ -51,8 +51,12 @@ fn unknown_or_incompatible_profiles_fail_closed() {
         "schemaVersion": PROVIDER_PROFILE_CONFIG_SCHEMA_VERSION,
         "profile": { "id": "future_profile", "version": 1 },
         "reasoning": { "mode": "provider_default", "effort": "provider_default" }
-    }));
-    assert!(unknown_id.is_err());
+    }))
+    .unwrap();
+    assert!(matches!(
+        unknown_id.validate(),
+        Err(ProviderProfileValidationError::UnsupportedProfileVersion { .. })
+    ));
 
     let deepseek = ProviderProfileConfig::deepseek_v4_default();
     assert!(matches!(

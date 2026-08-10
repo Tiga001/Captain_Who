@@ -57,8 +57,7 @@ use crate::protocol::{
     AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult, AgentWritePermission,
 };
 use crate::provider_profile::{
-    ProviderProfileConfig, ProviderProfileId, ProviderProtocolDialect, ProviderProtocolKey,
-    ReasoningMode,
+    ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
 };
 use crate::revision::content_revision;
 use crate::storage::conversation_history_archive_repository::{
@@ -67,9 +66,10 @@ use crate::storage::conversation_history_archive_repository::{
 use crate::storage::now_ms;
 use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
-use crate::usage::{merge_total_usage, merge_total_usage_with_disjoint_reasoning};
 use crate::{
-    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+    resolve_provider_runtime_capabilities, ConversationTraceSnapshot, ConversationTurnTrace,
+    ConversationTurnTraceTerminalStatus, ProviderContinuationRequirement,
+    ProviderPrivateReplaySemantics, ProviderUsageSemantics,
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
@@ -112,13 +112,9 @@ const MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST: usize = 3;
 fn merge_provider_usage(
     total: &mut Option<crate::protocol::AgentUsage>,
     next: Option<crate::protocol::AgentUsage>,
-    profile_id: ProviderProfileId,
+    usage_semantics: ProviderUsageSemantics,
 ) {
-    if profile_id == ProviderProfileId::DeepSeekV4Chat {
-        merge_total_usage_with_disjoint_reasoning(total, next);
-    } else {
-        merge_total_usage(total, next);
-    }
+    usage_semantics.merge_usage(total, next);
 }
 
 #[derive(Clone, Copy)]
@@ -140,7 +136,9 @@ fn hydrate_provider_continuation_history(
         required_refs,
         current_assistant_turn_id,
     } = resume;
-    if protocol.profile.id != ProviderProfileId::DeepSeekV4Chat {
+    let capabilities = resolve_provider_runtime_capabilities(protocol)
+        .map_err(|error| AgentError::new(format!("Provider runtime capabilities 无效：{error}")))?;
+    if capabilities.private_replay() == ProviderPrivateReplaySemantics::None {
         let has_provider_state = match (conversation_id, vault, storage) {
             (Some(conversation_id), Some(vault), _) => vault
                 .has_replayable_for_conversation(conversation_id)
@@ -612,6 +610,10 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        let provider_runtime_capabilities = resolve_provider_runtime_capabilities(
+            &llm_request.provider_protocol_key,
+        )
+        .map_err(|error| AgentError::new(format!("Provider runtime capabilities 无效：{error}")))?;
         let checkpoint_assistant_turn_id = tool_batch
             .checkpoint_assistant_turn_id()
             .map(str::to_string);
@@ -649,6 +651,18 @@ impl AgentRuntime {
                 },
             )?;
         }
+        let mut settles_entire_provider_tool_batch_on_terminal = restored_provider_turn
+            .as_ref()
+            .map(|turn| {
+                provider_runtime_capabilities
+                    .classify_turn(
+                        !turn.provider_tool_calls().is_empty(),
+                        turn.provider_continuation().is_some(),
+                        llm_request.provider_profile_config.reasoning.mode,
+                    )
+                    .settles_entire_batch_on_terminal()
+            })
+            .unwrap_or(false);
         if resumed_world_state_epoch {
             // The exact checkpoint context remains an immutable prefix. Resume establishes a new
             // run-state epoch only after the frozen pending Tool exchange has been closed, avoiding
@@ -698,13 +712,11 @@ impl AgentRuntime {
         let mut pending_provider_continuation_handoff = None;
         let result: AgentResult<AgentChatOutput> = async {
             if cancellation_token.is_cancelled() {
-                if llm_request.provider_protocol_key.profile.id
-                    == ProviderProfileId::DeepSeekV4Chat
-                    && !tool_batch.is_empty()
+                if settles_entire_provider_tool_batch_on_terminal && !tool_batch.is_empty()
                 {
                     let mut pending_assistant_context =
                         take_pending_assistant_tool_context(&mut tool_batch)?;
-                    settle_cancelled_deepseek_tool_batch(
+                    settle_cancelled_grouped_tool_batch(
                         None,
                         &mut tool_batch,
                         &mut pending_assistant_context,
@@ -730,13 +742,11 @@ impl AgentRuntime {
 
             let final_content = 'agent_loop: loop {
                 if cancellation_token.is_cancelled() {
-                    if llm_request.provider_protocol_key.profile.id
-                        == ProviderProfileId::DeepSeekV4Chat
-                        && !tool_batch.is_empty()
+                    if settles_entire_provider_tool_batch_on_terminal && !tool_batch.is_empty()
                     {
                         let mut pending_assistant_context =
                             take_pending_assistant_tool_context(&mut tool_batch)?;
-                        settle_cancelled_deepseek_tool_batch(
+                        settle_cancelled_grouped_tool_batch(
                             None,
                             &mut tool_batch,
                             &mut pending_assistant_context,
@@ -945,7 +955,7 @@ impl AgentRuntime {
                                                 merge_provider_usage(
                                                     &mut usage,
                                                     compaction_usage,
-                                                    llm_request.provider_protocol_key.profile.id,
+                                                    provider_runtime_capabilities.usage(),
                                                 );
                                                 active_context = (*baseline)
                                                     .replace_compacted_model_history(active_context);
@@ -962,7 +972,7 @@ impl AgentRuntime {
                                                 merge_provider_usage(
                                                     &mut usage,
                                                     error.usage().cloned(),
-                                                    llm_request.provider_protocol_key.profile.id,
+                                                    provider_runtime_capabilities.usage(),
                                                 );
                                                 return Ok(cancelled_output(
                                                     run_id,
@@ -977,7 +987,7 @@ impl AgentRuntime {
                                                 merge_provider_usage(
                                                     &mut usage,
                                                     error.usage().cloned(),
-                                                    llm_request.provider_protocol_key.profile.id,
+                                                    provider_runtime_capabilities.usage(),
                                                 );
                                                 return Err(error.with_usage(usage));
                                             }
@@ -1206,7 +1216,7 @@ impl AgentRuntime {
                                 merge_provider_usage(
                                     &mut usage,
                                     error.usage().cloned(),
-                                    llm_request.provider_protocol_key.profile.id,
+                                    provider_runtime_capabilities.usage(),
                                 );
                                 return Ok(cancelled_output(
                                     run_id,
@@ -1220,7 +1230,7 @@ impl AgentRuntime {
                             merge_provider_usage(
                                 &mut usage,
                                 error.usage().cloned(),
-                                llm_request.provider_protocol_key.profile.id,
+                                provider_runtime_capabilities.usage(),
                             );
                             if is_repairable_empty_model_action(&error)
                                 && !empty_model_action_repair_pending
@@ -1237,7 +1247,7 @@ impl AgentRuntime {
                     merge_provider_usage(
                         &mut usage,
                         llm_response.usage,
-                        llm_request.provider_protocol_key.profile.id,
+                        provider_runtime_capabilities.usage(),
                     );
                     finish_reason = llm_response.finish_reason;
                     let mut assistant_turn = llm_response.assistant_turn;
@@ -1249,14 +1259,13 @@ impl AgentRuntime {
                         &run_id,
                         model_request_index,
                     );
-                    let deepseek_skill_activation_barrier =
-                        llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                            && tool_bindings
-                                .iter()
-                                .any(|binding| binding.runtime_call.name == "skills_activate");
+                    let grouped_turn_skill_activation_barrier = provider_runtime_capabilities
+                        .preserves_skill_activation_batch()
+                        && tool_bindings
+                            .iter()
+                            .any(|binding| binding.runtime_call.name == "skills_activate");
                     let (tool_bindings, deferred_for_skill_activation) =
-                        if deepseek_skill_activation_barrier {
+                        if grouped_turn_skill_activation_barrier {
                             let deferred = tool_bindings
                                 .iter()
                                 .filter(|binding| {
@@ -1408,12 +1417,10 @@ impl AgentRuntime {
                     assistant_turn.set_runtime_visible_text(retained_assistant_content);
                     if assistant_turn.provider_tool_calls().is_empty() && !tool_bindings.is_empty()
                     {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
+                        if provider_runtime_capabilities.requires_provider_native_tool_calls() {
                             return Err(AgentError::structured(
                                 "provider_context_boundary_required",
-                                "DeepSeek Profile 只能执行 Provider 原生 Tool Call，不能把文本猜测为工具协议。",
+                                "当前 Provider Profile 只能执行 Provider 原生 Tool Call，不能把文本猜测为工具协议。",
                                 json!({
                                     "type": "providerContextBoundary",
                                     "recovery": "requestNativeProviderToolCalls"
@@ -1473,20 +1480,26 @@ impl AgentRuntime {
                         })
                         .collect::<AgentResult<Vec<_>>>()?;
                     assistant_turn.set_runtime_tool_bindings(context_bindings)?;
-                    let deepseek_tool_turn = llm_request.provider_protocol_key.profile.id
-                        == ProviderProfileId::DeepSeekV4Chat
-                        && !assistant_turn.provider_tool_calls().is_empty();
-                    if deepseek_tool_turn
-                        && llm_request.provider_profile_config.reasoning.mode
-                            == ReasoningMode::Enabled
-                        && assistant_turn.provider_continuation().is_none()
-                    {
+                    let has_provider_continuation =
+                        assistant_turn.provider_continuation().is_some();
+                    let provider_turn_policy = provider_runtime_capabilities.classify_turn(
+                        !assistant_turn.provider_tool_calls().is_empty(),
+                        has_provider_continuation,
+                        llm_request.provider_profile_config.reasoning.mode,
+                    );
+                    let continuation_requirement =
+                        provider_turn_policy.continuation_requirement();
+                    if matches!(
+                        (continuation_requirement, has_provider_continuation),
+                        (ProviderContinuationRequirement::Required, false)
+                            | (ProviderContinuationRequirement::Forbidden, true)
+                    ) {
                         return Err(provider_continuation_runtime_error(
                             crate::ProviderContinuationStoreError::InvalidTurn,
                         ));
                     }
-                    let has_provider_continuation =
-                        assistant_turn.provider_continuation().is_some();
+                    settles_entire_provider_tool_batch_on_terminal =
+                        provider_turn_policy.settles_entire_batch_on_terminal();
                     tool_batch = ToolCallBatch::from_provider_response(
                         &run_id,
                         model_request_index,
@@ -1512,7 +1525,7 @@ impl AgentRuntime {
                             )
                         },
                     )?;
-                    if has_provider_continuation || deepseek_tool_turn {
+                    if provider_turn_policy.requires_private_replay() {
                         let vault = provider_continuation_vault.as_ref().cloned().ok_or_else(|| {
                             provider_continuation_runtime_error(
                                 crate::ProviderContinuationStoreError::CredentialUnavailable,
@@ -1587,7 +1600,7 @@ impl AgentRuntime {
                                 provider_protocol: llm_request.provider_protocol_key.clone(),
                             });
                     }
-                    if deepseek_skill_activation_barrier {
+                    if grouped_turn_skill_activation_barrier {
                         tool_batch.mark_skill_activation_barrier();
                     }
                 }
@@ -1605,10 +1618,8 @@ impl AgentRuntime {
 
                 while let Some(queued_tool_call) = tool_batch.pop_front() {
                     if cancellation_token.is_cancelled() {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
-                            settle_cancelled_deepseek_tool_batch(
+                        if settles_entire_provider_tool_batch_on_terminal {
+                            settle_cancelled_grouped_tool_batch(
                                 Some(TerminalToolCallSettlement {
                                     queued: queued_tool_call,
                                     call: None,
@@ -1908,10 +1919,8 @@ impl AgentRuntime {
                     if let Err(error) =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
                     {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
-                            settle_aborted_deepseek_tool_batch(
+                        if settles_entire_provider_tool_batch_on_terminal {
+                            settle_aborted_grouped_tool_batch(
                                 &error,
                                 Some(TerminalToolCallSettlement {
                                     queued: cancellation_queued_tool_call.clone(),
@@ -1937,10 +1946,8 @@ impl AgentRuntime {
                     if let Err(error) = promote_pending_provider_continuation(
                         &mut pending_provider_continuation_handoff,
                     ) {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
-                            settle_aborted_deepseek_tool_batch(
+                        if settles_entire_provider_tool_batch_on_terminal {
+                            settle_aborted_grouped_tool_batch(
                                 &error,
                                 Some(TerminalToolCallSettlement {
                                     queued: cancellation_queued_tool_call.clone(),
@@ -1974,10 +1981,8 @@ impl AgentRuntime {
                         });
                     }
                     if cancellation_token.is_cancelled() {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
-                            settle_cancelled_deepseek_tool_batch(
+                        if settles_entire_provider_tool_batch_on_terminal {
+                            settle_cancelled_grouped_tool_batch(
                                 Some(TerminalToolCallSettlement {
                                     queued: cancellation_queued_tool_call.clone(),
                                     call: Some(call.clone()),
@@ -2029,10 +2034,8 @@ impl AgentRuntime {
                                     trace_observer.as_ref(),
                                 ) {
                                     let _ = tool_registry.invalidate_proposed_action(&action);
-                                    if llm_request.provider_protocol_key.profile.id
-                                        == ProviderProfileId::DeepSeekV4Chat
-                                    {
-                                        settle_aborted_deepseek_tool_batch(
+                                    if settles_entire_provider_tool_batch_on_terminal {
+                                        settle_aborted_grouped_tool_batch(
                                             &error,
                                             Some(TerminalToolCallSettlement {
                                                 queued: cancellation_queued_tool_call.clone(),
@@ -2093,10 +2096,8 @@ impl AgentRuntime {
                                 ) {
                                     Ok(observation) => observation,
                                     Err(error) => {
-                                        if llm_request.provider_protocol_key.profile.id
-                                            == ProviderProfileId::DeepSeekV4Chat
-                                        {
-                                            settle_aborted_deepseek_tool_batch(
+                                        if settles_entire_provider_tool_batch_on_terminal {
+                                            settle_aborted_grouped_tool_batch(
                                                 &error,
                                                 Some(TerminalToolCallSettlement {
                                                     queued: cancellation_queued_tool_call.clone(),
@@ -2146,10 +2147,8 @@ impl AgentRuntime {
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 ) {
-                                    if llm_request.provider_protocol_key.profile.id
-                                        == ProviderProfileId::DeepSeekV4Chat
-                                    {
-                                        settle_aborted_deepseek_tool_batch(
+                                    if settles_entire_provider_tool_batch_on_terminal {
+                                        settle_aborted_grouped_tool_batch(
                                             &error,
                                             Some(TerminalToolCallSettlement {
                                                 queued: cancellation_queued_tool_call.clone(),
@@ -2212,10 +2211,8 @@ impl AgentRuntime {
                         };
                         if cancellation_token.is_cancelled() {
                             let _ = tool_registry.invalidate_proposed_action(&action);
-                            if llm_request.provider_protocol_key.profile.id
-                                == ProviderProfileId::DeepSeekV4Chat
-                            {
-                                settle_cancelled_deepseek_tool_batch(
+                            if settles_entire_provider_tool_batch_on_terminal {
+                                settle_cancelled_grouped_tool_batch(
                                     Some(TerminalToolCallSettlement {
                                         queued: cancellation_queued_tool_call.clone(),
                                         call: Some(call.clone()),
@@ -2251,8 +2248,8 @@ impl AgentRuntime {
                             });
                         }
                         if matches!(&action, AgentProposedAction::McpToolCall { .. })
-                            && llm_request.provider_protocol_key.profile.id
-                                != ProviderProfileId::DeepSeekV4Chat
+                            && !provider_runtime_capabilities
+                                .allows_encrypted_checkpoint_rehydration()
                         {
                             let deferred_calls = tool_batch.defer_external_calls(|queued| {
                                 matches!(
@@ -2281,10 +2278,8 @@ impl AgentRuntime {
                             Ok(snapshots) => snapshots,
                             Err(error) => {
                                 let _ = tool_registry.invalidate_proposed_action(&action);
-                                if llm_request.provider_protocol_key.profile.id
-                                    == ProviderProfileId::DeepSeekV4Chat
-                                {
-                                    settle_aborted_deepseek_tool_batch(
+                                if settles_entire_provider_tool_batch_on_terminal {
+                                    settle_aborted_grouped_tool_batch(
                                         &error,
                                         Some(TerminalToolCallSettlement {
                                             queued: cancellation_queued_tool_call.clone(),
@@ -2334,10 +2329,8 @@ impl AgentRuntime {
                             Ok(checkpoint) => checkpoint,
                             Err(error) => {
                                 let _ = tool_registry.invalidate_proposed_action(&action);
-                                if llm_request.provider_protocol_key.profile.id
-                                    == ProviderProfileId::DeepSeekV4Chat
-                                {
-                                    settle_aborted_deepseek_tool_batch(
+                                if settles_entire_provider_tool_batch_on_terminal {
+                                    settle_aborted_grouped_tool_batch(
                                         &error,
                                         Some(TerminalToolCallSettlement {
                                             queued: cancellation_queued_tool_call.clone(),
@@ -2363,10 +2356,8 @@ impl AgentRuntime {
                         };
                         if cancellation_token.is_cancelled() {
                             let _ = tool_registry.invalidate_proposed_action(&action);
-                            if llm_request.provider_protocol_key.profile.id
-                                == ProviderProfileId::DeepSeekV4Chat
-                            {
-                                settle_cancelled_deepseek_tool_batch(
+                            if settles_entire_provider_tool_batch_on_terminal {
+                                settle_cancelled_grouped_tool_batch(
                                     Some(TerminalToolCallSettlement {
                                         queued: cancellation_queued_tool_call.clone(),
                                         call: Some(call.clone()),
@@ -2415,10 +2406,8 @@ impl AgentRuntime {
                                 Ok(invocation) => invocation,
                                 Err(error) => {
                                     let _ = tool_registry.invalidate_proposed_action(&action);
-                                    if llm_request.provider_protocol_key.profile.id
-                                        == ProviderProfileId::DeepSeekV4Chat
-                                    {
-                                        settle_aborted_deepseek_tool_batch(
+                                    if settles_entire_provider_tool_batch_on_terminal {
+                                        settle_aborted_grouped_tool_batch(
                                             &error,
                                             Some(TerminalToolCallSettlement {
                                                 queued: cancellation_queued_tool_call.clone(),
@@ -2507,10 +2496,8 @@ impl AgentRuntime {
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 ) {
-                                    if llm_request.provider_protocol_key.profile.id
-                                        == ProviderProfileId::DeepSeekV4Chat
-                                    {
-                                        settle_aborted_deepseek_tool_batch(
+                                    if settles_entire_provider_tool_batch_on_terminal {
+                                        settle_aborted_grouped_tool_batch(
                                             &error,
                                             Some(TerminalToolCallSettlement {
                                                 queued: cancellation_queued_tool_call.clone(),
@@ -2582,10 +2569,8 @@ impl AgentRuntime {
                     let result = match result_result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => {
-                            if llm_request.provider_protocol_key.profile.id
-                                == ProviderProfileId::DeepSeekV4Chat
-                            {
-                                settle_cancelled_deepseek_tool_batch(
+                            if settles_entire_provider_tool_batch_on_terminal {
+                                settle_cancelled_grouped_tool_batch(
                                     Some(TerminalToolCallSettlement {
                                         queued: cancellation_queued_tool_call.clone(),
                                         call: Some(call.clone()),
@@ -2615,11 +2600,9 @@ impl AgentRuntime {
                             ));
                         }
                         Err(error) => {
-                            if llm_request.provider_protocol_key.profile.id
-                                == ProviderProfileId::DeepSeekV4Chat
-                            {
+                            if settles_entire_provider_tool_batch_on_terminal {
                                 let failed_result = failed_tool_call_result(&call, error.clone());
-                                settle_aborted_deepseek_tool_batch(
+                                settle_aborted_grouped_tool_batch(
                                     &error,
                                     Some(TerminalToolCallSettlement {
                                         queued: cancellation_queued_tool_call.clone(),
@@ -2645,8 +2628,7 @@ impl AgentRuntime {
                             return Err(error);
                         }
                     };
-                    if llm_request.provider_protocol_key.profile.id
-                        == ProviderProfileId::DeepSeekV4Chat
+                    if settles_entire_provider_tool_batch_on_terminal
                         && cancellation_preempts_tool_result(
                             auto_execute_host_action,
                             if authoritative_tool_settlement {
@@ -2658,7 +2640,7 @@ impl AgentRuntime {
                             &result,
                         )
                     {
-                        settle_cancelled_deepseek_tool_batch(
+                        settle_cancelled_grouped_tool_batch(
                             Some(TerminalToolCallSettlement {
                                 queued: cancellation_queued_tool_call.clone(),
                                 call: Some(call.clone()),
@@ -2725,9 +2707,7 @@ impl AgentRuntime {
                         ) {
                             Ok(observations) => observations,
                             Err(error) => {
-                                if llm_request.provider_protocol_key.profile.id
-                                    == ProviderProfileId::DeepSeekV4Chat
-                                {
+                                if settles_entire_provider_tool_batch_on_terminal {
                                     conversation_trace
                                         .lock()
                                         .unwrap_or_else(|poison| poison.into_inner())
@@ -2736,7 +2716,7 @@ impl AgentRuntime {
                                             &checkpoint_result,
                                             archive_metadata,
                                         );
-                                    settle_aborted_deepseek_tool_batch(
+                                    settle_aborted_grouped_tool_batch(
                                         &error,
                                         Some(TerminalToolCallSettlement {
                                             queued: cancellation_queued_tool_call.clone(),
@@ -2785,10 +2765,8 @@ impl AgentRuntime {
                     if let Err(error) =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
                     {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
-                            settle_aborted_deepseek_tool_batch(
+                        if settles_entire_provider_tool_batch_on_terminal {
+                            settle_aborted_grouped_tool_batch(
                                 &error,
                                 Some(TerminalToolCallSettlement {
                                     queued: cancellation_queued_tool_call.clone(),
@@ -2829,10 +2807,8 @@ impl AgentRuntime {
                         cancellation_token.is_cancelled(),
                         &result,
                     ) {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                        {
-                            settle_cancelled_deepseek_tool_batch(
+                        if settles_entire_provider_tool_batch_on_terminal {
+                            settle_cancelled_grouped_tool_batch(
                                 Some(TerminalToolCallSettlement {
                                     queued: cancellation_queued_tool_call.clone(),
                                     call: Some(call.clone()),
@@ -2937,11 +2913,10 @@ impl AgentRuntime {
                     ) {
                         Ok(effects) => effects,
                         Err(error) => {
-                            if llm_request.provider_protocol_key.profile.id
-                                == ProviderProfileId::DeepSeekV4Chat
+                            if settles_entire_provider_tool_batch_on_terminal
                                 && !tool_batch.is_empty()
                             {
-                                settle_aborted_deepseek_tool_batch(
+                                settle_aborted_grouped_tool_batch(
                                     &error,
                                     None,
                                     &mut tool_batch,
@@ -2972,11 +2947,9 @@ impl AgentRuntime {
                     }
                     if terminate_after_repeat_guard_result {
                         let error = ToolFailureGuard::terminal_error(&call);
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                            && !tool_batch.is_empty()
+                        if settles_entire_provider_tool_batch_on_terminal && !tool_batch.is_empty()
                         {
-                            settle_aborted_deepseek_tool_batch(
+                            settle_aborted_grouped_tool_batch(
                                 &error,
                                 None,
                                 &mut tool_batch,
@@ -2994,11 +2967,9 @@ impl AgentRuntime {
                         return Err(error);
                     }
                     if cancellation_token.is_cancelled() {
-                        if llm_request.provider_protocol_key.profile.id
-                            == ProviderProfileId::DeepSeekV4Chat
-                            && !tool_batch.is_empty()
+                        if settles_entire_provider_tool_batch_on_terminal && !tool_batch.is_empty()
                         {
-                            settle_cancelled_deepseek_tool_batch(
+                            settle_cancelled_grouped_tool_batch(
                                 None,
                                 &mut tool_batch,
                                 &mut pending_assistant_context,
@@ -3153,9 +3124,9 @@ fn release_pending_provider_continuation(
     Ok(())
 }
 
-/// The runtime persists a DeepSeek tool-bearing Provider turn before any Tool can execute. Once
-/// that happens, cancellation must close the *whole* grouped turn as well: leaving even one call
-/// without a ToolResult would make the encrypted continuation impossible to replay safely.
+/// Some provider protocols persist a tool-bearing Assistant Turn before any Tool can execute.
+/// Once that happens, cancellation must close the *whole* grouped turn as well: leaving even one
+/// call without a ToolResult would make the encrypted continuation impossible to replay safely.
 ///
 /// `call` carries policy/approval state already computed for the in-flight call. Queued suffix
 /// calls deliberately use a fresh `NotRequired` state because cancellation prevents them from
@@ -3183,7 +3154,7 @@ struct SettledTerminalToolCallOutcome {
 }
 
 #[derive(Clone)]
-enum DeepSeekToolBatchTerminalCause {
+enum GroupedToolBatchTerminalCause {
     Cancelled,
     Aborted { cause_code: String },
 }
@@ -3283,9 +3254,10 @@ fn aborted_tool_call_result(
 
 /// Atomically stages ordered cancellation ToolResults for the current call and every queued
 /// suffix call, then publishes one complete trace snapshot. No remaining Tool is proposed,
-/// approved, or dispatched. Generic adapters retain their historical cancellation behavior.
+/// approved, or dispatched. Independent-call profiles retain their historical cancellation
+/// behavior.
 #[allow(clippy::too_many_arguments)]
-fn settle_cancelled_deepseek_tool_batch(
+fn settle_cancelled_grouped_tool_batch(
     current: Option<TerminalToolCallSettlement>,
     tool_batch: &mut ToolCallBatch,
     pending_assistant_context: &mut Option<PendingAssistantToolContext>,
@@ -3298,8 +3270,8 @@ fn settle_cancelled_deepseek_tool_batch(
     trace_assistant_message_id: Option<&str>,
     run_id: &str,
 ) -> AgentResult<()> {
-    settle_terminal_deepseek_tool_batch(
-        DeepSeekToolBatchTerminalCause::Cancelled,
+    settle_terminal_grouped_tool_batch(
+        GroupedToolBatchTerminalCause::Cancelled,
         current,
         tool_batch,
         pending_assistant_context,
@@ -3315,7 +3287,7 @@ fn settle_cancelled_deepseek_tool_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn settle_aborted_deepseek_tool_batch(
+fn settle_aborted_grouped_tool_batch(
     cause: &AgentError,
     current: Option<TerminalToolCallSettlement>,
     tool_batch: &mut ToolCallBatch,
@@ -3329,8 +3301,8 @@ fn settle_aborted_deepseek_tool_batch(
     trace_assistant_message_id: Option<&str>,
     run_id: &str,
 ) -> AgentResult<()> {
-    settle_terminal_deepseek_tool_batch(
-        DeepSeekToolBatchTerminalCause::Aborted {
+    settle_terminal_grouped_tool_batch(
+        GroupedToolBatchTerminalCause::Aborted {
             cause_code: cause.code().unwrap_or("agent.runtime_abort").to_string(),
         },
         current,
@@ -3348,8 +3320,8 @@ fn settle_aborted_deepseek_tool_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn settle_terminal_deepseek_tool_batch(
-    terminal_cause: DeepSeekToolBatchTerminalCause,
+fn settle_terminal_grouped_tool_batch(
+    terminal_cause: GroupedToolBatchTerminalCause,
     current: Option<TerminalToolCallSettlement>,
     tool_batch: &mut ToolCallBatch,
     pending_assistant_context: &mut Option<PendingAssistantToolContext>,
@@ -3494,10 +3466,10 @@ fn settle_terminal_deepseek_tool_batch(
             }
             TerminalToolCallOutcome::Authoritative(result) => project_terminal_result(result)?,
             TerminalToolCallOutcome::Synthetic => project_terminal_result(match &terminal_cause {
-                DeepSeekToolBatchTerminalCause::Cancelled => {
+                GroupedToolBatchTerminalCause::Cancelled => {
                     cancelled_tool_call_result(&call, dispatch_started)
                 }
-                DeepSeekToolBatchTerminalCause::Aborted { cause_code } => {
+                GroupedToolBatchTerminalCause::Aborted { cause_code } => {
                     aborted_tool_call_result(&call, dispatch_started, cause_code)
                 }
             })?,

@@ -64,6 +64,7 @@ import type {
   McpServerListOutput,
   McpServerMutationInput,
   McpServerUpdateInput,
+  ProviderProfileUiDescriptor,
   ChatSearchInput,
   ChatSearchResult,
   SkillInstallationCommitOutput,
@@ -100,6 +101,7 @@ import type {
   StorageChatMessageUiStateRecord,
   StorageComposerDraftRecord,
   StorageModelSettingsRecord,
+  StorageModelSettingsUpdateRecord,
   StorageProjectRecord,
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
@@ -220,6 +222,8 @@ const GIT_GET_REVIEW_FILE_DIFF_METHOD = 'git.getReviewFileDiff'
 const GIT_GET_REVIEW_FILE_CONTENT_METHOD = 'git.getReviewFileContent'
 const GIT_MUTATE_REVIEW_FILE_METHOD = 'git.mutateReviewFile'
 const STORAGE_LOAD_MODEL_SETTINGS_METHOD = 'storage.loadModelSettings'
+const STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD =
+  'storage.loadProviderProfileUiDescriptors'
 const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
 const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.loadAgentPromptPreferences'
 const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.saveAgentPromptPreferences'
@@ -913,8 +917,16 @@ export class CoreServer {
     return this.rpc.request<StorageModelSettingsRecord | null>(STORAGE_LOAD_MODEL_SETTINGS_METHOD)
   }
 
-  saveModelSettings(settings: StorageModelSettingsRecord): Promise<void> {
-    return this.rpc.request<void, StorageModelSettingsRecord>(
+  loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]> {
+    return this.rpc.request<ProviderProfileUiDescriptor[]>(
+      STORAGE_LOAD_PROVIDER_PROFILE_UI_DESCRIPTORS_METHOD
+    )
+  }
+
+  saveModelSettings(
+    settings: StorageModelSettingsUpdateRecord
+  ): Promise<StorageModelSettingsRecord> {
+    return this.rpc.request<StorageModelSettingsRecord, StorageModelSettingsUpdateRecord>(
       STORAGE_SAVE_MODEL_SETTINGS_METHOD,
       settings
     )

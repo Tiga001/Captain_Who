@@ -491,7 +491,7 @@ impl AgentService {
                 created_at,
                 now_ms(),
             )?;
-        if provider_native_tool_trace_is_in_progress(agent_input, &context_trace) {
+        if provider_native_tool_trace_is_in_progress(agent_input, &context_trace)? {
             // The Runtime already owns the exact grouped Provider turn in memory/checkpoint.
             // Returning no replacement baseline prevents a partial durable approval prefix from
             // splitting that turn or requiring later queued calls before they are published.
@@ -860,7 +860,7 @@ impl AgentService {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(run_id.to_string(), snapshot);
-        if provider_native_tool_trace_is_in_progress(&record.agent_input, &trace) {
+        if provider_native_tool_trace_is_in_progress(&record.agent_input, &trace)? {
             self.invalidate_conversation_context_state(conversation_id);
             return Ok(());
         }
@@ -1187,16 +1187,22 @@ impl AgentService {
 fn provider_native_tool_trace_is_in_progress(
     agent_input: &AgentChatInput,
     trace: &ConversationTurnTrace,
-) -> bool {
-    trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-        && agent_input
-            .provider_profile_config
-            .as_ref()
-            .is_some_and(|profile| profile.profile.id == ProviderProfileId::DeepSeekV4Chat)
-        && trace
+) -> Result<bool, String> {
+    if trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+        || !trace
             .items
             .iter()
             .any(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
+    {
+        return Ok(false);
+    }
+    let Some(provider_protocol_key) = agent_input.provider_protocol_key.as_ref() else {
+        return Ok(false);
+    };
+    let capabilities = mycopilot_core::resolve_provider_runtime_capabilities(provider_protocol_key)
+        .map_err(|error| error.to_string())?;
+    Ok(capabilities.partial_trace()
+        == mycopilot_core::ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed)
 }
 
 fn validate_continuation_result_identity(
@@ -1321,4 +1327,49 @@ pub(super) fn validate_compaction_trace_boundary(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod provider_capability_tests {
+    use super::*;
+
+    #[test]
+    fn compaction_rejects_an_unknown_frozen_provider_before_summary_work() {
+        let mut input = serde_json::from_value::<AgentChatInput>(serde_json::json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "test-token",
+            "model": "unsupported-compaction-provider",
+            "messages": []
+        }))
+        .unwrap();
+        input.provider_protocol_key = Some(ProviderProtocolKey {
+            dialect: ProviderProtocolDialect::OpenAiChatCompletions,
+            profile: mycopilot_core::ProviderProfileRef {
+                id: mycopilot_core::ProviderProfileId::DeepSeekV4Chat,
+                version: u32::MAX,
+            },
+            model_id: input.model.clone(),
+            provider_configuration_revision: None,
+        });
+        let trace = ConversationTurnTrace {
+            schema_version: mycopilot_core::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-unsupported-compaction".to_string(),
+            conversation_id: "conversation-unsupported-compaction".to_string(),
+            assistant_message_id: "assistant-unsupported-compaction".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: false,
+            items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: "call-unsupported-compaction".to_string(),
+                tool: "read_file".to_string(),
+                provenance: None,
+                operation: serde_json::json!({ "path": "README.md" }),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+        };
+
+        assert!(provider_native_tool_trace_is_in_progress(&input, &trace).is_err());
+    }
 }

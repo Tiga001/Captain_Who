@@ -7,6 +7,7 @@ import type {
 import { unwrapHostInvocation } from '@mycopilot/host-api'
 import { parseAgentMcpProposedAction, parseAgentMcpToolInvocationEvent } from '@mycopilot/protocol'
 import type {
+  ProviderProfileUiDescriptor,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
@@ -17,6 +18,7 @@ import type {
   StorageImageFileRecord,
   StorageModelConfigRecord,
   StorageModelSettingsRecord,
+  StorageModelSettingsUpdateRecord,
   StorageProjectRecord,
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
@@ -90,8 +92,19 @@ export async function loadModelSettings(): Promise<ModelSettingsSnapshot | null>
   return mapModelSettingsFromStorage(await hostClient.storage.loadModelSettings())
 }
 
-export async function saveModelSettings(settings: ModelSettingsSnapshot): Promise<void> {
-  await hostClient.storage.saveModelSettings(mapModelSettingsToStorage(settings))
+export async function loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]> {
+  return hostClient.storage.loadProviderProfileUiDescriptors()
+}
+
+export async function saveModelSettings(
+  settings: ModelSettingsSnapshot
+): Promise<ModelSettingsSnapshot> {
+  const saved = await hostClient.storage.saveModelSettings(mapModelSettingsToStorage(settings))
+  const normalized = mapModelSettingsFromStorage(saved)
+  if (!normalized) {
+    throw new Error('Host returned an empty model settings snapshot after save')
+  }
+  return normalized
 }
 
 export async function loadAgentPromptPreferences(): Promise<AgentPromptPreferencesSnapshot> {
@@ -315,7 +328,9 @@ function mapModelSettingsFromStorage(
   }
 }
 
-function mapModelSettingsToStorage(settings: ModelSettingsSnapshot): StorageModelSettingsRecord {
+function mapModelSettingsToStorage(
+  settings: ModelSettingsSnapshot
+): StorageModelSettingsUpdateRecord {
   return {
     ...settings,
     models: settings.models.map(mapModelToStorage)
@@ -337,12 +352,19 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
   }
 }
 
-function mapModelToStorage(model: ModelConfig): StorageModelConfigRecord {
+function mapModelToStorage(model: ModelConfig): StorageModelSettingsUpdateRecord['models'][number] {
   return {
-    ...model,
+    id: model.id,
+    displayName: model.displayName,
     apiUrlOverride: model.apiUrlOverride ?? null,
     apiTokenOverride: model.apiTokenOverride ?? null,
-    contextWindowTokens: model.contextWindowTokens ?? null
+    supportsImage: model.supportsImage,
+    contextWindowTokens: model.contextWindowTokens ?? null,
+    ...(model.previousModelId ? { previousModelId: model.previousModelId } : {}),
+    ...(model.providerProfileUpdate ? { providerProfileUpdate: model.providerProfileUpdate } : {}),
+    inputPrice: model.inputPrice,
+    outputPrice: model.outputPrice,
+    enabled: model.enabled
   }
 }
 

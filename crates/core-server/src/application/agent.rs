@@ -91,11 +91,13 @@ use mycopilot_core::{
     ContextJournalCursor, ConversationModelContextItem, ConversationTraceSnapshot,
     ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     McpApprovedToolInvocation, McpToolCatalogContext, McpToolInvocationEventUpdate, McpToolInvoker,
-    McpToolRuntime, ModelCapabilities, ProviderContinuationVault, ProviderProfileId,
-    ProviderProtocolDialect, ProviderProtocolKey,
+    McpToolRuntime, ModelCapabilities, ProviderContinuationVault, ProviderProtocolDialect,
+    ProviderProtocolKey,
 };
 #[cfg(test)]
-use mycopilot_core::{create_conversation_context_state, ProviderContinuationVaultFactory};
+use mycopilot_core::{
+    create_conversation_context_state, ProviderContinuationVaultFactory, ProviderUsageSemantics,
+};
 use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -504,6 +506,7 @@ impl AgentService {
                 })?;
         }
         let pending_actions = load_persisted_pending_actions(&storage)?;
+        let usage_contexts = usage::restore_pending_usage_contexts(&storage, &pending_actions)?;
         let office_engine = resolve_default_office_engine();
         let artifact_runtime = resolve_default_artifact_runtime();
         let file_effects = Arc::new(FileEffectTracker::default());
@@ -556,7 +559,7 @@ impl AgentService {
             startup_recoverable_mcp_approvals: Arc::new(Mutex::new(
                 startup_recoverable_mcp_approvals,
             )),
-            usage_contexts: Arc::new(Mutex::new(HashMap::new())),
+            usage_contexts: Arc::new(Mutex::new(usage_contexts)),
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             running_context_window_snapshots: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),

@@ -175,6 +175,11 @@ impl LlmStreamAccumulator {
                 ProviderProfileConfig::generic_for_dialect(provider_protocol.dialect)
             }
             ProviderProfileId::DeepSeekV4Chat => ProviderProfileConfig::deepseek_v4_default(),
+            _ => {
+                return Err(AgentError::new(
+                    "Provider profile 未注册，无法创建流式解析器。",
+                ));
+            }
         };
         Self::for_profile(&provider_profile, provider_protocol)
     }

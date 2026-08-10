@@ -1428,10 +1428,6 @@ pub(super) fn restore_agent_input_secrets(
         .provider_connection_revisions
         .get(&agent_input.model)
         .ok_or_else(|| "frozen pending-action provider connection is unavailable".to_string())?;
-    let current_provider_protocol_revision = settings_snapshot
-        .provider_protocol_revisions
-        .get(&agent_input.model)
-        .ok_or_else(|| "frozen pending-action Provider Protocol is unavailable".to_string())?;
     if current_provider_connection_revision != &persisted.provider_connection_revision {
         return Err("frozen pending-action provider connection no longer matches".to_string());
     }
@@ -1507,14 +1503,10 @@ pub(super) fn restore_agent_input_secrets(
     {
         return Err("frozen pending-action Provider Protocol provenance diverged".to_string());
     }
-    validate_current_effective_provider_protocol(
-        &persisted.provider_configuration_revision,
-        current_provider_protocol_revision,
-        model,
-        &connection,
-        provider_profile_config,
-        provider_protocol_key,
-    )?;
+    // The profile/key/capabilities belong to the already-running approval checkpoint. A settings
+    // edit may rotate the current model's Provider Protocol while this action is pending; that new
+    // identity is authoritative only for the next Run. The connection revision and endpoint digest
+    // above still fail closed on endpoint/token drift before any credential is rehydrated.
     if let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() {
         if &checkpoint.provider_profile_config != provider_profile_config
             || &checkpoint.provider_protocol_key != provider_protocol_key

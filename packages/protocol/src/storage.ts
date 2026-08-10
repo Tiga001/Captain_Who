@@ -1,7 +1,12 @@
 import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from './agent'
 
-export type ProviderProfileId =
+export type KnownProviderProfileId =
   'generic_openai_chat' | 'generic_anthropic_messages' | 'deepseek_v4_chat'
+
+/** Persisted ids are tolerant so unsupported future profiles can be displayed without reset. */
+export type ProviderProfileId = KnownProviderProfileId | (string & {})
+
+export type ProviderProtocolDialect = 'openai_chat_completions' | 'anthropic_messages'
 
 export type ProviderReasoningMode = 'provider_default' | 'enabled' | 'disabled'
 export type ProviderReasoningEffort = 'provider_default' | 'high' | 'max'
@@ -17,6 +22,47 @@ export interface ProviderProfileConfig {
     effort: ProviderReasoningEffort
   }
 }
+
+/**
+ * Safe, read-only projection of one code-owned Provider Profile registration.
+ *
+ * Runtime capabilities are intentionally absent: Renderer may use this descriptor for selection
+ * and presentation only, while Host remains authoritative for profile versions and behavior.
+ */
+export interface ProviderProfileUiDescriptor {
+  profileId: ProviderProfileId
+  profileVersion: number
+  displayName: string
+  compatibleDialects: ProviderProtocolDialect[]
+  settingsKind: ProviderProfileSettingsKind
+  selectable: boolean
+}
+
+export type ProviderProfileSettingsKind = 'none' | 'deepseek_v4_chat'
+
+export interface DeepSeekV4ChatProviderSettings {
+  kind: 'deepseek_v4_chat'
+  reasoning: {
+    mode: ProviderReasoningMode
+    effort: ProviderReasoningEffort
+  }
+}
+
+/** Public settings accepted by a registered Provider Profile. */
+export type ProviderProfileSettings = DeepSeekV4ChatProviderSettings
+
+/**
+ * Explicit profile mutation intent. Omission is equivalent to `unchanged` for older clients.
+ * Renderer never submits a profile version, protocol revision, or runtime capability.
+ */
+export type StorageProviderProfileUpdate =
+  | { kind: 'unchanged' }
+  | { kind: 'select_generic' }
+  | {
+      kind: 'select_registered_profile'
+      profileId: ProviderProfileId
+      settings: ProviderProfileSettings
+    }
 
 export interface StorageModelConfigRecord {
   /** Opaque model identifier sent verbatim as the provider API's `model` value. */
@@ -40,6 +86,28 @@ export interface StorageModelSettingsRecord {
   searchMode: string
   tavilyApiKey: string
   models: StorageModelConfigRecord[]
+}
+
+/** Model payload accepted by the authoritative Host save boundary. */
+export interface StorageModelConfigUpdateRecord extends Omit<
+  StorageModelConfigRecord,
+  'providerProfileConfig'
+> {
+  /** Previous opaque model identity used to preserve profile state across an explicit rename. */
+  previousModelId?: string
+  /** Missing means preserve the currently saved profile and settings. */
+  providerProfileUpdate?: StorageProviderProfileUpdate
+}
+
+/**
+ * Renderer-to-Host save request. The stored ProviderProfileConfig is deliberately not writable;
+ * Host resolves explicit update intents through its code-owned registration.
+ */
+export interface StorageModelSettingsUpdateRecord extends Omit<
+  StorageModelSettingsRecord,
+  'models'
+> {
+  models: StorageModelConfigUpdateRecord[]
 }
 
 export interface StorageProjectRecord {

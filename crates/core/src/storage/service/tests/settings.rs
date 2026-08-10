@@ -21,6 +21,205 @@ fn revision_test_settings() -> ModelSettingsRecord {
     }
 }
 
+fn renderer_save_request(
+    settings: &ModelSettingsRecord,
+    update: Option<serde_json::Value>,
+    previous_model_id: Option<&str>,
+    include_legacy_profile_echo: bool,
+) -> ModelSettingsSaveRequest {
+    let mut value = serde_json::to_value(settings).unwrap();
+    let model = value["models"][0].as_object_mut().unwrap();
+    if !include_legacy_profile_echo {
+        model.remove("providerProfileConfig");
+    }
+    if let Some(update) = update {
+        model.insert("providerProfileUpdate".to_string(), update);
+    }
+    if let Some(previous_model_id) = previous_model_id {
+        model.insert(
+            "previousModelId".to_string(),
+            serde_json::Value::String(previous_model_id.to_string()),
+        );
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn registered_profile_selection_is_host_versioned_normalized_and_authoritative() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            Some(serde_json::json!({
+                "kind": "select_registered_profile",
+                "profileId": "deepseek_v4_chat",
+                "settings": {
+                    "kind": "deepseek_v4_chat",
+                    "reasoning": {"mode": "disabled", "effort": "max"}
+                }
+            })),
+            None,
+            false,
+        ))
+        .unwrap();
+
+    let config = saved.models[0].provider_profile_config.as_ref().unwrap();
+    assert_eq!(
+        config.profile,
+        crate::ProviderProfileRef::deepseek_v4_chat()
+    );
+    assert_eq!(config.reasoning.mode, crate::ReasoningMode::Disabled);
+    assert_eq!(
+        config.reasoning.effort,
+        crate::ReasoningEffort::ProviderDefault
+    );
+    assert_eq!(
+        service.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
+        saved.models[0].provider_profile_config
+    );
+}
+
+#[test]
+fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    let initial = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            Some(serde_json::json!({
+                "kind": "select_registered_profile",
+                "profileId": "deepseek_v4_chat",
+                "settings": {
+                    "kind": "deepseek_v4_chat",
+                    "reasoning": {"mode": "enabled", "effort": "high"}
+                }
+            })),
+            None,
+            false,
+        ))
+        .unwrap();
+    let initial_revision = service
+        .load_model_settings_snapshot()
+        .unwrap()
+        .unwrap()
+        .provider_protocol_revisions["revision-model"]
+        .clone();
+
+    let mut metadata = initial.clone();
+    metadata.models[0].display_name = "Metadata only".to_string();
+    metadata.models[0].supports_image = true;
+    metadata.models[0].input_price = "2".to_string();
+    service
+        .save_model_settings_request(renderer_save_request(&metadata, None, None, false))
+        .unwrap();
+    assert_eq!(
+        service
+            .load_model_settings_snapshot()
+            .unwrap()
+            .unwrap()
+            .provider_protocol_revisions["revision-model"],
+        initial_revision
+    );
+
+    let changed = service
+        .save_model_settings_request(renderer_save_request(
+            &metadata,
+            Some(serde_json::json!({
+                "kind": "select_registered_profile",
+                "profileId": "deepseek_v4_chat",
+                "settings": {
+                    "kind": "deepseek_v4_chat",
+                    "reasoning": {"mode": "enabled", "effort": "max"}
+                }
+            })),
+            None,
+            false,
+        ))
+        .unwrap();
+    let changed_snapshot = service.load_model_settings_snapshot().unwrap().unwrap();
+    assert_ne!(
+        changed_snapshot.provider_protocol_revisions["revision-model"],
+        initial_revision
+    );
+    assert_eq!(
+        changed.models[0]
+            .provider_profile_config
+            .as_ref()
+            .unwrap()
+            .reasoning
+            .effort,
+        crate::ReasoningEffort::Max
+    );
+}
+
+#[test]
+fn select_generic_resolves_from_the_effective_anthropic_dialect() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            Some(serde_json::json!({"kind": "select_generic"})),
+            None,
+            false,
+        ))
+        .unwrap();
+
+    assert_eq!(
+        saved.models[0]
+            .provider_profile_config
+            .as_ref()
+            .unwrap()
+            .profile,
+        crate::ProviderProfileRef::generic_for_dialect(
+            crate::ProviderProtocolDialect::AnthropicMessages
+        )
+    );
+}
+
+#[test]
+fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselected() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_profile_config =
+        Some(crate::ProviderProfileConfig::generic_for_dialect(
+            crate::ProviderProtocolDialect::OpenAiChatCompletions,
+        ));
+    service.save_model_settings(settings.clone()).unwrap();
+
+    settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
+    let unchanged = renderer_save_request(&settings, None, None, true);
+    assert!(service.save_model_settings_request(unchanged).is_err());
+    assert_eq!(
+        service.load_model_settings().unwrap().unwrap().api_url,
+        "https://revision.example/v1"
+    );
+
+    let saved = service
+        .save_model_settings_request(renderer_save_request(
+            &settings,
+            Some(serde_json::json!({"kind": "select_generic"})),
+            None,
+            false,
+        ))
+        .unwrap();
+    assert_eq!(
+        saved.models[0]
+            .provider_profile_config
+            .as_ref()
+            .unwrap()
+            .profile
+            .id,
+        crate::ProviderProfileId::GenericAnthropicMessages
+    );
+}
+
 #[test]
 fn every_model_settings_save_rotates_an_opaque_host_revision() {
     let fixture = StorageFixture::new();
@@ -333,7 +532,7 @@ fn explicit_generic_profile_can_replace_a_provider_specific_profile() {
 }
 
 #[test]
-fn invalid_persisted_provider_profile_fails_closed() {
+fn unsupported_persisted_provider_profile_remains_visible_but_cannot_resolve() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     service
@@ -348,7 +547,179 @@ fn invalid_persisted_provider_profile_fails_closed() {
         )
         .unwrap();
 
-    assert!(service.load_model_settings().is_err());
+    let loaded = service.load_model_settings().unwrap().unwrap();
+    let config = loaded.models[0].provider_profile_config.as_ref().unwrap();
+    assert_eq!(config.profile.id.as_str(), "future_profile");
+    assert_eq!(config.profile.version, 1);
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_model_settings(revision_test_settings())
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    connection
+        .execute(
+            "UPDATE models SET provider_profile_config_json = ?1 WHERE id = 'revision-model'",
+            [r#"{"schemaVersion":1,"profile":{"id":"future_profile","version":9},"reasoning":{"mode":"provider_default","effort":"provider_default"}}"#],
+        )
+        .unwrap();
+    drop(connection);
+
+    let loaded = service.load_model_settings().unwrap().unwrap();
+    let before_revision = service
+        .load_model_settings_snapshot()
+        .unwrap()
+        .unwrap()
+        .provider_protocol_revisions["revision-model"]
+        .clone();
+    let mut price_edit = loaded.clone();
+    price_edit.models[0].input_price = "3.5".to_string();
+    let saved = service
+        .save_model_settings_request(renderer_save_request(&price_edit, None, None, true))
+        .unwrap();
+    assert_eq!(
+        saved.models[0]
+            .provider_profile_config
+            .as_ref()
+            .unwrap()
+            .profile
+            .id
+            .as_str(),
+        "future_profile"
+    );
+    assert_eq!(
+        service
+            .load_model_settings_snapshot()
+            .unwrap()
+            .unwrap()
+            .provider_protocol_revisions["revision-model"],
+        before_revision,
+        "an unrelated price save must preserve the unsupported opaque wire identity"
+    );
+
+    let mut renamed = saved;
+    renamed.models[0].id = "renamed-model".to_string();
+    let renamed = service
+        .save_model_settings_request(renderer_save_request(
+            &renamed,
+            None,
+            Some("revision-model"),
+            true,
+        ))
+        .unwrap();
+    assert_eq!(
+        renamed.models[0]
+            .provider_profile_config
+            .as_ref()
+            .unwrap()
+            .profile
+            .id
+            .as_str(),
+        "future_profile"
+    );
+}
+
+#[test]
+fn old_profile_echo_cannot_change_host_authoritative_version() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    settings.models[0].provider_profile_config =
+        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+    service.save_model_settings(settings.clone()).unwrap();
+
+    let mut request = serde_json::to_value(&settings).unwrap();
+    request["models"][0]["providerProfileConfig"]["profile"]["version"] =
+        serde_json::Value::from(99);
+    let request = serde_json::from_value::<ModelSettingsSaveRequest>(request).unwrap();
+    assert!(service.save_model_settings_request(request).is_err());
+    assert_eq!(
+        service.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
+        settings.models[0].provider_profile_config
+    );
+}
+
+#[test]
+fn save_request_rejects_renderer_capabilities_versions_and_unknown_settings() {
+    let valid_update = serde_json::json!({
+        "kind": "select_registered_profile",
+        "profileId": "deepseek_v4_chat",
+        "settings": {
+            "kind": "deepseek_v4_chat",
+            "reasoning": {"mode": "enabled", "effort": "high"}
+        }
+    });
+    for (field, injected) in [
+        ("profileVersion", serde_json::json!(1)),
+        ("capabilities", serde_json::json!({"privateReplay": true})),
+        ("providerConfigurationRevision", serde_json::json!("forged")),
+    ] {
+        let mut settings = serde_json::to_value(revision_test_settings()).unwrap();
+        let mut update = valid_update.clone();
+        update
+            .as_object_mut()
+            .unwrap()
+            .insert(field.to_string(), injected);
+        settings["models"][0]["providerProfileUpdate"] = update;
+        assert!(serde_json::from_value::<ModelSettingsSaveRequest>(settings).is_err());
+    }
+
+    let mut settings = serde_json::to_value(revision_test_settings()).unwrap();
+    let mut update = valid_update.clone();
+    update["settings"]["reasoning"]["replay"] = serde_json::json!(true);
+    settings["models"][0]["providerProfileUpdate"] = update;
+    assert!(serde_json::from_value::<ModelSettingsSaveRequest>(settings).is_err());
+
+    let mut settings = serde_json::to_value(revision_test_settings()).unwrap();
+    let mut update = valid_update;
+    update["settings"]["reasoning"]["effort"] = serde_json::json!("xhigh");
+    settings["models"][0]["providerProfileUpdate"] = update;
+    assert!(serde_json::from_value::<ModelSettingsSaveRequest>(settings).is_err());
+}
+
+#[test]
+fn registered_selection_rejects_unknown_profiles_and_incompatible_dialects() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    let unknown = renderer_save_request(
+        &settings,
+        Some(serde_json::json!({
+            "kind": "select_registered_profile",
+            "profileId": "future_profile",
+            "settings": {
+                "kind": "deepseek_v4_chat",
+                "reasoning": {"mode": "provider_default", "effort": "provider_default"}
+            }
+        })),
+        None,
+        false,
+    );
+    assert!(service.save_model_settings_request(unknown).is_err());
+
+    let mut anthropic = settings;
+    anthropic.api_url = "https://api.anthropic.com/v1/messages".to_string();
+    let incompatible = renderer_save_request(
+        &anthropic,
+        Some(serde_json::json!({
+            "kind": "select_registered_profile",
+            "profileId": "deepseek_v4_chat",
+            "settings": {
+                "kind": "deepseek_v4_chat",
+                "reasoning": {"mode": "provider_default", "effort": "provider_default"}
+            }
+        })),
+        None,
+        false,
+    );
+    assert!(service.save_model_settings_request(incompatible).is_err());
+    assert!(service.load_model_settings().unwrap().is_none());
 }
 
 #[test]

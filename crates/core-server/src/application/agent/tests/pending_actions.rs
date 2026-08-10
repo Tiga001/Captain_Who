@@ -218,6 +218,20 @@ fn freeze_generic_provider_protocol(
             mycopilot_core::ProviderProtocolDialect::detect_from_api_url(&input.api_url)
         });
     let config = mycopilot_core::ProviderProfileConfig::generic_for_dialect(dialect);
+    freeze_provider_protocol(input, provider_configuration_revision, config);
+}
+
+fn freeze_provider_protocol(
+    input: &mut AgentChatInput,
+    provider_configuration_revision: String,
+    config: mycopilot_core::ProviderProfileConfig,
+) {
+    let dialect = input
+        .api_style
+        .map(mycopilot_core::ProviderProtocolDialect::from)
+        .unwrap_or_else(|| {
+            mycopilot_core::ProviderProtocolDialect::detect_from_api_url(&input.api_url)
+        });
     let key = mycopilot_core::ProviderProtocolKey::new(
         dialect,
         &config,
@@ -2921,6 +2935,25 @@ fn frozen_provider_resume_input(
     search_mode: &str,
     search_key: Option<&str>,
 ) -> DecodedPersistedAgentResumeInput {
+    let dialect = mycopilot_core::ProviderProtocolDialect::detect_from_api_url(api_url);
+    frozen_provider_resume_input_with_profile(
+        storage,
+        api_url,
+        api_token,
+        search_mode,
+        search_key,
+        mycopilot_core::ProviderProfileConfig::generic_for_dialect(dialect),
+    )
+}
+
+fn frozen_provider_resume_input_with_profile(
+    storage: &Arc<StorageService>,
+    api_url: &str,
+    api_token: &str,
+    search_mode: &str,
+    search_key: Option<&str>,
+    profile: mycopilot_core::ProviderProfileConfig,
+) -> DecodedPersistedAgentResumeInput {
     let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
     let protocol_revision = snapshot.provider_protocol_revisions["test-model"].clone();
     let mut input = serde_json::from_value::<AgentChatInput>(json!({
@@ -2936,7 +2969,7 @@ fn frozen_provider_resume_input(
         "messages": []
     }))
     .unwrap();
-    freeze_generic_provider_protocol(&mut input, protocol_revision);
+    freeze_provider_protocol(&mut input, protocol_revision, profile);
     input.provider_connection_revision =
         Some(snapshot.provider_connection_revisions["test-model"].clone());
     input.search_connection_revision = Some(snapshot.search_connection_revision);
@@ -3043,7 +3076,7 @@ fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edit
 }
 
 #[test]
-fn pending_resume_rejects_selected_models_provider_profile_change() {
+fn pending_resume_preserves_frozen_generic_profile_when_current_model_selects_deepseek() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let endpoint = "https://provider-profile-change.example/v1";
@@ -3063,8 +3096,65 @@ fn pending_resume_rejects_selected_models_provider_profile_change() {
         Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
     storage.save_model_settings(settings).unwrap();
 
-    let error = restore_agent_input_secrets(&storage, frozen).unwrap_err();
-    assert!(error.contains("no longer matches"));
+    let frozen_profile = frozen.agent_input.provider_profile_config.clone().unwrap();
+    let frozen_key = frozen.agent_input.provider_protocol_key.clone().unwrap();
+    let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
+    assert_eq!(restored.provider_profile_config, Some(frozen_profile));
+    assert_eq!(restored.provider_protocol_key, Some(frozen_key));
+}
+
+#[test]
+fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let endpoint = "https://provider-profile-freeze.example/v1/chat/completions";
+    let token = "fixed-model-token";
+    save_test_pending_provider(&storage, "test-model", endpoint, token, "disabled", "");
+
+    let mut settings = storage.load_model_settings().unwrap().unwrap();
+    settings.models[0].provider_profile_config =
+        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+    storage.save_model_settings(settings).unwrap();
+    let deepseek = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+    let frozen = frozen_provider_resume_input_with_profile(
+        &storage,
+        endpoint,
+        token,
+        "disabled",
+        None,
+        deepseek.clone(),
+    );
+    let frozen_key = frozen.agent_input.provider_protocol_key.clone().unwrap();
+
+    let current = storage.load_model_settings().unwrap().unwrap();
+    let mut request = serde_json::to_value(current).unwrap();
+    request["models"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("providerProfileConfig");
+    request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
+    storage
+        .save_model_settings_request(
+            serde_json::from_value::<mycopilot_core::storage::models::ModelSettingsSaveRequest>(
+                request,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let current = storage.load_model_settings().unwrap().unwrap();
+    assert_eq!(
+        current.models[0]
+            .provider_profile_config
+            .as_ref()
+            .unwrap()
+            .profile
+            .id,
+        mycopilot_core::ProviderProfileId::GenericOpenAiChat
+    );
+    let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
+    assert_eq!(restored.provider_profile_config, Some(deepseek));
+    assert_eq!(restored.provider_protocol_key, Some(frozen_key));
 }
 
 #[test]
@@ -3834,7 +3924,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
-            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
             output_price: None,
             started_at: 1,
@@ -3957,7 +4047,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             project_id: None,
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
-            provider_profile_id: ProviderProfileId::GenericOpenAiChat,
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
             output_price: None,
             started_at: 1,

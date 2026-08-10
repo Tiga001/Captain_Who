@@ -14,9 +14,10 @@ export function modelConfigFromForm(
       values.contextWindowTokens.trim().length > 0
         ? Number(values.contextWindowTokens.replaceAll(',', ''))
         : undefined,
-    // Provider Profile controls are intentionally not visible yet. Editing any visible field
-    // must round-trip the existing Host-owned configuration instead of silently reverting it.
+    // The persisted config is read-only presentation state. Host consumes the explicit update,
+    // resolves its version/dialect, and returns the normalized authoritative config.
     providerProfileConfig: editingModel?.providerProfileConfig,
+    providerProfileUpdate: values.providerProfileUpdate,
     inputPrice: values.inputPrice,
     outputPrice: values.outputPrice,
     enabled: editingModel?.enabled ?? true
