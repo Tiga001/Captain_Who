@@ -100,6 +100,10 @@ export function ComposerSelectedSkills({
           : undefined
         const provenanceLabel =
           sourceLabel && trustLabel ? `${sourceLabel} · ${trustLabel}` : undefined
+        const visibleProvenanceLabel =
+          provenance?.sourceKind === 'bundled' && provenance.trust === 'application'
+            ? undefined
+            : provenanceLabel
         const accessibleName = provenanceLabel ? `${name} · ${provenanceLabel}` : name
 
         return (
@@ -124,8 +128,8 @@ export function ComposerSelectedSkills({
             />
             <span className="composer-skill-chip__content">
               <span className="composer-skill-chip__name">{name}</span>
-              {provenanceLabel && (
-                <small className="composer-skill-chip__provenance">{provenanceLabel}</small>
+              {visibleProvenanceLabel && (
+                <small className="composer-skill-chip__provenance">{visibleProvenanceLabel}</small>
               )}
             </span>
             {match?.status !== 'current' && match && <AlertTriangle aria-hidden="true" />}

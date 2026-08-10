@@ -1379,6 +1379,7 @@ fn message_deletion_blocks_pending_and_approved_processes_then_retires_terminal_
                 model_name: "Test model".to_string(),
                 provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
                 input_price: None,
+                cached_input_price: None,
                 output_price: None,
                 started_at: 1,
             },

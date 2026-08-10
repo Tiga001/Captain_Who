@@ -22,6 +22,7 @@ const existingModel: ModelConfig = {
   contextWindowTokens: 128_000,
   providerProfileConfig: deepSeekProfile,
   inputPrice: '0.01',
+  cachedInputPrice: '',
   outputPrice: '0.02',
   enabled: false
 }
@@ -33,6 +34,7 @@ const editedValues: ModelFormValues = {
   apiTokenOverride: '',
   contextWindowTokens: '256,000',
   inputPrice: '0.03',
+  cachedInputPrice: '0.005',
   outputPrice: '0.04',
   supportsImage: true
 }
@@ -44,6 +46,7 @@ describe('modelConfigFromForm', () => {
     expect(saved.providerProfileConfig).toEqual(deepSeekProfile)
     expect(saved.enabled).toBe(false)
     expect(saved.contextWindowTokens).toBe(256_000)
+    expect(saved.cachedInputPrice).toBe('0.005')
   })
 
   it('does not invent a Provider Profile for a newly created model', () => {

@@ -46,6 +46,9 @@ pub struct ModelConfigRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_profile_config: Option<ProviderProfileConfig>,
     pub input_price: String,
+    /// Empty means cached input inherits `input_price` when a run freezes its billing snapshot.
+    #[serde(default)]
+    pub cached_input_price: String,
     pub output_price: String,
     pub enabled: bool,
 }
@@ -118,6 +121,8 @@ pub struct ModelConfigSaveRequest {
     #[serde(default)]
     pub provider_profile_update: Option<ProviderProfileUpdate>,
     pub input_price: String,
+    #[serde(default)]
+    pub cached_input_price: String,
     pub output_price: String,
     pub enabled: bool,
 }
@@ -136,6 +141,7 @@ impl ModelConfigSaveRequest {
             context_window_tokens: self.context_window_tokens,
             provider_profile_config,
             input_price: self.input_price,
+            cached_input_price: self.cached_input_price,
             output_price: self.output_price,
             enabled: self.enabled,
         }
@@ -236,6 +242,15 @@ impl ModelConfigRecord {
             .unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS)
     }
 
+    /// Resolves the editable inheritance marker into the explicit price frozen for one run.
+    pub fn effective_cached_input_price(&self) -> &str {
+        if self.cached_input_price.trim().is_empty() {
+            &self.input_price
+        } else {
+            &self.cached_input_price
+        }
+    }
+
     pub fn resolved_provider_profile_config(
         &self,
         dialect: ProviderProtocolDialect,
@@ -303,6 +318,7 @@ mod model_connection_tests {
             context_window_tokens: None,
             provider_profile_config: None,
             input_price: "0".to_string(),
+            cached_input_price: String::new(),
             output_price: "0".to_string(),
             enabled: true,
         }
@@ -365,6 +381,17 @@ mod model_connection_tests {
         model.context_window_tokens = Some(256_000);
 
         assert_eq!(model.effective_context_window_tokens(), 256_000);
+    }
+
+    #[test]
+    fn cached_input_price_inherits_input_price_until_explicitly_configured() {
+        let mut model = model(None, None);
+        model.input_price = "0.012".to_string();
+
+        assert_eq!(model.effective_cached_input_price(), "0.012");
+
+        model.cached_input_price = "0.002".to_string();
+        assert_eq!(model.effective_cached_input_price(), "0.002");
     }
 }
 
@@ -657,6 +684,7 @@ pub struct AgentUsageRecordInsert {
     pub cache_creation_input_tokens: Option<u64>,
     pub billable_request_count: u64,
     pub input_price: Option<String>,
+    pub cached_input_price: Option<String>,
     pub output_price: Option<String>,
     pub estimated_cost: Option<f64>,
 }
@@ -900,6 +928,7 @@ mod security_tests {
             context_window_tokens: Some(128_000),
             provider_profile_config: None,
             input_price: "0".to_string(),
+            cached_input_price: String::new(),
             output_price: "0".to_string(),
             enabled: true,
         };

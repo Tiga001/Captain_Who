@@ -143,6 +143,7 @@ describe('global API URL Provider Profile updates', () => {
     displayName: 'Model',
     supportsImage: false,
     inputPrice: '0',
+    cachedInputPrice: '',
     outputPrice: '0',
     enabled: true
   }

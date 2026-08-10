@@ -2897,6 +2897,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         context_window_tokens: Some(64_000),
         provider_profile_config: None,
         input_price: "0".to_string(),
+        cached_input_price: String::new(),
         output_price: "0".to_string(),
         enabled: true,
     });
@@ -3060,6 +3061,7 @@ fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edit
         context_window_tokens: Some(64_000),
         provider_profile_config: None,
         input_price: "0".to_string(),
+        cached_input_price: String::new(),
         output_price: "0".to_string(),
         enabled: true,
     });
@@ -3926,6 +3928,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
             model_name: "Model 1".to_string(),
             provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
+            cached_input_price: None,
             output_price: None,
             started_at: 1,
         },
@@ -4049,6 +4052,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             model_name: "Model 1".to_string(),
             provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
             input_price: None,
+            cached_input_price: None,
             output_price: None,
             started_at: 1,
         },

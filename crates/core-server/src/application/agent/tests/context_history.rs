@@ -1031,6 +1031,7 @@ fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete
                 context_window_tokens: Some(128_000),
                 provider_profile_config: None,
                 input_price: "0.01".to_string(),
+                cached_input_price: String::new(),
                 output_price: "0.02".to_string(),
                 enabled: true,
             }],

@@ -744,6 +744,30 @@
   gap: 5px;
 }
 
+.model-form-input-price-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+
+.model-form-input-price-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.model-form-input-price-field > span:first-child {
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-normal);
+}
+
+.model-form-input-price-field .settings-list-control[aria-invalid='true'] {
+  outline: 1px solid var(--mc-color-text-danger);
+  outline-offset: 1px;
+}
+
 .model-form-price-control .settings-list-control[aria-invalid='true'] {
   outline: 1px solid var(--mc-color-text-danger);
   outline-offset: 1px;
@@ -1032,6 +1056,10 @@
 
   .model-form-page .settings-switch {
     justify-self: start;
+  }
+
+  .model-form-input-price-grid {
+    width: 100%;
   }
 
   .model-provider-settings-button {

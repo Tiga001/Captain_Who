@@ -56,6 +56,7 @@ describe('CoreServer model settings client', () => {
             }
           },
           inputPrice: '0',
+          cachedInputPrice: '',
           outputPrice: '0',
           enabled: true
         }
@@ -78,6 +79,7 @@ describe('CoreServer model settings client', () => {
             reasoning: { mode: 'disabled', effort: 'provider_default' }
           },
           inputPrice: '0',
+          cachedInputPrice: '',
           outputPrice: '0',
           enabled: true
         }

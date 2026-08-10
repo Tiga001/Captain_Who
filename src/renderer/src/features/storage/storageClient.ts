@@ -340,6 +340,7 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     contextWindowTokens: model.contextWindowTokens ?? undefined,
     providerProfileConfig: model.providerProfileConfig ?? undefined,
     inputPrice: model.inputPrice,
+    cachedInputPrice: model.cachedInputPrice,
     outputPrice: model.outputPrice,
     enabled: model.enabled
   }
@@ -356,6 +357,7 @@ function mapModelToStorage(model: ModelConfig): StorageModelSettingsUpdateRecord
     ...(model.previousModelId ? { previousModelId: model.previousModelId } : {}),
     ...(model.providerProfileUpdate ? { providerProfileUpdate: model.providerProfileUpdate } : {}),
     inputPrice: model.inputPrice,
+    cachedInputPrice: model.cachedInputPrice,
     outputPrice: model.outputPrice,
     enabled: model.enabled
   }

@@ -20,6 +20,8 @@ export interface ModelConfig {
   /** One-shot previous identity used by Host while saving an edited model rename. */
   previousModelId?: string
   inputPrice: string
+  /** Empty means cached input is billed at inputPrice. */
+  cachedInputPrice: string
   outputPrice: string
   enabled: boolean
 }
@@ -35,6 +37,7 @@ export interface ModelFormValues {
   apiTokenOverride: string
   contextWindowTokens: string
   inputPrice: string
+  cachedInputPrice: string
   outputPrice: string
   supportsImage: boolean
   providerProfileUpdate?: StorageProviderProfileUpdate
@@ -133,6 +136,7 @@ export const modelConfig = {
       displayName: 'claude-opus-4-7',
       supportsImage: true,
       inputPrice: '0.028',
+      cachedInputPrice: '',
       outputPrice: '0.14',
       enabled: true
     },
@@ -141,6 +145,7 @@ export const modelConfig = {
       displayName: 'claude-sonnet-4.6',
       supportsImage: true,
       inputPrice: '0.0168',
+      cachedInputPrice: '',
       outputPrice: '0.084',
       enabled: true
     },
@@ -149,6 +154,7 @@ export const modelConfig = {
       displayName: 'gpt-5.5',
       supportsImage: true,
       inputPrice: '0.021',
+      cachedInputPrice: '',
       outputPrice: '0.126',
       enabled: true
     },
@@ -157,6 +163,7 @@ export const modelConfig = {
       displayName: 'deepseek/deepseek-v4-pro',
       supportsImage: false,
       inputPrice: '0.012',
+      cachedInputPrice: '',
       outputPrice: '0.024',
       enabled: true
     },
@@ -165,6 +172,7 @@ export const modelConfig = {
       displayName: 'deepseek/deepseek-v4-flash',
       supportsImage: false,
       inputPrice: '0.00105',
+      cachedInputPrice: '',
       outputPrice: '0.0021',
       enabled: true
     },
@@ -173,6 +181,7 @@ export const modelConfig = {
       displayName: 'minimax/minimax-m2.5',
       supportsImage: false,
       inputPrice: '0.001407',
+      cachedInputPrice: '',
       outputPrice: '0.005628',
       enabled: true
     }

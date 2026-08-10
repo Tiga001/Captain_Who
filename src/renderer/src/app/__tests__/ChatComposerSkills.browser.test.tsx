@@ -968,7 +968,8 @@ describe('ChatComposer Skill picker', () => {
     expect(workspaceChip?.textContent).toContain(auditorSkill.name)
     expect(workspaceChip?.textContent).toContain('chat.workspaceSkill · chat.skillTrustUntrusted')
     expect(bundledChip?.textContent).toContain('skills.bundled.documents.name')
-    expect(bundledChip?.textContent).toContain('chat.bundledSkill · chat.skillTrustApplication')
+    expect(bundledChip?.querySelector('.composer-skill-chip__provenance')).toBeNull()
+    expect(bundledChip?.textContent).not.toContain('chat.bundledSkill · chat.skillTrustApplication')
     expect(installedChip?.textContent).toContain(auditorSkill.name)
     expect(installedChip?.textContent).toContain('chat.installedSkill · chat.skillTrustUntrusted')
     await expect

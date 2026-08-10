@@ -235,6 +235,11 @@
 
 .usage-chart-panel {
   --usage-chart-input-color: var(--mc-color-data-viz-input);
+  --usage-chart-cached-input-color: color-mix(
+    in srgb,
+    var(--mc-color-data-viz-input) 48%,
+    var(--mc-color-data-viz-output-thinking)
+  );
   --usage-chart-output-color: var(--mc-color-data-viz-output);
   --usage-chart-output-thinking-color: var(--mc-color-data-viz-output-thinking);
   --usage-chart-plot-height: 320px;
@@ -268,6 +273,10 @@
 
 .usage-chart-bar--input {
   background: var(--usage-chart-input-color);
+}
+
+.usage-chart-bar--cached-input {
+  background: var(--usage-chart-cached-input-color);
 }
 
 .usage-chart-bar--output {
@@ -358,9 +367,9 @@
 .usage-chart-day {
   position: relative;
   display: grid;
-  flex: 1 0 76px;
+  flex: 1 0 90px;
   grid-template-rows: var(--usage-chart-plot-height) var(--usage-chart-label-height);
-  min-width: 76px;
+  min-width: 90px;
   border-radius: var(--mc-radius-row);
   isolation: isolate;
   outline: 0;

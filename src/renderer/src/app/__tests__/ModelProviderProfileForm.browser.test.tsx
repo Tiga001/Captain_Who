@@ -39,6 +39,7 @@ const model: ModelConfig = {
     reasoning: { mode: 'provider_default', effort: 'provider_default' }
   },
   inputPrice: '0',
+  cachedInputPrice: '',
   outputPrice: '0',
   enabled: true
 }
@@ -158,6 +159,42 @@ describe('ModelForm Provider Profile controls', () => {
       expect.objectContaining({
         apiUrlOverride: 'https://api.anthropic.com/v1/messages',
         providerProfileUpdate: { kind: 'select_generic' }
+      })
+    )
+  })
+
+  it('submits separate cache-miss and cache-hit prices while preserving blank inheritance', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const screen = await render(
+      <ModelForm
+        model={{ ...model, inputPrice: '0.012', cachedInputPrice: '' }}
+        providerProfileDescriptors={descriptors}
+        onCancel={vi.fn()}
+        onSave={onSave}
+      />
+    )
+
+    const cacheMissInput = screen.getByRole('textbox', {
+      name: 'configuration.inputPriceCacheMiss'
+    })
+    const cacheHitInput = screen.getByRole('textbox', {
+      name: 'configuration.inputPriceCacheHit'
+    })
+
+    await expect.element(cacheMissInput).toHaveValue('0.012')
+    await expect.element(cacheHitInput).toHaveValue('')
+    await expect
+      .element(cacheHitInput)
+      .toHaveAttribute('placeholder', 'configuration.inputPriceCacheHitPlaceholder')
+
+    await cacheHitInput.fill('0.002')
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+
+    await expect.poll(() => onSave.mock.calls.length).toBe(1)
+    expect(onSave.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({
+        inputPrice: '0.012',
+        cachedInputPrice: '0.002'
       })
     )
   })

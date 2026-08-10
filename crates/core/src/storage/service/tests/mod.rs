@@ -132,6 +132,7 @@ fn agent_usage_record(conversation_id: &str, message_id: &str) -> AgentUsageReco
         cache_creation_input_tokens: None,
         billable_request_count: 1,
         input_price: Some("0".to_string()),
+        cached_input_price: Some("0".to_string()),
         output_price: Some("0".to_string()),
         estimated_cost: Some(0.0),
     }

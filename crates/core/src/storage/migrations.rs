@@ -994,6 +994,7 @@ fn upgrade_usage_consistency_schema(connection: &Connection) -> rusqlite::Result
                 billable_request_count INTEGER NOT NULL DEFAULT 0
                     CHECK (billable_request_count >= 0),
                 input_price TEXT,
+                cached_input_price TEXT,
                 output_price TEXT,
                 estimated_cost REAL,
                 UNIQUE(conversation_id, message_id),
@@ -1022,6 +1023,7 @@ fn upgrade_usage_consistency_schema(connection: &Connection) -> rusqlite::Result
                 cache_creation_input_tokens,
                 billable_request_count,
                 input_price,
+                cached_input_price,
                 output_price,
                 estimated_cost
             )
@@ -1046,6 +1048,7 @@ fn upgrade_usage_consistency_schema(connection: &Connection) -> rusqlite::Result
                 usage.cache_creation_input_tokens,
                 MAX(usage.billable_request_count, 0),
                 usage.input_price,
+                usage.cached_input_price,
                 usage.output_price,
                 usage.estimated_cost
             FROM agent_usage_records AS usage
@@ -1168,6 +1171,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             provider_connection_revision TEXT,
             provider_protocol_revision TEXT,
             input_price TEXT NOT NULL,
+            cached_input_price TEXT NOT NULL DEFAULT '',
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
             position INTEGER NOT NULL,
@@ -1186,6 +1190,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             provider_connection_revision,
             provider_protocol_revision,
             input_price,
+            cached_input_price,
             output_price,
             enabled,
             position,
@@ -1206,6 +1211,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             model.provider_connection_revision,
             model.provider_protocol_revision,
             model.input_price,
+            model.cached_input_price,
             model.output_price,
             model.enabled,
             model.position,
@@ -1266,6 +1272,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             billable_request_count INTEGER NOT NULL DEFAULT 0
                 CHECK (billable_request_count >= 0),
             input_price TEXT,
+            cached_input_price TEXT,
             output_price TEXT,
             estimated_cost REAL,
             UNIQUE(conversation_id, message_id),
@@ -1294,6 +1301,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             cache_creation_input_tokens,
             billable_request_count,
             input_price,
+            cached_input_price,
             output_price,
             estimated_cost
         )
@@ -1327,6 +1335,7 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             usage.cache_creation_input_tokens,
             usage.billable_request_count,
             usage.input_price,
+            usage.cached_input_price,
             usage.output_price,
             usage.estimated_cost
         FROM agent_usage_records AS usage
@@ -2151,6 +2160,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             provider_connection_revision TEXT,
             provider_protocol_revision TEXT,
             input_price TEXT NOT NULL,
+            cached_input_price TEXT NOT NULL DEFAULT '',
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
             position INTEGER NOT NULL,
@@ -2256,6 +2266,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             billable_request_count INTEGER NOT NULL DEFAULT 0
                 CHECK (billable_request_count >= 0),
             input_price TEXT,
+            cached_input_price TEXT,
             output_price TEXT,
             estimated_cost REAL,
             UNIQUE(conversation_id, message_id),
@@ -2491,6 +2502,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "models", "provider_profile_config_json", "TEXT")?;
     add_column_if_missing(connection, "models", "provider_connection_revision", "TEXT")?;
     add_column_if_missing(connection, "models", "provider_protocol_revision", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "models",
+        "cached_input_price",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     add_column_if_missing(connection, "conversations", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "archived_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "unread_at", "INTEGER")?;
@@ -3481,6 +3498,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "agent_usage_records",
         "output_thinking_tokens",
         "INTEGER",
+    )?;
+    add_column_if_missing(
+        connection,
+        "agent_usage_records",
+        "cached_input_price",
+        "TEXT",
     )?;
     add_column_if_missing(
         connection,

@@ -38,6 +38,7 @@ const storedSettings: ModelSettingsSnapshot = {
       displayName: 'Stored Model',
       supportsImage: false,
       inputPrice: '0',
+      cachedInputPrice: '',
       outputPrice: '0',
       enabled: true
     }

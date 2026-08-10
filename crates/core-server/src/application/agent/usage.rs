@@ -84,6 +84,7 @@ pub(super) fn restore_pending_usage_contexts(
                     model_name: provider_protocol_key.model_id.clone(),
                     provider_usage_semantics: usage_semantics,
                     input_price: None,
+                    cached_input_price: None,
                     output_price: None,
                     started_at: record.snapshot.created_at,
                 },
@@ -134,6 +135,7 @@ pub(super) fn restore_pending_usage_contexts(
                 model_name: persisted.model_name,
                 provider_usage_semantics: usage_semantics,
                 input_price: persisted.input_price,
+                cached_input_price: persisted.cached_input_price,
                 output_price: persisted.output_price,
                 started_at,
             },
@@ -279,6 +281,7 @@ impl AgentService {
                 .and_then(|usage| usage.billable_request_count)
                 .unwrap_or(0);
             let input_tokens = usage.as_ref().and_then(|usage| usage.input_tokens);
+            let cached_input_tokens = usage.as_ref().and_then(|usage| usage.cached_input_tokens);
             let output_tokens = usage.as_ref().and_then(|usage| usage.output_tokens);
             let billable_output_tokens = usage.as_ref().and_then(|usage| {
                 state
@@ -288,8 +291,10 @@ impl AgentService {
             });
             let estimated_cost = self.storage.estimate_usage_cost(
                 input_tokens,
+                cached_input_tokens,
                 billable_output_tokens,
                 state.context.input_price.as_deref().unwrap_or(""),
+                state.context.cached_input_price.as_deref().unwrap_or(""),
                 state.context.output_price.as_deref().unwrap_or(""),
             );
 
@@ -318,6 +323,7 @@ impl AgentService {
                     .and_then(|usage| usage.cache_creation_input_tokens),
                 billable_request_count,
                 input_price: state.context.input_price.clone(),
+                cached_input_price: state.context.cached_input_price.clone(),
                 output_price: state.context.output_price.clone(),
                 estimated_cost,
             })

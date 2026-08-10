@@ -206,13 +206,14 @@ pub fn save_model_settings(
                 provider_connection_revision,
                 provider_protocol_revision,
                 input_price,
+                cached_input_price,
                 output_price,
                 enabled,
                 position,
                 created_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
             ",
             params![
                 &model.id,
@@ -229,6 +230,7 @@ pub fn save_model_settings(
                     .get(&model.id)
                     .ok_or(rusqlite::Error::InvalidQuery)?,
                 &model.input_price,
+                &model.cached_input_price,
                 &model.output_price,
                 model.enabled,
                 index as i64,
@@ -260,6 +262,7 @@ fn load_models(connection: &Transaction<'_>) -> rusqlite::Result<LoadedModels> {
             provider_connection_revision,
             provider_protocol_revision,
             input_price,
+            cached_input_price,
             output_price,
             enabled
         FROM models
@@ -278,8 +281,9 @@ fn load_models(connection: &Transaction<'_>) -> rusqlite::Result<LoadedModels> {
                 context_window_tokens: row.get(5)?,
                 provider_profile_config: decode_provider_profile_config(row.get(6)?, 6)?,
                 input_price: row.get(9)?,
-                output_price: row.get(10)?,
-                enabled: row.get(11)?,
+                cached_input_price: row.get(10)?,
+                output_price: row.get(11)?,
+                enabled: row.get(12)?,
             };
             let connection_revision = row.get::<_, String>(7)?;
             if !is_provider_connection_revision(&connection_revision) {

@@ -30,6 +30,7 @@ pub(crate) struct AgentRunUsageContext {
     pub(crate) model_name: String,
     pub(crate) provider_usage_semantics: ProviderUsageSemantics,
     pub(crate) input_price: Option<String>,
+    pub(crate) cached_input_price: Option<String>,
     pub(crate) output_price: Option<String>,
     pub(crate) started_at: i64,
 }

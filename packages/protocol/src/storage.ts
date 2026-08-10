@@ -76,6 +76,8 @@ export interface StorageModelConfigRecord {
   /** Hidden provider wire configuration; settings UIs must preserve it even before exposing it. */
   providerProfileConfig?: ProviderProfileConfig | null
   inputPrice: string
+  /** Empty means cached input inherits inputPrice. */
+  cachedInputPrice: string
   outputPrice: string
   enabled: boolean
 }

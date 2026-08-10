@@ -15,6 +15,7 @@ fn revision_test_settings() -> ModelSettingsRecord {
             context_window_tokens: Some(128_000),
             provider_profile_config: None,
             input_price: "0".to_string(),
+            cached_input_price: String::new(),
             output_price: "0".to_string(),
             enabled: true,
         }],
@@ -285,6 +286,7 @@ fn provider_connection_revisions_follow_only_each_models_effective_connection() 
         context_window_tokens: Some(128_000),
         provider_profile_config: None,
         input_price: "0".to_string(),
+        cached_input_price: String::new(),
         output_price: "0".to_string(),
         enabled: true,
     });
@@ -386,6 +388,7 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
         context_window_tokens: Some(64_000),
         provider_profile_config: None,
         input_price: "0".to_string(),
+        cached_input_price: String::new(),
         output_price: "0".to_string(),
         enabled: true,
     });
@@ -760,18 +763,24 @@ fn rejects_invalid_model_prices_without_overwriting_saved_settings() {
             context_window_tokens: Some(128_000),
             provider_profile_config: None,
             input_price: "0.01".to_string(),
+            cached_input_price: String::new(),
             output_price: "0.02".to_string(),
             enabled: true,
         }],
     };
     service.save_model_settings(valid.clone()).unwrap();
 
-    let mut invalid = valid;
+    let mut invalid = valid.clone();
     invalid.models[0].input_price = "not-a-price".to_string();
     assert!(service.save_model_settings(invalid).is_err());
 
+    let mut invalid_cached = valid;
+    invalid_cached.models[0].cached_input_price = "not-a-price".to_string();
+    assert!(service.save_model_settings(invalid_cached).is_err());
+
     let stored = service.load_model_settings().unwrap().unwrap();
     assert_eq!(stored.models[0].input_price, "0.01");
+    assert_eq!(stored.models[0].cached_input_price, "");
     assert_eq!(stored.models[0].context_window_tokens, Some(128_000));
 }
 
@@ -793,6 +802,7 @@ fn rejects_zero_context_window_without_overwriting_saved_settings() {
             context_window_tokens: Some(128_000),
             provider_profile_config: None,
             input_price: "0.01".to_string(),
+            cached_input_price: String::new(),
             output_price: "0.02".to_string(),
             enabled: true,
         }],
@@ -825,6 +835,7 @@ fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
             context_window_tokens: Some(128_000),
             provider_profile_config: None,
             input_price: "0.01".to_string(),
+            cached_input_price: String::new(),
             output_price: "0.02".to_string(),
             enabled: true,
         }],

@@ -1190,6 +1190,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 billable_request_count: 42,
                 input_price: None,
+                cached_input_price: None,
                 output_price: None,
                 estimated_cost: None,
             },

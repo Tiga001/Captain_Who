@@ -34,6 +34,13 @@ fn validate_model_settings_fields(settings: &ModelSettingsRecord) -> Result<(), 
                 "模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。"
             ));
         }
+        if !model.cached_input_price.trim().is_empty()
+            && !usage_repository::is_valid_price_per_1k(&model.cached_input_price)
+        {
+            return Err(format!(
+                "模型 {model_id} 的缓存命中输入价格必须留空，或填写大于或等于 0 的有效数字。"
+            ));
+        }
         if !usage_repository::is_valid_price_per_1k(&model.output_price) {
             return Err(format!(
                 "模型 {model_id} 的输出价格必须是大于或等于 0 的有效数字。"
@@ -441,14 +448,18 @@ impl StorageService {
     pub fn estimate_usage_cost(
         &self,
         input_tokens: Option<u64>,
+        cached_input_tokens: Option<u64>,
         output_tokens: Option<u64>,
         input_price: &str,
+        cached_input_price: &str,
         output_price: &str,
     ) -> Option<f64> {
         usage_repository::estimate_usage_cost(
             input_tokens,
+            cached_input_tokens,
             output_tokens,
             input_price,
+            cached_input_price,
             output_price,
         )
     }

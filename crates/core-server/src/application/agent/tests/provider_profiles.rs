@@ -311,6 +311,7 @@ fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() 
             context_window_tokens: Some(64_000),
             provider_profile_config: None,
             input_price: "0".to_string(),
+            cached_input_price: String::new(),
             output_price: "0".to_string(),
             enabled: true,
         });

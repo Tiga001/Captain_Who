@@ -22,6 +22,7 @@ fn settings(profile: Option<ProviderProfileConfig>) -> ModelSettingsRecord {
             context_window_tokens: Some(128_000),
             provider_profile_config: profile,
             input_price: "0".to_string(),
+            cached_input_price: String::new(),
             output_price: "0".to_string(),
             enabled: true,
         }],

@@ -60,6 +60,7 @@ function toFormValues(model?: ModelConfig): ModelFormValues {
     apiTokenOverride: model?.apiTokenOverride ?? '',
     contextWindowTokens: model?.contextWindowTokens?.toString() ?? '',
     inputPrice: model?.inputPrice ?? '0',
+    cachedInputPrice: model?.cachedInputPrice ?? '',
     outputPrice: model?.outputPrice ?? '0',
     supportsImage: model?.supportsImage ?? false
   }
@@ -87,6 +88,7 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
   const isEditing = Boolean(model)
   const isContextWindowValid = isValidContextWindowInput(values.contextWindowTokens)
   const isInputPriceValid = isValidPriceInput(values.inputPrice)
+  const isCachedInputPriceValid = isValidPriceInput(values.cachedInputPrice)
   const isOutputPriceValid = isValidPriceInput(values.outputPrice)
   const hasOverrideUrl = values.apiUrlOverride.trim().length > 0
   const hasOverrideToken = values.apiTokenOverride.trim().length > 0
@@ -96,6 +98,7 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
     values.id.trim().length > 0 &&
     isContextWindowValid &&
     isInputPriceValid &&
+    isCachedInputPriceValid &&
     isOutputPriceValid &&
     isConnectionPairComplete &&
     isOverrideUrlValid
@@ -149,6 +152,9 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
           values.contextWindowTokens.trim().replaceAll(',', '') ||
           DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS.toString(),
         inputPrice: values.inputPrice.trim() || '0',
+        // Empty is intentional: Host freezes the effective cached price from inputPrice when a
+        // run starts, while the editable model keeps inheritance visible to the user.
+        cachedInputPrice: values.cachedInputPrice.trim(),
         outputPrice: values.outputPrice.trim() || '0',
         providerProfileUpdate: providerProfile.update
       })
@@ -233,25 +239,47 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
           </span>
         </label>
 
-        <label className="configuration-field settings-list-row">
+        <div className="configuration-field settings-list-row">
           <span className="settings-list-row__text">
             <span className="settings-list-row__title">{t('configuration.inputPrice')}</span>
           </span>
-          <span className="settings-list-row__control model-form-price-control">
-            <input
-              className="settings-list-control"
-              inputMode="decimal"
-              aria-invalid={!isInputPriceValid}
-              value={values.inputPrice}
-              onChange={(event) =>
-                setValues((current) => ({ ...current, inputPrice: event.target.value }))
-              }
-            />
-            {!isInputPriceValid && (
-              <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
-            )}
+          <span className="settings-list-row__control model-form-input-price-grid">
+            <label className="model-form-input-price-field">
+              <span>{t('configuration.inputPriceCacheMiss')}</span>
+              <input
+                className="settings-list-control"
+                inputMode="decimal"
+                aria-invalid={!isInputPriceValid}
+                value={values.inputPrice}
+                onChange={(event) =>
+                  setValues((current) => ({ ...current, inputPrice: event.target.value }))
+                }
+              />
+              {!isInputPriceValid && (
+                <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
+              )}
+            </label>
+            <label className="model-form-input-price-field">
+              <span>{t('configuration.inputPriceCacheHit')}</span>
+              <input
+                className="settings-list-control"
+                inputMode="decimal"
+                aria-invalid={!isCachedInputPriceValid}
+                value={values.cachedInputPrice}
+                placeholder={t('configuration.inputPriceCacheHitPlaceholder')}
+                onChange={(event) =>
+                  setValues((current) => ({
+                    ...current,
+                    cachedInputPrice: event.target.value
+                  }))
+                }
+              />
+              {!isCachedInputPriceValid && (
+                <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
+              )}
+            </label>
           </span>
-        </label>
+        </div>
 
         <label className="configuration-field settings-list-row">
           <span className="settings-list-row__text">

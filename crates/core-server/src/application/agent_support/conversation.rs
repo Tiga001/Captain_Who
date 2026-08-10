@@ -276,6 +276,7 @@ pub(crate) fn prepare_conversation_turn(
             model_name: model.display_name.clone(),
             provider_usage_semantics,
             input_price: Some(model.input_price.clone()),
+            cached_input_price: Some(model.effective_cached_input_price().to_string()),
             output_price: Some(model.output_price.clone()),
             started_at: timestamp,
         },

@@ -69,10 +69,11 @@ pub fn upsert_usage_record(
             cache_creation_input_tokens,
             billable_request_count,
             input_price,
+            cached_input_price,
             output_price,
             estimated_cost
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
         ON CONFLICT(conversation_id, message_id) DO UPDATE SET
             run_id = excluded.run_id,
             project_id = excluded.project_id,
@@ -91,6 +92,7 @@ pub fn upsert_usage_record(
             cache_creation_input_tokens = excluded.cache_creation_input_tokens,
             billable_request_count = excluded.billable_request_count,
             input_price = excluded.input_price,
+            cached_input_price = excluded.cached_input_price,
             output_price = excluded.output_price,
             estimated_cost = excluded.estimated_cost
         ",
@@ -115,6 +117,7 @@ pub fn upsert_usage_record(
             optional_u64_to_i64(record.cache_creation_input_tokens),
             u64_to_i64(record.billable_request_count),
             &record.input_price,
+            &record.cached_input_price,
             &record.output_price,
             record.estimated_cost,
         ],
@@ -152,6 +155,7 @@ pub fn load_usage_record_for_owner(
                 cache_creation_input_tokens,
                 billable_request_count,
                 input_price,
+                cached_input_price,
                 output_price,
                 estimated_cost
             FROM agent_usage_records
@@ -182,8 +186,9 @@ pub fn load_usage_record_for_owner(
                     cache_creation_input_tokens: checked_optional_i64_to_u64(row.get(17)?, 17)?,
                     billable_request_count: checked_i64_to_u64(row.get(18)?, 18)?,
                     input_price: row.get(19)?,
-                    output_price: row.get(20)?,
-                    estimated_cost: row.get(21)?,
+                    cached_input_price: row.get(20)?,
+                    output_price: row.get(21)?,
+                    estimated_cost: row.get(22)?,
                 })
             },
         )
@@ -392,15 +397,28 @@ pub fn clear_usage_records(
 
 pub fn estimate_usage_cost(
     input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     input_price: &str,
+    cached_input_price: &str,
     output_price: &str,
 ) -> Option<f64> {
+    if cached_input_tokens.is_some() && input_tokens.is_none() {
+        return None;
+    }
+
     let mut cost = 0.0;
     let mut has_usage = false;
 
     if let Some(tokens) = input_tokens {
-        cost += tokens as f64 * parse_price_per_1k(input_price)? / 1000.0;
+        // Provider usage reports cached input as a subset of total input. Clamp defensive
+        // provider over-reporting so one token can never be billed in both input buckets.
+        let cached_tokens = cached_input_tokens.unwrap_or(0).min(tokens);
+        let uncached_tokens = tokens.saturating_sub(cached_tokens);
+        cost += uncached_tokens as f64 * parse_price_per_1k(input_price)? / 1000.0;
+        if cached_tokens > 0 {
+            cost += cached_tokens as f64 * parse_price_per_1k(cached_input_price)? / 1000.0;
+        }
         has_usage = true;
     }
     if let Some(tokens) = output_tokens {
@@ -765,6 +783,7 @@ mod tests {
             cache_creation_input_tokens: None,
             billable_request_count: 1,
             input_price: Some("0.01".to_string()),
+            cached_input_price: Some("0.01".to_string()),
             output_price: Some("0.02".to_string()),
             estimated_cost,
         }
@@ -798,6 +817,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 billable_request_count: 2,
                 input_price: Some("0.01".to_string()),
+                cached_input_price: Some("0.01".to_string()),
                 output_price: Some("0.02".to_string()),
                 estimated_cost: Some(0.02),
             },
@@ -826,6 +846,7 @@ mod tests {
                 cache_creation_input_tokens: Some(50),
                 billable_request_count: 1,
                 input_price: Some("0.01".to_string()),
+                cached_input_price: Some("0.01".to_string()),
                 output_price: Some("0.02".to_string()),
                 estimated_cost: Some(0.022),
             },
@@ -974,6 +995,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 billable_request_count: 2,
                 input_price: Some("0".to_string()),
+                cached_input_price: Some("0".to_string()),
                 output_price: Some("0".to_string()),
                 estimated_cost: Some(0.1),
             },
@@ -1002,6 +1024,7 @@ mod tests {
                 cache_creation_input_tokens: Some(4),
                 billable_request_count: 1,
                 input_price: Some("0".to_string()),
+                cached_input_price: Some("0".to_string()),
                 output_price: Some("0".to_string()),
                 estimated_cost: Some(0.2),
             },
@@ -1165,6 +1188,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 billable_request_count: 1,
                 input_price: Some("0".to_string()),
+                cached_input_price: Some("0".to_string()),
                 output_price: Some("0".to_string()),
                 estimated_cost: Some(0.0),
             },
@@ -1205,11 +1229,29 @@ mod tests {
     #[test]
     fn estimates_cost_from_per_1k_prices() {
         assert_eq!(
-            estimate_usage_cost(Some(1_500), Some(500), "0.01", "0.02"),
+            estimate_usage_cost(Some(1_500), Some(1_000), Some(500), "0.01", "0.002", "0.02"),
+            Some(0.017)
+        );
+        assert_eq!(
+            estimate_usage_cost(Some(1_500), None, Some(500), "0.01", "0.01", "0.02"),
             Some(0.025)
         );
-        assert_eq!(estimate_usage_cost(None, None, "0.01", "0.02"), None);
-        assert_eq!(estimate_usage_cost(Some(1), None, "bad", "0.02"), None);
+        assert_eq!(
+            estimate_usage_cost(Some(100), Some(200), None, "0.01", "0.002", "0.02"),
+            Some(0.0002)
+        );
+        assert_eq!(
+            estimate_usage_cost(None, None, None, "0.01", "0.002", "0.02"),
+            None
+        );
+        assert_eq!(
+            estimate_usage_cost(None, Some(1), None, "0.01", "0.002", "0.02"),
+            None
+        );
+        assert_eq!(
+            estimate_usage_cost(Some(1), None, None, "bad", "0.002", "0.02"),
+            None
+        );
         assert!(!is_valid_price_per_1k(""));
         assert!(!is_valid_price_per_1k("-1"));
         assert!(!is_valid_price_per_1k("NaN"));

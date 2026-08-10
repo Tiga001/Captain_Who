@@ -19,6 +19,7 @@ export function modelConfigFromForm(
     providerProfileConfig: editingModel?.providerProfileConfig,
     providerProfileUpdate: values.providerProfileUpdate,
     inputPrice: values.inputPrice,
+    cachedInputPrice: values.cachedInputPrice,
     outputPrice: values.outputPrice,
     enabled: editingModel?.enabled ?? true
   }

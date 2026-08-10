@@ -33,6 +33,7 @@ const authoritativeSettings: StorageModelSettingsRecord = {
         reasoning: { mode: 'provider_default', effort: 'provider_default' }
       },
       inputPrice: '0',
+      cachedInputPrice: '',
       outputPrice: '0',
       enabled: true
     }
@@ -66,6 +67,7 @@ describe('model settings storage client', () => {
           },
           providerProfileUpdate: { kind: 'select_generic' },
           inputPrice: '0',
+          cachedInputPrice: '',
           outputPrice: '0',
           enabled: true
         }
@@ -88,6 +90,7 @@ describe('model settings storage client', () => {
           previousModelId: 'model-before-rename',
           providerProfileUpdate: { kind: 'select_generic' },
           inputPrice: '0',
+          cachedInputPrice: '',
           outputPrice: '0',
           enabled: true
         }

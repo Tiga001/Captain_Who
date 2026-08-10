@@ -23,12 +23,16 @@ const USAGE_RANGE_OPTIONS: Array<{
 ]
 
 type UsageChartRange = 'last7Days' | 'last30Days' | 'lastYear'
-type UsageChartTokenKey = 'inputTokens' | 'outputTokens' | 'outputThinkingTokens'
+type UsageChartTokenKey =
+  'uncachedInputTokens' | 'cachedInputTokens' | 'outputTokens' | 'outputThinkingTokens'
 
 type UsageChartSeries = {
   key: UsageChartTokenKey
   labelKey:
-    'usageBilling.inputTokens' | 'usageBilling.outputTokens' | 'usageBilling.outputThinkingTokens'
+    | 'usageBilling.uncachedInputTokens'
+    | 'usageBilling.cachedInputTokens'
+    | 'usageBilling.outputTokens'
+    | 'usageBilling.outputThinkingTokens'
   className: string
 }
 
@@ -50,7 +54,16 @@ type UsageValues = Partial<Record<UsageChartTokenKey, number>> & {
 const DAY_MS = 24 * 60 * 60 * 1000
 const ALL_MODELS_KEY = '__all_models__'
 const USAGE_CHART_SERIES: UsageChartSeries[] = [
-  { key: 'inputTokens', labelKey: 'usageBilling.inputTokens', className: 'usage-chart-bar--input' },
+  {
+    key: 'uncachedInputTokens',
+    labelKey: 'usageBilling.uncachedInputTokens',
+    className: 'usage-chart-bar--input'
+  },
+  {
+    key: 'cachedInputTokens',
+    labelKey: 'usageBilling.cachedInputTokens',
+    className: 'usage-chart-bar--cached-input'
+  },
   {
     key: 'outputTokens',
     labelKey: 'usageBilling.outputTokens',
@@ -210,8 +223,18 @@ function getNiceChartMax(value: number): number {
 function getUsageValues(
   source: AgentUsageSummaryOutput | AgentUsageModelSummary | undefined
 ): UsageValues {
+  const cachedInputTokens =
+    typeof source?.inputTokens === 'number' && typeof source.cachedInputTokens === 'number'
+      ? Math.min(source.cachedInputTokens, source.inputTokens)
+      : undefined
+  const uncachedInputTokens =
+    typeof source?.inputTokens === 'number'
+      ? Math.max(0, source.inputTokens - (cachedInputTokens ?? 0))
+      : undefined
+
   return {
-    inputTokens: source?.inputTokens,
+    uncachedInputTokens,
+    cachedInputTokens,
     outputTokens: source?.outputTokens,
     outputThinkingTokens: source?.outputThinkingTokens,
     estimatedCost: source?.estimatedCost,
@@ -467,7 +490,7 @@ export function UsageBillingSettingsPage({
             <div className="usage-chart-scroller">
               <div
                 className="usage-chart"
-                style={{ minWidth: `${Math.max(chartData.length * 86, 720)}px` }}
+                style={{ minWidth: `${Math.max(chartData.length * 96, 720)}px` }}
               >
                 <div className="usage-chart-y-axis" aria-hidden="true">
                   {chartTicks.map((tick, index) => (
@@ -501,7 +524,8 @@ export function UsageBillingSettingsPage({
                       const ariaLabel = [
                         day.fullDateLabel,
                         `${t('usageBilling.estimatedCost')} ${costLabel}`,
-                        `${t('usageBilling.inputTokens')} ${formatTokenCount(day.values.inputTokens, language, t('usageBilling.tokens'))}`,
+                        `${t('usageBilling.uncachedInputTokens')} ${formatTokenCount(day.values.uncachedInputTokens, language, t('usageBilling.tokens'))}`,
+                        `${t('usageBilling.cachedInputTokens')} ${formatTokenCount(day.values.cachedInputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputThinkingTokens')} ${formatTokenCount(day.values.outputThinkingTokens, language, t('usageBilling.tokens'))}`
                       ].join(', ')
@@ -553,11 +577,24 @@ export function UsageBillingSettingsPage({
                             <span className="usage-chart-tooltip__row">
                               <span>
                                 <i className="usage-chart-bar--input" aria-hidden="true" />
-                                {t('usageBilling.inputTokens')}
+                                {t('usageBilling.uncachedInputTokens')}
                               </span>
                               <strong>
                                 {formatTokenCount(
-                                  day.values.inputTokens,
+                                  day.values.uncachedInputTokens,
+                                  language,
+                                  t('usageBilling.tokens')
+                                )}
+                              </strong>
+                            </span>
+                            <span className="usage-chart-tooltip__row">
+                              <span>
+                                <i className="usage-chart-bar--cached-input" aria-hidden="true" />
+                                {t('usageBilling.cachedInputTokens')}
+                              </span>
+                              <strong>
+                                {formatTokenCount(
+                                  day.values.cachedInputTokens,
                                   language,
                                   t('usageBilling.tokens')
                                 )}
@@ -643,6 +680,10 @@ export function UsageBillingSettingsPage({
         </div>
 
         <div className="usage-secondary-grid">
+          <div className="usage-secondary-stat">
+            <span>{t('usageBilling.cachedInputTokens')}</span>
+            <strong>{formatCount(visibleSummary?.cachedInputTokens, language)}</strong>
+          </div>
           <div className="usage-secondary-stat">
             <span>{t('usageBilling.outputThinkingTokens')}</span>
             <strong>{formatCount(visibleSummary?.outputThinkingTokens, language)}</strong>

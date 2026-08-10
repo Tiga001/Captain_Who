@@ -268,6 +268,7 @@ fn save_deepseek_approval_provider(
                 context_window_tokens: Some(128_000),
                 provider_profile_config: Some(profile),
                 input_price: "0".to_string(),
+                cached_input_price: String::new(),
                 output_price: "0".to_string(),
                 enabled: true,
             }],
