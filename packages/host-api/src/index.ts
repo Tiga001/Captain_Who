@@ -16,6 +16,13 @@ import type {
   AgentFileDraftReadInput,
   AgentFileWriteDiffInput,
   AgentFileWriteDiffPage,
+  AgentProviderTransitionNotification,
+  AgentProviderTransitionOperation,
+  AgentProviderTransitionPreflightInput,
+  AgentProviderTransitionPreflightOutput,
+  AgentProviderTransitionStartInput,
+  AgentProviderTransitionStatusInput,
+  AgentProviderTransitionStatusOutput,
   PendingAgentActionSnapshot,
   OfficeEngineStatus,
   AgentRejectActionRequest,
@@ -299,6 +306,15 @@ export interface WorkspaceFilesHostApi {
 }
 
 export interface AgentHostApi {
+  preflightProviderTransition(
+    input: AgentProviderTransitionPreflightInput
+  ): Promise<HostInvocationResult<AgentProviderTransitionPreflightOutput>>
+  startProviderTransition(
+    input: AgentProviderTransitionStartInput
+  ): Promise<HostInvocationResult<AgentProviderTransitionOperation>>
+  getProviderTransitionStatus(
+    input: AgentProviderTransitionStatusInput
+  ): Promise<HostInvocationResult<AgentProviderTransitionStatusOutput>>
   startConversationTurn(
     input: AgentConversationTurnInput
   ): Promise<HostInvocationResult<AgentConversationTurnOutput>>
@@ -321,6 +337,7 @@ export interface AgentHostApi {
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
   readFileDraft(input: AgentFileDraftReadInput): Promise<AgentFileDraftContentPage>
   getFileWriteDiff(input: AgentFileWriteDiffInput): Promise<AgentFileWriteDiffPage>
+  onProviderTransition(handler: (event: AgentProviderTransitionNotification) => void): () => void
   onEvent(handler: (event: AgentEvent) => void): () => void
 }
 

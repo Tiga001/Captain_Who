@@ -60,6 +60,11 @@ pub fn save_composer_draft(
             skills_json = excluded.skills_json,
             queued_messages_json = excluded.queued_messages_json,
             updated_at = excluded.updated_at
+        WHERE excluded.updated_at > composer_drafts.updated_at
+           OR (
+                excluded.updated_at = composer_drafts.updated_at
+                AND excluded.model_id IS composer_drafts.model_id
+           )
         ",
         params![
             &draft.scope_id,

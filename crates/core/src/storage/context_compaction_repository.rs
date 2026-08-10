@@ -408,6 +408,180 @@ pub fn commit_prefix_replacement_with_receipt(
     Ok(summary)
 }
 
+/// Atomically installs a Provider-neutral summary and switches the conversation to the exact
+/// target model whose wire revision was preflighted.
+///
+/// The source journal, active summary head, current conversation model, conversation update
+/// revision, and target model protocol revision are all checked again inside the same SQLite
+/// transaction. The composer draft is updated in that transaction as well, preventing a crash
+/// between backend commit and Renderer persistence from resurrecting the old model selection.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_provider_transition_with_receipt(
+    connection: &mut Connection,
+    expected_prefix: &ContextCompactionPrefix,
+    draft: ContextCompactionSummaryDraft,
+    receipt: &ContextCompactionReceipt,
+    observation: &ModelRequestObservation,
+    expected_current_model_id: Option<&str>,
+    expected_conversation_updated_at: i64,
+    target_model_id: &str,
+    expected_target_provider_protocol_revision: &str,
+) -> Result<(ContextCompactionSummary, i64), ContextCompactionRepositoryError> {
+    validate_commit_inputs(expected_prefix, &draft)?;
+    receipt
+        .validate()
+        .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    if receipt.status != ContextCompactionReceiptStatus::Applied
+        || receipt.conversation_id != expected_prefix.conversation_id
+        || receipt.source_revision.as_deref() != Some(expected_prefix.source_revision.as_str())
+        || receipt.summary_id.as_deref() != Some(draft.id.as_str())
+        || receipt.model != target_model_id
+    {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "Provider transition receipt 与待提交的前缀、摘要或目标模型不一致。".to_string(),
+        ));
+    }
+
+    let transaction = connection.transaction()?;
+    validate_provider_transition_compare_and_set(
+        &transaction,
+        &expected_prefix.conversation_id,
+        expected_current_model_id,
+        expected_conversation_updated_at,
+        target_model_id,
+        expected_target_provider_protocol_revision,
+    )?;
+    // Recover any staged row whose durable ToolCall handoff committed before a crash so the
+    // release below evaluates the complete Provider-state set inside this transaction.
+    provider_continuation_repository::has_replayable_for_conversation(
+        &transaction,
+        &expected_prefix.conversation_id,
+    )?;
+    let summary = commit_prefix_replacement_in_transaction(
+        &transaction,
+        expected_prefix,
+        draft,
+        &receipt.assistant_message_id,
+    )?;
+    if provider_continuation_repository::has_replayable_for_conversation(
+        &transaction,
+        &expected_prefix.conversation_id,
+    )? {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "provider_context_boundary_required: 历史压缩未完整覆盖已有 Provider replay 状态。"
+                .to_string(),
+        ));
+    }
+    let transition_updated_at = summary
+        .created_at
+        .max(expected_conversation_updated_at.saturating_add(1));
+    let transition_updated_at = provider_transition_updated_at(
+        &transaction,
+        &expected_prefix.conversation_id,
+        transition_updated_at,
+    )?;
+    let mut committed_receipt = receipt.clone();
+    committed_receipt.updated_at = committed_receipt.updated_at.max(transition_updated_at);
+    context_compaction_receipt_repository::record_receipt_in_connection(
+        &transaction,
+        &committed_receipt,
+        Some(observation),
+    )
+    .map_err(map_receipt_error)?;
+    apply_provider_transition_model_selection(
+        &transaction,
+        &expected_prefix.conversation_id,
+        target_model_id,
+        transition_updated_at,
+    )?;
+    transaction.commit()?;
+    Ok((summary, transition_updated_at))
+}
+
+fn provider_transition_updated_at(
+    transaction: &Transaction<'_>,
+    conversation_id: &str,
+    minimum_updated_at: i64,
+) -> Result<i64, ContextCompactionRepositoryError> {
+    let draft_updated_at = transaction
+        .query_row(
+            "SELECT updated_at FROM composer_drafts WHERE scope_id = ?1",
+            [conversation_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(draft_updated_at
+        .map(|updated_at| minimum_updated_at.max(updated_at.saturating_add(1)))
+        .unwrap_or(minimum_updated_at))
+}
+
+fn validate_provider_transition_compare_and_set(
+    transaction: &Transaction<'_>,
+    conversation_id: &str,
+    expected_current_model_id: Option<&str>,
+    expected_conversation_updated_at: i64,
+    target_model_id: &str,
+    expected_target_provider_protocol_revision: &str,
+) -> Result<(), ContextCompactionRepositoryError> {
+    let current = transaction
+        .query_row(
+            "SELECT model_id, updated_at FROM conversations WHERE id = ?1",
+            [conversation_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+    let Some((current_model_id, current_updated_at)) = current else {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "Provider transition 的目标会话已不存在。".to_string(),
+        ));
+    };
+    if current_model_id.as_deref() != expected_current_model_id
+        || current_updated_at != expected_conversation_updated_at
+    {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "Provider transition 期间会话 head 或当前模型已变化。".to_string(),
+        ));
+    }
+    let target_revision = transaction
+        .query_row(
+            "SELECT provider_protocol_revision FROM models WHERE id = ?1 AND enabled = 1",
+            [target_model_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if target_revision.as_deref() != Some(expected_target_provider_protocol_revision) {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "Provider transition 期间目标模型的协议配置已变化。".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_provider_transition_model_selection(
+    transaction: &Transaction<'_>,
+    conversation_id: &str,
+    target_model_id: &str,
+    updated_at: i64,
+) -> Result<(), ContextCompactionRepositoryError> {
+    let affected = transaction.execute(
+        "UPDATE conversations SET model_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![target_model_id, updated_at, conversation_id],
+    )?;
+    if affected != 1 {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "Provider transition 提交前目标会话已不存在。".to_string(),
+        ));
+    }
+    transaction.execute(
+        "UPDATE composer_drafts
+         SET model_id = ?1,
+             updated_at = ?2
+         WHERE scope_id = ?3",
+        params![target_model_id, updated_at, conversation_id],
+    )?;
+    Ok(())
+}
+
 fn validate_commit_inputs(
     expected_prefix: &ContextCompactionPrefix,
     draft: &ContextCompactionSummaryDraft,

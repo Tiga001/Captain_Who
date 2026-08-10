@@ -41,6 +41,7 @@ describe('Image generation configuration IPC registration', () => {
     const artifactInput = { schemaVersion: 1, artifact: { artifactId: 'opaque' } }
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       getImageGenerationConfiguration: vi.fn().mockResolvedValue(output),
@@ -97,6 +98,7 @@ describe('Image generation configuration IPC registration', () => {
     )
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       updateImageGenerationConfiguration
@@ -116,6 +118,7 @@ describe('Image generation configuration IPC registration', () => {
     const readImageGenerationArtifact = vi.fn()
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       readImageGenerationArtifact

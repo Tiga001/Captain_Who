@@ -6,12 +6,41 @@ impl AgentService {
         input: AgentConversationTurnInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        // Conversation run admission and Provider-transition admission share one Host lock. This
+        // closes the race where both paths could pass their read-only checks before either became
+        // visible in `active_runs`/`provider_transitions`.
+        let _admission = self
+            .conversation_admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if self.is_project_deleting(input.project_id.as_deref())
             || self.is_conversation_deleting(input.conversation_id.as_deref())
         {
             return Err("项目或会话正在移除，无法开始新的 agent 运行。"
                 .to_string()
                 .into());
+        }
+        if input
+            .conversation_id
+            .as_deref()
+            .is_some_and(|conversation_id| {
+                self.provider_transitions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .contains_key(conversation_id)
+            })
+        {
+            return Err("当前会话正在压缩历史并切换模型，请稍后再发送。"
+                .to_string()
+                .into());
+        }
+        if let Some(conversation_id) = input
+            .conversation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            self.ensure_provider_transition_ready_for_send(conversation_id, &input.model_id)?;
         }
         let run_id = next_run_id();
         let cancellation_token = AgentCancellationToken::new();

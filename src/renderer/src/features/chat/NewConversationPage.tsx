@@ -12,7 +12,10 @@ interface NewConversationPageProps {
   defaultProjectId?: string | null
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
-  onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
+  onSubmitMessage: (
+    message: string,
+    options: ChatSubmitOptions
+  ) => boolean | void | Promise<boolean | void>
   permissionModeAvailability: {
     custom: boolean
     full: boolean

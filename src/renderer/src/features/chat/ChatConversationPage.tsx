@@ -12,6 +12,7 @@ import { Split, X } from 'lucide-react'
 import type {
   AgentContextWindowSnapshot,
   AgentProposedAction,
+  AgentProviderTransitionOperation,
   GitTurnDiffSummary
 } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
@@ -19,6 +20,10 @@ import { AgentApprovalDialog } from './components/AgentApprovalDialog'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
 import { ConversationTurnNavigationRail } from './components/ConversationTurnNavigationRail'
+import {
+  ConversationModelTransitionDivider,
+  ModelTransitionConfirmationDialog
+} from './components/ConversationModelTransition'
 import type {
   ChatComposerDraft,
   ChatConversation,
@@ -27,6 +32,7 @@ import type {
   ChatQueuedMessage,
   ChatSubmitOptions
 } from './chatTypes'
+import type { ModelTransitionConfirmation } from './modelTransitionUiState'
 import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { getLatestAgentTodo } from './todoLifetime'
@@ -47,6 +53,8 @@ interface ChatConversationPageProps {
   editSelectedModelAvailable: boolean
   editSelectedModelSupportsImage: boolean
   initialScrollTop?: number | null
+  modelTransitionConfirmation?: ModelTransitionConfirmation
+  modelTransitionOperations?: AgentProviderTransitionOperation[]
   scrollToBottomSignal?: number
   onApproveAgentAction?: (
     messageId: string,
@@ -57,6 +65,10 @@ interface ChatConversationPageProps {
   onComposerDraftChange: (draft: ChatComposerDraft) => void
   onComposerDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
+  onModelChangeRequested?: (modelId: string) => void | Promise<void>
+  onModelTransitionCancel?: () => void
+  onModelTransitionConfirm?: () => void | Promise<void>
+  onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
@@ -64,7 +76,10 @@ interface ChatConversationPageProps {
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
   onStopGenerating?: () => void
-  onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
+  onSubmitMessage: (
+    message: string,
+    options: ChatSubmitOptions
+  ) => boolean | void | Promise<boolean | void>
   onMessageUiStateChange?: (
     messageId: string,
     uiState: ChatConversation['messages'][number]['uiState']
@@ -134,6 +149,7 @@ interface ChatMessageListProps {
   editSelectedModelSupportsImage: boolean
   editableLastUserMessageId: string | null
   lastAssistantMessageId?: string
+  modelTransitionOperations?: AgentProviderTransitionOperation[]
   onApproveAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
@@ -144,6 +160,7 @@ interface ChatMessageListProps {
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
+  onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
   showTokenUsageDetails: boolean
@@ -156,18 +173,21 @@ export const ChatMessageList = memo(function ChatMessageList({
   editSelectedModelSupportsImage,
   editableLastUserMessageId,
   lastAssistantMessageId,
+  modelTransitionOperations = [],
   onApproveAgentAction,
   onCancelAgentAction,
   onContinueInNewTask,
   onEditLastUserMessage,
   onOpenContinuationOrigin,
   onMessageUiStateChange,
+  onModelTransitionRetry,
   onRejectAgentAction,
   onReviewLastTurn,
   showTokenUsageDetails,
   turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
   const continuationOrigin = conversation.continuationOrigin
+  const messageIds = new Set(conversation.messages.map((message) => message.id))
 
   return (
     <>
@@ -202,8 +222,37 @@ export const ChatMessageList = memo(function ChatMessageList({
               }
             />
           )}
+          {modelTransitionOperations
+            .filter(
+              (operation) =>
+                operation.status === 'completed' && operation.coveredThroughMessageId === message.id
+            )
+            .map((operation) => (
+              <ConversationModelTransitionDivider
+                key={operation.operationId}
+                operation={operation}
+              />
+            ))}
         </Fragment>
       ))}
+      {modelTransitionOperations
+        .filter(
+          (operation) =>
+            operation.status !== 'completed' ||
+            !operation.coveredThroughMessageId ||
+            !messageIds.has(operation.coveredThroughMessageId)
+        )
+        .map((operation) => (
+          <ConversationModelTransitionDivider
+            key={operation.operationId}
+            onRetry={
+              operation.status === 'failed' && onModelTransitionRetry
+                ? () => onModelTransitionRetry(operation)
+                : undefined
+            }
+            operation={operation}
+          />
+        ))}
     </>
   )
 })
@@ -250,12 +299,18 @@ export function ChatConversationPage({
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
   initialScrollTop = null,
+  modelTransitionConfirmation,
+  modelTransitionOperations = [],
   scrollToBottomSignal = 0,
   onApproveAgentAction,
   onCancelAgentAction,
   onComposerDraftChange,
   onComposerDraftMessageChange,
   onGuideQueuedMessage,
+  onModelChangeRequested,
+  onModelTransitionCancel,
+  onModelTransitionConfirm,
+  onModelTransitionRetry,
   onEditLastUserMessage,
   onContinueInNewTask,
   onOpenContinuationOrigin,
@@ -391,12 +446,14 @@ export function ChatConversationPage({
             editSelectedModelSupportsImage={editSelectedModelSupportsImage}
             editableLastUserMessageId={editableLastUserMessageId}
             lastAssistantMessageId={lastAssistantMessageId}
+            modelTransitionOperations={modelTransitionOperations}
             onApproveAgentAction={onApproveAgentAction}
             onCancelAgentAction={onCancelAgentAction}
             onContinueInNewTask={onContinueInNewTask}
             onEditLastUserMessage={onEditLastUserMessage}
             onOpenContinuationOrigin={onOpenContinuationOrigin}
             onMessageUiStateChange={onMessageUiStateChange}
+            onModelTransitionRetry={onModelTransitionRetry}
             onRejectAgentAction={onRejectAgentAction}
             onReviewLastTurn={onReviewLastTurn}
             showTokenUsageDetails={showTokenUsageDetails}
@@ -433,9 +490,13 @@ export function ChatConversationPage({
             defaultProjectId={conversation.projectId}
             draft={composerDraft}
             isGenerating={isGenerating}
+            isModelTransitionRunning={modelTransitionOperations.some(
+              (operation) => operation.status === 'running'
+            )}
             onDraftChange={onComposerDraftChange}
             onDraftMessageChange={onComposerDraftMessageChange}
             onGuideQueuedMessage={onGuideQueuedMessage}
+            onModelChangeRequested={onModelChangeRequested}
             onOpenQueuedMessageInSideChat={setSideChatPlaceholder}
             onStopGenerating={onStopGenerating}
             onSubmitMessage={onSubmitMessage}
@@ -445,6 +506,13 @@ export function ChatConversationPage({
           />
         )}
       </div>
+      {modelTransitionConfirmation && onModelTransitionCancel && onModelTransitionConfirm && (
+        <ModelTransitionConfirmationDialog
+          onCancel={onModelTransitionCancel}
+          onConfirm={onModelTransitionConfirm}
+          preflight={modelTransitionConfirmation}
+        />
+      )}
       {sideChatPlaceholder && (
         <aside
           className="guidance-side-chat-placeholder"

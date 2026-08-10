@@ -29,6 +29,7 @@ pub mod pending_action_repository;
 pub mod preferences_repository;
 pub mod project_repository;
 pub(crate) mod provider_continuation_repository;
+pub mod provider_transition_repository;
 pub mod service;
 pub mod skill_enablement_repository;
 pub mod turn_diff_repository;
@@ -36,6 +37,9 @@ pub mod usage_repository;
 pub mod world_state_repository;
 
 pub use database_snapshot::create_verified_sqlite_snapshot;
+pub use provider_transition_repository::{
+    ProviderTransitionCompatibleCommitOutcome, ProviderTransitionTerminalRecord,
+};
 
 use rusqlite::Connection;
 use std::path::Path;

@@ -36,6 +36,7 @@ mod office;
 mod pending_actions;
 mod provider_profiles;
 mod provider_runtime_capability_boundary;
+mod provider_transition;
 mod skills;
 mod steering;
 mod terminal_events;

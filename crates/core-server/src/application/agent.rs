@@ -6,7 +6,11 @@ use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
-    AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus, PendingAgentActionSnapshot,
+    AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
+    AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
+    AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,
+    PendingAgentActionSnapshot,
 };
 use crate::application::mcp::approval_payload_store::{
     McpApprovalStartupInspector, McpApprovalStartupPayloadState,
@@ -110,6 +114,7 @@ mod context_compaction;
 mod context_window;
 mod pending_action_store;
 mod persisted_resume_input;
+mod provider_transition;
 mod run_lifecycle;
 mod steering;
 mod turn;
@@ -428,6 +433,9 @@ pub struct AgentService {
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
+    conversation_admission: Arc<Mutex<()>>,
+    provider_transitions: Arc<Mutex<HashMap<String, String>>>,
+    provider_transition_operations: Arc<Mutex<HashMap<String, AgentProviderTransitionOperation>>>,
     office_engine: Arc<dyn OfficeEngine>,
     image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
     skill_installation_prepare: Option<Arc<dyn AgentSkillInstallationPrepareExecutor>>,
@@ -565,6 +573,9 @@ impl AgentService {
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,
+            conversation_admission: Arc::new(Mutex::new(())),
+            provider_transitions: Arc::new(Mutex::new(HashMap::new())),
+            provider_transition_operations: Arc::new(Mutex::new(HashMap::new())),
             office_engine,
             image_generation_execution: None,
             skill_installation_prepare: None,

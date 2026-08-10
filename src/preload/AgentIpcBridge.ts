@@ -6,6 +6,12 @@ type AgentIpcRenderer = Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
 
 export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostApi {
   return {
+    preflightProviderTransition: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.preflightProviderTransition, input),
+    startProviderTransition: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.startProviderTransition, input),
+    getProviderTransitionStatus: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.getProviderTransitionStatus, input),
     startConversationTurn: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.startConversationTurn, input),
     getContextWindowSnapshot: (input) =>
@@ -23,6 +29,12 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
     clearUsageRecords: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.clearUsageRecords, input),
     readFileDraft: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.readFileDraft, input),
     getFileWriteDiff: (input) => ipcRenderer.invoke(HOST_CHANNELS.agent.getFileWriteDiff, input),
+    onProviderTransition: (handler) => {
+      const listener = (_event: IpcRendererEvent, payload: Parameters<typeof handler>[0]): void =>
+        handler(payload)
+      ipcRenderer.on(HOST_CHANNELS.agent.providerTransition, listener)
+      return () => ipcRenderer.removeListener(HOST_CHANNELS.agent.providerTransition, listener)
+    },
     onEvent: (handler) => {
       const listener = (_event: IpcRendererEvent, payload: AgentEvent): void => handler(payload)
       ipcRenderer.on(HOST_CHANNELS.agent.event, listener)

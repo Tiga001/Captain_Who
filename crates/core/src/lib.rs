@@ -237,7 +237,8 @@ pub use protocol::{
 pub use revision::content_revision;
 pub use runtime::{
     conversation_context_configuration_revision, create_conversation_context_state,
-    create_conversation_context_state_with_host_services, inspect_context_window,
+    create_conversation_context_state_with_host_services,
+    estimate_provider_transition_compaction_source_tokens, inspect_context_window,
     inspect_context_window_with_tool_projection, next_run_id,
     prepare_context_window_tool_projection, redact_terminal_skill_discovery, send_chat,
     send_chat_with_events, send_chat_with_events_and_cancellation, send_chat_with_host_executor,

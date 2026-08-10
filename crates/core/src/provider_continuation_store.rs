@@ -363,7 +363,7 @@ impl ProviderContinuationVault {
 
     /// Reports only whether encrypted provider-native replay state exists for this conversation.
     /// No protocol identity, payload metadata, ciphertext, or plaintext crosses this boundary.
-    pub(crate) fn has_replayable_for_conversation(
+    pub fn has_replayable_for_conversation(
         &self,
         conversation_id: &str,
     ) -> Result<bool, ProviderContinuationStoreError> {

@@ -8,7 +8,12 @@ import {
   type SetStateAction
 } from 'react'
 import { createPortal } from 'react-dom'
-import type { AgentEvent, SkillSelection } from '@mycopilot/protocol'
+import type {
+  AgentEvent,
+  AgentProviderTransitionOperation,
+  AgentProviderTransitionReason,
+  SkillSelection
+} from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from './shell/sidebar/LeftSidebar'
 import { RightSidebar } from '../features/rightSidebar/RightSidebar'
@@ -91,6 +96,8 @@ import type { PendingMessageDelta } from './AppShellSupport'
 import { useAgentActionDecisionHandlers } from '../features/agentRun/useAgentActionDecisionHandlers'
 import { useContextWindowSnapshots } from '../features/agentRun/useContextWindowSnapshots'
 import { useAgentRunLifecycle } from './useAgentRunLifecycle'
+import { useProviderTransition } from '../features/agentRun/useProviderTransition'
+import { selectRenderableModelTransitionOperations } from '../features/chat/modelTransitionUiState'
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -195,6 +202,13 @@ export function AppShell() {
   const recoveredGuidanceKeysRef = useRef<Set<string>>(new Set())
   const autoSubmitQueuedMessageRef = useRef<(conversationId: string) => void>(() => undefined)
   const editSubmissionSeqRef = useRef(0)
+  const pendingProviderTransitionSubmissionsRef = useRef<
+    Map<
+      string,
+      | { kind: 'composer'; message: string; options: ChatSubmitOptions }
+      | { kind: 'queued_message'; queueMessageId: string }
+    >
+  >(new Map())
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
     [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft()
   })
@@ -488,7 +502,7 @@ export function AppShell() {
       const currentDraft = draftsRef.current[scopeId] ?? createComposerDraft()
       const nextDraft = {
         ...updater(currentDraft),
-        updatedAt: Date.now()
+        updatedAt: Math.max(Date.now(), currentDraft.updatedAt + 1)
       }
       setDraftsWithRef({
         ...draftsRef.current,
@@ -691,12 +705,14 @@ export function AppShell() {
       options: ChatSubmitOptions,
       behavior: { activate: boolean; preserveComposerContent: boolean }
     ) => {
-      const now = Date.now()
       const targetConversation = targetConversationId
         ? (conversationsRef.current.find(
             (conversation) => conversation.id === targetConversationId
           ) ?? null)
         : null
+      const now = targetConversation
+        ? Math.max(Date.now(), targetConversation.updatedAt + 1)
+        : Date.now()
       const conversationId = targetConversation?.id ?? createId('conversation')
       const userMessage = createUserMessage(message, options.attachments ?? [])
       const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
@@ -756,12 +772,15 @@ export function AppShell() {
               projectId: options.projectId,
               updatedAt: now
             }
-          : createComposerDraft({
-              modelId: options.modelId,
-              permissionMode: options.permissionMode,
-              projectId: options.projectId,
-              queuedMessages: currentDraft.queuedMessages
-            })
+          : {
+              ...createComposerDraft({
+                modelId: options.modelId,
+                permissionMode: options.permissionMode,
+                projectId: options.projectId,
+                queuedMessages: currentDraft.queuedMessages
+              }),
+              updatedAt: now
+            }
       )
       void requestAssistantResponse(
         conversationId,
@@ -786,18 +805,137 @@ export function AppShell() {
     ]
   )
 
-  const submitMessage = useCallback(
-    (message: string, options: ChatSubmitOptions) => {
-      submitMessageToConversation(activeConversationIdRef.current, message, options, {
-        activate: true,
-        preserveComposerContent: false
-      })
+  const showProviderTransitionBlocked = useCallback(
+    (reason: AgentProviderTransitionReason) => {
+      const key =
+        reason === 'active_run'
+          ? 'chat.modelTransition.blockedActiveRun'
+          : reason === 'pending_approval'
+            ? 'chat.modelTransition.blockedPendingApproval'
+            : 'chat.modelTransition.blockedUnsupportedTarget'
+      showToast(t(key))
     },
-    [submitMessageToConversation]
+    [showToast, t]
+  )
+
+  const handleProviderTransitionCompleted = useCallback(
+    (operation: Extract<AgentProviderTransitionOperation, { status: 'completed' }>) => {
+      setConversationsWithRef((currentConversations) =>
+        currentConversations.map((conversation) =>
+          conversation.id === operation.conversationId
+            ? {
+                ...conversation,
+                modelId: operation.modelId,
+                updatedAt: Math.max(conversation.updatedAt, operation.conversationUpdatedAt)
+              }
+            : conversation
+        )
+      )
+
+      const currentDraft = draftsRef.current[operation.conversationId]
+      if (currentDraft) {
+        updateDraft(operation.conversationId, {
+          ...currentDraft,
+          modelId: operation.modelId,
+          updatedAt: Math.max(operation.conversationUpdatedAt, currentDraft.updatedAt + 1)
+        })
+      }
+
+      const pendingSubmission = pendingProviderTransitionSubmissionsRef.current.get(
+        operation.conversationId
+      )
+      if (!pendingSubmission) return
+      pendingProviderTransitionSubmissionsRef.current.delete(operation.conversationId)
+
+      if (pendingSubmission.kind === 'queued_message') {
+        queueMicrotask(() => {
+          const nextQueuedMessage = draftsRef.current[operation.conversationId]?.queuedMessages[0]
+          if (nextQueuedMessage?.id !== pendingSubmission.queueMessageId) return
+          autoSubmitQueuedMessageRef.current(operation.conversationId)
+        })
+        return
+      }
+      if (pendingSubmission.options.modelId !== operation.targetModelId) return
+      submitMessageToConversation(
+        operation.conversationId,
+        pendingSubmission.message,
+        { ...pendingSubmission.options, modelId: operation.modelId },
+        {
+          activate: activeConversationIdRef.current === operation.conversationId,
+          preserveComposerContent: false
+        }
+      )
+    },
+    [setConversationsWithRef, submitMessageToConversation, updateDraft]
+  )
+
+  const handleProviderTransitionFailed = useCallback(
+    (operation: Extract<AgentProviderTransitionOperation, { status: 'failed' }>) => {
+      const pendingSubmission = pendingProviderTransitionSubmissionsRef.current.get(
+        operation.conversationId
+      )
+      // A composer submission is an intent tied to the failed attempt. Retrying the transition
+      // switches models only; it must never replay stale text over a newer user-edited draft.
+      if (pendingSubmission?.kind === 'composer') {
+        pendingProviderTransitionSubmissionsRef.current.delete(operation.conversationId)
+      }
+    },
+    []
+  )
+
+  const {
+    cancelConfirmation: cancelProviderTransitionConfirmation,
+    confirm: confirmProviderTransition,
+    loadStatus: loadProviderTransitionStatus,
+    request: requestProviderTransition,
+    retry: retryProviderTransition,
+    store: providerTransitionStore
+  } = useProviderTransition({
+    onBlocked: showProviderTransitionBlocked,
+    onOperationCompleted: handleProviderTransitionCompleted,
+    onOperationFailed: handleProviderTransitionFailed,
+    onRequestError: () => showToast(t('chat.modelTransition.requestFailed'))
+  })
+
+  const submitMessage = useCallback(
+    async (message: string, options: ChatSubmitOptions): Promise<boolean> => {
+      const conversationId = activeConversationIdRef.current
+      if (!conversationId) {
+        submitMessageToConversation(null, message, options, {
+          activate: true,
+          preserveComposerContent: false
+        })
+        return true
+      }
+
+      await waitForConversationSaves(conversationId)
+      const outcome = await requestProviderTransition(conversationId, options.modelId)
+      if (outcome.status === 'completed') {
+        submitMessageToConversation(
+          conversationId,
+          message,
+          { ...options, modelId: outcome.operation.modelId },
+          {
+            activate: true,
+            preserveComposerContent: false
+          }
+        )
+        return true
+      }
+      if (outcome.status === 'confirmation_required' || outcome.status === 'running') {
+        pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
+          kind: 'composer',
+          message,
+          options
+        })
+      }
+      return false
+    },
+    [requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
   )
 
   const submitNextQueuedMessage = useCallback(
-    (conversationId: string) => {
+    async (conversationId: string) => {
       const conversation = conversationsRef.current.find(
         (candidate) => candidate.id === conversationId
       )
@@ -816,6 +954,26 @@ export function AppShell() {
       const queuedMessage = draft?.queuedMessages[0]
       if (!draft || !queuedMessage || queuedMessage.status === 'submitting') return
 
+      await waitForConversationSaves(conversationId)
+      const transitionOutcome = await requestProviderTransition(
+        conversationId,
+        queuedMessage.modelId
+      )
+      if (
+        transitionOutcome.status === 'confirmation_required' ||
+        transitionOutcome.status === 'running'
+      ) {
+        pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
+          kind: 'queued_message',
+          queueMessageId: queuedMessage.id
+        })
+        return
+      }
+      if (transitionOutcome.status !== 'completed') return
+
+      const currentQueuedMessage = draftsRef.current[conversationId]?.queuedMessages[0]
+      if (!currentQueuedMessage || currentQueuedMessage.id !== queuedMessage.id) return
+
       mutateDraft(conversationId, (currentDraft) => ({
         ...currentDraft,
         queuedMessages: currentDraft.queuedMessages.filter(
@@ -827,7 +985,7 @@ export function AppShell() {
         queuedMessage.content,
         {
           attachments: queuedMessage.attachments,
-          modelId: queuedMessage.modelId,
+          modelId: transitionOutcome.operation.modelId,
           permissionMode: queuedMessage.permissionMode,
           projectId: queuedMessage.projectId,
           skills: queuedMessage.skills
@@ -838,7 +996,7 @@ export function AppShell() {
         }
       )
     },
-    [mutateDraft, submitMessageToConversation]
+    [mutateDraft, requestProviderTransition, submitMessageToConversation, waitForConversationSaves]
   )
   useEffect(() => {
     autoSubmitQueuedMessageRef.current = submitNextQueuedMessage
@@ -896,8 +1054,22 @@ export function AppShell() {
         throw new Error(t('chat.unsupportedImageWarning'))
       }
 
+      await waitForConversationSaves(conversationId)
+      const transitionOutcome = await requestProviderTransition(
+        conversationId,
+        activeDraftSelectedModel.id
+      )
+      if (transitionOutcome.status !== 'completed') {
+        throw new Error(
+          transitionOutcome.status === 'confirmation_required' ||
+            transitionOutcome.status === 'running'
+            ? t('chat.modelTransition.confirmThenRetryEdit')
+            : t('chat.modelTransition.requestFailed')
+        )
+      }
+
       const now = Date.now()
-      const modelId = activeDraftSelectedModel.id
+      const modelId = transitionOutcome.operation.modelId
       const permissionMode = activeDraft.permissionMode
       const editedSkillSelections =
         latestEditableTurn.assistantMessage.agentRun?.explicitSkillSelections ??
@@ -1002,6 +1174,7 @@ export function AppShell() {
       activeDraftSelectedModel,
       cleanupRunBinding,
       requestAssistantResponse,
+      requestProviderTransition,
       restoreSubmittedSkills,
       setConversationsWithRef,
       t,
@@ -1041,6 +1214,69 @@ export function AppShell() {
     setSettingsOpen,
     showToast
   })
+
+  const activeProviderTransitionConversationId = activeConversation?.id
+  const activeProviderTransitionMessagesLoaded = activeConversation?.messagesLoaded
+  useEffect(() => {
+    if (
+      !activeProviderTransitionConversationId ||
+      activeProviderTransitionMessagesLoaded === false
+    ) {
+      return
+    }
+    void loadProviderTransitionStatus(activeProviderTransitionConversationId)
+  }, [
+    activeProviderTransitionConversationId,
+    activeProviderTransitionMessagesLoaded,
+    loadProviderTransitionStatus
+  ])
+
+  const activeProviderTransitionConfirmation = activeConversation
+    ? providerTransitionStore.confirmations[activeConversation.id]
+    : undefined
+  const activeProviderTransitionOperations = useMemo(
+    () =>
+      activeProviderTransitionConversationId
+        ? selectRenderableModelTransitionOperations(
+            providerTransitionStore,
+            activeProviderTransitionConversationId
+          )
+        : [],
+    [activeProviderTransitionConversationId, providerTransitionStore]
+  )
+
+  const requestConversationModelChange = useCallback(
+    async (targetModelId: string) => {
+      const conversationId = activeConversationIdRef.current
+      if (!conversationId) return
+      pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
+      await waitForConversationSaves(conversationId)
+      await requestProviderTransition(conversationId, targetModelId)
+    },
+    [requestProviderTransition, waitForConversationSaves]
+  )
+
+  const cancelActiveProviderTransition = useCallback(() => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) return
+    pendingProviderTransitionSubmissionsRef.current.delete(conversationId)
+    cancelProviderTransitionConfirmation(conversationId)
+  }, [cancelProviderTransitionConfirmation])
+
+  const confirmActiveProviderTransition = useCallback(async () => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) return
+    await waitForConversationSaves(conversationId)
+    await confirmProviderTransition(conversationId)
+  }, [confirmProviderTransition, waitForConversationSaves])
+
+  const retryActiveProviderTransition = useCallback(
+    async (operation: AgentProviderTransitionOperation) => {
+      await waitForConversationSaves(operation.conversationId)
+      await retryProviderTransition(operation)
+    },
+    [retryProviderTransition, waitForConversationSaves]
+  )
 
   const removeProject = useProjectRemoval({
     activeConversationIdRef,
@@ -1349,6 +1585,8 @@ export function AppShell() {
                 editSelectedModelAvailable={Boolean(activeDraftSelectedModel)}
                 editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
                 initialScrollTop={activeConversationInitialScrollTop}
+                modelTransitionConfirmation={activeProviderTransitionConfirmation}
+                modelTransitionOperations={activeProviderTransitionOperations}
                 permissionModeAvailability={permissionModeAvailability}
                 skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
                 scrollToBottomSignal={conversationScrollToBottomSignal}
@@ -1361,6 +1599,10 @@ export function AppShell() {
                   persistDraftMessageOnly(activeConversation.id, draft)
                 }
                 onGuideQueuedMessage={guideQueuedMessage}
+                onModelChangeRequested={requestConversationModelChange}
+                onModelTransitionCancel={cancelActiveProviderTransition}
+                onModelTransitionConfirm={confirmActiveProviderTransition}
+                onModelTransitionRetry={retryActiveProviderTransition}
                 onEditLastUserMessage={submitEditedLastUserMessage}
                 onContinueInNewTask={(messageId) =>
                   continueInNewTask(activeConversation.id, messageId)

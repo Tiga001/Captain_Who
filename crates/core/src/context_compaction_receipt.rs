@@ -232,6 +232,81 @@ pub struct ContextCompactionReceipt {
 }
 
 impl ContextCompactionReceipt {
+    /// Starts a Host-requested Provider transition compaction without manufacturing an Agent run.
+    ///
+    /// The normal capacity-triggered path derives this data from `ContextCompactionPlan`. A
+    /// Provider transition already owns an exact durable prefix, so it records the equivalent
+    /// immutable plan directly while retaining the same receipt state machine and commit checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_provider_transition(
+        operation_id: impl Into<String>,
+        run_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        assistant_message_id: impl Into<String>,
+        model: impl Into<String>,
+        api_style: AgentApiStyle,
+        prefix: &ContextCompactionPrefix,
+        source_input_tokens: u64,
+        target_replacement_tokens: u64,
+        started_at: i64,
+    ) -> AgentResult<Self> {
+        prefix.validate()?;
+        if source_input_tokens == 0 || target_replacement_tokens >= source_input_tokens {
+            return Err(AgentError::new(
+                "Provider transition 压缩计划的 token 计量无效。",
+            ));
+        }
+        let expected_reclaimed_tokens =
+            source_input_tokens.saturating_sub(target_replacement_tokens);
+        let plan = ContextCompactionReceiptPlan {
+            context_revision: prefix.source_revision.clone(),
+            persistent_revision: prefix.source_revision.clone(),
+            request_input_tokens: source_input_tokens,
+            available_input_tokens: None,
+            request_trigger_input_tokens: None,
+            request_target_input_tokens: Some(target_replacement_tokens),
+            source_input_tokens,
+            retained_input_tokens: 0,
+            target_replacement_tokens,
+            expected_reclaimed_tokens,
+            planned_reclaimed_tokens: expected_reclaimed_tokens,
+            projected_request_input_tokens: target_replacement_tokens,
+            best_effort: false,
+            protected_input_tokens: 0,
+            protected_reasons: BTreeMap::new(),
+            atomic_unit_count: prefix.source_items.len().max(1),
+            previous_summary_id: prefix
+                .previous_summary
+                .as_ref()
+                .map(|summary| summary.id.clone()),
+            covered_through: prefix.covered_through.clone(),
+        };
+        let receipt = Self {
+            schema_version: CONTEXT_COMPACTION_RECEIPT_SCHEMA_VERSION,
+            operation_id: operation_id.into(),
+            run_id: run_id.into(),
+            conversation_id: conversation_id.into(),
+            assistant_message_id: assistant_message_id.into(),
+            request_index: 1,
+            attempt_index: 1,
+            model: model.into(),
+            api_style,
+            status: ContextCompactionReceiptStatus::InProgress,
+            stage: ContextCompactionReceiptStage::Planned,
+            plan,
+            source_revision: None,
+            generation_observation_id: None,
+            summary_id: None,
+            result: None,
+            error: None,
+            started_at,
+            updated_at: started_at,
+            completed_at: None,
+        };
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin(
         operation_id: impl Into<String>,
@@ -377,7 +452,7 @@ impl ContextCompactionReceipt {
         Ok(())
     }
 
-    pub(crate) fn advance_stage(
+    pub fn advance_stage(
         &mut self,
         stage: ContextCompactionReceiptStage,
         updated_at: i64,
@@ -394,7 +469,7 @@ impl ContextCompactionReceipt {
         self.validate()
     }
 
-    pub(crate) fn attach_prepared_prefix(
+    pub fn attach_prepared_prefix(
         &mut self,
         prefix: &ContextCompactionPrefix,
         updated_at: i64,
@@ -415,7 +490,7 @@ impl ContextCompactionReceipt {
         self.advance_stage(ContextCompactionReceiptStage::Generating, updated_at)
     }
 
-    pub(crate) fn complete_applied(
+    pub fn complete_applied(
         &mut self,
         draft: &ContextCompactionSummaryDraft,
         observation: &ModelRequestObservation,
@@ -447,7 +522,7 @@ impl ContextCompactionReceipt {
         self.validate()
     }
 
-    pub(crate) fn complete_refreshed(
+    pub fn complete_refreshed(
         &mut self,
         observation: Option<&ModelRequestObservation>,
         completed_at: i64,
@@ -467,7 +542,7 @@ impl ContextCompactionReceipt {
         self.validate()
     }
 
-    pub(crate) fn complete_error(
+    pub fn complete_error(
         &mut self,
         error: &AgentError,
         observation: Option<&ModelRequestObservation>,

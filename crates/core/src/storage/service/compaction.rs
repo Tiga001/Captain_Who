@@ -29,6 +29,36 @@ impl StorageService {
             .map_err(|error| error.to_string())
     }
 
+    pub fn list_provider_transition_receipts(
+        &self,
+        conversation_id: &str,
+        operation_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ContextCompactionReceipt>, String> {
+        let connection = self.state.connection()?;
+        context_compaction_receipt_repository::list_provider_transition_receipts(
+            &connection,
+            conversation_id,
+            operation_id,
+            limit,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn provider_transition_failed_attempt_count(
+        &self,
+        conversation_id: &str,
+        target_model_id: &str,
+    ) -> Result<u64, String> {
+        let connection = self.state.connection()?;
+        context_compaction_receipt_repository::provider_transition_failed_attempt_count(
+            &connection,
+            conversation_id,
+            target_model_id,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     pub fn prepare_context_compaction_prefix(
         &self,
         conversation_id: &str,
@@ -124,6 +154,36 @@ impl StorageService {
             observation,
         ) {
             Ok(summary) => Ok(Some(summary)),
+            Err(error) if error.is_stale() => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_provider_transition_with_receipt_if_current(
+        &self,
+        expected_prefix: &ContextCompactionPrefix,
+        draft: ContextCompactionSummaryDraft,
+        receipt: &ContextCompactionReceipt,
+        observation: &ModelRequestObservation,
+        expected_current_model_id: Option<&str>,
+        expected_conversation_updated_at: i64,
+        target_model_id: &str,
+        expected_target_provider_protocol_revision: &str,
+    ) -> Result<Option<(ContextCompactionSummary, i64)>, String> {
+        let mut connection = self.state.connection()?;
+        match context_compaction_repository::commit_provider_transition_with_receipt(
+            &mut connection,
+            expected_prefix,
+            draft,
+            receipt,
+            observation,
+            expected_current_model_id,
+            expected_conversation_updated_at,
+            target_model_id,
+            expected_target_provider_protocol_revision,
+        ) {
+            Ok(committed) => Ok(Some(committed)),
             Err(error) if error.is_stale() => Ok(None),
             Err(error) => Err(error.to_string()),
         }

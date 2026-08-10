@@ -80,11 +80,16 @@ interface ChatComposerProps {
   defaultProjectId?: string | null
   canGuideQueuedMessages?: boolean
   isGenerating?: boolean
+  isModelTransitionRunning?: boolean
   onDraftChange: (draft: ChatComposerDraft) => void
   onDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
+  onModelChangeRequested?: (modelId: string) => void | Promise<void>
   onOpenQueuedMessageInSideChat?: (message: ChatQueuedMessage) => void
-  onSubmitMessage?: (message: string, options: ChatSubmitOptions) => void
+  onSubmitMessage?: (
+    message: string,
+    options: ChatSubmitOptions
+  ) => boolean | void | Promise<boolean | void>
   onStopGenerating?: () => void
   permissionModeAvailability?: {
     custom: boolean
@@ -102,9 +107,11 @@ export function ChatComposer({
   defaultProjectId = null,
   canGuideQueuedMessages = false,
   isGenerating = false,
+  isModelTransitionRunning = false,
   onDraftChange,
   onDraftMessageChange,
   onGuideQueuedMessage,
+  onModelChangeRequested,
   onOpenQueuedMessageInSideChat,
   onSubmitMessage,
   onStopGenerating,
@@ -210,14 +217,17 @@ export function ChatComposer({
     hasSendableContent &&
     !hasUnsupportedImageAttachment &&
     !hasInvalidSkillSelection &&
+    !isModelTransitionRunning &&
     Boolean(selectedModel)
-  const submitButtonState = isGenerating
-    ? canSend
-      ? 'ready'
-      : 'stop'
-    : canSend
-      ? 'ready'
-      : 'disabled'
+  const submitButtonState = isModelTransitionRunning
+    ? 'disabled'
+    : isGenerating
+      ? canSend
+        ? 'ready'
+        : 'stop'
+      : canSend
+        ? 'ready'
+        : 'disabled'
   const isConfirmingImeInput = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent
     const keyCode = 'keyCode' in nativeEvent ? nativeEvent.keyCode : 0
@@ -264,6 +274,15 @@ export function ChatComposer({
       message
     }
   }, [draft, message, resetKey])
+
+  useEffect(() => {
+    if (!isModelTransitionRunning) return
+    setIsAttachmentMenuOpen(false)
+    setIsSkillMenuOpen(false)
+    setIsPermissionMenuOpen(false)
+    setIsModelMenuOpen(false)
+    setIsProjectMenuOpen(false)
+  }, [isModelTransitionRunning])
 
   useEffect(() => {
     setAttachmentError(null)
@@ -430,7 +449,8 @@ export function ChatComposer({
       return
     }
 
-    onSubmitMessage?.(messageContent, submitOptions)
+    const accepted = await onSubmitMessage?.(messageContent, submitOptions)
+    if (accepted === false) return
     updateDraft({
       message: '',
       attachments: [],
@@ -582,6 +602,7 @@ export function ChatComposer({
         aria-label={t('chat.composer')}
         onSubmit={(event) => {
           event.preventDefault()
+          if (isModelTransitionRunning) return
           void submitMessage()
         }}
         onDragOver={(event) => {
@@ -596,12 +617,14 @@ export function ChatComposer({
           setIsFileDragActive(false)
         }}
         onDrop={(event) => {
+          if (isModelTransitionRunning) return
           if (event.dataTransfer.files.length === 0) return
           event.preventDefault()
           setIsFileDragActive(false)
           void addDroppedOrPastedFiles(event.dataTransfer.files)
         }}
         onPaste={(event) => {
+          if (isModelTransitionRunning) return
           if (event.clipboardData.files.length === 0) return
           event.preventDefault()
           void addDroppedOrPastedFiles(event.clipboardData.files)
@@ -681,6 +704,7 @@ export function ChatComposer({
           value={message}
           placeholder={t('chat.inputPlaceholder')}
           aria-label={t('chat.inputAria')}
+          disabled={isModelTransitionRunning}
           rows={1}
           onChange={(event) => updateDraftMessage(event.target.value)}
           onCompositionStart={() => {
@@ -722,6 +746,7 @@ export function ChatComposer({
               aria-haspopup={isSkillMenuOpen ? 'dialog' : 'menu'}
               aria-expanded={isAttachmentMenuOpen || isSkillMenuOpen}
               aria-label={t('chat.addContext')}
+              disabled={isModelTransitionRunning}
               onClick={() => {
                 setAttachmentError(null)
                 setIsAttachmentMenuOpen((open) => !open)
@@ -785,7 +810,7 @@ export function ChatComposer({
             <button
               type="button"
               className="composer-permission-button"
-              disabled={isGenerating}
+              disabled={isGenerating || isModelTransitionRunning}
               data-permission={selectedPermission.id}
               aria-haspopup="listbox"
               aria-expanded={isPermissionMenuOpen}
@@ -850,7 +875,7 @@ export function ChatComposer({
             <button
               type="button"
               className="composer-model-button"
-              disabled={isGenerating}
+              disabled={isGenerating || isModelTransitionRunning}
               aria-haspopup="listbox"
               aria-expanded={isModelMenuOpen}
               aria-label={t('chat.selectModel')}
@@ -891,8 +916,13 @@ export function ChatComposer({
                         data-selected={isSelected || undefined}
                         key={model.id}
                         onClick={() => {
-                          updateDraft({ modelId: model.id })
                           setIsModelMenuOpen(false)
+                          if (model.id === selectedModel?.id) return
+                          if (onModelChangeRequested) {
+                            void onModelChangeRequested(model.id)
+                          } else {
+                            updateDraft({ modelId: model.id })
+                          }
                         }}
                       >
                         <span className="composer-model-option__name">{model.displayName}</span>
@@ -911,10 +941,10 @@ export function ChatComposer({
           </div>
 
           <button
-            type={isGenerating && !canSend ? 'button' : 'submit'}
+            type={isModelTransitionRunning || (isGenerating && !canSend) ? 'button' : 'submit'}
             className="composer-submit-button"
             data-state={submitButtonState}
-            disabled={!isGenerating && !canSend}
+            disabled={isModelTransitionRunning || (!isGenerating && !canSend)}
             aria-label={
               isGenerating ? (canSend ? t('chat.queueMessage') : t('chat.stop')) : t('chat.send')
             }
@@ -938,6 +968,7 @@ export function ChatComposer({
               <button
                 className="composer-project-button"
                 type="button"
+                disabled={isModelTransitionRunning}
                 aria-haspopup="listbox"
                 aria-expanded={isProjectMenuOpen}
                 onClick={() => {

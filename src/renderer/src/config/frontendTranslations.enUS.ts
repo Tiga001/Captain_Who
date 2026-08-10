@@ -739,6 +739,25 @@ export const enUSTranslations = {
   'chat.selectPermission': 'Select permission',
   'chat.selectModel': 'Select model',
   'chat.noEnabledModels': 'No enabled models',
+  'chat.modelTransition.providerTitle': 'Switch API provider',
+  'chat.modelTransition.providerDescription':
+    'This model uses a different API provider. Compact the history first to adapt it safely.',
+  'chat.modelTransition.protocolTitle': 'Switch compatibility rules',
+  'chat.modelTransition.protocolDescription':
+    'This model uses different compatibility rules. Compact the history first to adapt it safely.',
+  'chat.modelTransition.cancel': 'Cancel',
+  'chat.modelTransition.confirm': 'Compact and switch',
+  'chat.modelTransition.running': 'Compacting history and switching model…',
+  'chat.modelTransition.succeeded': 'History compacted',
+  'chat.modelTransition.failed': 'History compaction failed · Retry',
+  'chat.modelTransition.blockedActiveRun':
+    'The current task is still running. The model cannot be switched yet.',
+  'chat.modelTransition.blockedPendingApproval':
+    'The current task is waiting for approval. The model cannot be switched yet.',
+  'chat.modelTransition.blockedUnsupportedTarget': 'The target model cannot be used for this task.',
+  'chat.modelTransition.requestFailed': 'The model could not be switched safely. Try again.',
+  'chat.modelTransition.confirmThenRetryEdit':
+    'Compact the history and switch models first, then submit the edit again.',
   'chat.contextWindow': 'Context window',
   'chat.contextWindowAria': 'Context window {used}% used',
   'chat.contextUsedSummary': '{used}% used ({remaining}% remaining)',

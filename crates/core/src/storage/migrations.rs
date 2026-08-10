@@ -3113,6 +3113,31 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (generation_observation_id) REFERENCES model_request_observations(id)
         );
 
+        CREATE TABLE IF NOT EXISTS provider_transition_terminal_records (
+            operation_id TEXT PRIMARY KEY CHECK (
+                typeof(operation_id) = 'text'
+                AND length(CAST(operation_id AS BLOB)) BETWEEN 21 AND 1024
+                AND substr(operation_id, 1, 20) = 'provider-transition-'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            conversation_id TEXT NOT NULL CHECK (
+                typeof(conversation_id) = 'text'
+                AND length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 512
+                AND conversation_id = trim(conversation_id)
+            ),
+            target_model_id TEXT NOT NULL CHECK (
+                typeof(target_model_id) = 'text'
+                AND length(CAST(target_model_id AS BLOB)) BETWEEN 1 AND 512
+                AND target_model_id = trim(target_model_id)
+            ),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+            conversation_updated_at INTEGER NOT NULL CHECK (
+                conversation_updated_at >= started_at
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS conversation_context_compaction_heads (
             conversation_id TEXT PRIMARY KEY,
             summary_id TEXT NOT NULL UNIQUE,
@@ -3160,6 +3185,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_context_compaction_receipts_conversation_id ON context_compaction_receipts(conversation_id, started_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_receipts_run_id ON context_compaction_receipts(run_id, request_index, attempt_index);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_receipts_status ON context_compaction_receipts(status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_provider_transition_terminal_records_conversation
+            ON provider_transition_terminal_records(conversation_id, started_at DESC, operation_id DESC);
         CREATE INDEX IF NOT EXISTS idx_attachments_conversation_id ON attachments(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_project_id ON attachments(project_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);

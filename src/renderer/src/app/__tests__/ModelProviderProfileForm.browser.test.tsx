@@ -43,11 +43,6 @@ const model: ModelConfig = {
   enabled: true
 }
 
-function changeSelect(select: HTMLSelectElement, value: string) {
-  select.value = value
-  select.dispatchEvent(new Event('change', { bubbles: true }))
-}
-
 describe('ModelForm Provider Profile controls', () => {
   it('builds the registered choices only from selectable Host descriptors', async () => {
     const screen = await render(
@@ -187,14 +182,20 @@ describe('ModelForm Provider Profile controls', () => {
     await screen.getByRole('option', { name: 'DeepSeek V4 Chat' }).click()
 
     await screen.getByRole('button', { name: 'configuration.providerSettings.open' }).click()
-    const mode = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="configuration.deepSeekSettings.thinkingMode"]'
-    )!
-    const effort = document.querySelector<HTMLSelectElement>(
-      'select[aria-label="configuration.deepSeekSettings.reasoningEffort"]'
-    )!
-    changeSelect(mode, 'enabled')
-    changeSelect(effort, 'high')
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.thinkingMode: configuration.deepSeekSettings.thinkingProviderDefault'
+      })
+      .click()
+    await screen
+      .getByRole('option', { name: 'configuration.deepSeekSettings.thinkingEnabled' })
+      .click()
+    await screen
+      .getByRole('button', {
+        name: 'configuration.deepSeekSettings.reasoningEffort: configuration.deepSeekSettings.effortProviderDefault'
+      })
+      .click()
+    await screen.getByRole('option', { name: 'configuration.deepSeekSettings.effortHigh' }).click()
     await screen.getByRole('button', { name: 'configuration.providerSettings.confirm' }).click()
     await screen.getByRole('button', { name: 'configuration.save' }).click()
 

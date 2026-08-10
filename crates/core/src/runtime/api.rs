@@ -538,7 +538,9 @@ pub use super::context_compaction::{
     AgentContextCompactionPrepareOutcome, AgentContextCompactionPrepareRequest,
     AgentContextCompactionServices,
 };
-pub use super::context_compaction_model::AgentContextCompactionModelGenerator;
+pub use super::context_compaction_model::{
+    estimate_provider_transition_compaction_source_tokens, AgentContextCompactionModelGenerator,
+};
 
 pub async fn send_chat(input: AgentChatInput) -> AgentResult<AgentChatOutput> {
     AgentRuntime::default().send_chat(input).await

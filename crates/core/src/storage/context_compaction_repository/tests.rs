@@ -1,11 +1,12 @@
 use super::*;
 use crate::storage::{migrations, provider_continuation_repository, world_state_repository};
 use crate::{
-    AgentApprovalStatus, AgentCommandSessionStatus, ConversationCommandSessionLifecycle,
-    ConversationCommandSessionLifecyclePhase, ConversationTraceToolResultStatus,
-    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
-    WorldStateDiff, WorldStateLifetime, WorldStateRecord, WorldStateSectionEnvelope,
-    WorldStateSectionId, WorldStateSnapshot, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    AgentApprovalStatus, AgentCommandSessionStatus, ContextCompactionReceiptStage,
+    ConversationCommandSessionLifecycle, ConversationCommandSessionLifecyclePhase,
+    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus, WorldStateDiff, WorldStateLifetime, WorldStateRecord,
+    WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 
 fn setup() -> Connection {
@@ -1529,4 +1530,553 @@ fn deleting_a_summary_owner_cannot_expose_released_provider_history() {
         provider_continuation_state(&connection, &covered.continuation_id),
         ("released".to_string(), None)
     );
+}
+
+fn seed_provider_transition_target(connection: &Connection, target_model_id: &str, revision: &str) {
+    connection
+        .execute(
+            "INSERT INTO models (
+                id, display_name, supports_image, provider_protocol_revision,
+                input_price, output_price, enabled, position, created_at, updated_at
+             ) VALUES (?1, ?1, 0, ?2, '0', '0', 1, 0, 1, 1)",
+            params![target_model_id, revision],
+        )
+        .unwrap();
+}
+
+fn applied_provider_transition_receipt(
+    prefix: &ContextCompactionPrefix,
+    target_model_id: &str,
+) -> (
+    ContextCompactionSummaryDraft,
+    ContextCompactionReceipt,
+    ContextCompactionReceipt,
+    ModelRequestObservation,
+) {
+    let mut transition_draft = draft(prefix, "summary-provider-transition");
+    transition_draft.created_at = 24;
+    let mut receipt = ContextCompactionReceipt::begin_provider_transition(
+        "provider-transition-test",
+        "provider-transition-test-compaction",
+        "conversation-1",
+        "assistant-1",
+        target_model_id,
+        crate::AgentApiStyle::OpenAiCompatible,
+        prefix,
+        100,
+        30,
+        20,
+    )
+    .unwrap();
+    let planned_receipt = receipt.clone();
+    receipt
+        .advance_stage(ContextCompactionReceiptStage::Preparing, 21)
+        .unwrap();
+    receipt.attach_prepared_prefix(prefix, 22).unwrap();
+    let observation = crate::model_request_observation::ModelRequestObservationBuilder::new(
+        "model-request-provider-transition-test",
+        "provider-transition-test-compaction",
+        Some("conversation-1".to_string()),
+        Some("assistant-1".to_string()),
+        Some("provider-transition-test".to_string()),
+        1,
+        crate::ModelRequestPurpose::ContextCompaction,
+        target_model_id,
+        crate::AgentApiStyle::OpenAiCompatible,
+        None,
+        22,
+    )
+    .completed(None, Some("stop".to_string()), 23)
+    .unwrap();
+    receipt
+        .advance_stage(ContextCompactionReceiptStage::Committing, 23)
+        .unwrap();
+    receipt
+        .complete_applied(&transition_draft, &observation, 24)
+        .unwrap();
+    (transition_draft, planned_receipt, receipt, observation)
+}
+
+#[test]
+fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
+    let mut connection = setup();
+    connection
+        .execute(
+            "UPDATE conversations SET model_id = 'source-model', updated_at = 7
+             WHERE id = 'conversation-1'",
+            [],
+        )
+        .unwrap();
+    seed_provider_transition_target(&connection, "target-model", "target-revision");
+    connection
+        .execute(
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, model_id, attachments_json,
+                skills_json, queued_messages_json, updated_at
+             ) VALUES ('conversation-1', 'unsent text', 'ask', 'source-model', '[]', '[]', '[]', 100)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO agent_usage_records (
+                id, conversation_id, message_id, run_id, model_id, model_name,
+                created_at, input_tokens, output_tokens, billable_request_count
+             ) VALUES (
+                'usage-existing', 'conversation-1', 'assistant-1', 'run-existing',
+                'source-model', 'Source', 5, 41, 9, 1
+             )",
+            [],
+        )
+        .unwrap();
+    let usage_before = connection
+        .query_row(
+            "SELECT id, run_id, model_id, input_tokens, output_tokens
+             FROM agent_usage_records WHERE message_id = 'assistant-1'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("assistant-1"),
+    )
+    .unwrap();
+    let (transition_draft, planned_receipt, receipt, observation) =
+        applied_provider_transition_receipt(&prefix, "target-model");
+    crate::storage::context_compaction_receipt_repository::record_receipt(
+        &mut connection,
+        &planned_receipt,
+        None,
+    )
+    .unwrap();
+
+    let (summary, committed_updated_at) = commit_provider_transition_with_receipt(
+        &mut connection,
+        &prefix,
+        transition_draft,
+        &receipt,
+        &observation,
+        Some("source-model"),
+        7,
+        "target-model",
+        "target-revision",
+    )
+    .unwrap();
+
+    assert_eq!(summary.id, "summary-provider-transition");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "target-model"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "target-model"
+    );
+    let transition_updated_at = connection
+        .query_row(
+            "SELECT updated_at FROM conversations WHERE id = 'conversation-1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(transition_updated_at, committed_updated_at);
+    assert!(transition_updated_at > 100);
+
+    // A Renderer metadata write queued before the transition may arrive after the atomic commit.
+    // Its older model selection must not resurrect the source model or overwrite newer metadata.
+    crate::storage::chat_repository::save_conversation_meta(
+        &connection,
+        &crate::storage::models::ChatConversationMetaRecord {
+            id: "conversation-1".to_string(),
+            project_id: None,
+            model_id: Some("source-model".to_string()),
+            title: "stale title".to_string(),
+            created_at: 1,
+            updated_at: 7,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id, title, updated_at FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap(),
+        (
+            "target-model".to_string(),
+            "Test".to_string(),
+            transition_updated_at,
+        )
+    );
+    let draft_transition_updated_at = connection
+        .query_row(
+            "SELECT updated_at FROM composer_drafts WHERE scope_id = 'conversation-1'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(draft_transition_updated_at, committed_updated_at);
+    crate::storage::composer_draft_repository::save_composer_draft(
+        &connection,
+        crate::storage::models::ComposerDraftRecord {
+            scope_id: "conversation-1".to_string(),
+            message: "stale unsent text".to_string(),
+            permission_mode: "ask".to_string(),
+            permission_mode_version: 0,
+            model_id: Some("source-model".to_string()),
+            project_id: None,
+            attachments_json: "[]".to_string(),
+            skills_json: "[]".to_string(),
+            queued_messages_json: "[]".to_string(),
+            updated_at: 7,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id, message, updated_at
+                 FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap(),
+        (
+            "target-model".to_string(),
+            "unsent text".to_string(),
+            draft_transition_updated_at,
+        )
+    );
+    let usage_after = connection
+        .query_row(
+            "SELECT id, run_id, model_id, input_tokens, output_tokens
+             FROM agent_usage_records WHERE message_id = 'assistant-1'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(usage_after, usage_before);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_request_observations
+                 WHERE operation_id = 'provider-transition-test'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn provider_transition_releases_every_replayable_turn_before_switching_models() {
+    let mut connection = setup();
+    connection
+        .execute(
+            "UPDATE conversations SET model_id = 'source-model', updated_at = 7
+             WHERE id = 'conversation-1'",
+            [],
+        )
+        .unwrap();
+    seed_provider_transition_target(&connection, "target-model", "target-revision");
+    let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::trace_item("assistant-2", 1),
+    )
+    .unwrap();
+    let (transition_draft, planned_receipt, receipt, observation) =
+        applied_provider_transition_receipt(&prefix, "target-model");
+    crate::storage::context_compaction_receipt_repository::record_receipt(
+        &mut connection,
+        &planned_receipt,
+        None,
+    )
+    .unwrap();
+
+    commit_provider_transition_with_receipt(
+        &mut connection,
+        &prefix,
+        transition_draft,
+        &receipt,
+        &observation,
+        Some("source-model"),
+        7,
+        "target-model",
+        "target-revision",
+    )
+    .unwrap();
+
+    assert_eq!(
+        provider_continuation_state(&connection, &covered.continuation_id),
+        ("released".to_string(), None)
+    );
+    assert!(
+        !provider_continuation_repository::has_replayable_for_conversation(
+            &connection,
+            "conversation-1"
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "target-model"
+    );
+}
+
+#[test]
+fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summary() {
+    let mut connection = setup();
+    connection
+        .execute(
+            "UPDATE conversations SET model_id = 'source-model', updated_at = 7
+             WHERE id = 'conversation-1'",
+            [],
+        )
+        .unwrap();
+    seed_provider_transition_target(&connection, "target-model", "target-revision");
+    let uncovered =
+        provider_continuation_record("assistant-1", "run-missing-trace", 0, &["missing-call"]);
+    provider_continuation_repository::store_active_in_connection(&connection, &uncovered).unwrap();
+    let original_ciphertext = provider_continuation_state(&connection, &uncovered.continuation_id)
+        .1
+        .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("assistant-1"),
+    )
+    .unwrap();
+    let (transition_draft, planned_receipt, receipt, observation) =
+        applied_provider_transition_receipt(&prefix, "target-model");
+    crate::storage::context_compaction_receipt_repository::record_receipt(
+        &mut connection,
+        &planned_receipt,
+        None,
+    )
+    .unwrap();
+
+    let error = commit_provider_transition_with_receipt(
+        &mut connection,
+        &prefix,
+        transition_draft,
+        &receipt,
+        &observation,
+        Some("source-model"),
+        7,
+        "target-model",
+        "target-revision",
+    )
+    .unwrap_err();
+
+    assert!(error.is_stale());
+    assert!(error
+        .to_string()
+        .contains("provider_context_boundary_required"));
+    assert_eq!(
+        provider_continuation_state(&connection, &uncovered.continuation_id),
+        ("active".to_string(), Some(original_ciphertext))
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "source-model"
+    );
+    assert!(get_active_summary(&connection, "conversation-1")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_request_observations
+                 WHERE operation_id = 'provider-transition-test'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
+    let mut connection = setup();
+    connection
+        .execute(
+            "UPDATE conversations SET model_id = 'source-model', updated_at = 7
+             WHERE id = 'conversation-1'",
+            [],
+        )
+        .unwrap();
+    seed_provider_transition_target(&connection, "target-model", "new-revision");
+    connection
+        .execute(
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, model_id, attachments_json,
+                skills_json, queued_messages_json, updated_at
+             ) VALUES ('conversation-1', 'unsent text', 'ask', 'source-model', '[]', '[]', '[]', 7)",
+            [],
+        )
+        .unwrap();
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("assistant-1"),
+    )
+    .unwrap();
+    let (transition_draft, planned_receipt, receipt, observation) =
+        applied_provider_transition_receipt(&prefix, "target-model");
+    crate::storage::context_compaction_receipt_repository::record_receipt(
+        &mut connection,
+        &planned_receipt,
+        None,
+    )
+    .unwrap();
+
+    let error = commit_provider_transition_with_receipt(
+        &mut connection,
+        &prefix,
+        transition_draft,
+        &receipt,
+        &observation,
+        Some("source-model"),
+        7,
+        "target-model",
+        "stale-revision",
+    )
+    .unwrap_err();
+    assert!(error.is_stale());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "source-model"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "source-model"
+    );
+    assert!(get_active_summary(&connection, "conversation-1")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_request_observations
+                 WHERE operation_id = 'provider-transition-test'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn provider_transition_status_filters_before_applying_its_limit() {
+    let mut connection = setup();
+    let mut transition = planned_receipt();
+    transition.operation_id = "provider-transition-visible".to_string();
+    transition.run_id = "provider-transition-visible-compaction".to_string();
+    crate::storage::context_compaction_receipt_repository::record_receipt(
+        &mut connection,
+        &transition,
+        None,
+    )
+    .unwrap();
+    for index in 0..60 {
+        let mut ordinary = planned_receipt();
+        ordinary.operation_id = format!("ordinary-compaction-{index:02}");
+        ordinary.run_id = format!("ordinary-compaction-run-{index:02}");
+        ordinary.started_at = 100 + index;
+        ordinary.updated_at = 100 + index;
+        crate::storage::context_compaction_receipt_repository::record_receipt(
+            &mut connection,
+            &ordinary,
+            None,
+        )
+        .unwrap();
+    }
+
+    let receipts =
+        crate::storage::context_compaction_receipt_repository::list_provider_transition_receipts(
+            &connection,
+            "conversation-1",
+            None,
+            1,
+        )
+        .unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].operation_id, "provider-transition-visible");
 }

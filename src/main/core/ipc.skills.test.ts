@@ -89,6 +89,7 @@ describe('Skill management IPC registration', () => {
     )
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       resolveSkillInstallationSource
@@ -118,6 +119,7 @@ describe('Skill management IPC registration', () => {
     const cancelSkillSourceResolution = vi.fn().mockResolvedValue(output)
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       cancelSkillSourceResolution
@@ -157,6 +159,7 @@ describe('Skill management IPC registration', () => {
     )
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       uninstallSkill
@@ -191,6 +194,7 @@ describe('Office status IPC registration', () => {
     const getOfficeStatus = vi.fn().mockResolvedValue(output)
     const coreServer = {
       onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(() => vi.fn()),
       onSkillsChanged: vi.fn(),
       onMcpChanged: vi.fn(() => vi.fn()),
       getOfficeStatus

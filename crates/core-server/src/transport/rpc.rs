@@ -32,7 +32,16 @@ pub(crate) fn agent_service_error_response(id: JsonRpcId, error: AgentServiceErr
             serde_json::to_value(data).expect("Skill activation error data must serialize"),
         ))
         .expect("JSON-RPC error response must serialize"),
-        None => response_error(Some(id), -32000, error.message()),
+        None => match error.data() {
+            Some(data) => serde_json::to_value(error_with_data(
+                Some(id),
+                -32000,
+                error.message(),
+                data.clone(),
+            ))
+            .expect("Agent service error data must serialize"),
+            None => response_error(Some(id), -32000, error.message()),
+        },
     }
 }
 

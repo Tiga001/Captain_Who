@@ -6,6 +6,13 @@ import type {
   AgentConversationTurnOutput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
+  AgentProviderTransitionNotification,
+  AgentProviderTransitionOperation,
+  AgentProviderTransitionPreflightInput,
+  AgentProviderTransitionPreflightOutput,
+  AgentProviderTransitionStartInput,
+  AgentProviderTransitionStatusInput,
+  AgentProviderTransitionStatusOutput,
   AgentActionExecutionOutput,
   AgentCommandSessionGetInput,
   AgentCommandSessionGetOutput,
@@ -35,6 +42,30 @@ export async function getContextWindowSnapshot(
   input: AgentContextWindowSnapshotInput
 ): Promise<AgentContextWindowSnapshotOutput> {
   return unwrapHostInvocation(await hostClient.agent.getContextWindowSnapshot(input))
+}
+
+export async function preflightProviderTransition(
+  input: AgentProviderTransitionPreflightInput
+): Promise<AgentProviderTransitionPreflightOutput> {
+  return unwrapHostInvocation(await hostClient.agent.preflightProviderTransition(input))
+}
+
+export async function startProviderTransition(
+  input: AgentProviderTransitionStartInput
+): Promise<AgentProviderTransitionOperation> {
+  return unwrapHostInvocation(await hostClient.agent.startProviderTransition(input))
+}
+
+export async function getProviderTransitionStatus(
+  input: AgentProviderTransitionStatusInput
+): Promise<AgentProviderTransitionStatusOutput> {
+  return unwrapHostInvocation(await hostClient.agent.getProviderTransitionStatus(input))
+}
+
+export function onProviderTransition(
+  handler: (event: AgentProviderTransitionNotification) => void
+): () => void {
+  return hostClient.agent.onProviderTransition(handler)
 }
 
 export async function listAgentCommandSessions(

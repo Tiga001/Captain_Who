@@ -50,12 +50,18 @@ pub(super) use conversation::*;
 pub(super) use helpers::*;
 pub(super) use types::{
     agent_input_belongs_to_project, pending_status_label, ActionExecutionDecision,
-    AgentRunUsageContext, AgentRunUsageState, PendingActionRecord,
+    AgentProviderTransitionDecision, AgentProviderTransitionOperationError,
+    AgentProviderTransitionOperationStatus, AgentProviderTransitionReason,
+    AgentProviderTransitionRecovery, AgentRunUsageContext, AgentRunUsageState, PendingActionRecord,
 };
 pub use types::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
     AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
-    AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus, PendingAgentActionSnapshot,
+    AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
+    AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
+    AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,
+    PendingAgentActionSnapshot,
 };
 pub(super) use utility::*;
 pub(super) use world_state::*;

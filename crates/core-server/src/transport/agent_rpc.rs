@@ -30,6 +30,52 @@ pub(crate) fn handle_agent_start_conversation_turn(
     }
 }
 
+pub(crate) fn handle_agent_preflight_provider_transition(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentProviderTransitionPreflightInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+    match agent_service.preflight_provider_transition(input) {
+        Ok(output) => response_success(id, output),
+        Err(error) => agent_service_error_response(id, error),
+    }
+}
+
+pub(crate) fn handle_agent_start_provider_transition(
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentProviderTransitionStartInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+    match agent_service.start_provider_transition(input, notification_tx) {
+        Ok(output) => response_success(id, output),
+        Err(error) => agent_service_error_response(id, error),
+    }
+}
+
+pub(crate) fn handle_agent_get_provider_transition_status(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentProviderTransitionGetStatusInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+    match agent_service.get_provider_transition_status(input) {
+        Ok(output) => response_success(id, output),
+        Err(error) => agent_service_error_response(id, error),
+    }
+}
+
 pub(crate) fn handle_agent_cancel_run(
     agent_service: &AgentService,
     id: JsonRpcId,

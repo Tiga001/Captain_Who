@@ -22,8 +22,8 @@ use crate::provider_profile::{
     ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
 };
 use crate::{
-    ContextCompactionGeneration, ContextCompactionSummaryDraft, ModelRequestEstimate,
-    ModelRequestObservation, ModelRequestPurpose,
+    ContextCompactionGeneration, ContextCompactionPrefix, ContextCompactionSummaryDraft,
+    ModelRequestEstimate, ModelRequestObservation, ModelRequestPurpose,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -315,6 +315,37 @@ impl AgentContextCompactionModelGenerator {
             .map_err(|error| error.with_usage(usage.clone()))?;
         Ok(AgentContextCompactionGenerationOutput { draft, observation })
     }
+}
+
+/// Measures the complete tool-free request used to summarize one transition prefix.
+///
+/// Provider transition compaction is admitted before a normal Agent context can be built. This
+/// helper intentionally uses the same request projection and tokenizer as the real generator so
+/// the target model's context-window gate is authoritative and no caller needs to guess from
+/// character length or silently truncate old history.
+pub fn estimate_provider_transition_compaction_source_tokens(
+    prefix: &ContextCompactionPrefix,
+    model: &str,
+    api_style: AgentApiStyle,
+) -> AgentResult<u64> {
+    prefix.validate()?;
+    let continuity = crate::ContextContinuitySnapshot::from_prefix(prefix)?;
+    let request = AgentContextCompactionGenerationRequest {
+        operation_id: "provider-transition-estimate".to_string(),
+        run_id: "provider-transition-estimate".to_string(),
+        conversation_id: prefix.conversation_id.clone(),
+        assistant_message_id: prefix.covered_through.message_id().to_string(),
+        request_index: 1,
+        prefix: std::sync::Arc::new(prefix.clone()),
+        continuity,
+        source_input_tokens: u64::MAX,
+        uncovered_tail_input_tokens: 0,
+        target_replacement_tokens: 0,
+    };
+    let mut context = build_compaction_request_context(&request, 0)?;
+    let detector = ContextCapacityDetector::for_model(model, api_style, &[]);
+    let report = detector.inspect(&mut context, None, 0);
+    Ok(report.usage.request_input_tokens())
 }
 
 fn summary_output_budget(

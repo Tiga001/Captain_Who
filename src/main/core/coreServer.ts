@@ -18,6 +18,13 @@ import type {
   AgentFileDraftReadInput,
   AgentFileWriteDiffInput,
   AgentFileWriteDiffPage,
+  AgentProviderTransitionNotification,
+  AgentProviderTransitionOperation,
+  AgentProviderTransitionPreflightInput,
+  AgentProviderTransitionPreflightOutput,
+  AgentProviderTransitionStartInput,
+  AgentProviderTransitionStatusInput,
+  AgentProviderTransitionStatusOutput,
   AgentRejectActionRequest,
   AgentSteerRunInput,
   AgentSteerRunOutput,
@@ -115,10 +122,14 @@ import {
   AGENT_EVENT_NOTIFICATION_METHOD,
   AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
   AGENT_GET_FILE_WRITE_DIFF_METHOD,
+  AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
   AGENT_GET_USAGE_SUMMARY_METHOD,
   AGENT_LIST_PENDING_ACTIONS_METHOD,
   AGENT_READ_FILE_DRAFT_METHOD,
   AGENT_REJECT_ACTION_METHOD,
+  AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
+  AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD,
+  AGENT_START_PROVIDER_TRANSITION_METHOD,
   AGENT_START_CONVERSATION_TURN_METHOD,
   AGENT_STEER_RUN_METHOD,
   parseAgentActionExecutionOutputForHost,
@@ -127,6 +138,13 @@ import {
   parseAgentCommandSessionListInput,
   parseAgentCommandSessionListOutput,
   parseAgentEventForHost,
+  parseAgentProviderTransitionNotification,
+  parseAgentProviderTransitionOperation,
+  parseAgentProviderTransitionPreflightInput,
+  parseAgentProviderTransitionPreflightOutput,
+  parseAgentProviderTransitionStartInput,
+  parseAgentProviderTransitionStatusInput,
+  parseAgentProviderTransitionStatusOutput,
   parsePendingAgentActionSnapshotsForHost,
   parseSkillInstallationCommitOutput,
   parseSkillInstallationPreview,
@@ -246,6 +264,18 @@ const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
 const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = 'storage.loadInputAttachments'
+
+function validateProviderTransitionResponseIdentity(
+  request: { conversationId: string; targetModelId: string },
+  response: { conversationId: string; targetModelId: string }
+): void {
+  if (
+    response.conversationId !== request.conversationId ||
+    response.targetModelId !== request.targetModelId
+  ) {
+    throw new Error('Invalid Provider transition response identity')
+  }
+}
 
 function rethrowValidatedSkillError<TData extends { message: string }>(
   error: unknown,
@@ -647,6 +677,82 @@ export class CoreServer {
       .request<unknown, McpServerMutationInput>(method, request)
       .then(parseMcpServerDetailsOutput)
       .catch(rethrowValidatedMcpManagementError)
+  }
+
+  preflightProviderTransition(
+    input: AgentProviderTransitionPreflightInput
+  ): Promise<AgentProviderTransitionPreflightOutput> {
+    const request = parseAgentProviderTransitionPreflightInput(input)
+    return this.rpc
+      .request<unknown, AgentProviderTransitionPreflightInput>(
+        AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentProviderTransitionPreflightOutput(value)
+        validateProviderTransitionResponseIdentity(request, output)
+        return output
+      })
+      .catch(() => {
+        throw new Error('Unable to check this model switch. Please try again.')
+      })
+  }
+
+  startProviderTransition(
+    input: AgentProviderTransitionStartInput
+  ): Promise<AgentProviderTransitionOperation> {
+    const request = parseAgentProviderTransitionStartInput(input)
+    return this.rpc
+      .request<unknown, AgentProviderTransitionStartInput>(
+        AGENT_START_PROVIDER_TRANSITION_METHOD,
+        request
+      )
+      .then((value) => {
+        const operation = parseAgentProviderTransitionOperation(value)
+        validateProviderTransitionResponseIdentity(request, operation)
+        return operation
+      })
+      .catch(() => {
+        throw new Error('The model-switch check expired. Please try again.')
+      })
+  }
+
+  getProviderTransitionStatus(
+    input: AgentProviderTransitionStatusInput
+  ): Promise<AgentProviderTransitionStatusOutput> {
+    const request = parseAgentProviderTransitionStatusInput(input)
+    return this.rpc
+      .request<unknown, AgentProviderTransitionStatusInput>(
+        AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentProviderTransitionStatusOutput(value)
+        if (
+          output.operations.some(
+            (operation) =>
+              operation.conversationId !== request.conversationId ||
+              (request.operationId !== undefined && operation.operationId !== request.operationId)
+          )
+        ) {
+          throw new Error('Invalid Provider transition status response identity')
+        }
+        return output
+      })
+      .catch(() => {
+        throw new Error('Unable to restore the model-switch status. Please try again.')
+      })
+  }
+
+  onProviderTransition(handler: (event: AgentProviderTransitionNotification) => void): () => void {
+    return this.rpc.onNotification(AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseAgentProviderTransitionNotification(params))
+      } catch {
+        // Do not echo rejected transition payloads: they may contain future private fields.
+        console.warn('Ignored invalid Provider transition notification')
+      }
+    })
   }
 
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {

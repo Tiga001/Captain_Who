@@ -29,6 +29,18 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
             "getContextWindowSnapshot",
             AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
         ),
+        (
+            "preflightProviderTransition",
+            AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
+        ),
+        (
+            "startProviderTransition",
+            AGENT_START_PROVIDER_TRANSITION_METHOD,
+        ),
+        (
+            "getProviderTransitionStatus",
+            AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
+        ),
         ("listCommandSessions", AGENT_COMMAND_SESSIONS_LIST_METHOD),
         ("getCommandSession", AGENT_COMMAND_SESSIONS_GET_METHOD),
         ("listPendingActions", AGENT_LIST_PENDING_ACTIONS_METHOD),
@@ -40,6 +52,10 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
         ("readFileDraft", AGENT_READ_FILE_DRAFT_METHOD),
         ("getFileWriteDiff", AGENT_GET_FILE_WRITE_DIFF_METHOD),
         ("eventNotification", AGENT_EVENT_NOTIFICATION_METHOD),
+        (
+            "providerTransitionNotification",
+            AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD,
+        ),
     ] {
         assert_eq!(
             methods[key], expected,

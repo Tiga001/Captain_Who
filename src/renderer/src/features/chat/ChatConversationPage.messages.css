@@ -104,6 +104,25 @@
   flex: none;
 }
 
+.conversation-model-transition[data-status='running'] button,
+.conversation-model-transition[data-status='completed'] button {
+  color: var(--mc-color-text-muted);
+}
+
+.conversation-model-transition[data-status='failed'] button {
+  color: var(--mc-color-text-accent);
+}
+
+.conversation-model-transition__spinner {
+  animation: conversation-model-transition-spin 1s linear infinite;
+}
+
+@keyframes conversation-model-transition-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .chat-message {
   position: relative;
   display: grid;

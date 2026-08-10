@@ -1,5 +1,9 @@
 import { BrowserWindow } from 'electron'
-import { captureHostInvocation, HOST_CHANNELS } from '@mycopilot/host-api'
+import {
+  captureHostInvocation,
+  HOST_CHANNELS,
+  type HostInvocationResult
+} from '@mycopilot/host-api'
 import type { CoreServer } from '../core/coreServer'
 import type { TrustedIpcMain } from './trustedIpc'
 
@@ -12,6 +16,32 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     }
   })
 
+  coreServer.onProviderTransition((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.providerTransition, event)
+      }
+    }
+  })
+
+  ipcMain.handle(HOST_CHANNELS.agent.preflightProviderTransition, (_event, input) =>
+    captureProviderTransitionInvocation(
+      () => coreServer.preflightProviderTransition(input),
+      'Unable to check this model switch. Please try again.'
+    )
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.startProviderTransition, (_event, input) =>
+    captureProviderTransitionInvocation(
+      () => coreServer.startProviderTransition(input),
+      'The model-switch check expired. Please try again.'
+    )
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.getProviderTransitionStatus, (_event, input) =>
+    captureProviderTransitionInvocation(
+      () => coreServer.getProviderTransitionStatus(input),
+      'Unable to restore the model-switch status. Please try again.'
+    )
+  )
   ipcMain.handle(HOST_CHANNELS.agent.startConversationTurn, (_event, input) =>
     captureHostInvocation(() => coreServer.startConversationTurn(input))
   )
@@ -48,4 +78,20 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.getFileWriteDiff, (_event, input) =>
     coreServer.getFileWriteDiff(input)
   )
+}
+
+/**
+ * Provider-transition failures must never forward arbitrary Core data or diagnostics to Renderer.
+ * Typed asynchronous failures travel through the strictly parsed operation notification instead.
+ */
+async function captureProviderTransitionInvocation<T>(
+  operation: () => Promise<T>,
+  safeErrorMessage: string
+): Promise<HostInvocationResult<T>> {
+  const result = await captureHostInvocation(operation)
+  if (result.ok) return result
+  return {
+    ok: false,
+    error: { message: safeErrorMessage }
+  }
 }

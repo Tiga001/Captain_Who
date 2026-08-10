@@ -19,6 +19,18 @@ pub(crate) fn handle_request(
             request.id,
             request.params,
         ),
+        AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD => {
+            handle_agent_preflight_provider_transition(agent_service, request.id, request.params)
+        }
+        AGENT_START_PROVIDER_TRANSITION_METHOD => handle_agent_start_provider_transition(
+            agent_service,
+            notification_tx,
+            request.id,
+            request.params,
+        ),
+        AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD => {
+            handle_agent_get_provider_transition_status(agent_service, request.id, request.params)
+        }
         AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD => {
             let input = match parse_params::<agent::AgentContextWindowSnapshotInput>(request.params)
             {

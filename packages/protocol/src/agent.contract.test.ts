@@ -21,6 +21,12 @@ import {
   type AgentToolIdentity,
   type ConversationTurnTraceItem
 } from './agent'
+import {
+  AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
+  AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
+  AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD,
+  AGENT_START_PROVIDER_TRANSITION_METHOD
+} from './providerTransition'
 
 const fixture = JSON.parse(
   readFileSync(resolve(process.cwd(), 'packages/protocol/fixtures/agent-contract-v1.json'), 'utf8')
@@ -158,6 +164,10 @@ describe('Agent cross-language golden contract', () => {
       cancelRun: AGENT_CANCEL_RUN_METHOD,
       steerRun: AGENT_STEER_RUN_METHOD,
       startConversationTurn: AGENT_START_CONVERSATION_TURN_METHOD,
+      preflightProviderTransition: AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
+      startProviderTransition: AGENT_START_PROVIDER_TRANSITION_METHOD,
+      getProviderTransitionStatus: AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD,
+      providerTransitionNotification: AGENT_PROVIDER_TRANSITION_NOTIFICATION_METHOD,
       getContextWindowSnapshot: AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
       listCommandSessions: AGENT_COMMAND_SESSIONS_LIST_METHOD,
       getCommandSession: AGENT_COMMAND_SESSIONS_GET_METHOD,

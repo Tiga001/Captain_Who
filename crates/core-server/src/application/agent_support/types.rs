@@ -184,6 +184,114 @@ fn context_window_indicator_enabled_by_default() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentProviderTransitionPreflightInput {
+    pub conversation_id: String,
+    pub target_model_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderTransitionDecision {
+    Compatible,
+    RequiresCompaction,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderTransitionReason {
+    SameProtocol,
+    NoIncompatibleHistory,
+    ApiProviderChanged,
+    ProviderProtocolChanged,
+    ActiveRun,
+    PendingApproval,
+    UnsupportedTarget,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderTransitionPreflightOutput {
+    pub conversation_id: String,
+    pub target_model_id: String,
+    pub decision: AgentProviderTransitionDecision,
+    pub reason: AgentProviderTransitionReason,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transition_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentProviderTransitionStartInput {
+    pub conversation_id: String,
+    pub target_model_id: String,
+    pub transition_token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentProviderTransitionGetStatusInput {
+    pub conversation_id: String,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderTransitionOperationStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProviderTransitionRecovery {
+    Retry,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderTransitionOperationError {
+    pub code: String,
+    pub message: String,
+    pub recovery: AgentProviderTransitionRecovery,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderTransitionOperation {
+    pub schema_version: u32,
+    pub operation_id: String,
+    pub conversation_id: String,
+    pub target_model_id: String,
+    pub status: AgentProviderTransitionOperationStatus,
+    pub started_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_updated_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_through_message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<AgentProviderTransitionOperationError>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderTransitionGetStatusOutput {
+    pub operations: Vec<AgentProviderTransitionOperation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextWindowSnapshotInput {
     pub conversation_id: Option<String>,
@@ -223,6 +331,7 @@ pub struct AgentConversationTurnOutput {
 pub struct AgentServiceError {
     message: String,
     skill_activation: Option<Box<SkillActivationErrorData>>,
+    data: Option<Value>,
 }
 
 impl AgentServiceError {
@@ -233,6 +342,18 @@ impl AgentServiceError {
     pub fn skill_activation(&self) -> Option<&SkillActivationErrorData> {
         self.skill_activation.as_deref()
     }
+
+    pub fn data(&self) -> Option<&Value> {
+        self.data.as_ref()
+    }
+
+    pub(crate) fn structured(message: impl Into<String>, data: Value) -> Self {
+        Self {
+            message: message.into(),
+            skill_activation: None,
+            data: Some(data),
+        }
+    }
 }
 
 impl From<String> for AgentServiceError {
@@ -240,6 +361,7 @@ impl From<String> for AgentServiceError {
         Self {
             message,
             skill_activation: None,
+            data: None,
         }
     }
 }
@@ -250,6 +372,7 @@ impl From<SkillActivationFailure> for AgentServiceError {
         Self {
             message,
             skill_activation: Some(failure.into_data()),
+            data: None,
         }
     }
 }

@@ -7,9 +7,10 @@ import { render } from 'vitest-browser-react'
 import '../../styles/global.css'
 import '../../features/chat/components/ChatComposer.css'
 
-const { draftChangeSpy, listSkillsSpy, submitSpy } = vi.hoisted(() => ({
+const { draftChangeSpy, listSkillsSpy, modelChangeSpy, submitSpy } = vi.hoisted(() => ({
   draftChangeSpy: vi.fn(),
   listSkillsSpy: vi.fn(),
+  modelChangeSpy: vi.fn(),
   submitSpy: vi.fn()
 }))
 
@@ -181,12 +182,18 @@ type ChatComposerProps = ComponentProps<typeof ChatComposer>
 function TestComposer({
   initialDraft = createComposerDraft({ modelId: 'model-1', projectId: 'project-a' }),
   isGenerating = false,
+  isModelTransitionRunning = false,
+  onModelChangeRequested,
+  onSubmitMessage = submitSpy,
   onGuideQueuedMessage,
   skillCatalogRefreshToken = 0,
   showProjectSelector = false
 }: {
   initialDraft?: ChatComposerProps['draft']
   isGenerating?: boolean
+  isModelTransitionRunning?: boolean
+  onModelChangeRequested?: ChatComposerProps['onModelChangeRequested']
+  onSubmitMessage?: ChatComposerProps['onSubmitMessage']
   onGuideQueuedMessage?: ChatComposerProps['onGuideQueuedMessage']
   skillCatalogRefreshToken?: number
   showProjectSelector?: boolean
@@ -198,11 +205,13 @@ function TestComposer({
         canGuideQueuedMessages={isGenerating}
         draft={draft}
         isGenerating={isGenerating}
+        isModelTransitionRunning={isModelTransitionRunning}
         onDraftChange={(nextDraft) => {
           draftChangeSpy(nextDraft)
           setDraft(nextDraft)
         }}
-        onSubmitMessage={submitSpy}
+        onSubmitMessage={onSubmitMessage}
+        onModelChangeRequested={onModelChangeRequested}
         onGuideQueuedMessage={onGuideQueuedMessage}
         skillCatalogRefreshToken={skillCatalogRefreshToken}
         showProjectSelector={showProjectSelector}
@@ -214,6 +223,7 @@ function TestComposer({
 beforeEach(() => {
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
+  modelChangeSpy.mockReset()
   listSkillsSpy.mockImplementation(async (projectId: string | null) => {
     if (projectId === null) {
       return catalog([bundledDocumentsSkill, bundledImageGenerationSkill, installedAuditorSkill])
@@ -237,6 +247,69 @@ describe('ChatComposer model picker', () => {
     expect(menu.clientHeight).toBe(198)
     expect(menu.scrollHeight).toBeGreaterThan(menu.clientHeight)
     expect(options[0]?.getBoundingClientRect().height).toBeLessThanOrEqual(36)
+  })
+
+  it('delegates a model change without optimistically replacing the draft model', async () => {
+    const screen = await render(<TestComposer onModelChangeRequested={modelChangeSpy} />)
+
+    await screen.getByRole('button', { name: 'chat.selectModel' }).click()
+    await screen.getByRole('option', { name: /Model 2/ }).click()
+
+    expect(modelChangeSpy).toHaveBeenCalledWith('model-2')
+    expect(draftChangeSpy).not.toHaveBeenCalled()
+    await expect
+      .element(screen.getByRole('button', { name: 'chat.selectModel' }))
+      .toHaveTextContent('Model One')
+  })
+
+  it('locks text input and model selection while history is being compacted', async () => {
+    const screen = await render(<TestComposer isModelTransitionRunning />)
+
+    await expect.element(screen.getByRole('textbox', { name: 'chat.inputAria' })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: 'chat.selectModel' })).toBeDisabled()
+    await expect.element(screen.getByRole('button', { name: 'chat.send' })).toBeDisabled()
+  })
+
+  it('retains composer input when the submit guard defers message creation', async () => {
+    const deferredSubmit = vi.fn().mockResolvedValue(false)
+    const deferredDraft = createComposerDraft({
+      attachments: [
+        {
+          id: 'attachment-deferred',
+          kind: 'file',
+          name: 'keep.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 4,
+          encoding: 'base64',
+          data: 'a2VlcA=='
+        }
+      ],
+      modelId: 'model-1',
+      permissionMode: 'custom',
+      projectId: 'project-a',
+      skills: [{ id: auditorSkill.id, revision: auditorSkill.revision }]
+    })
+    const screen = await render(
+      <TestComposer initialDraft={deferredDraft} onSubmitMessage={deferredSubmit} />
+    )
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+
+    await input.fill('keep this message')
+    await screen.getByRole('button', { name: 'chat.send' }).click()
+
+    await expect.poll(() => deferredSubmit.mock.calls.length).toBe(1)
+    expect(deferredSubmit.mock.calls[0]?.[1]).toMatchObject({
+      attachments: deferredDraft.attachments,
+      modelId: 'model-1',
+      permissionMode: 'custom',
+      projectId: 'project-a',
+      skills: deferredDraft.skills
+    })
+    await expect.element(input).toHaveValue('keep this message')
+    await expect.element(screen.getByText('keep.txt')).toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: /^chat\.removeSkill Repository auditor/ }))
+      .toBeVisible()
   })
 })
 

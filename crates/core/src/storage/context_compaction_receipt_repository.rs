@@ -102,7 +102,7 @@ pub fn get_receipt(
     row.map(decode_receipt).transpose()
 }
 
-pub fn list_receipts(
+pub fn list_provider_transition_receipts(
     connection: &Connection,
     conversation_id: &str,
     operation_id: Option<&str>,
@@ -135,6 +135,7 @@ pub fn list_receipts(
             "SELECT status, stage, receipt_json
              FROM context_compaction_receipts
              WHERE conversation_id = ?1
+               AND operation_id LIKE 'provider-transition-%'
              ORDER BY started_at DESC, operation_id DESC
              LIMIT ?2",
         )?;
@@ -150,6 +151,25 @@ pub fn list_receipts(
         rows
     };
     rows.into_iter().map(decode_receipt).collect()
+}
+
+pub fn provider_transition_failed_attempt_count(
+    connection: &Connection,
+    conversation_id: &str,
+    target_model_id: &str,
+) -> Result<u64, ContextCompactionReceiptRepositoryError> {
+    connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM context_compaction_receipts
+             WHERE conversation_id = ?1
+               AND model = ?2
+               AND operation_id LIKE 'provider-transition-%'
+               AND status IN ('failed', 'cancelled', 'interrupted')",
+            params![conversation_id, target_model_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(Into::into)
 }
 
 pub fn mark_in_progress_receipts_interrupted(
@@ -491,6 +511,33 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn provider_transition_failed_attempt_count_is_unambiguous_with_equal_timestamps() {
+        let mut connection = setup();
+        for (operation_id, run_id) in [
+            ("provider-transition-ffff", "transition-run-1"),
+            ("provider-transition-0000", "transition-run-2"),
+        ] {
+            let mut receipt = planned_receipt();
+            receipt.operation_id = operation_id.to_string();
+            receipt.run_id = run_id.to_string();
+            receipt.model = "target-model".to_string();
+            receipt.started_at = 5;
+            receipt.updated_at = 5;
+            record_receipt(&mut connection, &receipt, None).unwrap();
+            receipt
+                .complete_error(&crate::AgentError::new("failed"), None, 5)
+                .unwrap();
+            record_receipt(&mut connection, &receipt, None).unwrap();
+        }
+
+        assert_eq!(
+            provider_transition_failed_attempt_count(&connection, "conversation-1", "target-model")
+                .unwrap(),
+            2
         );
     }
 

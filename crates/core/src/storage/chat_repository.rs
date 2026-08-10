@@ -324,6 +324,11 @@ pub fn save_conversation_meta(
             pinned_at = excluded.pinned_at,
             archived_at = excluded.archived_at,
             unread_at = excluded.unread_at
+        WHERE excluded.updated_at > conversations.updated_at
+           OR (
+                excluded.updated_at = conversations.updated_at
+                AND excluded.model_id IS conversations.model_id
+           )
         ",
         params![
             &conversation.id,
