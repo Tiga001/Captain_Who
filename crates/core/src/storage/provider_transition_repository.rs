@@ -10,16 +10,22 @@ pub struct ProviderTransitionTerminalRecord {
     pub operation_id: String,
     pub conversation_id: String,
     pub target_model_id: String,
+    /// Immutable UI labels only. They are never used for routing or model mutation.
+    pub source_model_display_name: Option<String>,
+    pub target_model_display_name: Option<String>,
     pub started_at: i64,
     pub completed_at: i64,
     pub conversation_updated_at: i64,
 }
 
 impl ProviderTransitionTerminalRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         operation_id: impl Into<String>,
         conversation_id: impl Into<String>,
         target_model_id: impl Into<String>,
+        source_model_display_name: Option<String>,
+        target_model_display_name: Option<String>,
         started_at: i64,
         completed_at: i64,
         conversation_updated_at: i64,
@@ -29,6 +35,8 @@ impl ProviderTransitionTerminalRecord {
             operation_id: operation_id.into(),
             conversation_id: conversation_id.into(),
             target_model_id: target_model_id.into(),
+            source_model_display_name,
+            target_model_display_name,
             started_at,
             completed_at,
             conversation_updated_at,
@@ -53,6 +61,22 @@ impl ProviderTransitionTerminalRecord {
         }
         validate_identity("conversation_id", &self.conversation_id, 512)?;
         validate_identity("target_model_id", &self.target_model_id, 512)?;
+        match (
+            self.source_model_display_name.as_deref(),
+            self.target_model_display_name.as_deref(),
+        ) {
+            (Some(source), Some(target)) => {
+                validate_identity("source_model_display_name", source, 512)?;
+                validate_identity("target_model_display_name", target, 512)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(ProviderTransitionRepositoryError::Invalid(
+                    "Provider transition display names must either both be present or both be absent."
+                        .to_string(),
+                ));
+            }
+        }
         if self.started_at < 0
             || self.completed_at < self.started_at
             || self.conversation_updated_at < self.started_at
@@ -168,6 +192,7 @@ pub fn get_terminal_record(
     connection
         .query_row(
             "SELECT schema_version, operation_id, conversation_id, target_model_id,
+                    source_model_display_name, target_model_display_name,
                     started_at, completed_at, conversation_updated_at
              FROM provider_transition_terminal_records
              WHERE operation_id = ?1",
@@ -188,6 +213,7 @@ pub fn list_terminal_records(
     let bounded_limit = i64::try_from(limit.clamp(1, 100)).unwrap_or(100);
     let mut statement = connection.prepare(
         "SELECT schema_version, operation_id, conversation_id, target_model_id,
+                source_model_display_name, target_model_display_name,
                 started_at, completed_at, conversation_updated_at
          FROM provider_transition_terminal_records
          WHERE conversation_id = ?1
@@ -271,13 +297,16 @@ fn insert_terminal_record(
     transaction.execute(
         "INSERT INTO provider_transition_terminal_records (
             schema_version, operation_id, conversation_id, target_model_id,
+            source_model_display_name, target_model_display_name,
             started_at, completed_at, conversation_updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             record.schema_version,
             &record.operation_id,
             &record.conversation_id,
             &record.target_model_id,
+            &record.source_model_display_name,
+            &record.target_model_display_name,
             record.started_at,
             record.completed_at,
             record.conversation_updated_at,
@@ -294,9 +323,11 @@ fn decode_terminal_record(
         operation_id: row.get(1)?,
         conversation_id: row.get(2)?,
         target_model_id: row.get(3)?,
-        started_at: row.get(4)?,
-        completed_at: row.get(5)?,
-        conversation_updated_at: row.get(6)?,
+        source_model_display_name: row.get(4)?,
+        target_model_display_name: row.get(5)?,
+        started_at: row.get(6)?,
+        completed_at: row.get(7)?,
+        conversation_updated_at: row.get(8)?,
     })
 }
 
@@ -356,6 +387,8 @@ mod tests {
             operation_id,
             "conversation-1",
             "target-model",
+            Some("Source".to_string()),
+            Some("Target".to_string()),
             10,
             12,
             12,

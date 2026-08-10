@@ -211,6 +211,14 @@ pub struct ContextCompactionReceipt {
     pub request_index: u64,
     pub attempt_index: u64,
     pub model: String,
+    /// Immutable, presentation-only model labels for Provider transition receipts.
+    ///
+    /// These snapshots never participate in routing, compare-and-set checks, or model mutation.
+    /// Older receipts and ordinary capacity compactions omit them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_transition_source_model_display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_transition_target_model_display_name: Option<String>,
     pub api_style: AgentApiStyle,
     pub status: ContextCompactionReceiptStatus,
     pub stage: ContextCompactionReceiptStage,
@@ -244,6 +252,8 @@ impl ContextCompactionReceipt {
         conversation_id: impl Into<String>,
         assistant_message_id: impl Into<String>,
         model: impl Into<String>,
+        source_model_display_name: Option<String>,
+        target_model_display_name: Option<String>,
         api_style: AgentApiStyle,
         prefix: &ContextCompactionPrefix,
         source_input_tokens: u64,
@@ -290,6 +300,8 @@ impl ContextCompactionReceipt {
             request_index: 1,
             attempt_index: 1,
             model: model.into(),
+            provider_transition_source_model_display_name: source_model_display_name,
+            provider_transition_target_model_display_name: target_model_display_name,
             api_style,
             status: ContextCompactionReceiptStatus::InProgress,
             stage: ContextCompactionReceiptStage::Planned,
@@ -329,6 +341,8 @@ impl ContextCompactionReceipt {
             request_index,
             attempt_index,
             model: model.into(),
+            provider_transition_source_model_display_name: None,
+            provider_transition_target_model_display_name: None,
             api_style,
             status: ContextCompactionReceiptStatus::InProgress,
             stage: ContextCompactionReceiptStage::Planned,
@@ -362,6 +376,29 @@ impl ContextCompactionReceipt {
         ] {
             if value.trim().is_empty() {
                 return Err(AgentError::new(format!("压缩 receipt 的{label}不能为空。")));
+            }
+        }
+        match (
+            self.provider_transition_source_model_display_name
+                .as_deref(),
+            self.provider_transition_target_model_display_name
+                .as_deref(),
+        ) {
+            (Some(source), Some(target)) => {
+                for (label, value) in [("源模型显示名", source), ("目标模型显示名", target)]
+                {
+                    if value.trim().is_empty() || value.trim() != value || value.len() > 512 {
+                        return Err(AgentError::new(format!(
+                            "压缩 receipt 的{label}必须是长度不超过 512 字节的非空文本。"
+                        )));
+                    }
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(AgentError::new(
+                    "压缩 receipt 的 Provider transition 模型显示名必须成对出现。",
+                ));
             }
         }
         if self.request_index == 0 || self.attempt_index == 0 {

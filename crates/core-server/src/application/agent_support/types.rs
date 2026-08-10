@@ -269,6 +269,11 @@ pub struct AgentProviderTransitionOperation {
     pub operation_id: String,
     pub conversation_id: String,
     pub target_model_id: String,
+    /// Immutable presentation snapshots only; never authoritative model identities.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_model_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_model_display_name: Option<String>,
     pub status: AgentProviderTransitionOperationStatus,
     pub started_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]

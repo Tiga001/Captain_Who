@@ -99,6 +99,9 @@ interface AgentProviderTransitionOperationBase {
   operationId: string
   conversationId: string
   targetModelId: string
+  /** Immutable presentation snapshots. Never use these labels as model identities. */
+  sourceModelDisplayName?: string
+  targetModelDisplayName?: string
   /** Safe Timeline anchor only; never a Provider cursor or continuation reference. */
   coveredThroughMessageId?: string
   startedAt: number
@@ -330,6 +333,8 @@ export function parseAgentProviderTransitionOperation(
     'operationId',
     'conversationId',
     'targetModelId',
+    'sourceModelDisplayName',
+    'targetModelDisplayName',
     'coveredThroughMessageId',
     'status',
     'startedAt',
@@ -339,6 +344,23 @@ export function parseAgentProviderTransitionOperation(
     ...(status === 'failed' ? ['error', 'completedAt'] : [])
   ]
   expectOnlyKeys(record, allowedKeys, context)
+
+  const sourceModelDisplayName = parseOptionalBoundedNonEmptyString(
+    record.sourceModelDisplayName,
+    `${context}.sourceModelDisplayName`,
+    MAX_ID_BYTES
+  )
+  const targetModelDisplayName = parseOptionalBoundedNonEmptyString(
+    record.targetModelDisplayName,
+    `${context}.targetModelDisplayName`,
+    MAX_ID_BYTES
+  )
+  if ((sourceModelDisplayName === undefined) !== (targetModelDisplayName === undefined)) {
+    throw invalidProtocolValue(
+      context,
+      'sourceModelDisplayName and targetModelDisplayName must either both be present or both be absent'
+    )
+  }
 
   const common: AgentProviderTransitionOperationBase = {
     schemaVersion: AGENT_PROVIDER_TRANSITION_SCHEMA_VERSION,
@@ -357,6 +379,9 @@ export function parseAgentProviderTransitionOperation(
       `${context}.targetModelId`,
       MAX_ID_BYTES
     ),
+    ...(sourceModelDisplayName === undefined
+      ? {}
+      : { sourceModelDisplayName, targetModelDisplayName: targetModelDisplayName! }),
     ...(record.coveredThroughMessageId === undefined
       ? {}
       : {

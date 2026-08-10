@@ -63,7 +63,7 @@
   gap: 14px;
 }
 
-.conversation-continuation-divider > span {
+.conversation-continuation-divider > span[aria-hidden='true'] {
   height: 1px;
   background: var(--mc-color-border-default);
 }
@@ -113,14 +113,8 @@
   color: var(--mc-color-text-accent);
 }
 
-.conversation-model-transition__spinner {
-  animation: conversation-model-transition-spin 1s linear infinite;
-}
-
-@keyframes conversation-model-transition-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.conversation-model-transition__tooltip-anchor {
+  min-width: 0;
 }
 
 .chat-message {

@@ -3130,6 +3130,18 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
                 AND length(CAST(target_model_id AS BLOB)) BETWEEN 1 AND 512
                 AND target_model_id = trim(target_model_id)
             ),
+            source_model_display_name TEXT CHECK (
+                source_model_display_name IS NULL OR (
+                    length(CAST(source_model_display_name AS BLOB)) BETWEEN 1 AND 512
+                    AND source_model_display_name = trim(source_model_display_name)
+                )
+            ),
+            target_model_display_name TEXT CHECK (
+                target_model_display_name IS NULL OR (
+                    length(CAST(target_model_display_name AS BLOB)) BETWEEN 1 AND 512
+                    AND target_model_display_name = trim(target_model_display_name)
+                )
+            ),
             started_at INTEGER NOT NULL CHECK (started_at >= 0),
             completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
             conversation_updated_at INTEGER NOT NULL CHECK (
@@ -3223,6 +3235,18 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
 
     upgrade_context_compaction_model_replacement_schema(connection)?;
+    add_column_if_missing(
+        connection,
+        "provider_transition_terminal_records",
+        "source_model_display_name",
+        "TEXT",
+    )?;
+    add_column_if_missing(
+        connection,
+        "provider_transition_terminal_records",
+        "target_model_display_name",
+        "TEXT",
+    )?;
 
     connection.execute(
         "DELETE FROM context_compaction_summaries WHERE schema_version != ?1",

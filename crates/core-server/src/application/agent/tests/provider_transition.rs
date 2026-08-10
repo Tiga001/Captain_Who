@@ -371,6 +371,15 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
         running.status,
         AgentProviderTransitionOperationStatus::Running
     );
+    assert_eq!(
+        running.source_model_display_name.as_deref(),
+        Some("Model 1")
+    );
+    assert_eq!(
+        running.target_model_display_name.as_deref(),
+        Some("Model 2")
+    );
+    let operation_id = running.operation_id.clone();
 
     let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -388,6 +397,8 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
         Some("model-2")
     );
     assert!(completed.get("summaryId").and_then(Value::as_str).is_some());
+    assert_eq!(completed["sourceModelDisplayName"], "Model 1");
+    assert_eq!(completed["targetModelDisplayName"], "Model 2");
 
     let stored = storage.load_conversation(conversation_id).unwrap().unwrap();
     assert_eq!(stored.model_id.as_deref(), Some("model-2"));
@@ -407,6 +418,24 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
         })
         .unwrap();
     assert_eq!(after.decision, AgentProviderTransitionDecision::Compatible);
+
+    drop(service);
+    let restarted = AgentService::new(storage.clone());
+    let recovered = restarted
+        .get_provider_transition_status(AgentProviderTransitionGetStatusInput {
+            conversation_id: conversation_id.to_string(),
+            operation_id: Some(operation_id),
+        })
+        .unwrap();
+    assert_eq!(recovered.operations.len(), 1);
+    assert_eq!(
+        recovered.operations[0].source_model_display_name.as_deref(),
+        Some("Model 1")
+    );
+    assert_eq!(
+        recovered.operations[0].target_model_display_name.as_deref(),
+        Some("Model 2")
+    );
 }
 
 #[tokio::test]

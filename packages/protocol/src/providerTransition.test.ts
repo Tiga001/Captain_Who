@@ -13,6 +13,8 @@ const runningOperation = {
   operationId: 'provider-transition-1',
   conversationId: 'conversation-1',
   targetModelId: 'generic-model',
+  sourceModelDisplayName: '旧模型',
+  targetModelDisplayName: '新模型',
   coveredThroughMessageId: 'assistant-1',
   status: 'running',
   startedAt: 10
@@ -130,6 +132,13 @@ describe('Provider transition protocol', () => {
   it('parses running and completed operations with only a safe Timeline anchor', () => {
     expect(parseAgentProviderTransitionOperation(runningOperation)).toEqual(runningOperation)
     expect(parseAgentProviderTransitionNotification(runningOperation)).toEqual(runningOperation)
+
+    expect(() =>
+      parseAgentProviderTransitionOperation({
+        ...runningOperation,
+        targetModelDisplayName: undefined
+      })
+    ).toThrow(/sourceModelDisplayName and targetModelDisplayName/)
 
     const completed = {
       ...runningOperation,

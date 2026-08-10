@@ -14,8 +14,9 @@ const translations: Record<string, string> = {
   'chat.modelTransition.protocolTitle': '切换兼容规则',
   'chat.modelTransition.protocolDescription': '兼容规则不同，新模型需要先压缩历史完成适配。',
   'chat.modelTransition.running': '正在压缩历史并切换模型…',
-  'chat.modelTransition.succeeded': '历史已压缩',
-  'chat.modelTransition.failed': '历史压缩失败 · 重试'
+  'chat.modelTransition.succeeded': '切换API厂商，历史已压缩',
+  'chat.modelTransition.failed': '历史压缩失败 · 重试',
+  'chat.modelTransition.modelChangeTooltip': '从 {source} 切换到 {target}'
 }
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
@@ -92,10 +93,49 @@ describe('provider transition presentation', () => {
     const divider = screen.getByTestId('model-transition-divider').element()
     expect(divider.classList.contains('conversation-continuation-divider')).toBe(true)
     expect(divider.closest('.chat-message')).toBeNull()
-    await expect.element(screen.getByText('正在压缩历史并切换模型…')).toBeVisible()
+    const runningLabel = screen.getByText('正在压缩历史并切换模型…')
+    await expect.element(runningLabel).toBeVisible()
+    expect(runningLabel.element()).toHaveClass('agent-running-text')
     await expect
       .element(screen.getByRole('button', { name: '正在压缩历史并切换模型…' }))
       .toBeDisabled()
+    expect(divider.querySelector('.lucide-fold-vertical')).not.toBeNull()
+  })
+
+  it('uses the compaction icon and shows the durable model transition on hover', async () => {
+    const screen = await render(
+      <ConversationModelTransitionDivider
+        operation={{
+          schemaVersion: 1,
+          status: 'completed',
+          conversationId: 'conversation-1',
+          sourceModelDisplayName: 'GPT-5.2',
+          targetModelDisplayName: 'DeepSeek V4',
+          targetModelId: 'deepseek-model',
+          operationId: 'operation-1',
+          coveredThroughMessageId: 'assistant-1',
+          startedAt: 10,
+          completedAt: 20,
+          conversationUpdatedAt: 21,
+          modelId: 'deepseek-model',
+          summaryId: 'summary-1'
+        }}
+      />
+    )
+
+    const divider = screen.getByTestId('model-transition-divider').element()
+    expect(divider.querySelector('.lucide-fold-vertical')).not.toBeNull()
+    const completedLabel = screen.getByText('切换API厂商，历史已压缩')
+    await expect.element(completedLabel).toBeVisible()
+    expect(completedLabel.element()).not.toHaveClass('agent-running-text')
+
+    const tooltipAnchor = divider.querySelector('.conversation-model-transition__tooltip-anchor')
+    expect(tooltipAnchor).not.toBeNull()
+    if (tooltipAnchor) await userEvent.hover(tooltipAnchor)
+
+    await expect
+      .element(screen.getByRole('tooltip'))
+      .toHaveTextContent('从 GPT-5.2 切换到 DeepSeek V4')
   })
 
   it('offers retry only for a failed transition', async () => {
@@ -121,6 +161,7 @@ describe('provider transition presentation', () => {
     )
 
     await userEvent.click(screen.getByRole('button', { name: '历史压缩失败 · 重试' }))
+    expect(screen.getByText('历史压缩失败 · 重试').element()).not.toHaveClass('agent-running-text')
     expect(retrySpy).toHaveBeenCalledTimes(1)
   })
 })

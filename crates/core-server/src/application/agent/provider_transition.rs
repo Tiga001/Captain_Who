@@ -36,6 +36,8 @@ struct PreparedProviderTransition {
     output: AgentProviderTransitionPreflightOutput,
     conversation: ChatConversationRecord,
     target: ProviderTransitionTarget,
+    source_model_display_name: Option<String>,
+    target_model_display_name: Option<String>,
     prefix: Option<mycopilot_core::ContextCompactionPrefix>,
     summary_owner_assistant_message_id: Option<String>,
 }
@@ -186,6 +188,8 @@ impl AgentService {
                     &operation_id,
                     &prepared.conversation.id,
                     &target_model_id,
+                    prepared.source_model_display_name.as_deref(),
+                    prepared.target_model_display_name.as_deref(),
                     started_at,
                     started_at,
                     minimum_updated_at,
@@ -234,6 +238,8 @@ impl AgentService {
             prepared.conversation.id.clone(),
             summary_owner_assistant_message_id.to_string(),
             prepared.target.model.id.clone(),
+            prepared.source_model_display_name.clone(),
+            prepared.target_model_display_name.clone(),
             prepared.target.api_style,
             prefix,
             source_input_tokens,
@@ -266,6 +272,8 @@ impl AgentService {
             operation_id: operation_id.clone(),
             conversation_id: prepared.conversation.id.clone(),
             target_model_id: target_model_id.clone(),
+            source_model_display_name: prepared.source_model_display_name.clone(),
+            target_model_display_name: prepared.target_model_display_name.clone(),
             status: AgentProviderTransitionOperationStatus::Running,
             started_at,
             completed_at: None,
@@ -476,6 +484,24 @@ impl AgentService {
                 ));
             }
         };
+        let source_model_display_name = conversation.model_id.as_deref().map(|source_model_id| {
+            settings_snapshot
+                .settings
+                .models
+                .iter()
+                .find(|model| model.id == source_model_id)
+                .map(|model| model.display_name.trim())
+                .filter(|display_name| !display_name.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| source_model_id.to_string())
+        });
+        let target_model_display_name = source_model_display_name.as_ref().map(|_| {
+            if target.model.display_name.trim().is_empty() {
+                target.model.id.clone()
+            } else {
+                target.model.display_name.trim().to_string()
+            }
+        });
 
         let (preview_input, traces) = self
             .persisted_conversation_context_state(&target.generator_input, conversation_id)
@@ -628,6 +654,8 @@ impl AgentService {
                 output,
                 conversation,
                 target,
+                source_model_display_name,
+                target_model_display_name,
                 prefix,
                 summary_owner_assistant_message_id,
             },
@@ -663,6 +691,12 @@ impl AgentService {
                     operation_id: operation_id.clone(),
                     conversation_id: conversation.id.clone(),
                     target_model_id: target_model_id.clone(),
+                    source_model_display_name: receipt
+                        .provider_transition_source_model_display_name
+                        .clone(),
+                    target_model_display_name: receipt
+                        .provider_transition_target_model_display_name
+                        .clone(),
                     status: AgentProviderTransitionOperationStatus::Completed,
                     started_at: receipt.started_at,
                     completed_at: Some(summary.created_at),
@@ -680,6 +714,12 @@ impl AgentService {
                 operation_id: operation_id.clone(),
                 conversation_id: conversation.id.clone(),
                 target_model_id,
+                source_model_display_name: receipt
+                    .provider_transition_source_model_display_name
+                    .clone(),
+                target_model_display_name: receipt
+                    .provider_transition_target_model_display_name
+                    .clone(),
                 status: AgentProviderTransitionOperationStatus::Failed,
                 started_at: receipt.started_at,
                 completed_at: Some(now_ms()),
@@ -1146,6 +1186,8 @@ fn provider_transition_operation_from_terminal_record(
         operation_id: record.operation_id.clone(),
         conversation_id: record.conversation_id.clone(),
         target_model_id: record.target_model_id.clone(),
+        source_model_display_name: record.source_model_display_name.clone(),
+        target_model_display_name: record.target_model_display_name.clone(),
         status: AgentProviderTransitionOperationStatus::Completed,
         started_at: record.started_at,
         completed_at: Some(record.completed_at),
@@ -1208,6 +1250,12 @@ fn provider_transition_operation_from_receipt(
         operation_id: receipt.operation_id.clone(),
         conversation_id: receipt.conversation_id.clone(),
         target_model_id: receipt.model.clone(),
+        source_model_display_name: receipt
+            .provider_transition_source_model_display_name
+            .clone(),
+        target_model_display_name: receipt
+            .provider_transition_target_model_display_name
+            .clone(),
         status,
         started_at: receipt.started_at,
         completed_at: receipt.completed_at,

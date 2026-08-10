@@ -263,6 +263,10 @@ fn validate_transition(
         || existing.request_index != next.request_index
         || existing.attempt_index != next.attempt_index
         || existing.model != next.model
+        || existing.provider_transition_source_model_display_name
+            != next.provider_transition_source_model_display_name
+        || existing.provider_transition_target_model_display_name
+            != next.provider_transition_target_model_display_name
         || existing.api_style != next.api_style
         || existing.plan != next.plan
         || existing.started_at != next.started_at
@@ -433,6 +437,8 @@ mod tests {
             request_index: 1,
             attempt_index: 1,
             model: "test-model".to_string(),
+            provider_transition_source_model_display_name: None,
+            provider_transition_target_model_display_name: None,
             api_style: crate::AgentApiStyle::OpenAiCompatible,
             status: ContextCompactionReceiptStatus::InProgress,
             stage: ContextCompactionReceiptStage::Planned,

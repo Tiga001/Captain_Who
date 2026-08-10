@@ -1,6 +1,8 @@
-import { Check, LoaderCircle, RotateCcw } from 'lucide-react'
+import { FoldVertical, RotateCcw } from 'lucide-react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
+import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { formatTranslation } from '../../../config/translationFormat'
 import type { AgentProviderTransitionOperation } from '@mycopilot/protocol'
 import type { ModelTransitionConfirmation } from '../modelTransitionUiState'
 
@@ -53,13 +55,34 @@ export function ConversationModelTransitionDivider({
         : t('chat.modelTransition.failed')
 
   const icon =
-    operation.status === 'running' ? (
-      <LoaderCircle aria-hidden="true" className="conversation-model-transition__spinner" />
-    ) : operation.status === 'completed' ? (
-      <Check aria-hidden="true" />
-    ) : (
+    operation.status === 'failed' ? (
       <RotateCcw aria-hidden="true" />
+    ) : (
+      <FoldVertical aria-hidden="true" />
     )
+  const tooltip =
+    operation.sourceModelDisplayName && operation.targetModelDisplayName
+      ? formatTranslation(t, 'chat.modelTransition.modelChangeTooltip', {
+          source: operation.sourceModelDisplayName,
+          target: operation.targetModelDisplayName
+        })
+      : null
+
+  const button = (
+    <button
+      aria-label={content}
+      disabled={operation.status !== 'failed' || !onRetry}
+      onClick={() => {
+        if (operation.status === 'failed' && onRetry) void onRetry()
+      }}
+      type="button"
+    >
+      {icon}
+      <span className={operation.status === 'running' ? 'agent-running-text' : undefined}>
+        {content}
+      </span>
+    </button>
+  )
 
   return (
     <div
@@ -69,17 +92,17 @@ export function ConversationModelTransitionDivider({
       role="status"
     >
       <span aria-hidden="true" />
-      <button
-        aria-label={content}
-        disabled={operation.status !== 'failed' || !onRetry}
-        onClick={() => {
-          if (operation.status === 'failed' && onRetry) void onRetry()
-        }}
-        type="button"
-      >
-        {icon}
-        <span>{content}</span>
-      </button>
+      {tooltip ? (
+        <Tooltip
+          anchorClassName="conversation-model-transition__tooltip-anchor"
+          content={tooltip}
+          describeTrigger
+        >
+          {button}
+        </Tooltip>
+      ) : (
+        button
+      )}
       <span aria-hidden="true" />
     </div>
   )

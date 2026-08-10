@@ -748,8 +748,9 @@ export const enUSTranslations = {
   'chat.modelTransition.cancel': 'Cancel',
   'chat.modelTransition.confirm': 'Compact and switch',
   'chat.modelTransition.running': 'Compacting history and switching model…',
-  'chat.modelTransition.succeeded': 'History compacted',
+  'chat.modelTransition.succeeded': 'API provider switched, history compacted',
   'chat.modelTransition.failed': 'History compaction failed · Retry',
+  'chat.modelTransition.modelChangeTooltip': 'Switched from {source} to {target}',
   'chat.modelTransition.blockedActiveRun':
     'The current task is still running. The model cannot be switched yet.',
   'chat.modelTransition.blockedPendingApproval':
