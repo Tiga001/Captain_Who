@@ -432,7 +432,16 @@ fn wait_for_terminal_record(
     conversation_id: &str,
     session_id: &str,
 ) -> mycopilot_core::storage::agent_command_session_repository::AgentCommandSessionRecord {
-    let deadline = Instant::now() + TEST_WAIT;
+    wait_for_terminal_record_with_timeout(storage, conversation_id, session_id, TEST_WAIT)
+}
+
+fn wait_for_terminal_record_with_timeout(
+    storage: &StorageService,
+    conversation_id: &str,
+    session_id: &str,
+    wait: Duration,
+) -> mycopilot_core::storage::agent_command_session_repository::AgentCommandSessionRecord {
+    let deadline = Instant::now() + wait;
     loop {
         let record = storage
             .load_agent_command_session(conversation_id, session_id)
@@ -1175,7 +1184,7 @@ fn running_transition_failure_has_one_failed_terminal_across_host_and_storage() 
 }
 
 #[test]
-fn synchronous_archive_failure_returns_only_small_error_until_unique_archive_recovers() {
+fn synchronous_archive_failure_returns_recoverable_session_until_unique_archive_recovers() {
     let fixture = RunningFixture::new_with_initial_yield(
         "synchronous-archive-failure",
         Duration::from_secs(2),
@@ -1191,6 +1200,8 @@ fn synchronous_archive_failure_returns_only_small_error_until_unique_archive_rec
     let run_id = fixture.run_id.clone();
     let call_id = fixture.call_id.clone();
     let tracker_for_start = Arc::clone(&tracker);
+    let command = r#"awk 'BEGIN { for (i = 0; i < 20000; i++) printf "archive-retry-%05d\n", i }'"#;
+    let command_for_start = command.to_string();
     let start = thread::spawn(move || {
         start_owned_session_with_tracker(
             &registry,
@@ -1199,7 +1210,7 @@ fn synchronous_archive_failure_returns_only_small_error_until_unique_archive_rec
             &assistant_message_id,
             &run_id,
             &call_id,
-            r#"awk 'BEGIN { for (i = 0; i < 20000; i++) printf "archive-retry-%05d\n", i }'"#,
+            &command_for_start,
             Some(notifications),
             &tracker_for_start,
         )
@@ -1215,11 +1226,38 @@ fn synchronous_archive_failure_returns_only_small_error_until_unique_archive_rec
         assert!(Instant::now() < deadline, "missing command_started");
         thread::sleep(Duration::from_millis(5));
     };
-    let error = start
+    let launch = start
         .join()
         .expect("synchronous archive failure thread")
-        .unwrap_err();
-    assert!(error.contains("完整输出由后台 Session 继续持有"));
+        .expect("archive failure remains a recoverable Session launch");
+    let AgentCommandSessionLaunch::Running {
+        snapshot,
+        tool_result,
+        mut handoff_guard,
+    } = launch
+    else {
+        panic!("an unsettled terminal archive must return a recoverable Session")
+    };
+    assert_eq!(snapshot.session_id, session_id);
+    let running = tool_result.result.as_ref().expect("running receipt");
+    assert_eq!(running["status"], "running");
+    assert_eq!(running["sessionId"], session_id);
+    assert_eq!(running["continueWith"]["tool"], "command_session");
+    assert_eq!(
+        running["continueWith"]["args"],
+        json!({ "sessionId": session_id, "action": "wait" })
+    );
+    adopt_owned_session(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        &snapshot,
+        command,
+        &mut handoff_guard,
+    );
+    wait_for_settlement_attempts(&fixture.registry, 1);
     assert_eq!(fixture.registry.retained_admission_count(), 1);
     assert_eq!(fixture.registry.settlement_scheduler_stats().1, 1);
 
@@ -1247,6 +1285,262 @@ fn synchronous_archive_failure_returns_only_small_error_until_unique_archive_rec
         .unwrap()
         .expect("recovered Exact Archive descriptor");
     assert!(descriptor.total_bytes > 200_000);
+    assert_eq!(fixture.registry.retained_admission_count(), 0);
+    assert_eq!(fixture.registry.retained_live_session_count(), 0);
+    assert_eq!(fixture.registry.retained_core_session_count(), 0);
+    assert_eq!(fixture.registry.settlement_scheduler_stats().1, 0);
+    assert!(tracker
+        .active_run_ids_for_conversation(&fixture.conversation_id)
+        .is_empty());
+    assert!(tracker
+        .unsettled_effect_ids_for_conversation(&fixture.conversation_id)
+        .is_empty());
+
+    let restarted_storage = Arc::new(StorageService::open(&fixture.database_path).unwrap());
+    let restarted = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&restarted_storage),
+        CommandSessionManager::new(test_manager_config()).unwrap(),
+        INITIAL_YIELD,
+    );
+    let replay = restarted
+        .execute_command_session(
+            AgentCommandSessionExecutionRequest {
+                conversation_id: fixture.conversation_id.clone(),
+                run_id: "run-synchronous-archive-recovery-read".to_string(),
+                call_id: "call-synchronous-archive-recovery-read".to_string(),
+                session_id,
+                action: AgentCommandSessionAction::Poll,
+                wait_ms: 0,
+                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            },
+            observation_control(),
+        )
+        .unwrap();
+    assert_eq!(replay.status, AgentCommandSessionStatus::Exited);
+    let history_open = replay
+        .history_open
+        .as_deref()
+        .expect("restarted Host exposes the recovered archive route");
+    let tail = restarted_storage
+        .read_conversation_history_archive_page_from_open(
+            &fixture.conversation_id,
+            history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("recovered archive remains readable after a true Storage restart");
+    assert!(tail.content.contains("archive-retry-19999"));
+}
+
+#[test]
+fn synchronous_settlement_failure_serializes_concurrent_cancel_with_recovery_receipt() {
+    let fixture = RunningFixture::new_with_initial_yield(
+        "synchronous-settlement-cancel-fence",
+        Duration::from_secs(2),
+    );
+    let database = Connection::open(&fixture.database_path).unwrap();
+    install_archive_rejection(&database, "reject_cancel_fenced_session_archive");
+    let tracker = Arc::new(FileEffectTracker::default());
+    let settlement_entered = Arc::new(Barrier::new(2));
+    let settlement_release = Arc::new(Barrier::new(2));
+    let entered_for_hook = Arc::clone(&settlement_entered);
+    let release_for_hook = Arc::clone(&settlement_release);
+    fixture
+        .registry
+        .set_before_synchronous_settlement_hook(Arc::new(move |_| {
+            entered_for_hook.wait();
+            release_for_hook.wait();
+        }));
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let registry = fixture.registry.clone();
+    let workspace = fixture.workspace.path().to_path_buf();
+    let conversation_id = fixture.conversation_id.clone();
+    let assistant_message_id = fixture.assistant_message_id.clone();
+    let run_id = fixture.run_id.clone();
+    let call_id = fixture.call_id.clone();
+    let tracker_for_start = Arc::clone(&tracker);
+    let command = "printf cancel-fenced-terminal";
+    let start = thread::spawn(move || {
+        start_owned_session_with_tracker(
+            &registry,
+            &workspace,
+            &conversation_id,
+            &assistant_message_id,
+            &run_id,
+            &call_id,
+            command,
+            Some(notifications),
+            &tracker_for_start,
+        )
+    });
+
+    settlement_entered.wait();
+    let cancel_started = Arc::new(Barrier::new(2));
+    let cancel_started_in_thread = Arc::clone(&cancel_started);
+    let cancel_registry = fixture.registry.clone();
+    let cancel_run_id = fixture.run_id.clone();
+    let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+    let cancel = thread::spawn(move || {
+        cancel_started_in_thread.wait();
+        cancelled_tx
+            .send(cancel_registry.cancel_pre_handoff_for_run(&cancel_run_id))
+            .unwrap();
+    });
+    cancel_started.wait();
+    assert!(
+        cancelled_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err(),
+        "cancellation must wait until the recoverable receipt is complete"
+    );
+    settlement_release.wait();
+    assert_eq!(cancelled_rx.recv_timeout(TEST_WAIT).unwrap(), 1);
+    cancel.join().unwrap();
+
+    let launch = start.join().unwrap().unwrap();
+    let AgentCommandSessionLaunch::Running {
+        snapshot,
+        tool_result,
+        mut handoff_guard,
+    } = launch
+    else {
+        panic!("settlement failure must expose its stable recovery receipt before cancellation")
+    };
+    let running = tool_result.result.as_ref().expect("running receipt");
+    assert_eq!(running["status"], "running");
+    assert_eq!(running["sessionId"], snapshot.session_id);
+    assert_eq!(
+        running["continueWith"]["args"]["sessionId"],
+        snapshot.session_id
+    );
+
+    database
+        .execute_batch("DROP TRIGGER reject_cancel_fenced_session_archive;")
+        .unwrap();
+    assert_eq!(
+        handoff_guard.commit(|| false, || Ok(())).unwrap(),
+        AgentCommandHandoffOutcome::CancelledBeforeCommit
+    );
+    let terminal = handoff_guard.abort_before_handoff().unwrap();
+    assert_eq!(terminal.snapshot.session_id.as_str(), snapshot.session_id);
+    let record = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(record.snapshot.status, AgentCommandSessionStatus::Exited);
+
+    let archive_count: u64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_history_blobs WHERE conversation_id = ?1",
+            rusqlite::params![&fixture.conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count, 1);
+    let terminal_events = std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter(|event| {
+            matches!(
+                event["params"]["type"].as_str(),
+                Some("command_exited" | "command_interrupted")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_events.len(), 1);
+    assert_eq!(fixture.registry.retained_live_session_count(), 0);
+    assert_eq!(fixture.registry.retained_core_session_count(), 0);
+    assert_eq!(fixture.registry.retained_admission_count(), 0);
+    assert_eq!(fixture.registry.settlement_scheduler_stats().1, 0);
+    assert!(tracker
+        .active_run_ids_for_conversation(&fixture.conversation_id)
+        .is_empty());
+    assert!(tracker
+        .unsettled_effect_ids_for_conversation(&fixture.conversation_id)
+        .is_empty());
+}
+
+#[test]
+fn cancelled_pending_handoff_guard_drop_retries_one_terminal_settlement() {
+    let fixture = RunningFixture::new("cancelled-handoff-drop-retry");
+    let database = Connection::open(&fixture.database_path).unwrap();
+    install_archive_rejection(&database, "reject_cancelled_handoff_drop_archive");
+    let tracker = Arc::new(FileEffectTracker::default());
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let launch = start_owned_session_with_tracker(
+        &fixture.registry,
+        fixture.workspace.path(),
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        "sleep 30",
+        Some(notifications),
+        &tracker,
+    )
+    .unwrap();
+    let AgentCommandSessionLaunch::Running {
+        snapshot,
+        handoff_guard,
+        ..
+    } = launch
+    else {
+        panic!("the pending handoff command must still be running")
+    };
+
+    // The explicit cancellation wins first and records Pending -> Aborted. A caller panic then
+    // drops the still-armed guard. The Aborted drop path must open the settlement fence; otherwise
+    // the terminal process, FileEffect guard, and admission lease remain retained forever.
+    assert_eq!(
+        fixture.registry.cancel_pre_handoff_for_run(&fixture.run_id),
+        1
+    );
+    drop(handoff_guard);
+    wait_for_settlement_attempts(&fixture.registry, 1);
+    let pending = fixture
+        .storage
+        .load_agent_command_session(&fixture.conversation_id, &snapshot.session_id)
+        .unwrap()
+        .expect("failed terminal commit keeps the durable running row");
+    assert_eq!(pending.snapshot.status, AgentCommandSessionStatus::Running);
+    assert_eq!(fixture.registry.retained_live_session_count(), 1);
+    assert_eq!(fixture.registry.retained_admission_count(), 1);
+    assert_eq!(
+        tracker.active_run_ids_for_conversation(&fixture.conversation_id),
+        vec![fixture.run_id.clone()]
+    );
+
+    database
+        .execute_batch("DROP TRIGGER reject_cancelled_handoff_drop_archive;")
+        .unwrap();
+    let record = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(
+        record.snapshot.status,
+        AgentCommandSessionStatus::Interrupted
+    );
+    let archive_count: u64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_history_blobs WHERE conversation_id = ?1",
+            rusqlite::params![&fixture.conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count, 1);
+    let terminal_events = std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter(|event| {
+            matches!(
+                event["params"]["type"].as_str(),
+                Some("command_exited" | "command_interrupted")
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_events.len(), 1);
+    assert_eq!(fixture.registry.retained_live_session_count(), 0);
+    assert_eq!(fixture.registry.retained_core_session_count(), 0);
     assert_eq!(fixture.registry.retained_admission_count(), 0);
     assert_eq!(fixture.registry.settlement_scheduler_stats().1, 0);
     assert!(tracker
@@ -1427,6 +1721,136 @@ fn short_large_output_is_archived_before_terminal_visibility_without_a_second_ex
         event["params"]["type"] == "command_exited"
             && event["params"]["sessionId"] == terminal.snapshot.session_id.as_str()
     }));
+}
+
+#[test]
+fn fast_four_megabyte_output_hands_off_until_the_host_queue_reaches_terminal() {
+    let fixture = RunningFixture::new_with_initial_yield(
+        "fast-four-megabyte-handoff",
+        Duration::from_secs(2),
+    );
+    let persisted_chunks = Arc::new(AtomicUsize::new(0));
+    let observed_chunks = Arc::clone(&persisted_chunks);
+    fixture
+        .registry
+        .set_before_output_persistence_hook(Arc::new(move |_, _| {
+            observed_chunks.fetch_add(1, Ordering::Relaxed);
+            // A 4+ MiB producer fills the bounded lifecycle queue. Slowing each durable append
+            // makes Core's terminal callback observable before the Host writer reaches the final
+            // queue item, reproducing the real pdftotext settlement cut deterministically.
+            thread::sleep(Duration::from_millis(21));
+        }));
+    let command = r#"awk 'BEGIN { for (i = 0; i < 100000; i++) printf "pdftotext-page-%06d-abcdefghijklmnopqrstuvwxyz\n", i }'"#;
+
+    let launch = start_owned_session(
+        &fixture.registry,
+        fixture.workspace.path(),
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        command,
+        None,
+    )
+    .expect("a delayed Host terminal must remain a recoverable launch");
+    let AgentCommandSessionLaunch::Running {
+        snapshot,
+        tool_result,
+        mut handoff_guard,
+    } = launch
+    else {
+        panic!("the delayed Host terminal must not be projected as an empty exited result")
+    };
+    let running = tool_result
+        .result
+        .as_ref()
+        .expect("recoverable running ToolResult");
+    assert_eq!(running["status"], "running");
+    assert_eq!(running["sessionId"], snapshot.session_id);
+    assert_eq!(running["continueWith"]["tool"], "command_session");
+    assert_eq!(
+        running["continueWith"]["args"],
+        json!({
+            "sessionId": snapshot.session_id,
+            "action": "wait"
+        })
+    );
+    assert!(
+        running["outputTruncated"].as_bool().unwrap(),
+        "a saturated Host lifecycle queue must be explicit"
+    );
+
+    adopt_owned_session(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        &snapshot,
+        command,
+        &mut handoff_guard,
+    );
+    let record = wait_for_terminal_record_with_timeout(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+        Duration::from_secs(15),
+    );
+    assert_eq!(record.snapshot.status, AgentCommandSessionStatus::Exited);
+    assert_eq!(record.snapshot.exit_code, Some(0));
+    assert!(persisted_chunks.load(Ordering::Relaxed) > 1);
+
+    let request = AgentCommandSessionExecutionRequest {
+        conversation_id: fixture.conversation_id.clone(),
+        run_id: "run-fast-four-megabyte-terminal-read".to_string(),
+        call_id: "call-fast-four-megabyte-terminal-read".to_string(),
+        session_id: snapshot.session_id.clone(),
+        action: AgentCommandSessionAction::Poll,
+        wait_ms: 0,
+        max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    };
+    let terminal = fixture
+        .registry
+        .execute_command_session(request.clone(), observation_control())
+        .unwrap();
+    assert_eq!(terminal.status, AgentCommandSessionStatus::Exited);
+    let history_open = terminal
+        .history_open
+        .as_deref()
+        .expect("terminal wait exposes the exact-output recovery route");
+    let tail = fixture
+        .storage
+        .read_conversation_history_archive_page_from_open(
+            &fixture.conversation_id,
+            history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("the exact output remains readable through conversation_history");
+    assert!(tail
+        .content
+        .contains("pdftotext-page-099999-abcdefghijklmnopqrstuvwxyz"));
+
+    let connection = Connection::open(&fixture.database_path).unwrap();
+    let archive_count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_history_blobs WHERE conversation_id = ?1",
+            rusqlite::params![&fixture.conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count, 1);
+
+    let restarted = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&fixture.storage),
+        CommandSessionManager::new(test_manager_config()).unwrap(),
+        INITIAL_YIELD,
+    );
+    let replay = restarted
+        .execute_command_session(request, observation_control())
+        .unwrap();
+    assert_eq!(replay, terminal);
+    assert_eq!(replay.history_open.as_deref(), Some(history_open));
 }
 
 #[test]

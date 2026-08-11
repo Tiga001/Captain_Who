@@ -80,6 +80,10 @@ struct AgentCommandSessionRegistryInner {
     after_durable_create_hook: Mutex<Option<AfterDurableCreateHook>>,
     #[cfg(test)]
     durable_start_inspection_hook: Mutex<Option<DurableStartInspectionHook>>,
+    #[cfg(test)]
+    before_output_persistence_hook: Mutex<Option<BeforeOutputPersistenceHook>>,
+    #[cfg(test)]
+    before_synchronous_settlement_hook: Mutex<Option<BeforeSynchronousSettlementHook>>,
 }
 
 #[cfg(test)]
@@ -91,6 +95,12 @@ type AfterDurableCreateHook = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sy
 #[cfg(test)]
 type DurableStartInspectionHook = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
+#[cfg(test)]
+type BeforeOutputPersistenceHook = Arc<dyn Fn(&str, u64) + Send + Sync>;
+
+#[cfg(test)]
+type BeforeSynchronousSettlementHook = Arc<dyn Fn(&str) + Send + Sync>;
+
 struct HostCommandSession {
     owner: CommandSessionOwner,
     authorization_source: CommandAuthorizationSource,
@@ -98,6 +108,13 @@ struct HostCommandSession {
     permission_provenance: Value,
     notifications: Option<CoreServerNotificationSender>,
     state: Mutex<HostCommandSessionState>,
+    /// Serializes the Pending handoff boundary with synchronous terminal settlement and
+    /// cancellation. The model-visible recovery receipt must be complete before cancellation can
+    /// retire the same ownership token.
+    handoff_settlement_fence: Mutex<()>,
+    /// Makes Archive/Trace/Session materialization and terminal publication single-flight across
+    /// the synchronous fast path and the shared retry scheduler.
+    terminal_settlement_fence: Mutex<()>,
     changed: Condvar,
 }
 
@@ -196,6 +213,14 @@ pub(super) enum AgentCommandSessionLaunch {
     },
 }
 
+enum AgentCommandSynchronousFinish {
+    Settled,
+    Recoverable {
+        snapshot: Box<AgentCommandSessionSnapshot>,
+        tool_result: AgentToolResult,
+    },
+}
+
 /// Linear ownership token for the narrow `Running receipt -> durable handoff` interval.
 ///
 /// Dropping this token (including unwinding a caller panic) aborts the still-pending Session
@@ -239,9 +264,12 @@ impl AgentCommandSessionHandoffGuard {
         registry.abort_before_handoff(self)
     }
 
-    fn finish_synchronous(&mut self) -> Result<(), String> {
+    fn finish_synchronous(
+        &mut self,
+        snapshot: &CoreSessionSnapshot,
+    ) -> Result<AgentCommandSynchronousFinish, String> {
         let registry = self.registry.clone();
-        registry.finish_synchronous(self)
+        registry.finish_synchronous(self, snapshot)
     }
 
     fn validate_registry(&self, registry: &AgentCommandSessionRegistry) -> Result<(), String> {
@@ -352,6 +380,10 @@ impl AgentCommandSessionRegistry {
             after_durable_create_hook: Mutex::new(None),
             #[cfg(test)]
             durable_start_inspection_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_output_persistence_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_synchronous_settlement_hook: Mutex::new(None),
         });
         Self { inner }
     }
@@ -390,6 +422,8 @@ impl AgentCommandSessionRegistry {
                 persisted_sequence: 0,
                 admission_lease: Some(admission_lease),
             }),
+            handoff_settlement_fence: Mutex::new(()),
+            terminal_settlement_fence: Mutex::new(()),
             changed: Condvar::new(),
         });
         let (lifecycle_tx, lifecycle_rx) =
@@ -554,11 +588,24 @@ impl AgentCommandSessionRegistry {
                 if let Some(session_id) = session.session_id_string() {
                     session.install_file_effect_guard(request.file_effect_guard.take())?;
                     let mut handoff_guard = self.handoff_guard(session_id);
-                    if let Err(error) = handoff_guard.finish_synchronous() {
-                        session.record_persistence_error(error.clone());
-                        return Err(format!(
-                            "命令已经结束，但 Host 未能确认唯一的 Archive/Trace/Session 终态；完整输出由后台 Session 继续持有：{error}"
-                        ));
+                    match handoff_guard.finish_synchronous(&terminal.snapshot) {
+                        Ok(AgentCommandSynchronousFinish::Settled) => {}
+                        Ok(AgentCommandSynchronousFinish::Recoverable {
+                            snapshot,
+                            tool_result,
+                        }) => {
+                            return Ok(AgentCommandSessionLaunch::Running {
+                                snapshot,
+                                tool_result,
+                                handoff_guard,
+                            });
+                        }
+                        Err(error) => {
+                            session.record_persistence_error(error);
+                            let mut aborted = handoff_guard.abort_before_handoff()?;
+                            session.clear_archived_execution_spools(&mut aborted.execution)?;
+                            return Ok(AgentCommandSessionLaunch::Exited(Box::new(aborted)));
+                        }
                     }
                     if let Some(authoritative) = session.terminal() {
                         // The lifecycle writer owns managed-output publication. Return that same
@@ -573,24 +620,7 @@ impl AgentCommandSessionRegistry {
             CommandStartOutcome::Running(snapshot) => {
                 session.install_file_effect_guard(request.file_effect_guard.take())?;
                 let mut handoff_guard = self.handoff_guard(snapshot.session_id.to_string());
-                if session.mark_terminal_settlement_ready() == HandoffState::Aborted {
-                    let mut terminal = handoff_guard.abort_before_handoff()?;
-                    session.clear_archived_execution_spools(&mut terminal.execution)?;
-                    return Ok(AgentCommandSessionLaunch::Exited(Box::new(terminal)));
-                }
-                if let Some(error) = session.persistence_error() {
-                    let mut terminal = handoff_guard.abort_before_handoff()?;
-                    session.record_persistence_error(format!(
-                        "命令已在持久交接前终止，因为 Session 状态无法安全保存：{error}"
-                    ));
-                    session.clear_archived_execution_spools(&mut terminal.execution)?;
-                    return Ok(AgentCommandSessionLaunch::Exited(Box::new(terminal)));
-                }
-                session.wait_for_persisted_sequence(
-                    snapshot.latest_output_sequence,
-                    Duration::from_secs(1),
-                );
-                match self.running_receipt(&snapshot, &session) {
+                match self.prepare_running_receipt(&snapshot, &session) {
                     Ok((host_snapshot, tool_result)) => Ok(AgentCommandSessionLaunch::Running {
                         snapshot: Box::new(host_snapshot),
                         tool_result,
@@ -599,7 +629,7 @@ impl AgentCommandSessionRegistry {
                     Err(receipt_error) => {
                         let mut terminal = handoff_guard.abort_before_handoff()?;
                         session.record_persistence_error(format!(
-                            "命令已在持久交接前终止，因为 running 回执无法安全生成：{receipt_error}"
+                            "命令已在持久交接前终止，因为 running 回执或其所有权无法安全生成：{receipt_error}"
                         ));
                         session.clear_archived_execution_spools(&mut terminal.execution)?;
                         Ok(AgentCommandSessionLaunch::Exited(Box::new(terminal)))
@@ -841,6 +871,7 @@ impl AgentCommandSessionRegistry {
         handoff_guard.validate_registry(self)?;
         let session_id = handoff_guard.session_id.as_str();
         let session = self.live_session(session_id)?;
+        let _handoff_fence = lock(&session.handoff_settlement_fence);
         {
             let mut state = lock(&session.state);
             if state.handoff != HandoffState::Pending {
@@ -861,6 +892,7 @@ impl AgentCommandSessionRegistry {
                 return Ok(AgentCommandHandoffOutcome::PersistenceFailed(error));
             }
             state.handoff = HandoffState::Adopted;
+            state.terminal_settlement_ready = true;
             handoff_guard.armed = false;
             session.changed.notify_all();
         }
@@ -904,6 +936,7 @@ impl AgentCommandSessionRegistry {
             .collect::<Vec<_>>();
         let mut cancelled = 0;
         for session in sessions {
+            let _handoff_fence = lock(&session.handoff_settlement_fence);
             let session_id = {
                 let mut state = lock(&session.state);
                 if state.handoff != HandoffState::Pending {
@@ -919,11 +952,6 @@ impl AgentCommandSessionRegistry {
                     .inner
                     .manager
                     .force_terminate(&session_id, Duration::ZERO);
-                if session.terminal_settlement_ready() && session.terminal().is_some() {
-                    let _ = self
-                        .inner
-                        .schedule_terminal_settlement(Arc::clone(&session));
-                }
             }
         }
         cancelled
@@ -936,11 +964,16 @@ impl AgentCommandSessionRegistry {
         let Ok(session) = self.live_session(session_id) else {
             return;
         };
+        let _handoff_fence = lock(&session.handoff_settlement_fence);
         let session_id = {
             let mut state = lock(&session.state);
             match state.handoff {
-                HandoffState::Pending => state.handoff = HandoffState::Aborted,
-                HandoffState::Aborted | HandoffState::Synchronous => {}
+                HandoffState::Pending => {
+                    state.handoff = HandoffState::Aborted;
+                    state.terminal_settlement_ready = true;
+                }
+                HandoffState::Aborted => state.terminal_settlement_ready = true,
+                HandoffState::Synchronous => {}
                 HandoffState::Adopted => return,
             }
             session.changed.notify_all();
@@ -953,7 +986,9 @@ impl AgentCommandSessionRegistry {
                 .force_terminate(&session_id, Duration::ZERO);
         }
         if session.terminal_settlement_ready() && session.terminal().is_some() {
-            let _ = self.inner.schedule_terminal_settlement(session);
+            let _ = self
+                .inner
+                .schedule_terminal_settlement(Arc::clone(&session));
         }
     }
 
@@ -966,6 +1001,7 @@ impl AgentCommandSessionRegistry {
         handoff_guard.validate_registry(self)?;
         let session_id = handoff_guard.session_id.clone();
         let session = self.live_session(&session_id)?;
+        let _handoff_fence = lock(&session.handoff_settlement_fence);
         {
             let mut state = lock(&session.state);
             if state.handoff == HandoffState::Adopted {
@@ -1018,29 +1054,105 @@ impl AgentCommandSessionRegistry {
         Ok(terminal)
     }
 
+    fn prepare_running_receipt(
+        &self,
+        snapshot: &CoreSessionSnapshot,
+        session: &Arc<HostCommandSession>,
+    ) -> Result<(AgentCommandSessionSnapshot, AgentToolResult), String> {
+        let _handoff_fence = lock(&session.handoff_settlement_fence);
+        {
+            let state = lock(&session.state);
+            if state.handoff != HandoffState::Pending {
+                return Err(format!(
+                    "命令 Session 的 running 回执生成前，交接状态已变为 {:?}。",
+                    state.handoff
+                ));
+            }
+            if let Some(error) = state.persistence_error.as_deref() {
+                return Err(format!("命令 Session 状态无法安全保存：{error}"));
+            }
+        }
+        session
+            .wait_for_persisted_sequence(snapshot.latest_output_sequence, Duration::from_secs(1));
+        self.running_receipt(snapshot, session)
+    }
+
     fn finish_synchronous(
         &self,
         handoff_guard: &mut AgentCommandSessionHandoffGuard,
-    ) -> Result<(), String> {
+        snapshot: &CoreSessionSnapshot,
+    ) -> Result<AgentCommandSynchronousFinish, String> {
         handoff_guard.validate_registry(self)?;
         let session_id = handoff_guard.session_id.clone();
         let session = self.live_session(&session_id)?;
-        session
-            .wait_for_terminal(SESSION_TERMINATE_WAIT)
-            .ok_or_else(|| {
-                "命令进程已经结束，但 Host 输出队列未在有界窗口内完成排空；保留未结算 Session，禁止抢先提交终态。"
-                    .to_string()
-            })?;
+        let _handoff_fence = lock(&session.handoff_settlement_fence);
+        if lock(&session.state).handoff != HandoffState::Pending {
+            return Err("命令 Session 在同步结算前已被取消或完成交接。".to_string());
+        }
+        let Some(terminal) = session.wait_for_terminal(SESSION_TERMINATE_WAIT) else {
+            // Core can finish a short, noisy process before the Host lifecycle writer has drained
+            // its bounded Output queue. Build the durable recovery receipt while the same fence
+            // still excludes cancellation and handoff; no observer can remove this live Session
+            // between receipt persistence and returning its stable identity.
+            let (snapshot, tool_result) = self.running_receipt(snapshot, &session)?;
+            return Ok(AgentCommandSynchronousFinish::Recoverable {
+                snapshot: Box::new(snapshot),
+                tool_result,
+            });
+        };
+        // Make a bounded authoritative synchronous settlement attempt while the caller still
+        // owns the Pending handoff token. A failed Archive/Trace/Session commit cannot strand a
+        // Synchronous Session without a model-visible identity: `start` can return the ordinary
+        // running receipt, and the caller's existing audit handoff activates scheduler retries.
         {
             let mut state = lock(&session.state);
-            if state.handoff == HandoffState::Pending {
-                state.handoff = HandoffState::Synchronous;
-            }
             state.terminal_settlement_ready = true;
+            session.changed.notify_all();
+        }
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.inner.before_synchronous_settlement_hook).clone() {
+            hook(session_id.as_str());
+        }
+        let settlement = if let Err(first_error) = self.inner.settle_terminal(&session, &terminal) {
+            // A SQLite commit can be outcome-unknown to its caller. Replaying the exact same
+            // immutable terminal cut once closes the common post-commit-error boundary before we
+            // expose a recoverable running receipt; permanent failures still fall back to the
+            // caller-owned handoff and the shared retry scheduler.
+            self.inner
+                .settle_terminal(&session, &terminal)
+                .map_err(|retry_error| {
+                    format!(
+                        "命令 Session 终态首次结算失败：{first_error}；幂等重试失败：{retry_error}"
+                    )
+                })
+        } else {
+            Ok(())
+        };
+        if let Err(error) = settlement {
+            session.record_persistence_error(error);
+            {
+                let mut state = lock(&session.state);
+                if state.handoff != HandoffState::Pending {
+                    return Err("命令 Session 终态结算失败后的交接状态不再可恢复。".to_string());
+                }
+                // The scheduler must not materialize an Aborted terminal before the caller has
+                // durably accepted or explicitly retired this recovery receipt.
+                state.terminal_settlement_ready = false;
+                session.changed.notify_all();
+            }
+            let (snapshot, tool_result) = self.running_receipt(snapshot, &session)?;
+            return Ok(AgentCommandSynchronousFinish::Recoverable {
+                snapshot: Box::new(snapshot),
+                tool_result,
+            });
+        }
+        {
+            let mut state = lock(&session.state);
+            state.handoff = HandoffState::Synchronous;
             handoff_guard.armed = false;
             session.changed.notify_all();
         }
-        self.schedule_and_wait_terminal_settlement(&session)
+        Ok(AgentCommandSynchronousFinish::Settled)
     }
 
     fn schedule_and_wait_terminal_settlement(
@@ -1269,6 +1381,13 @@ impl AgentCommandSessionRegistry {
                 "startedAt": record.snapshot.started_at,
                 "latestSequence": read.receipt.latest_sequence,
                 "outputTruncated": read.receipt.output_truncated,
+                "continueWith": {
+                    "tool": "command_session",
+                    "args": {
+                        "sessionId": record.snapshot.session_id,
+                        "action": "wait"
+                    }
+                }
             })),
             error: None,
         };
@@ -1305,6 +1424,19 @@ impl AgentCommandSessionRegistry {
     #[cfg(test)]
     pub(super) fn set_durable_start_inspection_hook(&self, hook: DurableStartInspectionHook) {
         *lock(&self.inner.durable_start_inspection_hook) = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_output_persistence_hook(&self, hook: BeforeOutputPersistenceHook) {
+        *lock(&self.inner.before_output_persistence_hook) = Some(hook);
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_before_synchronous_settlement_hook(
+        &self,
+        hook: BeforeSynchronousSettlementHook,
+    ) {
+        *lock(&self.inner.before_synchronous_settlement_hook) = Some(hook);
     }
 
     #[cfg(test)]
@@ -1937,6 +2069,10 @@ impl AgentCommandSessionRegistryInner {
         latest_sequence: u64,
         output_truncated: bool,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(hook) = lock(&self.before_output_persistence_hook).clone() {
+            hook(session_id, chunk.sequence);
+        }
         match self.storage.append_agent_command_session_output(
             &AgentCommandSessionOutputAppend {
                 conversation_id: &session.owner.conversation_id,
@@ -2136,6 +2272,10 @@ impl AgentCommandSessionRegistryInner {
         session: &HostCommandSession,
         terminal: &CommandTerminalResult,
     ) -> Result<(), String> {
+        let _settlement_fence = lock(&session.terminal_settlement_fence);
+        if session.is_terminal_settled() {
+            return Ok(());
+        }
         if !session.terminal_settlement_ready() {
             return Err("命令 Session 的 File Effect 所有权尚未安装，禁止提交终态。".to_string());
         }
@@ -2184,6 +2324,7 @@ impl AgentCommandSessionRegistryInner {
         drop(state);
         self.forget_terminal_session(terminal.snapshot.session_id.as_str());
         session.release_admission();
+        session.mark_terminal_settled();
         Ok(())
     }
 
@@ -2373,13 +2514,6 @@ impl HostCommandSession {
         Ok(())
     }
 
-    fn mark_terminal_settlement_ready(&self) -> HandoffState {
-        let mut state = lock(&self.state);
-        state.terminal_settlement_ready = true;
-        self.changed.notify_all();
-        state.handoff
-    }
-
     fn terminal_settlement_ready(&self) -> bool {
         lock(&self.state).terminal_settlement_ready
     }
@@ -2422,10 +2556,6 @@ impl HostCommandSession {
             .wait_timeout_while(state, wait, |state| state.terminal.is_none())
             .unwrap_or_else(|error| error.into_inner());
         state.terminal.clone()
-    }
-
-    fn persistence_error(&self) -> Option<String> {
-        lock(&self.state).persistence_error.clone()
     }
 
     fn record_persistence_error(&self, error: String) {

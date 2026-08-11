@@ -675,11 +675,16 @@ mod tests {
             "`run_command`",
             "`read_image`",
             "`MYCOPILOT_INPUT_ROOT`",
-            "fixed managed Python, PDF CLI, and `rg`",
+            "complete executable set is exactly",
+            "`pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, and `rg`",
+            "`head`, `tail`, `grep`, `sed`, and `awk` are unavailable",
             "pdftotext -layout",
             "--max-count 20",
+            "rg --max-count 80 '^'",
+            "pdftotext -f FIRST -l LAST",
             "quoted Python heredoc",
             "Do not print an entire large PDF",
+            "`historyOpen`",
             "`conversation_history`",
             "references/reading.md",
             "references/creating-and-editing.md",
@@ -717,8 +722,13 @@ mod tests {
             .find(|resource| resource.path() == "references/reading.md")
             .unwrap();
         let reading = String::from_utf8(reader.read(reading).unwrap()).unwrap();
+        assert!(reading
+            .contains("exactly `pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, and `rg`"));
         assert!(reading.contains("| rg -n -i -C 4 --max-count 20"));
+        assert!(reading.contains("| rg --max-count 80 '^'"));
         assert!(reading.contains("pdftotext -f 42 -l 46 -layout"));
+        assert!(reading.contains("`historyOpen` with `conversation_history`"));
+        assert!(reading.contains("`head`, `tail`, and byte-offset slicing are not recovery paths"));
         assert!(reading.contains("reports extracted-text line numbers, not PDF page numbers"));
         assert!(reading.contains("python - \"$MYCOPILOT_INPUT_ROOT/manual.pdf\" <<'PY'"));
         assert!(reading.contains("Do not dump the full text"));

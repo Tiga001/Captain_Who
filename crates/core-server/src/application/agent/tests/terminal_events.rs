@@ -1,4 +1,11 @@
 use super::*;
+use mycopilot_core::{
+    AgentCommandSessionAction, AgentCommandSessionExecutionControl,
+    AgentCommandSessionExecutionRequest, AgentCommandSessionExecutor,
+    AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 #[test]
 fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources() {
@@ -169,6 +176,151 @@ fn automatic_command_streams_bounded_output_with_stable_call_identity() {
         .collect::<String>();
     assert!(output.contains("stdout-live"));
     assert!(output.contains("stderr-live"));
+}
+
+#[test]
+fn automatic_fast_large_output_returns_a_recoverable_session_instead_of_empty_exit() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("fast-large-automatic.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let conversation_id = "conversation-fast-large-automatic";
+    let assistant_message_id = "assistant-fast-large-automatic";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Fast large automatic command".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let mut service = AgentService::new(Arc::clone(&storage));
+    service.command_sessions = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&storage),
+        CommandSessionManager::default(),
+        Duration::from_secs(2),
+    );
+    let persisted_chunks = Arc::new(AtomicUsize::new(0));
+    let observed_chunks = Arc::clone(&persisted_chunks);
+    service
+        .command_sessions
+        .set_before_output_persistence_hook(Arc::new(move |_, _| {
+            observed_chunks.fetch_add(1, Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(21));
+        }));
+
+    let mut input = command_test_input(fixture.path());
+    let context = input.context.as_mut().expect("command test context");
+    context.conversation_id = Some(conversation_id.to_string());
+    context.permissions.command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+    let run_id = "run-fast-large-automatic";
+    let call_id = "command-fast-large-automatic";
+    let command_text = r#"awk 'BEGIN { for (i = 0; i < 100000; i++) printf "pdftotext-page-%06d-abcdefghijklmnopqrstuvwxyz\n", i }'"#;
+    let result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                input,
+                run_id.to_string(),
+                Some(conversation_id.to_string()),
+                Some(assistant_message_id.to_string()),
+                None,
+            ),
+            AgentProposedAction::Command {
+                command: command_request(call_id, command_text),
+            },
+            AgentCancellationToken::new(),
+        )
+        .unwrap();
+
+    assert!(result.ok);
+    let running = result
+        .result
+        .as_ref()
+        .expect("automatic command returns its durable running receipt");
+    assert_eq!(running["status"], "running");
+    let session_id = running["sessionId"]
+        .as_str()
+        .expect("the recovery receipt retains a stable Session identity");
+    assert_eq!(running["continueWith"]["tool"], "command_session");
+    assert_eq!(
+        running["continueWith"]["args"],
+        json!({ "sessionId": session_id, "action": "wait" })
+    );
+    assert!(running["outputTruncated"].as_bool().unwrap());
+    assert!(persisted_chunks.load(Ordering::Relaxed) > 1);
+
+    let persisted = storage
+        .list_agent_tool_results_for_run(run_id, "run_command")
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].result.as_ref().unwrap()["status"], "running");
+    assert_eq!(
+        persisted[0].result.as_ref().unwrap()["sessionId"],
+        session_id
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let terminal_record = loop {
+        let record = storage
+            .load_agent_command_session(conversation_id, session_id)
+            .unwrap()
+            .expect("automatic command Session remains durable");
+        if record.snapshot.status.is_terminal() && record.settled_at.is_some() {
+            break record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "large automatic command remained permanently stuck: {:?}",
+            record.snapshot.status
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        terminal_record.snapshot.status,
+        AgentCommandSessionStatus::Exited
+    );
+    assert_eq!(terminal_record.snapshot.exit_code, Some(0));
+
+    let terminal = service
+        .command_sessions
+        .execute_command_session(
+            AgentCommandSessionExecutionRequest {
+                conversation_id: conversation_id.to_string(),
+                run_id: "run-fast-large-terminal-read".to_string(),
+                call_id: "call-fast-large-terminal-read".to_string(),
+                session_id: session_id.to_string(),
+                action: AgentCommandSessionAction::Poll,
+                wait_ms: 0,
+                max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+            },
+            AgentCommandSessionExecutionControl::new(AgentCancellationToken::new(), None),
+        )
+        .unwrap();
+    let history_open = terminal
+        .history_open
+        .as_deref()
+        .expect("terminal command Session exposes the exact output route");
+    let tail = storage
+        .read_conversation_history_archive_page_from_open(conversation_id, history_open, u64::MAX)
+        .unwrap()
+        .expect("conversation_history opens the automatic command archive");
+    assert!(tail
+        .content
+        .contains("pdftotext-page-099999-abcdefghijklmnopqrstuvwxyz"));
 }
 
 #[test]

@@ -30,6 +30,12 @@ const bundledCases = [
     enName: 'Image Generation'
   },
   {
+    id: 'bundled:application:pdf',
+    sourceId: 'application:pdf',
+    zhName: 'PDF',
+    enName: 'PDF'
+  },
+  {
     id: 'bundled:application:skill-installer',
     sourceId: 'application:skill-installer',
     zhName: 'Skill 安装器',

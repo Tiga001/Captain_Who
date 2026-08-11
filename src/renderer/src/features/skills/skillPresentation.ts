@@ -4,7 +4,7 @@ import type { Translate } from '../../config/translationFormat'
 import type { TranslationKey } from '../../config/frontendTranslations'
 
 export type BundledSkillPresentationKey =
-  'documents' | 'imageGeneration' | 'presentations' | 'skillInstaller' | 'spreadsheets'
+  'documents' | 'imageGeneration' | 'pdf' | 'presentations' | 'skillInstaller' | 'spreadsheets'
 
 interface SkillPresentationInput {
   description?: string
@@ -21,6 +21,7 @@ interface SkillPresentation {
 const BUNDLED_SKILL_KEY_BY_ID: Readonly<Record<string, BundledSkillPresentationKey>> = {
   'bundled:application:documents': 'documents',
   'bundled:application:image-generation': 'imageGeneration',
+  'bundled:application:pdf': 'pdf',
   'bundled:application:presentations': 'presentations',
   'bundled:application:skill-installer': 'skillInstaller',
   'bundled:application:spreadsheets': 'spreadsheets'
@@ -29,6 +30,7 @@ const BUNDLED_SKILL_KEY_BY_ID: Readonly<Record<string, BundledSkillPresentationK
 const BUNDLED_SKILL_KEY_BY_SOURCE_ID: Readonly<Record<string, BundledSkillPresentationKey>> = {
   'application:documents': 'documents',
   'application:image-generation': 'imageGeneration',
+  'application:pdf': 'pdf',
   'application:presentations': 'presentations',
   'application:skill-installer': 'skillInstaller',
   'application:spreadsheets': 'spreadsheets'
@@ -44,6 +46,10 @@ const BUNDLED_SKILL_TRANSLATIONS: Readonly<
   imageGeneration: {
     description: 'skills.bundled.imageGeneration.description',
     name: 'skills.bundled.imageGeneration.name'
+  },
+  pdf: {
+    description: 'skills.bundled.pdf.description',
+    name: 'skills.bundled.pdf.name'
   },
   presentations: {
     description: 'skills.bundled.presentations.description',

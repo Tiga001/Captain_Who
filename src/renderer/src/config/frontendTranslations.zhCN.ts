@@ -796,6 +796,8 @@ export const zhCNTranslations = {
   'skills.bundled.presentations.description': '创建、编辑、检查、渲染和验证 PowerPoint 演示文稿。',
   'skills.bundled.imageGeneration.name': '图片生成',
   'skills.bundled.imageGeneration.description': '根据文字描述生成图片，或基于已有图片进行编辑。',
+  'skills.bundled.pdf.name': 'PDF',
+  'skills.bundled.pdf.description': '读取、搜索、检查、创建、编辑、渲染和验证 PDF 文件。',
   'skills.bundled.skillInstaller.name': 'Skill 安装器',
   'skills.bundled.skillInstaller.description':
     '检查并安装来自 GitHub 链接或已授权本地路径的第三方 Skill。',

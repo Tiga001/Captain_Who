@@ -240,9 +240,7 @@ pub(crate) fn parse_managed_pdf_shell(
         let program = words[program_index].0.as_str();
         if !MANAGED_PROGRAMS.contains(&program) {
             if saw_managed_program || script_contains_managed_intent(&lexed) {
-                return Err(format!(
-                    "Managed PDF Shell 不允许执行 `{program}`；请只使用受管 PDF/Python/rg 命令。"
-                ));
+                return Err(unsupported_managed_program_error(program));
             }
             return Ok(None);
         }
@@ -302,6 +300,22 @@ pub(crate) fn parse_managed_pdf_shell(
         programs,
         private_redirection_paths,
     }))
+}
+
+fn unsupported_managed_program_error(program: &str) -> String {
+    const COMMON_FILTERS: &[&str] = &[
+        "head", "tail", "grep", "egrep", "fgrep", "sed", "awk", "cut", "sort", "uniq", "wc",
+        "less", "more",
+    ];
+    let executable_set = "`pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, `rg`";
+    if COMMON_FILTERS.contains(&program) {
+        return format!(
+            "Managed PDF Shell 不提供常见过滤器 `{program}`；完整可执行集合只有 {executable_set}。读取特定 PDF 页请使用 `pdftotext -f FIRST -l LAST`，限制搜索命中请使用 `rg --max-count N PATTERN`，只取前 N 行请使用 `rg --max-count N '^'`。如果已有超限结果，请通过其 `historyOpen` 调用 `conversation_history`，不要重新执行全文提取。"
+        );
+    }
+    format!(
+        "Managed PDF Shell 不允许执行 `{program}`；完整可执行集合只有 {executable_set}。复杂但有界的处理请使用受管 Python quoted heredoc。"
+    )
 }
 
 fn script_contains_managed_intent(lexed: &LexedCommand) -> bool {
@@ -1047,6 +1061,27 @@ mod tests {
     fn accepts_quoted_python_heredoc_and_private_redirection() {
         let command = "python - <<'PY' > extracted.txt\nfrom pathlib import Path\nprint(Path('x'))\nPY\nrg x extracted.txt";
         assert!(parse_managed_pdf_shell(command).unwrap().is_some());
+    }
+
+    #[test]
+    fn common_filter_rejection_returns_bounded_recovery_commands() {
+        for program in ["head", "tail", "grep", "sed", "awk"] {
+            let command = format!("pdftotext manual.pdf - | {program} -n 20");
+            let error = parse_managed_pdf_shell(&command).unwrap_err();
+            for expected in [
+                &format!("`{program}`"),
+                "`pdftotext -f FIRST -l LAST`",
+                "`rg --max-count N PATTERN`",
+                "`rg --max-count N '^'`",
+                "`historyOpen`",
+                "`conversation_history`",
+            ] {
+                assert!(
+                    error.contains(expected),
+                    "missing `{expected}` in `{error}`"
+                );
+            }
+        }
     }
 
     #[test]

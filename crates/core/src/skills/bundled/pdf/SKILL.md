@@ -5,7 +5,7 @@ description: Read, search, inspect, create, edit, render, and verify PDF files, 
 
 # PDF
 
-Use only `run_command` for PDF processing; use `read_image` for visual inspection. The activated Skill supplies a fixed managed Python, PDF CLI, and `rg`; never install dependencies or fall back to system tools.
+Use only `run_command` for PDF processing; use `read_image` for visual inspection. The complete executable set is exactly `pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, and `rg`. Commands such as `head`, `tail`, `grep`, `sed`, and `awk` are unavailable; never install replacements or fall back to system tools.
 
 For a PDF already in the selected workspace, use its exact safe workspace-relative path. For an attachment, external file, generated Artifact, Skill resource, script, image, font, or other source, bind the returned path through `run_command.inputs`, then use its mounted path below `MYCOPILOT_INPUT_ROOT`. Never guess a physical attachment, Artifact, runtime, or private working-directory path. Copy output `readPath` values exactly as returned.
 
@@ -18,7 +18,13 @@ For a PDF already in the selected workspace, use its exact safe workspace-relati
    pdftotext -layout "manual.pdf" - | rg -n -i -C 4 --max-count 20 "steady|unit operation"
    ```
 
-3. Extract only the matching page range plus necessary adjacent pages. Do not print an entire large PDF, repeatedly slice the same full extraction by output offsets, or rerun a command whose archived result is available through `historyOpen` and `conversation_history`.
+   To inspect only the first `N` extracted lines, use the receipt-bound `rg` instead of `head`:
+
+   ```sh
+   pdftotext -layout "manual.pdf" - | rg --max-count 80 '^'
+   ```
+
+3. Extract only the matching page range plus necessary adjacent pages with `pdftotext -f FIRST -l LAST`. Use `rg --max-count N` to bound matches or initial lines. Do not print an entire large PDF, repeatedly slice the same full extraction by output offsets, or rerun a command whose archived result is available through `historyOpen`; open that exact result with `conversation_history` instead.
 4. Use text extraction for meaning, not visual proof. Render relevant pages and call `read_image` for scans, tables, figures, columns, forms, or layout questions. If text is empty or damaged, switch to page rendering.
 5. After creating or editing, reopen the PDF, validate its structure and requested content, render all changed pages (or every page when small), and inspect those images before delivery.
 6. State which pages were actually extracted or rendered; never claim coverage you did not inspect.

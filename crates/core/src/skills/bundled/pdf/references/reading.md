@@ -16,6 +16,8 @@ pdfinfo "$MYCOPILOT_INPUT_ROOT/manual.pdf"
 
 Record the one-based page count first. Note encryption, dimensions, title, or author only when relevant.
 
+The managed shell exposes exactly `pdfinfo`, `pdftotext`, `pdftoppm`, `python`, `python3`, and `rg`. It does not expose `head`, `tail`, `grep`, `sed`, `awk`, or other ambient shell programs.
+
 ## Locate before loading
 
 For a large text PDF, stream extraction into the receipt-bound `rg` and cap matches:
@@ -27,13 +29,22 @@ pdftotext -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" - \
 
 Use distinctive headings, section numbers, captions, or terms. If 20 matches are ambiguous, refine the expression rather than increasing output without a reason. Once the relevant pages are known, extract them directly:
 
+To inspect only the first `N` extracted lines without `head`, match every line and cap the receipt-bound `rg`:
+
+```sh
+pdftotext -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" - \
+  | rg --max-count 80 '^'
+```
+
+This limits extracted-text lines, not PDF pages. For a known page interval, use the page-bounded form instead:
+
 `rg -n` reports extracted-text line numbers, not PDF page numbers. When the bounded context does not include a nearby `--- Page N ---` marker, use the page-aware Python fallback below to map the term to PDF pages; do not translate line numbers into byte-offset slicing.
 
 ```sh
 pdftotext -f 42 -l 46 -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" -
 ```
 
-Read enough adjacent pages to capture section boundaries, continuations, footnotes, captions, and sources. Do not dump the full text of a large document and then issue repeated Python commands that slice the same stdout by byte or character offset. If a command result exceeded the model budget, use its `historyOpen` with `conversation_history` instead of repeating extraction.
+Read enough adjacent pages to capture section boundaries, continuations, footnotes, captions, and sources. Do not dump the full text of a large document and then issue repeated Python commands that slice the same stdout by byte or character offset. If a command result exceeded the model budget, use its `historyOpen` with `conversation_history` instead of repeating extraction; `head`, `tail`, and byte-offset slicing are not recovery paths.
 
 Prefer `pdftotext` for fast layout-aware text, `pypdf` for page-level structure, and `pdfplumber` for positional text and tables. If a tool produces empty or clearly damaged text, switch tools once or render the relevant pages; do not repeat the same failing command.
 

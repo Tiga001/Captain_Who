@@ -839,6 +839,9 @@ export const enUSTranslations = {
   'skills.bundled.imageGeneration.name': 'Image Generation',
   'skills.bundled.imageGeneration.description':
     'Generate images from text or edit an existing image with instructions.',
+  'skills.bundled.pdf.name': 'PDF',
+  'skills.bundled.pdf.description':
+    'Read, search, inspect, create, edit, render, and validate PDF files.',
   'skills.bundled.skillInstaller.name': 'Skill Installer',
   'skills.bundled.skillInstaller.description':
     'Inspect and install third-party Skills from GitHub links or authorized local paths.',

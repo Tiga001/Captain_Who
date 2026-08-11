@@ -1,6 +1,7 @@
 // Renderer Skill icon presentation: maps exact bundled application identities to stable icons.
 import type { SkillSourceDescriptor } from '@mycopilot/protocol'
 import { Images, WandSparkles } from 'lucide-react'
+import pdfIcon from 'material-icon-theme/icons/pdf.svg?url'
 import { OfficeFileIcon, type OfficeFileKind } from '../../components/files/OfficeFileIcon'
 import {
   getBundledSkillPresentationKey,
@@ -35,6 +36,8 @@ export function SkillIcon({ className, skillId, source }: SkillIconProps) {
     <span className={className} data-office-kind={officeKind} aria-hidden="true">
       {officeKind ? (
         <OfficeFileIcon kind={officeKind} />
+      ) : presentationKey === 'pdf' ? (
+        <img alt="" draggable={false} src={pdfIcon} />
       ) : presentationKey === 'imageGeneration' ? (
         <Images />
       ) : (
