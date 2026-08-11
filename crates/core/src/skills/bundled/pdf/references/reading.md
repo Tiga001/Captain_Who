@@ -1,54 +1,78 @@
 # Reading and inspection
 
-## Start with structure
+## Establish structure
 
-For an existing workspace PDF, use its exact safe workspace-relative path directly; the Host freezes it automatically. For attachments, external files, Artifacts, and other sources, bind the PDF with `run_command.inputs` and give it a stable `mountPath`, such as `manual.pdf`. Inspect it first with either:
+Inspect an existing workspace PDF by its exact relative path:
 
 ```sh
 pdfinfo "manuals/manual.pdf"
-# or, for a declared non-workspace input:
+```
+
+For a declared input, use its mount below the input root:
+
+```sh
 pdfinfo "$MYCOPILOT_INPUT_ROOT/manual.pdf"
 ```
 
-Record the reported page count and note encryption, page size, title, author, and creation metadata only when relevant. Treat PDF page numbers as one-based unless the library API explicitly uses zero-based indexes.
+Record the one-based page count first. Note encryption, dimensions, title, or author only when relevant.
 
 ## Locate before loading
 
-For a short text PDF, use `pdftotext -layout` or a bounded `pypdf`/`pdfplumber` extraction. For a large PDF:
-
-1. Extract searchable text to stdout or a safe private relative file such as `extracted.txt`; do not put unpublished text in `outputs/` or expect a `readPath` for it.
-2. Search for distinctive keywords, headings, figure/table captions, or section numbers.
-3. Extract the matching pages plus enough adjacent pages to preserve the section boundary and context.
-4. Check nearby footnotes, captions, sources, and continuation pages before answering.
-
-Prefer `pdftotext` for fast text, `pypdf` for page-level text and document structure, and `pdfplumber` for tables or positional text. If one extractor fails or produces visibly damaged text, try another rather than repeating the same command. Managed PDF execution accepts one direct invocation per tool call. For temporary multi-line Python logic, use a single quoted `python -c` argument containing literal newlines; do not use a pipeline, shell wrapper, or heredoc.
-
-For a saved search index, use a private relative intermediate rather than a publishable output:
+For a large text PDF, stream extraction into the receipt-bound `rg` and cap matches:
 
 ```sh
-pdftotext -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" extracted.txt
+pdftotext -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" - \
+  | rg -n -i -C 4 --max-count 20 "steady[- ]state|unit operation"
 ```
 
-Search or read `extracted.txt` in a later managed `python -c` command in the same Run. Do not use `grep` or `rg` for this step: only the managed PDF command entry points are guaranteed to resume in the private Run execution space. The intermediate has no Artifact `readPath`; only files deliberately written below `outputs/` are considered for publication. Prefer one bounded `python -c` command that extracts and locates keywords when practical.
+Use distinctive headings, section numbers, captions, or terms. If 20 matches are ambiguous, refine the expression rather than increasing output without a reason. Once the relevant pages are known, extract them directly:
 
-Do not mistake a text match for visual evidence. Extracted text can reorder columns, omit figures, flatten tables, lose superscripts, and hide clipping.
-
-## Render only what matters
-
-Render a bounded page range with Poppler and write it below `outputs/`, for example:
+`rg -n` reports extracted-text line numbers, not PDF page numbers. When the bounded context does not include a nearby `--- Page N ---` marker, use the page-aware Python fallback below to map the term to PDF pages; do not translate line numbers into byte-offset slicing.
 
 ```sh
-pdftoppm -f 12 -l 14 -png "$MYCOPILOT_INPUT_ROOT/manual.pdf" outputs/manual-page
+pdftotext -f 42 -l 46 -layout "$MYCOPILOT_INPUT_ROOT/manual.pdf" -
 ```
 
-Copy every returned image `outputs[].readPath` directly into `read_image.path`. Inspect all requested pages and, when needed, adjacent pages. Check headings, column order, tables, charts, diagrams, captions, footnotes, handwriting, stamps, and other layout-dependent evidence.
+Read enough adjacent pages to capture section boundaries, continuations, footnotes, captions, and sources. Do not dump the full text of a large document and then issue repeated Python commands that slice the same stdout by byte or character offset. If a command result exceeded the model budget, use its `historyOpen` with `conversation_history` instead of repeating extraction.
 
-For a scanned PDF or pages with empty extraction, render the relevant pages and read them visually. Do not claim OCR coverage beyond the pages actually inspected.
+Prefer `pdftotext` for fast layout-aware text, `pypdf` for page-level structure, and `pdfplumber` for positional text and tables. If a tool produces empty or clearly damaged text, switch tools once or render the relevant pages; do not repeat the same failing command.
+
+For bounded page-aware logic that the CLI cannot express, use a quoted heredoc and print only selected evidence:
+
+```sh
+python - "$MYCOPILOT_INPUT_ROOT/manual.pdf" <<'PY'
+import re, sys
+from pypdf import PdfReader
+
+reader = PdfReader(sys.argv[1])
+pattern = re.compile(r"steady[- ]state|unit operation", re.I)
+shown = 0
+for page_number, page in enumerate(reader.pages, 1):
+    text = page.extract_text() or ""
+    if pattern.search(text):
+        excerpt = " ".join(text.split())[:1200]
+        print(f"PAGE {page_number}: {excerpt}")
+        shown += 1
+        if shown == 12:
+            break
+PY
+```
+
+Keep explicit match, page, and excerpt limits. A heredoc is one command; do not create an executable temporary script just to work around quoting.
+
+## Render only relevant pages
+
+Text matches are not visual evidence. Render a bounded page range into publishable outputs:
+
+```sh
+pdftoppm -f 42 -l 46 -png "$MYCOPILOT_INPUT_ROOT/manual.pdf" outputs/manual-page
+```
+
+Pass every returned image `readPath` unchanged to `read_image`. Inspect headings, column order, tables, diagrams, captions, footnotes, handwriting, stamps, clipping, and unreadable glyphs. For scanned PDFs or pages with unusable extraction, use this visual path immediately.
 
 ## Answering gate
 
-- Cite or name the relevant PDF page numbers in the answer.
-- Distinguish document claims from your inference.
-- Preserve material table/figure labels, units, dates, qualifications, sources, and sample sizes.
+- Name the relevant PDF page numbers.
+- Preserve material labels, units, dates, qualifications, sources, and sample sizes.
+- Distinguish document statements from inference.
 - Disclose unreadable or unverified content instead of guessing.
-- When archived command output is needed, follow the returned `historyOpen` data with `conversation_history` rather than executing the extraction again.

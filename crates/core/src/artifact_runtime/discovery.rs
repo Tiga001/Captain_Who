@@ -24,9 +24,10 @@ const MAX_COMPONENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SHA256_HEX_LENGTH: usize = 64;
 
-pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.1";
+pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.2";
 pub const ARTIFACT_RUNTIME_NODE_VERSION: &str = "22.23.1";
 pub const ARTIFACT_RUNTIME_PYTHON_VERSION: &str = "3.12.13";
+pub const ARTIFACT_RUNTIME_RIPGREP_VERSION: &str = "15.1.0";
 
 const EXPECTED_NODE_DEPENDENCIES: &[(&str, &str)] = &[
     ("docx", "9.6.1"),
@@ -42,6 +43,12 @@ const EXPECTED_PYTHON_DEPENDENCIES: &[(&str, &str)] = &[
     ("python-pptx", "1.0.2"),
     ("reportlab", "4.4.9"),
     ("xlsxwriter", "3.2.9"),
+];
+const EXPECTED_PDF_CLI_PATH: &str = "runtime/pdf-runtime-cli.py";
+const EXPECTED_RIPGREP_LICENSES: &[&str] = &[
+    "legal/ripgrep/COPYING",
+    "legal/ripgrep/LICENSE-MIT",
+    "legal/ripgrep/UNLICENSE",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +92,7 @@ impl ArtifactRuntimeProvider {
         let receipt = read_receipt(&root)?;
         validate_receipt_contract(&receipt)?;
         let files = verify_component_tree(&root, &receipt)?;
+        validate_tool_executable_files(&receipt, &files)?;
         Ok(Self {
             root,
             source,
@@ -171,6 +179,19 @@ impl ArtifactRuntimeProvider {
             recovery: None,
             message: None,
         }
+    }
+
+    /// Returns the receipt-verified ripgrep executable. This never consults ambient PATH and
+    /// revalidates the complete component immediately before handing the path to a command host.
+    pub fn ripgrep_executable(&self) -> Result<PathBuf, ArtifactRuntimeError> {
+        self.reverify_bundle_integrity()?;
+        self.file_path(&self.receipt.tools.ripgrep.executable)
+    }
+
+    /// Returns the receipt-verified PDF compatibility CLI consumed by managed Python.
+    pub fn pdf_cli_path(&self) -> Result<PathBuf, ArtifactRuntimeError> {
+        self.reverify_bundle_integrity()?;
+        self.file_path(&self.receipt.tools.pdf_cli.path)
     }
 
     /// Revalidates the complete component file set and the immutable identities captured by the
@@ -439,6 +460,7 @@ struct ComponentReceipt {
     platform: String,
     arch: String,
     runtimes: RuntimeSet,
+    tools: ToolSet,
     files: Vec<FileReceipt>,
     bundle_revision: String,
 }
@@ -457,6 +479,29 @@ impl ComponentReceipt {
 struct RuntimeSet {
     node: RuntimeReceipt,
     python: RuntimeReceipt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ToolSet {
+    pdf_cli: PdfCliReceipt,
+    ripgrep: ExecutableToolReceipt,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PdfCliReceipt {
+    version: String,
+    path: String,
+    identity_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExecutableToolReceipt {
+    version: String,
+    executable: String,
+    identity_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -500,6 +545,7 @@ struct ReceiptRevisionPayload<'a> {
     platform: &'a str,
     arch: &'a str,
     runtimes: &'a RuntimeSet,
+    tools: &'a ToolSet,
     files: &'a [FileReceipt],
 }
 
@@ -535,9 +581,9 @@ fn read_receipt(root: &Path) -> Result<ComponentReceipt, ArtifactRuntimeError> {
 }
 
 fn validate_receipt_contract(receipt: &ComponentReceipt) -> Result<(), ArtifactRuntimeError> {
-    if receipt.schema_version != 2 {
+    if receipt.schema_version != 3 {
         return Err(invalid_component(
-            "Artifact runtime receipt schemaVersion must be 2.",
+            "Artifact runtime receipt schemaVersion must be 3.",
         ));
     }
     if receipt.provider_id != ARTIFACT_RUNTIME_PROVIDER_ID {
@@ -584,6 +630,7 @@ fn validate_receipt_contract(receipt: &ComponentReceipt) -> Result<(), ArtifactR
         ARTIFACT_RUNTIME_PYTHON_VERSION,
         EXPECTED_PYTHON_DEPENDENCIES,
     )?;
+    validate_tool_receipts(&receipt.tools)?;
     if receipt.files.is_empty() || receipt.files.len() > MAX_COMPONENT_FILES {
         return Err(invalid_component(format!(
             "Artifact runtime receipt must contain between 1 and {MAX_COMPONENT_FILES} files."
@@ -627,6 +674,78 @@ fn validate_receipt_contract(receipt: &ComponentReceipt) -> Result<(), ArtifactR
             ArtifactRuntimeRecovery::RepairComponent,
             "Artifact runtime bundle revision does not match its frozen receipt.",
         ));
+    }
+    Ok(())
+}
+
+fn validate_tool_receipts(tools: &ToolSet) -> Result<(), ArtifactRuntimeError> {
+    if tools.pdf_cli.version != "1" {
+        return Err(invalid_component(
+            "Managed PDF CLI must be pinned to version 1.",
+        ));
+    }
+    validate_relative_path(&tools.pdf_cli.path)?;
+    if tools.pdf_cli.path != EXPECTED_PDF_CLI_PATH {
+        return Err(invalid_component(
+            "Managed PDF tool paths do not match the frozen bundle contract.",
+        ));
+    }
+    validate_identity_files(
+        &tools.pdf_cli.identity_files,
+        std::iter::once(tools.pdf_cli.path.as_str()),
+        "Managed PDF CLI",
+    )?;
+
+    if tools.ripgrep.version != ARTIFACT_RUNTIME_RIPGREP_VERSION {
+        return Err(invalid_component(format!(
+            "Managed ripgrep must be pinned to version {ARTIFACT_RUNTIME_RIPGREP_VERSION}."
+        )));
+    }
+    validate_relative_path(&tools.ripgrep.executable)?;
+    let expected_ripgrep = if current_platform() == "win32" {
+        "dependencies/tools/rg.exe"
+    } else {
+        "dependencies/tools/rg"
+    };
+    if tools.ripgrep.executable != expected_ripgrep {
+        return Err(invalid_component(
+            "Managed ripgrep executable path does not match the frozen bundle contract.",
+        ));
+    }
+    validate_identity_files(
+        &tools.ripgrep.identity_files,
+        std::iter::once(tools.ripgrep.executable.as_str())
+            .chain(EXPECTED_RIPGREP_LICENSES.iter().copied()),
+        "Managed ripgrep",
+    )
+}
+
+fn validate_identity_files<'a>(
+    identity_files: &[String],
+    required: impl IntoIterator<Item = &'a str>,
+    label: &str,
+) -> Result<(), ArtifactRuntimeError> {
+    if identity_files.is_empty() || identity_files.len() > 64 {
+        return Err(invalid_component(format!(
+            "{label} must declare between 1 and 64 identity files."
+        )));
+    }
+    let mut identities = BTreeSet::new();
+    for path in identity_files {
+        validate_relative_path(path)?;
+        if !identities.insert(path.as_str()) {
+            return Err(invalid_component(format!(
+                "{label} identity files must be unique."
+            )));
+        }
+    }
+    if required
+        .into_iter()
+        .any(|required| !identities.contains(required))
+    {
+        return Err(invalid_component(format!(
+            "{label} identity files do not include every executable or resource entry."
+        )));
     }
     Ok(())
 }
@@ -754,6 +873,7 @@ fn compute_bundle_revision(receipt: &ComponentReceipt) -> Result<String, Artifac
         platform: &receipt.platform,
         arch: &receipt.arch,
         runtimes: &receipt.runtimes,
+        tools: &receipt.tools,
         files: &receipt.files,
     };
     let bytes = serde_json::to_vec(&payload).map_err(|error| {
@@ -829,7 +949,47 @@ fn verify_component_tree(
             )));
         }
     }
+    for path in receipt
+        .tools
+        .pdf_cli
+        .identity_files
+        .iter()
+        .chain(receipt.tools.ripgrep.identity_files.iter())
+    {
+        if !verified.contains_key(path) {
+            return Err(invalid_component(format!(
+                "Managed tool identity file `{path}` is absent from the component file set."
+            )));
+        }
+    }
     Ok(verified)
+}
+
+fn validate_tool_executable_files(
+    receipt: &ComponentReceipt,
+    files: &BTreeMap<String, VerifiedFile>,
+) -> Result<(), ArtifactRuntimeError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let relative = receipt.tools.ripgrep.executable.as_str();
+        let file = files.get(relative).ok_or_else(|| {
+            invalid_component(format!(
+                "Managed tool executable `{relative}` is absent from the component file set."
+            ))
+        })?;
+        let metadata = fs::symlink_metadata(&file.path)
+            .map_err(|error| io_error("inspect managed tool executable", error))?;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(invalid_component(format!(
+                "Managed tool executable `{relative}` is not executable."
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (receipt, files);
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1268,6 +1428,20 @@ mod tests {
                     "dependencies/python/bin/python3",
                     b"python fixture".as_slice(),
                 ),
+                ("dependencies/tools/rg", b"ripgrep fixture".as_slice()),
+                (
+                    "runtime/pdf-runtime-cli.py",
+                    b"# managed PDF CLI fixture\n".as_slice(),
+                ),
+                ("legal/ripgrep/COPYING", b"fixture copyright\n".as_slice()),
+                (
+                    "legal/ripgrep/LICENSE-MIT",
+                    b"fixture MIT license\n".as_slice(),
+                ),
+                (
+                    "legal/ripgrep/UNLICENSE",
+                    b"fixture unlicense\n".as_slice(),
+                ),
                 (
                     "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA",
                     b"Name: openpyxl\nVersion: 3.1.5\n".as_slice(),
@@ -1307,7 +1481,10 @@ mod tests {
                 let mut file = File::create(&path).unwrap();
                 file.write_all(bytes).unwrap();
                 #[cfg(unix)]
-                if relative.ends_with("/node") || relative.ends_with("/python3") {
+                if relative.ends_with("/node")
+                    || relative.ends_with("/python3")
+                    || relative.ends_with("/rg")
+                {
                     use std::os::unix::fs::PermissionsExt;
                     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
                 }
@@ -1342,7 +1519,7 @@ mod tests {
             })
             .collect();
         ComponentReceipt {
-            schema_version: 2,
+            schema_version: 3,
             provider_id: ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
             bundle_version: ARTIFACT_RUNTIME_BUNDLE_VERSION.to_string(),
             build_inputs_revision: format!(
@@ -1447,6 +1624,23 @@ mod tests {
                     ],
                 },
             },
+            tools: ToolSet {
+                pdf_cli: PdfCliReceipt {
+                    version: "1".to_string(),
+                    path: "runtime/pdf-runtime-cli.py".to_string(),
+                    identity_files: vec!["runtime/pdf-runtime-cli.py".to_string()],
+                },
+                ripgrep: ExecutableToolReceipt {
+                    version: ARTIFACT_RUNTIME_RIPGREP_VERSION.to_string(),
+                    executable: "dependencies/tools/rg".to_string(),
+                    identity_files: vec![
+                        "dependencies/tools/rg".to_string(),
+                        "legal/ripgrep/COPYING".to_string(),
+                        "legal/ripgrep/LICENSE-MIT".to_string(),
+                        "legal/ripgrep/UNLICENSE".to_string(),
+                    ],
+                },
+            },
             files,
             bundle_revision: String::new(),
         }
@@ -1534,6 +1728,52 @@ mod tests {
             invocation.arguments_prefix(),
             &[OsString::from("-I"), OsString::from("-B")]
         );
+    }
+
+    #[test]
+    fn exposes_only_receipt_verified_pdf_cli_and_ripgrep_paths() {
+        let fixture = Fixture::new();
+        let provider = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap();
+
+        assert_eq!(
+            provider.pdf_cli_path().unwrap(),
+            fixture
+                .directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("runtime/pdf-runtime-cli.py")
+        );
+        assert_eq!(
+            provider.ripgrep_executable().unwrap(),
+            fixture
+                .directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("dependencies/tools/rg")
+        );
+        fs::write(
+            fixture.directory.path().join("dependencies/tools/rg"),
+            b"replaced ripgrep fixture",
+        )
+        .unwrap();
+        let error = provider.ripgrep_executable().unwrap_err();
+        assert_eq!(error.code(), ArtifactRuntimeErrorCode::IntegrityMismatch);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_receipted_ripgrep_without_execute_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let launcher = fixture.directory.path().join("dependencies/tools/rg");
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap_err();
+        assert_eq!(error.code(), ArtifactRuntimeErrorCode::InvalidComponent);
+        assert!(error.message().contains("is not executable"));
     }
 
     #[test]

@@ -1,16 +1,17 @@
-"""Host-owned compatibility CLI for the managed PDF runtime.
+"""Receipt-bound compatibility CLI for the managed PDF runtime.
 
-The Rust adapter invokes this source with ``python -c`` from an isolated, private working
-directory. It intentionally implements only the small command surface documented by the bundled
-PDF Skill. Publishable files are confined to ``outputs/``; text intermediates remain inside the
-private Run workspace, and inputs are frozen below ``MYCOPILOT_INPUT_ROOT``.
+The Host invokes this receipt-covered file with the exact managed Python from an isolated, private
+working directory. It intentionally implements only the small command surface documented by the
+bundled PDF Skill. Publishable files are confined to ``outputs/``; text intermediates remain inside
+the private Run workspace, and inputs are frozen below a Host-validated input root.
 """
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import sys
-import math
 import tempfile
 from pathlib import Path
 
@@ -21,7 +22,7 @@ MAX_RENDER_DPI = 300
 MAX_RENDER_PAGE_PIXELS = 40_000_000
 MAX_RENDER_TOTAL_PIXELS = 128_000_000
 MAX_EXTRACTED_TEXT_BYTES = 32 * 1024 * 1024
-STREAM_COPY_BYTES = 64 * 1024
+_MANAGED_INPUT_ROOT: Path | None = None
 
 
 def _expanded_path(value: str) -> Path:
@@ -37,9 +38,8 @@ def _input_path(value: str) -> Path:
         raise ValueError(f"PDF input is not a regular file: {value}")
     execution_root = Path.cwd().resolve(strict=True)
     allowed_roots = [execution_root]
-    input_root_value = os.environ.get("MYCOPILOT_INPUT_ROOT")
-    if input_root_value:
-        input_root = Path(input_root_value).resolve(strict=True)
+    if _MANAGED_INPUT_ROOT is not None:
+        input_root = _MANAGED_INPUT_ROOT.resolve(strict=True)
         if not input_root.is_dir():
             raise ValueError("MYCOPILOT_INPUT_ROOT is not a directory")
         allowed_roots.append(input_root)
@@ -126,6 +126,40 @@ def _parse_int(args: list[str], index: int, option: str) -> tuple[int, int]:
         raise ValueError(f"{option} requires an integer") from error
 
 
+def _pdf_text_chunks(
+    path: Path,
+    first_page: int,
+    last_page: int | None,
+    layout: bool,
+    page_breaks: bool,
+):
+    from pypdf import PdfReader
+
+    # Keep non-fatal damaged-xref recovery diagnostics out of model-facing command output.
+    # Fatal parse failures still propagate as managed command errors.
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    separator = "\n\f\n" if page_breaks else "\n\n"
+    reader = PdfReader(str(path))
+    if reader.is_encrypted:
+        raise ValueError(
+            "encrypted PDF requires a password; this managed workflow does not accept passwords"
+        )
+    end = len(reader.pages) if last_page is None else min(last_page, len(reader.pages))
+    if first_page > end:
+        raise ValueError(
+            f"first page {first_page} exceeds document page count {len(reader.pages)}"
+        )
+    for page_number in range(first_page, end + 1):
+        page = reader.pages[page_number - 1]
+        text = (
+            page.extract_text(extraction_mode="layout")
+            if layout
+            else page.extract_text()
+        ) or ""
+        prefix = separator if page_number > first_page else ""
+        yield f"{prefix}--- Page {page_number} ---\n{text}".encode("utf-8")
+
+
 def pdfinfo(args: list[str]) -> None:
     if len(args) != 1:
         raise ValueError("usage: pdfinfo <input.pdf>")
@@ -184,64 +218,57 @@ def pdftotext(args: list[str]) -> None:
     if first_page < 1 or (last_page is not None and last_page < first_page):
         raise ValueError("invalid PDF page range")
 
-    import pdfplumber
-
     path = _input_path(positional[0])
-    _reject_encrypted_pdf(path)
     destination = positional[1] if len(positional) == 2 else "-"
     output = None if destination == "-" else _intermediate_path(destination)
-    private_temp = Path.cwd() / ".tmp"
-    private_temp.mkdir(mode=0o700, exist_ok=True)
-    temporary = tempfile.NamedTemporaryFile(
-        mode="w+b",
-        prefix="pdftotext-",
-        suffix=".tmp",
-        dir=private_temp,
-        delete=False,
-    )
-    temporary_path = Path(temporary.name)
     extracted_pages = 0
     extracted_bytes = 0
-    separator = "\n\f\n" if page_breaks else "\n\n"
+    temporary_path: Path | None = None
+    temporary = None
+    if output is not None:
+        private_temp = Path.cwd() / ".tmp"
+        private_temp.mkdir(mode=0o700, exist_ok=True)
+        temporary = tempfile.NamedTemporaryFile(
+            mode="w+b",
+            prefix="pdftotext-",
+            suffix=".tmp",
+            dir=private_temp,
+            delete=False,
+        )
+        temporary_path = Path(temporary.name)
+    writer = temporary if temporary is not None else sys.stdout.buffer
     try:
-        with temporary:
-            with pdfplumber.open(path) as pdf:
-                end = len(pdf.pages) if last_page is None else min(last_page, len(pdf.pages))
-                if first_page > end:
-                    raise ValueError(
-                        f"first page {first_page} exceeds document page count {len(pdf.pages)}"
-                    )
-                for page_number in range(first_page, end + 1):
-                    page = pdf.pages[page_number - 1]
-                    text = page.extract_text(layout=layout) or ""
-                    prefix = separator if extracted_pages else ""
-                    encoded = f"{prefix}--- Page {page_number} ---\n{text}".encode("utf-8")
-                    if extracted_bytes + len(encoded) + 1 > MAX_EXTRACTED_TEXT_BYTES:
-                        raise ValueError(
-                            "extracted text exceeds the 32 MiB safety limit; "
-                            "narrow the page range with -f and -l"
-                        )
-                    temporary.write(encoded)
-                    extracted_bytes += len(encoded)
-                    extracted_pages += 1
-                temporary.write(b"\n")
-                extracted_bytes += 1
-            temporary.flush()
-            os.fsync(temporary.fileno())
+        for encoded in _pdf_text_chunks(path, first_page, last_page, layout, page_breaks):
+            if extracted_bytes + len(encoded) + 1 > MAX_EXTRACTED_TEXT_BYTES:
+                raise ValueError(
+                    "extracted text exceeds the 32 MiB safety limit; "
+                    "narrow the page range with -f and -l"
+                )
+            writer.write(encoded)
+            extracted_bytes += len(encoded)
+            extracted_pages += 1
+            if temporary is None:
+                # Let a bounded downstream reader terminate production before later pages are
+                # parsed. BrokenPipeError is normalized by the process entry point below.
+                writer.flush()
+        writer.write(b"\n")
+        extracted_bytes += 1
+        writer.flush()
 
-        if output is not None:
+        if temporary is not None:
+            os.fsync(temporary.fileno())
+            temporary.close()
             os.replace(temporary_path, output)
+            temporary_path = None
             print(
                 f"Extracted {extracted_pages} page(s), {extracted_bytes} UTF-8 byte(s) "
                 f"to {output.relative_to(Path.cwd())}"
             )
-            return
-        with temporary_path.open("rb") as source:
-            while chunk := source.read(STREAM_COPY_BYTES):
-                sys.stdout.buffer.write(chunk)
-        sys.stdout.buffer.flush()
     finally:
-        temporary_path.unlink(missing_ok=True)
+        if temporary is not None and not temporary.closed:
+            temporary.close()
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def pdftoppm(args: list[str]) -> None:
@@ -341,9 +368,15 @@ def pdftoppm(args: list[str]) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
+    global _MANAGED_INPUT_ROOT
+
+    arguments = sys.argv[1:]
+    if len(arguments) >= 2 and arguments[0] == "--managed-input-root":
+        _MANAGED_INPUT_ROOT = Path(arguments[1])
+        arguments = arguments[2:]
+    if not arguments:
         raise ValueError("managed PDF command name is required")
-    command, args = sys.argv[1], sys.argv[2:]
+    command, args = arguments[0], arguments[1:]
     if command == "pdfinfo":
         pdfinfo(args)
     elif command == "pdftotext":
@@ -357,6 +390,16 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
+    except BrokenPipeError:
+        # A bounded downstream reader such as `rg --max-count` may intentionally stop before
+        # pdftotext finishes. Treat that normal pipeline backpressure as success and replace
+        # stdout so Python's interpreter-shutdown flush cannot emit a second BrokenPipeError.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(devnull, sys.stdout.fileno())
+        finally:
+            os.close(devnull)
+        raise SystemExit(0)
     except Exception as error:
         print(f"managed PDF command failed: {error}", file=sys.stderr)
         raise SystemExit(2)

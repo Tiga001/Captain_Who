@@ -12,7 +12,7 @@ mod types;
 pub use discovery::{
     artifact_runtime_component_relative_path, ArtifactRuntimeDiscoveryOptions,
     ArtifactRuntimeProvider, ARTIFACT_RUNTIME_BUNDLE_VERSION, ARTIFACT_RUNTIME_NODE_VERSION,
-    ARTIFACT_RUNTIME_PYTHON_VERSION,
+    ARTIFACT_RUNTIME_PYTHON_VERSION, ARTIFACT_RUNTIME_RIPGREP_VERSION,
 };
 pub use types::{
     ArtifactRuntimeAvailability, ArtifactRuntimeBundleStatus, ArtifactRuntimeDependency,

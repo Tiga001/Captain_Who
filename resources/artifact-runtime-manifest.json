@@ -1,11 +1,11 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "providerId": "mycopilot.artifact-runtime",
-  "bundleVersion": "2026.08.1",
+  "bundleVersion": "2026.08.2",
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "e4b2f0e09f0f6c96a2dbf8c2db773ddde6e4530749349429252e049153ad3776"
+      "sha256": "2a760ebb4e2363d973954dad6884e547b9caf7cec323efa3cd4fe3d5d379f6c5"
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",
@@ -30,6 +30,10 @@
     "pythonRequirements": {
       "path": "resources/artifact-runtime-python-requirements.txt",
       "sha256": "00f07736ba51e7c20d7f6aab446107d1f8013cdafef738c1c140fafd022bce8b"
+    },
+    "pdfRuntimeCli": {
+      "path": "crates/core/src/command/pdf_runtime_cli.py",
+      "sha256": "a96a7be711aff3435487009976fe4f9dc93697f18f5d396576679e089a101bd7"
     }
   },
   "node": {
@@ -192,5 +196,69 @@
     },
     "source": "https://github.com/astral-sh/python-build-standalone",
     "license": "MPL-2.0 AND Python-2.0"
+  },
+  "tools": {
+    "pdfCli": {
+      "version": "1",
+      "target": "runtime/pdf-runtime-cli.py"
+    },
+    "ripgrep": {
+      "version": "15.1.0",
+      "executable": {
+        "unix": "dependencies/tools/rg",
+        "win32": "dependencies/tools/rg.exe"
+      },
+      "assets": {
+        "darwin-arm64": {
+          "format": "tar.gz",
+          "archiveRoot": "ripgrep-15.1.0-aarch64-apple-darwin",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-apple-darwin.tar.gz",
+          "size": 1777930,
+          "sha256": "378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715"
+        },
+        "darwin-x64": {
+          "format": "tar.gz",
+          "archiveRoot": "ripgrep-15.1.0-x86_64-apple-darwin",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-apple-darwin.tar.gz",
+          "size": 1894127,
+          "sha256": "64811cb24e77cac3057d6c40b63ac9becf9082eedd54ca411b475b755d334882"
+        },
+        "linux-arm64": {
+          "format": "tar.gz",
+          "archiveRoot": "ripgrep-15.1.0-aarch64-unknown-linux-gnu",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-unknown-linux-gnu.tar.gz",
+          "size": 1869959,
+          "sha256": "2b661c6ef508e902f388e9098d9c4c5aca72c87b55922d94abdba830b4dc885e"
+        },
+        "linux-x64": {
+          "format": "tar.gz",
+          "archiveRoot": "ripgrep-15.1.0-x86_64-unknown-linux-musl",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-unknown-linux-musl.tar.gz",
+          "size": 2263077,
+          "sha256": "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599"
+        },
+        "win32-arm64": {
+          "format": "zip",
+          "archiveRoot": "ripgrep-15.1.0-aarch64-pc-windows-msvc",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-pc-windows-msvc.zip",
+          "size": 1675460,
+          "sha256": "00d931fb5237c9696ca49308818edb76d8eb6fc132761cb2a1bd616b2df02f8e"
+        },
+        "win32-x64": {
+          "format": "zip",
+          "archiveRoot": "ripgrep-15.1.0-x86_64-pc-windows-msvc",
+          "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-pc-windows-msvc.zip",
+          "size": 1810687,
+          "sha256": "124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a"
+        }
+      },
+      "licenseFiles": [
+        { "source": "COPYING", "target": "legal/ripgrep/COPYING" },
+        { "source": "LICENSE-MIT", "target": "legal/ripgrep/LICENSE-MIT" },
+        { "source": "UNLICENSE", "target": "legal/ripgrep/UNLICENSE" }
+      ],
+      "source": "https://github.com/BurntSushi/ripgrep",
+      "license": "MIT OR Unlicense"
+    }
   }
 }

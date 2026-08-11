@@ -2,7 +2,7 @@ use super::{clean_relative_path, AgentTool, ToolExecutionContext};
 use crate::command::{
     classify_command_risk, infer_managed_artifact_builder_command,
     infer_managed_artifact_command_kind, infer_managed_pdf_command_kind,
-    infer_managed_pdf_workspace_input, normalize_command_text, validate_command_runtime_binding,
+    infer_managed_pdf_workspace_inputs, normalize_command_text, validate_command_runtime_binding,
     validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
     validate_managed_artifact_command_shape, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
     MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
@@ -405,8 +405,8 @@ fn command_request_from_call(
     .with_conversation_id(context.conversation_id_optional());
     let workspace_root = context.workspace_root_optional()?;
     let mut input_specs = resolve_run_command_inputs(&input_context, args.inputs)?;
-    if managed_pdf_profile.is_some() && input_specs.is_empty() {
-        if let Some(relative) = infer_managed_pdf_workspace_input(&command).map_err(|message| {
+    if managed_pdf_profile.is_some() {
+        for relative in infer_managed_pdf_workspace_inputs(&command).map_err(|message| {
             AgentError::structured(
                 "agent.fileInput.invalidRequest",
                 message,
@@ -447,10 +447,31 @@ fn command_request_from_call(
                         }),
                     ));
                 }
-                input_specs.push(AgentFileInputSpec {
+                let implicit = AgentFileInputSpec {
                     mount_path: relative.clone(),
                     source: AgentFileInputRef::Workspace { path: relative },
-                });
+                };
+                if let Some(existing) = input_specs
+                    .iter()
+                    .find(|input| input.mount_path == implicit.mount_path)
+                {
+                    if existing != &implicit {
+                        return Err(AgentError::structured(
+                            "agent.fileInput.invalidRequest",
+                            format!(
+                                "run_command.inputs 的 mountPath `{}` 与隐式 workspace PDF 输入冲突。",
+                                implicit.mount_path
+                            ),
+                            json!({
+                                "type": "agentFileInput",
+                                "code": "agent.fileInput.invalidRequest",
+                                "recovery": "changeRequest"
+                            }),
+                        ));
+                    }
+                } else {
+                    input_specs.push(implicit);
+                }
             }
         }
     }
@@ -496,6 +517,29 @@ fn trusted_managed_pdf_profile(
     if explicit_profile.is_some() {
         return Ok(None);
     }
+    // Office Managed Builders have an existing, provenance-bound runtime contract. Activating
+    // the PDF Skill in the same Run must not cause its deliberately narrower shell parser to
+    // reinterpret or reject those commands before the Office binding is considered.
+    if infer_managed_artifact_builder_command(command)
+        .map_err(builder_contract_error)?
+        .is_some_and(|builder| {
+            builder
+                .output_paths
+                .iter()
+                .any(|output| office_profile_for_output(output).is_some())
+        })
+    {
+        return Ok(None);
+    }
+    let activated = context.skill_resources_optional().is_some_and(|resources| {
+        resources.package_uris().iter().any(|package| {
+            package.skill_id().source_id().as_str() == APPLICATION_BUNDLED_SKILL_SOURCE_ID
+                && package.skill_id().local_id() == PDF_LOCAL_ID
+        })
+    });
+    if !activated {
+        return Ok(None);
+    }
     let Some(kind) = infer_managed_pdf_command_kind(command).map_err(|message| {
         AgentError::structured(
             "artifactRuntime.invalidCommandShape",
@@ -511,13 +555,7 @@ fn trusted_managed_pdf_profile(
         return Ok(None);
     };
     debug_assert_eq!(kind, crate::AgentCommandRuntimeKind::Python);
-    let activated = context.skill_resources_optional().is_some_and(|resources| {
-        resources.package_uris().iter().any(|package| {
-            package.skill_id().source_id().as_str() == APPLICATION_BUNDLED_SKILL_SOURCE_ID
-                && package.skill_id().local_id() == PDF_LOCAL_ID
-        })
-    });
-    Ok(activated.then_some(AgentCommandRuntimeProfile::Pdf))
+    Ok(Some(AgentCommandRuntimeProfile::Pdf))
 }
 
 fn sanitize_managed_pdf_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
@@ -1180,27 +1218,15 @@ fn normalize_frozen_run_command_inputs(
     frozen_inputs: &[AgentFileInputSpec],
     frozen_pdf: bool,
 ) -> Result<Vec<AgentFileInputSpec>, String> {
-    if inputs.is_empty() && frozen_pdf {
-        if let Some(relative) = infer_managed_pdf_workspace_input(command)? {
-            let implicit = vec![AgentFileInputSpec {
-                mount_path: relative.clone(),
-                source: AgentFileInputRef::Workspace { path: relative },
-            }];
-            if implicit == frozen_inputs {
-                return Ok(implicit);
-            }
-        }
-    }
-    if inputs.len() != frozen_inputs.len() {
-        return Err("run_command frozen ToolCall inputs differ from prepared inputs".to_string());
-    }
-    let specs = inputs
+    let mut specs = inputs
         .into_iter()
         .enumerate()
         .map(|(index, input)| match input {
             RunCommandInputWire::Legacy(spec) => Ok(spec),
             RunCommandInputWire::ModelPath(input) => {
-                let frozen = &frozen_inputs[index];
+                let frozen = frozen_inputs.get(index).ok_or_else(|| {
+                    "run_command frozen ToolCall inputs exceed prepared inputs".to_string()
+                })?;
                 if !agent_file_input_ref_matches_model_path(&frozen.source, &input.path)
                     .map_err(|_| "run_command frozen ToolCall input path is invalid".to_string())?
                 {
@@ -1218,6 +1244,30 @@ fn normalize_frozen_run_command_inputs(
             }
         })
         .collect::<Result<Vec<_>, String>>()?;
+    if frozen_pdf {
+        for relative in infer_managed_pdf_workspace_inputs(command)? {
+            let implicit = AgentFileInputSpec {
+                mount_path: relative.clone(),
+                source: AgentFileInputRef::Workspace { path: relative },
+            };
+            if let Some(existing) = specs
+                .iter()
+                .find(|input| input.mount_path == implicit.mount_path)
+            {
+                if existing != &implicit {
+                    return Err(
+                        "run_command frozen ToolCall input collides with implicit PDF input"
+                            .to_string(),
+                    );
+                }
+            } else {
+                specs.push(implicit);
+            }
+        }
+    }
+    if specs.len() != frozen_inputs.len() {
+        return Err("run_command frozen ToolCall inputs differ from prepared inputs".to_string());
+    }
     normalize_agent_file_input_specs(&specs)
         .map_err(|_| "run_command frozen ToolCall inputs are invalid".to_string())
 }
@@ -1399,8 +1449,10 @@ mod tests {
         memory_resource_session_for_test, SkillId, SkillPackageUri, SkillResourceKind,
         SkillResourcePath, SkillRevision, SkillSourceId, APPLICATION_BUNDLED_SKILL_SOURCE_ID,
     };
-    use crate::storage::models::AgentActionAuditRecord;
-    use crate::storage::service::StorageService;
+    use crate::storage::models::{
+        AgentActionAuditRecord, ChatConversationRecord, ChatMessageRecord,
+    };
+    use crate::storage::service::{ManagedArtifactAuthority, StorageService};
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use std::sync::Arc;
@@ -1444,7 +1496,7 @@ mod tests {
                 &resolved_packages,
             ),
             provider_id: crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
-            bundle_version: "2026.08.1".to_string(),
+            bundle_version: crate::artifact_runtime::ARTIFACT_RUNTIME_BUNDLE_VERSION.to_string(),
             bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
             kind,
             runtime_version: "22.23.1".to_string(),
@@ -1588,6 +1640,26 @@ mod tests {
         )
     }
 
+    fn pdf_and_documents_skill_session() -> Arc<crate::skills::SkillResourceSession> {
+        let session = pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID);
+        let documents = memory_resource_session_for_test(
+            SkillId::parse(format!(
+                "{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{DOCUMENTS_LOCAL_ID}"
+            ))
+            .unwrap(),
+            SkillRevision::parse("documents-test-revision").unwrap(),
+            SkillSourceId::parse(APPLICATION_BUNDLED_SKILL_SOURCE_ID).unwrap(),
+            vec![(
+                "templates/builder.py".to_string(),
+                SkillResourceKind::Other,
+                b"test".to_vec(),
+            )],
+        )
+        .unwrap();
+        session.extend_from(&documents).unwrap();
+        session
+    }
+
     #[test]
     fn only_exact_bundled_pdf_skill_binds_the_hidden_pdf_runtime() {
         let command = "python -c 'from pypdf import PdfWriter; print(PdfWriter)'";
@@ -1709,6 +1781,106 @@ mod tests {
         assert!(!serde_json::to_string(&request)
             .unwrap()
             .contains(workspace.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn bundled_pdf_merges_explicit_attachment_and_workspace_inputs_deterministically() {
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_name = "工作区 手册.pdf";
+        let workspace_bytes = b"%PDF-1.4\nworkspace fixture\n";
+        std::fs::write(workspace.path().join(workspace_name), workspace_bytes).unwrap();
+
+        let library = tempfile::tempdir().unwrap();
+        let library_root = library.path().canonicalize().unwrap();
+        std::fs::create_dir(library_root.join("objects")).unwrap();
+        let attachment_bytes = b"%PDF-1.4\nattachment fixture\n";
+        std::fs::write(library_root.join("objects/attached.pdf"), attachment_bytes).unwrap();
+        let attachment_read_path = "@attachments/attachment-pdf/attached.pdf";
+
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-mixed-pdf-inputs".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("mixed PDF inputs".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: Some(AgentAttachmentLibraryContext {
+                    root_path: Some(library_root.to_string_lossy().into_owned()),
+                    conversation_id: Some("conversation-mixed-pdf-inputs".to_string()),
+                    project_id: None,
+                    conversation_attachments: vec![AgentAttachmentReference {
+                        id: "attachment-pdf".to_string(),
+                        conversation_id: "conversation-mixed-pdf-inputs".to_string(),
+                        message_id: "message-mixed-pdf-inputs".to_string(),
+                        project_id: None,
+                        kind: AgentInputAttachmentKind::File,
+                        name: "attached.pdf".to_string(),
+                        mime_type: Some("application/pdf".to_string()),
+                        size_bytes: attachment_bytes.len() as u64,
+                        read_path: attachment_read_path.to_string(),
+                        storage_rel_path: "objects/attached.pdf".to_string(),
+                        created_at: 1,
+                    }],
+                    project_attachments: Vec::new(),
+                }),
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..AgentPermissions::default()
+                },
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            test_binding(
+                AgentCommandRuntimeProfile::Pdf,
+                AgentCommandRuntimeKind::Python,
+                &[
+                    ("pdfplumber", "0.11.9"),
+                    ("pypdf", "6.15.0"),
+                    ("pypdfium2", "5.12.1"),
+                    ("reportlab", "4.4.9"),
+                ],
+            ),
+        );
+        let call = AgentToolCall {
+            id: "pdf-mixed-inputs".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": format!(
+                    "pdfinfo \"{workspace_name}\"; pdfinfo \"$MYCOPILOT_INPUT_ROOT/attached.pdf\""
+                ),
+                "inputs": [
+                    {"path": attachment_read_path, "mountPath": "attached.pdf"}
+                ],
+                "reason": "Compare the workspace and attached PDFs"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert_eq!(request.inputs.len(), 2);
+        assert_eq!(request.inputs[0].mount_path, "attached.pdf");
+        assert_eq!(request.inputs[1].mount_path, workspace_name);
+        assert_eq!(
+            request.inputs[1].source,
+            AgentFileInputRef::Workspace {
+                path: workspace_name.to_string()
+            }
+        );
+        assert_eq!(
+            request.inputs[0].sha256,
+            format!("{:x}", Sha256::digest(attachment_bytes))
+        );
+        assert_eq!(
+            request.inputs[1].sha256,
+            format!("{:x}", Sha256::digest(workspace_bytes))
+        );
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(!serialized.contains(workspace.path().to_string_lossy().as_ref()));
+        assert!(!serialized.contains(library_root.to_string_lossy().as_ref()));
     }
 
     #[test]
@@ -1884,6 +2056,100 @@ mod tests {
             request.inputs[0].sha256,
             format!("{:x}", Sha256::digest(bytes))
         );
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
+    }
+
+    #[test]
+    fn bundled_pdf_freezes_a_conversation_artifact_without_a_workspace() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let storage = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        let conversation_id = "conversation-pdf-artifact";
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: conversation_id.to_string(),
+                project_id: None,
+                model_id: Some("test-model".to_string()),
+                title: "PDF Artifact input".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-pdf-artifact".to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let source = root.join("generated-manual.pdf");
+        let bytes = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        std::fs::write(&source, bytes).unwrap();
+        let published = storage
+            .publish_managed_artifact_file(
+                &source,
+                ManagedArtifactAuthority {
+                    conversation_id,
+                    run_id: "run-pdf-artifact-source",
+                    call_id: "call-pdf-artifact-source",
+                },
+            )
+            .unwrap();
+        let read_path = published.read_path();
+        assert!(read_path.starts_with("artifact://sha256/"));
+
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some(conversation_id.to_string()),
+                project_id: None,
+                workspace: None,
+                attachment_library: None,
+                permissions: AgentPermissions::default(),
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            test_binding(
+                AgentCommandRuntimeProfile::Pdf,
+                AgentCommandRuntimeKind::Python,
+                &[
+                    ("pdfplumber", "0.11.9"),
+                    ("pypdf", "6.15.0"),
+                    ("pypdfium2", "5.12.1"),
+                    ("reportlab", "4.4.9"),
+                ],
+            ),
+        )
+        .with_runtime_services("run-pdf-artifact".to_string(), Some(storage));
+        let call = AgentToolCall {
+            id: "pdf-artifact-info".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "pdfinfo \"$MYCOPILOT_INPUT_ROOT/manual.pdf\"",
+                "inputs": [{
+                    "path": read_path,
+                    "mountPath": "manual.pdf"
+                }],
+                "reason": "Inspect a PDF produced earlier in this conversation"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert!(request.cwd.is_none());
+        assert_eq!(request.inputs.len(), 1);
+        assert_eq!(request.inputs[0].mount_path, "manual.pdf");
+        assert_eq!(request.inputs[0].size_bytes, bytes.len() as u64);
+        assert_eq!(request.inputs[0].sha256, published.sha256);
+        assert!(matches!(
+            &request.inputs[0].source,
+            AgentFileInputRef::GeneratedArtifact { uri, .. } if uri == &published.read_path()
+        ));
         validate_frozen_command_trace_args(&request, &call.args).unwrap();
     }
 
@@ -2145,6 +2411,72 @@ mod tests {
             assert!(observe.expected_outputs[0].starts_with("outputs/"));
             validate_frozen_command_trace_args(&request, &args).unwrap();
         }
+    }
+
+    #[test]
+    fn activated_pdf_skill_does_not_intercept_a_provenance_bound_office_builder() {
+        let workspace = tempfile::tempdir().unwrap();
+        let script = "scripts/build.py";
+        let script_path = workspace.path().join(script);
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "# managed builder\n").unwrap();
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+        let run_id = "run-pdf-and-documents";
+        record_materialized_builder(
+            &storage,
+            run_id,
+            AgentCommandRuntimeProfile::Documents,
+            script,
+        );
+        let command = "python scripts/build.py --output outputs/report.docx";
+        let call = AgentToolCall {
+            id: "tool-pdf-and-documents".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({ "command": command }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-pdf-and-documents".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("PDF and Documents".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            }))
+            .with_skill_resources(Some(pdf_and_documents_skill_session())),
+            test_binding(
+                AgentCommandRuntimeProfile::Documents,
+                AgentCommandRuntimeKind::Python,
+                &[("python-docx", "1.2.0")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(storage));
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert_eq!(request.command, command);
+        assert_eq!(
+            request
+                .runtime_binding
+                .as_deref()
+                .map(|binding| binding.profile),
+            Some(AgentCommandRuntimeProfile::Documents)
+        );
+        assert_eq!(
+            request
+                .observe
+                .as_ref()
+                .map(|observe| observe.kinds.as_slice()),
+            Some([AgentCommandArtifactObservationKind::Office].as_slice())
+        );
     }
 
     #[test]

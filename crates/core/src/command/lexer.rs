@@ -24,7 +24,9 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
     let mut segments = Vec::new();
     let mut embedded_commands = Vec::new();
     let mut tokens = Vec::new();
+    let mut token_ranges = Vec::new();
     let mut token = String::new();
+    let mut token_start = None;
     // Shell IO_NUMBER recognition is lexical: quoted or escaped digits immediately before a
     // redirection remain an ordinary argument. Preserve that provenance instead of guessing from
     // the dequoted token value later.
@@ -84,7 +86,13 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
             }
             Quote::None => {
                 if character == '\n' {
-                    push_token(&mut tokens, &mut token);
+                    push_token_with_range(
+                        &mut tokens,
+                        &mut token_ranges,
+                        &mut token,
+                        &mut token_start,
+                        index,
+                    );
                     token_has_quoted_or_escaped_content = false;
                     // A newline following `|`, `&&`, or `||` is a shell continuation, not the
                     // beginning of a here-document body or another empty command.
@@ -95,6 +103,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     if !tokens.is_empty() {
                         segments.push(ShellSegment {
                             tokens: std::mem::take(&mut tokens),
+                            token_ranges: std::mem::take(&mut token_ranges),
                             has_write_redirection: write_redirection,
                             input_redirections: std::mem::take(&mut input_redirections),
                             has_heredoc: segment_has_heredoc,
@@ -112,7 +121,13 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     continue;
                 }
                 if character.is_whitespace() {
-                    push_token(&mut tokens, &mut token);
+                    push_token_with_range(
+                        &mut tokens,
+                        &mut token_ranges,
+                        &mut token,
+                        &mut token_start,
+                        index,
+                    );
                     token_has_quoted_or_escaped_content = false;
                     index += 1;
                     continue;
@@ -126,18 +141,21 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     continue;
                 }
                 if character == '\'' {
+                    token_start.get_or_insert(index);
                     token_has_quoted_or_escaped_content = true;
                     quote = Quote::Single;
                     index += 1;
                     continue;
                 }
                 if character == '"' {
+                    token_start.get_or_insert(index);
                     token_has_quoted_or_escaped_content = true;
                     quote = Quote::Double;
                     index += 1;
                     continue;
                 }
                 if character == '\\' {
+                    token_start.get_or_insert(index);
                     let Some(next) = chars.get(index + 1) else {
                         return Err(CommandSyntaxError {
                             code: "command.malformed.trailing_escape",
@@ -152,6 +170,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     continue;
                 }
                 if character == '$' && chars.get(index + 1) == Some(&'(') {
+                    token_start.get_or_insert(index);
                     let (embedded, next) = extract_parenthesized_command(&chars, index + 2)?;
                     embedded_commands.push(embedded);
                     token.push_str("$()");
@@ -159,6 +178,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     continue;
                 }
                 if character == '`' {
+                    token_start.get_or_insert(index);
                     let (embedded, next) = extract_backtick_command(&chars, index + 1)?;
                     embedded_commands.push(embedded);
                     token.push_str("``");
@@ -189,10 +209,17 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                         || token_has_quoted_or_escaped_content
                         || !token.chars().all(|character| character.is_ascii_digit())
                     {
-                        push_token(&mut tokens, &mut token);
+                        push_token_with_range(
+                            &mut tokens,
+                            &mut token_ranges,
+                            &mut token,
+                            &mut token_start,
+                            index,
+                        );
                     } else {
                         // `0<<'EOF'` selects stdin; the IO number is not an argv token.
                         token.clear();
+                        token_start = None;
                     }
                     token_has_quoted_or_escaped_content = false;
                     let (heredoc, next) = read_heredoc_delimiter(&chars, index + 2)?;
@@ -210,7 +237,23 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     });
                 }
                 if character == '>' || character == '&' && chars.get(index + 1) == Some(&'>') {
-                    push_token(&mut tokens, &mut token);
+                    if token.is_empty()
+                        || token_has_quoted_or_escaped_content
+                        || !token.chars().all(|character| character.is_ascii_digit())
+                    {
+                        push_token_with_range(
+                            &mut tokens,
+                            &mut token_ranges,
+                            &mut token,
+                            &mut token_start,
+                            index,
+                        );
+                    } else {
+                        // An unquoted IO_NUMBER immediately adjacent to `>` selects the file
+                        // descriptor and is not an argv word.
+                        token.clear();
+                        token_start = None;
+                    }
                     token_has_quoted_or_escaped_content = false;
                     index += 1;
                     if chars.get(index) == Some(&'>') {
@@ -234,11 +277,18 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                         || token_has_quoted_or_escaped_content
                         || !token.chars().all(|character| character.is_ascii_digit())
                     {
-                        push_token(&mut tokens, &mut token);
+                        push_token_with_range(
+                            &mut tokens,
+                            &mut token_ranges,
+                            &mut token,
+                            &mut token_start,
+                            index,
+                        );
                     } else {
                         // A decimal word immediately adjacent to a redirection operator selects
                         // the file descriptor; it is not an argument passed to the program.
                         token.clear();
+                        token_start = None;
                     }
                     token_has_quoted_or_escaped_content = false;
                     let read_write = chars.get(index + 1) == Some(&'>');
@@ -256,7 +306,12 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                         });
                     }
                     let (target, dynamic, next) = read_redirection_target(&chars, target_start)?;
-                    input_redirections.push(ShellInputRedirection { target, dynamic });
+                    input_redirections.push(ShellInputRedirection {
+                        target,
+                        dynamic,
+                        target_range: target_start..next,
+                        read_write,
+                    });
                     write_redirection |= read_write;
                     index = next;
                     continue;
@@ -269,7 +324,13 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                                 "run_command 不允许 shell 后台执行；取消和超时必须覆盖整个命令。",
                         });
                     }
-                    push_token(&mut tokens, &mut token);
+                    push_token_with_range(
+                        &mut tokens,
+                        &mut token_ranges,
+                        &mut token,
+                        &mut token_start,
+                        index,
+                    );
                     token_has_quoted_or_escaped_content = false;
                     if tokens.is_empty() {
                         return Err(CommandSyntaxError {
@@ -279,6 +340,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     }
                     segments.push(ShellSegment {
                         tokens: std::mem::take(&mut tokens),
+                        token_ranges: std::mem::take(&mut token_ranges),
                         has_write_redirection: write_redirection,
                         input_redirections: std::mem::take(&mut input_redirections),
                         has_heredoc: segment_has_heredoc,
@@ -298,6 +360,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                 }
 
                 separator_state = SeparatorState::None;
+                token_start.get_or_insert(index);
                 token.push(character);
                 index += 1;
             }
@@ -316,7 +379,13 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
             reason: "命令包含未闭合的引号。",
         });
     }
-    push_token(&mut tokens, &mut token);
+    push_token_with_range(
+        &mut tokens,
+        &mut token_ranges,
+        &mut token,
+        &mut token_start,
+        chars.len(),
+    );
     if separator_state != SeparatorState::None && tokens.is_empty() {
         return Err(CommandSyntaxError {
             code: "command.malformed.trailing_operator",
@@ -326,6 +395,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
     if !tokens.is_empty() {
         segments.push(ShellSegment {
             tokens,
+            token_ranges,
             has_write_redirection: write_redirection,
             input_redirections,
             has_heredoc: segment_has_heredoc,
@@ -448,9 +518,18 @@ fn consume_heredoc_body(
     })
 }
 
-pub(super) fn push_token(tokens: &mut Vec<String>, token: &mut String) {
+fn push_token_with_range(
+    tokens: &mut Vec<String>,
+    token_ranges: &mut Vec<std::ops::Range<usize>>,
+    token: &mut String,
+    token_start: &mut Option<usize>,
+    end: usize,
+) {
     if !token.is_empty() {
         tokens.push(std::mem::take(token));
+        token_ranges.push(token_start.take().unwrap_or(end)..end);
+    } else {
+        *token_start = None;
     }
 }
 

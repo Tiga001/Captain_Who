@@ -675,11 +675,11 @@ mod tests {
             "`run_command`",
             "`read_image`",
             "`MYCOPILOT_INPUT_ROOT`",
-            "never execute a saved script from the private execution space",
-            "safe relative names there",
-            "only publishable PNG, JPEG, WebP, or PDF",
-            "relative `outputs/...`",
-            "exact `outputs[].readPath`",
+            "fixed managed Python, PDF CLI, and `rg`",
+            "pdftotext -layout",
+            "--max-count 20",
+            "quoted Python heredoc",
+            "Do not print an entire large PDF",
             "`conversation_history`",
             "references/reading.md",
             "references/creating-and-editing.md",
@@ -687,7 +687,15 @@ mod tests {
         ] {
             assert!(instructions.contains(required), "missing `{required}`");
         }
-        for forbidden in ["@scratch", "brew install", "apt-get", "pip install"] {
+        for forbidden in [
+            "@scratch",
+            "brew install",
+            "apt-get",
+            "pip install",
+            "one direct managed invocation",
+            "Pipelines, `&&`",
+            "single-line",
+        ] {
             assert!(
                 !package.source_text().contains(forbidden),
                 "model-facing PDF Skill leaked forbidden instruction `{forbidden}`"
@@ -709,8 +717,13 @@ mod tests {
             .find(|resource| resource.path() == "references/reading.md")
             .unwrap();
         let reading = String::from_utf8(reader.read(reading).unwrap()).unwrap();
-        assert!(reading.contains("managed `python -c`"));
-        assert!(reading.contains("Do not use `grep` or `rg`"));
+        assert!(reading.contains("| rg -n -i -C 4 --max-count 20"));
+        assert!(reading.contains("pdftotext -f 42 -l 46 -layout"));
+        assert!(reading.contains("reports extracted-text line numbers, not PDF page numbers"));
+        assert!(reading.contains("python - \"$MYCOPILOT_INPUT_ROOT/manual.pdf\" <<'PY'"));
+        assert!(reading.contains("Do not dump the full text"));
+        assert!(!reading.contains("Do not use `grep` or `rg`"));
+        assert!(!reading.contains("python -c"));
         let creating = package
             .resources()
             .entries()
@@ -718,9 +731,9 @@ mod tests {
             .find(|resource| resource.path() == "references/creating-and-editing.md")
             .unwrap();
         let creating = String::from_utf8(reader.read(creating).unwrap()).unwrap();
-        assert!(creating.contains("Use managed `python -c`"));
-        assert!(creating.contains("invoke the frozen script only below `MYCOPILOT_INPUT_ROOT`"));
-        assert!(creating.contains("Never create and later execute a script"));
+        assert!(creating.contains("python - <<'PY'"));
+        assert!(creating.contains("Keep stdout to a short status"));
+        assert!(!creating.contains("python -c"));
     }
 
     #[test]

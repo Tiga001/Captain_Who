@@ -35,6 +35,7 @@ mod artifact_observer;
 mod execution;
 mod lexer;
 mod managed_output_publication;
+mod managed_pdf_shell;
 mod managed_runtime;
 mod output_capture;
 mod policy;
@@ -62,7 +63,7 @@ pub use managed_output_publication::{
 };
 pub(crate) use managed_runtime::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
-    infer_managed_pdf_command_kind, infer_managed_pdf_workspace_input,
+    infer_managed_pdf_command_kind, infer_managed_pdf_workspace_inputs,
     validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
     validate_managed_artifact_command_shape,
 };

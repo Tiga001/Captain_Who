@@ -5,6 +5,13 @@ pub(super) const MAX_POLICY_NESTING: usize = 8;
 #[derive(Debug)]
 pub(super) struct ShellSegment {
     pub(super) tokens: Vec<String>,
+    /// Character ranges for the source words corresponding one-for-one with [`Self::tokens`].
+    ///
+    /// These ranges are deliberately retained by the authoritative lexer so trusted managed
+    /// runtimes can compile only already-validated operands (for example a frozen PDF input)
+    /// without regex replacement or reparsing dequoted strings. They are Host-only metadata and
+    /// never enter the durable command/request projection.
+    pub(super) token_ranges: Vec<std::ops::Range<usize>>,
     pub(super) has_write_redirection: bool,
     pub(super) input_redirections: Vec<ShellInputRedirection>,
     /// A safely quoted here-document feeds data to this segment. The body is deliberately absent:
@@ -17,6 +24,8 @@ pub(super) struct ShellSegment {
 pub(super) struct ShellInputRedirection {
     pub(super) target: String,
     pub(super) dynamic: bool,
+    pub(super) target_range: std::ops::Range<usize>,
+    pub(super) read_write: bool,
 }
 
 #[derive(Debug)]

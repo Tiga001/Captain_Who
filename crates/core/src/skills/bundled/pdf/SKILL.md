@@ -5,27 +5,28 @@ description: Read, search, inspect, create, edit, render, and verify PDF files, 
 
 # PDF
 
-Use only `run_command` for PDF processing and `read_image` for visual inspection. No dedicated PDF model tool is exposed.
+Use only `run_command` for PDF processing; use `read_image` for visual inspection. The activated Skill supplies a fixed managed Python, PDF CLI, and `rg`; never install dependencies or fall back to system tools.
 
-For an existing PDF in the selected workspace, pass its exact safe workspace-relative path directly to `pdfinfo`, `pdftotext`, or `pdftoppm`; the Host freezes and mounts that explicit PDF input automatically. Bind every attachment, external file, generated Artifact, Skill resource, Python script, and additional source through `run_command.inputs`. For a declared input, use the exact user path or returned `readPath`, choose an optional safe `mountPath`, and read it below `MYCOPILOT_INPUT_ROOT`. Never open an `@attachments/...`, `artifact://...`, or `skill://...` value directly from a command.
+For a PDF already in the selected workspace, use its exact safe workspace-relative path. For an attachment, external file, generated Artifact, Skill resource, script, image, font, or other source, bind the returned path through `run_command.inputs`, then use its mounted path below `MYCOPILOT_INPUT_ROOT`. Never guess a physical attachment, Artifact, runtime, or private working-directory path. Copy output `readPath` values exactly as returned.
 
-Use the managed commands and Python environment supplied after this trusted Skill is activated. Omit `runtimeProfile`; never use system Python, install packages, or invoke `pip`, Homebrew, `apt`, or another dependency manager. If the managed PDF capability is unavailable, stop with the returned recovery guidance instead of falling back to the machine environment.
+## Core workflow
 
-Use one direct managed invocation per `run_command`: `pdfinfo`, `pdftotext`, `pdftoppm`, `python -c`, or a frozen input-root Python script. Pipelines, `&&`, `||`, `;`, shell redirection, and heredocs are intentionally unavailable inside this managed PDF surface. For temporary bounded logic, put literal newlines inside the quoted `python -c` code argument; do not wrap it in `sh`, write a temporary script, or use a heredoc. A reusable script must already be an authorized file: bind it with `run_command.inputs` and invoke it only below `MYCOPILOT_INPUT_ROOT`; never execute a saved script from the private execution space. Write unpublished intermediate text and other non-executable data to safe relative names there, such as `extracted.txt`; use stdout when a saved intermediate is unnecessary. Write only publishable PNG, JPEG, WebP, or PDF files below relative `outputs/...` paths. Intermediate files do not receive a `readPath`. Never discover, infer, expose, or report a physical working directory. After a command publishes files, copy its exact `outputs[].readPath`; pass an image `readPath` unchanged to `read_image.path` and use the returned Artifact path unchanged for delivery. Do not reconstruct a path from the command, stdout, or a file search.
+1. Run `pdfinfo` to learn page count, encryption state, page size, and relevant metadata.
+2. For a large text PDF, locate a section with bounded streaming search before extracting pages:
 
-## Required workflow
+   ```sh
+   pdftotext -layout "manual.pdf" - | rg -n -i -C 4 --max-count 20 "steady|unit operation"
+   ```
 
-1. Run `pdfinfo` before reading to establish page count, metadata, encryption state, and page dimensions.
-2. For a large PDF, locate the relevant keyword, section, or page range before extracting or rendering. Do not emit or render the whole document by default.
-3. Use `pdftotext`, `pypdf`, or `pdfplumber` for semantic extraction. Text extraction does not prove layout, table geometry, figure content, or visual correctness.
-4. Render every relevant page for scanned content, tables, figures, complex layout, or any visual question, then inspect every returned image with `read_image`. If extraction is empty or damaged, switch to rendered-page inspection.
-5. After creating or editing, reopen and validate the written PDF, render all changed pages (or every page for a small document), and inspect them before delivery.
-6. State which pages were actually extracted or rendered. Never claim to have read an uninspected page.
+3. Extract only the matching page range plus necessary adjacent pages. Do not print an entire large PDF, repeatedly slice the same full extraction by output offsets, or rerun a command whose archived result is available through `historyOpen` and `conversation_history`.
+4. Use text extraction for meaning, not visual proof. Render relevant pages and call `read_image` for scans, tables, figures, columns, forms, or layout questions. If text is empty or damaged, switch to page rendering.
+5. After creating or editing, reopen the PDF, validate its structure and requested content, render all changed pages (or every page when small), and inspect those images before delivery.
+6. State which pages were actually extracted or rendered; never claim coverage you did not inspect.
 
-If command output crosses the shared model-result budget, use its `historyOpen` reference with `conversation_history`; do not rerun the same command merely to recover archived output.
+Use shell pipelines and redirection only to connect this fixed managed toolchain or create bounded private intermediates. Use a quoted Python heredoc for short fallback logic, and keep its output explicitly bounded. Do not download packages, invoke `pip`, Homebrew, or `apt`, discover the runtime, or expose private paths.
 
-Read the reference that matches the task:
+Read the relevant reference before acting:
 
-- [references/reading.md](references/reading.md) for search, extraction, page selection, and visual review.
+- [references/reading.md](references/reading.md) for search, page selection, extraction, and visual review.
 - [references/creating-and-editing.md](references/creating-and-editing.md) for generation, modification, validation, and delivery.
 - [references/forms.md](references/forms.md) for AcroForm inspection, filling, appearance validation, and flattening.

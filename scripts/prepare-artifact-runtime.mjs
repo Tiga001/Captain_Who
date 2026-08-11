@@ -22,6 +22,7 @@ import {
 import { get as httpsGet } from 'node:https'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { inflateRawSync } from 'node:zlib'
 import { extract } from 'tar'
 
 export const ARTIFACT_RUNTIME_MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
@@ -77,7 +78,8 @@ const BUILD_INPUT_RELATIVE_PATHS = Object.freeze({
   nodePackageManifest: 'packages/artifact-runtime-node/package.json',
   nodePackageEvidence: 'resources/artifact-runtime-node-package-evidence.json',
   pnpmLockfile: 'pnpm-lock.yaml',
-  pythonRequirements: 'resources/artifact-runtime-python-requirements.txt'
+  pythonRequirements: 'resources/artifact-runtime-python-requirements.txt',
+  pdfRuntimeCli: 'crates/core/src/command/pdf_runtime_cli.py'
 })
 const BUILD_INPUT_SOURCE_PATHS = Object.freeze(
   Object.fromEntries(
@@ -266,6 +268,25 @@ function validateAsset(value, label, { node = false } = {}) {
   })
 }
 
+function validateArchivedToolAsset(value, label) {
+  const asset = plainObject(value, label)
+  exactKeys(asset, ['format', 'archiveRoot', 'url', 'size', 'sha256'], label)
+  if (!['tar.gz', 'zip'].includes(asset.format)) {
+    throw new Error(`${label}.format must be tar.gz or zip`)
+  }
+  const size = positiveInteger(asset.size, `${label}.size`)
+  if (size > ARTIFACT_RUNTIME_MAX_DOWNLOAD_BYTES) {
+    throw new Error(`${label}.size exceeds the 128 MiB component download limit`)
+  }
+  return Object.freeze({
+    format: asset.format,
+    archiveRoot: canonicalRelativePath(asset.archiveRoot, `${label}.archiveRoot`),
+    url: validateArtifactRuntimeDownloadUrl(asset.url, `${label}.url`).href,
+    size,
+    sha256: sha256(asset.sha256, `${label}.sha256`)
+  })
+}
+
 function validateExecutableMap(value, label) {
   const map = plainObject(value, label)
   exactKeys(map, ['unix', 'win32'], label)
@@ -301,6 +322,12 @@ function validateDependencies(value, expected, label) {
 }
 
 function validateTargetAssets(value, label, options) {
+  return validateTargetAssetsWith(value, label, (asset, assetLabel) =>
+    validateAsset(asset, assetLabel, options)
+  )
+}
+
+function validateTargetAssetsWith(value, label, validateTarget) {
   const assets = plainObject(value, label)
   const targets = []
   for (const platform of SUPPORTED_PLATFORMS) {
@@ -313,7 +340,7 @@ function validateTargetAssets(value, label, options) {
     Object.fromEntries(
       targets.map((target) => [
         target,
-        validateAsset(assets[target], `${label}.${target}`, options)
+        validateTarget(assets[target], `${label}.${target}`)
       ])
     )
   )
@@ -350,17 +377,17 @@ export function validateArtifactRuntimeManifest(value) {
   const manifest = plainObject(value, 'manifest')
   exactKeys(
     manifest,
-    ['schemaVersion', 'providerId', 'bundleVersion', 'buildInputs', 'node', 'python'],
+    ['schemaVersion', 'providerId', 'bundleVersion', 'buildInputs', 'node', 'python', 'tools'],
     'manifest'
   )
-  if (manifest.schemaVersion !== 3) {
-    throw new Error('manifest.schemaVersion must be 3')
+  if (manifest.schemaVersion !== 4) {
+    throw new Error('manifest.schemaVersion must be 4')
   }
   if (manifest.providerId !== 'mycopilot.artifact-runtime') {
     throw new Error('manifest.providerId must be mycopilot.artifact-runtime')
   }
-  if (manifest.bundleVersion !== '2026.08.1') {
-    throw new Error('artifact runtime bundle must remain pinned to 2026.08.1')
+  if (manifest.bundleVersion !== '2026.08.2') {
+    throw new Error('artifact runtime bundle must remain pinned to 2026.08.2')
   }
   const buildInputs = validateBuildInputs(manifest.buildInputs)
 
@@ -405,8 +432,44 @@ export function validateArtifactRuntimeManifest(value) {
     throw new Error('managed Python must remain pinned to 3.12.13+20260610')
   }
 
+  const tools = plainObject(manifest.tools, 'manifest.tools')
+  exactKeys(tools, ['pdfCli', 'ripgrep'], 'manifest.tools')
+  const pdfCli = plainObject(tools.pdfCli, 'manifest.tools.pdfCli')
+  exactKeys(pdfCli, ['version', 'target'], 'manifest.tools.pdfCli')
+  if (pdfCli.version !== '1') throw new Error('managed PDF CLI must remain pinned to version 1')
+  const ripgrep = plainObject(tools.ripgrep, 'manifest.tools.ripgrep')
+  exactKeys(
+    ripgrep,
+    ['version', 'executable', 'assets', 'licenseFiles', 'source', 'license'],
+    'manifest.tools.ripgrep'
+  )
+  if (ripgrep.version !== '15.1.0') {
+    throw new Error('managed ripgrep must remain pinned to 15.1.0')
+  }
+  if (!Array.isArray(ripgrep.licenseFiles) || ripgrep.licenseFiles.length !== 3) {
+    throw new Error('managed ripgrep must declare exactly three license evidence files')
+  }
+  const licenseFiles = ripgrep.licenseFiles.map((value, index) => {
+    const descriptor = plainObject(value, `manifest.tools.ripgrep.licenseFiles[${index}]`)
+    exactKeys(
+      descriptor,
+      ['source', 'target'],
+      `manifest.tools.ripgrep.licenseFiles[${index}]`
+    )
+    return Object.freeze({
+      source: canonicalRelativePath(
+        descriptor.source,
+        `manifest.tools.ripgrep.licenseFiles[${index}].source`
+      ),
+      target: canonicalRelativePath(
+        descriptor.target,
+        `manifest.tools.ripgrep.licenseFiles[${index}].target`
+      )
+    })
+  })
+
   return Object.freeze({
-    schemaVersion: 3,
+    schemaVersion: 4,
     providerId: manifest.providerId,
     bundleVersion: manifest.bundleVersion,
     buildInputs,
@@ -457,6 +520,30 @@ export function validateArtifactRuntimeManifest(value) {
       assets: validateTargetAssets(python.assets, 'manifest.python.assets'),
       source: validateArtifactRuntimeDownloadUrl(python.source, 'manifest.python.source').href,
       license: nonEmptyString(python.license, 'manifest.python.license')
+    }),
+    tools: Object.freeze({
+      pdfCli: Object.freeze({
+        version: pdfCli.version,
+        target: canonicalRelativePath(pdfCli.target, 'manifest.tools.pdfCli.target')
+      }),
+      ripgrep: Object.freeze({
+        version: ripgrep.version,
+        executable: validateExecutableMap(
+          ripgrep.executable,
+          'manifest.tools.ripgrep.executable'
+        ),
+        assets: validateTargetAssetsWith(
+          ripgrep.assets,
+          'manifest.tools.ripgrep.assets',
+          validateArchivedToolAsset
+        ),
+        licenseFiles: Object.freeze(licenseFiles),
+        source: validateArtifactRuntimeDownloadUrl(
+          ripgrep.source,
+          'manifest.tools.ripgrep.source'
+        ).href,
+        license: nonEmptyString(ripgrep.license, 'manifest.tools.ripgrep.license')
+      })
     })
   })
 }
@@ -497,7 +584,8 @@ export function selectArtifactRuntimeAssets(
   return Object.freeze({
     target,
     node: manifest.node.assets[target],
-    python: manifest.python.assets[target]
+    python: manifest.python.assets[target],
+    ripgrep: manifest.tools.ripgrep.assets[target]
   })
 }
 
@@ -775,6 +863,156 @@ async function acquireNodeRuntime(manifest, asset, staging, downloadDirectory) {
   const result = await runProcess(executable, ['--version'], { timeoutMs: 15_000 })
   if (result.stdout.trim() !== `v${manifest.node.version}`) {
     throw new Error(`Managed Node probe returned unexpected version: ${result.stdout.trim()}`)
+  }
+  return executable
+}
+
+function isPinnedRipgrepVersion(stdout, version) {
+  const prefix = `ripgrep ${version}`
+  if (!stdout.startsWith(prefix)) return false
+  const boundary = stdout[prefix.length]
+  return boundary === '\n' || boundary === '\r' || boundary === ' ' || boundary === '('
+}
+
+export function readPinnedZipMembers(bytes, requestedNames) {
+  const minimumEocdBytes = 22
+  const maximumCommentBytes = 65_535
+  const firstCandidate = Math.max(0, bytes.length - minimumEocdBytes - maximumCommentBytes)
+  let eocdOffset = -1
+  for (let offset = bytes.length - minimumEocdBytes; offset >= firstCandidate; offset -= 1) {
+    if (bytes.readUInt32LE(offset) === 0x06054b50) {
+      eocdOffset = offset
+      break
+    }
+  }
+  if (eocdOffset < 0) throw new Error('Pinned ripgrep ZIP has no end-of-central-directory record')
+  const disk = bytes.readUInt16LE(eocdOffset + 4)
+  const centralDisk = bytes.readUInt16LE(eocdOffset + 6)
+  const entriesOnDisk = bytes.readUInt16LE(eocdOffset + 8)
+  const entryCount = bytes.readUInt16LE(eocdOffset + 10)
+  const centralBytes = bytes.readUInt32LE(eocdOffset + 12)
+  const centralOffset = bytes.readUInt32LE(eocdOffset + 16)
+  const commentBytes = bytes.readUInt16LE(eocdOffset + 20)
+  if (
+    disk !== 0 ||
+    centralDisk !== 0 ||
+    entriesOnDisk !== entryCount ||
+    entryCount === 0xffff ||
+    centralBytes === 0xffffffff ||
+    centralOffset === 0xffffffff ||
+    eocdOffset + minimumEocdBytes + commentBytes !== bytes.length ||
+    centralOffset + centralBytes > eocdOffset
+  ) {
+    throw new Error('Pinned ripgrep ZIP uses an unsupported split or ZIP64 layout')
+  }
+
+  const requested = new Set(requestedNames)
+  const found = new Map()
+  let offset = centralOffset
+  for (let index = 0; index < entryCount; index += 1) {
+    if (offset + 46 > bytes.length || bytes.readUInt32LE(offset) !== 0x02014b50) {
+      throw new Error('Pinned ripgrep ZIP central directory is malformed')
+    }
+    const flags = bytes.readUInt16LE(offset + 8)
+    const compression = bytes.readUInt16LE(offset + 10)
+    const compressedBytes = bytes.readUInt32LE(offset + 20)
+    const uncompressedBytes = bytes.readUInt32LE(offset + 24)
+    const nameBytes = bytes.readUInt16LE(offset + 28)
+    const extraBytes = bytes.readUInt16LE(offset + 30)
+    const entryCommentBytes = bytes.readUInt16LE(offset + 32)
+    const localOffset = bytes.readUInt32LE(offset + 42)
+    const end = offset + 46 + nameBytes + extraBytes + entryCommentBytes
+    if (end > centralOffset + centralBytes || flags & 0x1) {
+      throw new Error('Pinned ripgrep ZIP contains an encrypted or malformed entry')
+    }
+    const name = bytes.subarray(offset + 46, offset + 46 + nameBytes).toString('utf8')
+    if (requested.has(name)) {
+      if (found.has(name)) throw new Error(`Pinned ripgrep ZIP repeats required entry ${name}`)
+      if (
+        localOffset + 30 > bytes.length ||
+        bytes.readUInt32LE(localOffset) !== 0x04034b50 ||
+        bytes.readUInt16LE(localOffset + 8) !== compression
+      ) {
+        throw new Error(`Pinned ripgrep ZIP local header is invalid for ${name}`)
+      }
+      const localNameBytes = bytes.readUInt16LE(localOffset + 26)
+      const localExtraBytes = bytes.readUInt16LE(localOffset + 28)
+      const dataOffset = localOffset + 30 + localNameBytes + localExtraBytes
+      const dataEnd = dataOffset + compressedBytes
+      if (dataEnd > bytes.length || uncompressedBytes > ARTIFACT_RUNTIME_MAX_DOWNLOAD_BYTES) {
+        throw new Error(`Pinned ripgrep ZIP entry is oversized or truncated: ${name}`)
+      }
+      const compressed = bytes.subarray(dataOffset, dataEnd)
+      const content =
+        compression === 0
+          ? Buffer.from(compressed)
+          : compression === 8
+            ? inflateRawSync(compressed, { maxOutputLength: uncompressedBytes })
+            : null
+      if (!content || content.length !== uncompressedBytes) {
+        throw new Error(`Pinned ripgrep ZIP entry has unsupported or invalid compression: ${name}`)
+      }
+      found.set(name, content)
+    }
+    offset = end
+  }
+  if (offset !== centralOffset + centralBytes) {
+    throw new Error('Pinned ripgrep ZIP central directory length does not match its record')
+  }
+  for (const name of requested) {
+    if (!found.has(name)) throw new Error(`Pinned ripgrep archive is missing ${name}`)
+  }
+  return found
+}
+
+async function acquireRipgrep(manifest, asset, staging, downloadDirectory) {
+  const archive = await downloadPinnedFile(asset, archiveCachePath(downloadDirectory, asset))
+  const executableRelative =
+    process.platform === 'win32'
+      ? manifest.tools.ripgrep.executable.win32
+      : manifest.tools.ripgrep.executable.unix
+  const members = [
+    { source: process.platform === 'win32' ? 'rg.exe' : 'rg', target: executableRelative },
+    ...manifest.tools.ripgrep.licenseFiles
+  ]
+  const requiredNames = members.map(({ source }) => `${asset.archiveRoot}/${source}`)
+  const extracted = new Map()
+  if (asset.format === 'zip') {
+    const archiveBytes = await readFile(archive)
+    for (const [name, content] of readPinnedZipMembers(archiveBytes, requiredNames)) {
+      extracted.set(name, content)
+    }
+  } else {
+    const extraction = join(staging, `.ripgrep-extract-${randomUUID()}`)
+    await mkdir(extraction, { recursive: false, mode: 0o700 })
+    try {
+      await extract({ file: archive, cwd: extraction, strict: true, preservePaths: false })
+      for (const name of requiredNames) {
+        const { bytes } = await readRegularFileNoFollow(
+          join(extraction, ...name.split('/')),
+          `Pinned ripgrep archive member ${name}`
+        )
+        extracted.set(name, bytes)
+      }
+    } finally {
+      await rm(extraction, { recursive: true, force: true })
+    }
+  }
+
+  for (const member of members) {
+    const source = `${asset.archiveRoot}/${member.source}`
+    const destination = join(staging, ...member.target.split('/'))
+    await mkdir(dirname(destination), { recursive: true })
+    await writeFile(destination, extracted.get(source), {
+      flag: 'wx',
+      mode: member.target === executableRelative ? 0o755 : 0o644
+    })
+  }
+  const executable = join(staging, ...executableRelative.split('/'))
+  if (process.platform !== 'win32') await chmod(executable, 0o755)
+  const result = await runProcess(executable, ['--version'], { timeoutMs: 15_000 })
+  if (!isPinnedRipgrepVersion(result.stdout, manifest.tools.ripgrep.version)) {
+    throw new Error(`Managed ripgrep probe returned unexpected version: ${result.stdout.trim()}`)
   }
   return executable
 }
@@ -1346,6 +1584,14 @@ async function copyRuntimeSupportFiles(manifestPath, manifest, staging, download
     manifest.buildInputs.nodeLoader.sha256,
     'staged managed Node loader'
   )
+  const pdfCliSource = BUILD_INPUT_SOURCE_PATHS.pdfRuntimeCli
+  const pdfCliTarget = join(staging, ...manifest.tools.pdfCli.target.split('/'))
+  await cp(pdfCliSource, pdfCliTarget, { force: false, errorOnExist: true })
+  await verifyPinnedLocalFile(
+    pdfCliTarget,
+    manifest.buildInputs.pdfRuntimeCli.sha256,
+    'staged managed PDF CLI'
+  )
   const legal = await downloadPinnedFile(
     manifest.node.licenseFile,
     archiveCachePath(downloadDirectory, manifest.node.licenseFile)
@@ -1708,7 +1954,7 @@ export async function prepareArtifactRuntimeLegalEvidence(manifest, staging) {
   const nodePackages = await buildNodeLegalInventory(manifest, staging)
   const pythonPackages = await buildPythonLegalInventory(manifest, staging)
   const legalManifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     providerId: manifest.providerId,
     bundleVersion: manifest.bundleVersion,
     runtimes: [
@@ -1734,6 +1980,18 @@ export async function prepareArtifactRuntimeLegalEvidence(manifest, staging) {
         ]
       }
     ],
+    tools: [
+      {
+        name: 'ripgrep',
+        version: manifest.tools.ripgrep.version,
+        licenseExpression: manifest.tools.ripgrep.license,
+        source: manifest.tools.ripgrep.source,
+        evidence: manifest.tools.ripgrep.licenseFiles.map(({ target }) => ({
+          kind: 'licenseFile',
+          path: target
+        }))
+      }
+    ],
     packages: { node: nodePackages, python: pythonPackages }
   }
   await writeFile(
@@ -1744,7 +2002,13 @@ export async function prepareArtifactRuntimeLegalEvidence(manifest, staging) {
   return legalManifest
 }
 
-async function probePreparedRuntimes(manifest, staging, nodeExecutable, pythonExecutable) {
+async function probePreparedRuntimes(
+  manifest,
+  staging,
+  nodeExecutable,
+  pythonExecutable,
+  ripgrepExecutable
+) {
   const nodeVersion = await runProcess(nodeExecutable, ['--version'], { timeoutMs: 15_000 })
   if (nodeVersion.stdout.trim() !== `v${manifest.node.version}`) {
     throw new Error(`Managed Node probe returned unexpected version: ${nodeVersion.stdout.trim()}`)
@@ -1790,6 +2054,18 @@ async function probePreparedRuntimes(manifest, staging, nodeExecutable, pythonEx
       throw new Error(`Managed Python dependency probe failed for ${name}`)
     }
   }
+  const ripgrepVersion = await runProcess(ripgrepExecutable, ['--version'], { timeoutMs: 15_000 })
+  if (!isPinnedRipgrepVersion(ripgrepVersion.stdout, manifest.tools.ripgrep.version)) {
+    throw new Error(
+      `Managed ripgrep probe returned unexpected version: ${ripgrepVersion.stdout.trim()}`
+    )
+  }
+  const pdfCli = join(staging, ...manifest.tools.pdfCli.target.split('/'))
+  await verifyPinnedLocalFile(
+    pdfCli,
+    manifest.buildInputs.pdfRuntimeCli.sha256,
+    'prepared managed PDF CLI'
+  )
 }
 
 async function walkRegularFiles(root) {
@@ -1865,19 +2141,43 @@ function buildRuntimeReceipt(manifest, platform) {
   }
 }
 
+function buildToolReceipt(manifest, platform) {
+  const ripgrepExecutable =
+    platform === 'win32'
+      ? manifest.tools.ripgrep.executable.win32
+      : manifest.tools.ripgrep.executable.unix
+  return {
+    pdfCli: {
+      version: manifest.tools.pdfCli.version,
+      path: manifest.tools.pdfCli.target,
+      identityFiles: [manifest.tools.pdfCli.target]
+    },
+    ripgrep: {
+      version: manifest.tools.ripgrep.version,
+      executable: ripgrepExecutable,
+      identityFiles: [
+        ripgrepExecutable,
+        ...manifest.tools.ripgrep.licenseFiles.map(({ target }) => target)
+      ]
+    }
+  }
+}
+
 function buildReceipt(manifest, platform, arch, files) {
   const runtimes = buildRuntimeReceipt(manifest, platform)
+  const tools = buildToolReceipt(manifest, platform)
   const buildInputsRevision = `${BUILD_INPUTS_REVISION_PREFIX}${createHash('sha256')
     .update(JSON.stringify(manifest))
     .digest('hex')}`
   const payload = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     providerId: manifest.providerId,
     bundleVersion: manifest.bundleVersion,
     buildInputsRevision,
     platform,
     arch,
     runtimes,
+    tools,
     files
   }
   const bundleRevision = `${BUNDLE_REVISION_PREFIX}${createHash('sha256')
@@ -1907,11 +2207,13 @@ async function verifyLegalInventory(outputDirectory, manifest, actualFiles) {
   }
   const legal = JSON.parse(bytes.toString('utf8'))
   if (
-    legal.schemaVersion !== 2 ||
+    legal.schemaVersion !== 3 ||
     legal.providerId !== manifest.providerId ||
     legal.bundleVersion !== manifest.bundleVersion ||
     !Array.isArray(legal.runtimes) ||
     legal.runtimes.length !== 2 ||
+    !Array.isArray(legal.tools) ||
+    legal.tools.length !== 1 ||
     !legal.packages ||
     !Array.isArray(legal.packages.node) ||
     !Array.isArray(legal.packages.python)
@@ -1942,6 +2244,16 @@ async function verifyLegalInventory(outputDirectory, manifest, actualFiles) {
     nonEmptyString(runtime.source, 'runtime source')
     inspectEvidence(`${runtime.name}@${runtime.version}`, runtime.evidence)
   }
+  const [ripgrep] = legal.tools
+  if (
+    ripgrep.name !== 'ripgrep' ||
+    ripgrep.version !== manifest.tools.ripgrep.version ||
+    ripgrep.licenseExpression !== manifest.tools.ripgrep.license ||
+    ripgrep.source !== manifest.tools.ripgrep.source
+  ) {
+    throw new Error('Artifact runtime legal inventory has an invalid ripgrep identity')
+  }
+  inspectEvidence(`ripgrep@${ripgrep.version}`, ripgrep.evidence)
   const inspectPackages = (packages, expectedDirect) => {
     const seen = new Set()
     const direct = new Set()
@@ -1987,7 +2299,7 @@ async function verifyReceipt(outputDirectory, manifest, platform, arch) {
   }
   const receipt = JSON.parse(bytes.toString('utf8'))
   if (
-    receipt.schemaVersion !== 2 ||
+    receipt.schemaVersion !== 3 ||
     receipt.providerId !== manifest.providerId ||
     receipt.bundleVersion !== manifest.bundleVersion ||
     receipt.platform !== platform ||
@@ -2020,6 +2332,9 @@ async function verifyReceipt(outputDirectory, manifest, platform, arch) {
   if (JSON.stringify(rebuilt.runtimes) !== JSON.stringify(receipt.runtimes)) {
     throw new Error('Artifact runtime receipt runtime descriptors do not match the pinned manifest')
   }
+  if (JSON.stringify(rebuilt.tools) !== JSON.stringify(receipt.tools)) {
+    throw new Error('Artifact runtime receipt tool descriptors do not match the pinned manifest')
+  }
   if (rebuilt.buildInputsRevision !== receipt.buildInputsRevision) {
     throw new Error('Artifact runtime receipt build inputs do not match the pinned manifest')
   }
@@ -2036,6 +2351,20 @@ async function verifyReceipt(outputDirectory, manifest, platform, arch) {
     manifest.buildInputs.nodeLoader.sha256,
     'published managed Node loader'
   )
+  await verifyPinnedLocalFile(
+    join(outputDirectory, ...manifest.tools.pdfCli.target.split('/')),
+    manifest.buildInputs.pdfRuntimeCli.sha256,
+    'published managed PDF CLI'
+  )
+  if (platform !== 'win32') {
+    const ripgrepExecutable = manifest.tools.ripgrep.executable.unix
+    for (const relative of [ripgrepExecutable]) {
+      const metadata = await lstat(join(outputDirectory, ...relative.split('/')))
+      if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o111) === 0) {
+        throw new Error(`Published managed tool entry is not an executable regular file: ${relative}`)
+      }
+    }
+  }
   await verifyLegalInventory(outputDirectory, manifest, actualFiles)
   return receipt
 }
@@ -2069,7 +2398,11 @@ async function publishDirectoryAtomically(staging, outputDirectory, hooks = {}) 
 }
 
 async function buildComponentSource({ manifestPath, manifest, staging, downloadDirectory }) {
-  const { node: nodeAsset, python: pythonAsset } = selectArtifactRuntimeAssets(manifest)
+  const {
+    node: nodeAsset,
+    python: pythonAsset,
+    ripgrep: ripgrepAsset
+  } = selectArtifactRuntimeAssets(manifest)
   const nodeExecutable = await acquireNodeRuntime(manifest, nodeAsset, staging, downloadDirectory)
   await prepareManagedNodeDependencies(manifest, staging)
   const pythonExecutable = await acquirePythonRuntime(
@@ -2079,8 +2412,20 @@ async function buildComponentSource({ manifestPath, manifest, staging, downloadD
     downloadDirectory
   )
   await installPythonDependencies(manifest, pythonExecutable)
+  const ripgrepExecutable = await acquireRipgrep(
+    manifest,
+    ripgrepAsset,
+    staging,
+    downloadDirectory
+  )
   await copyRuntimeSupportFiles(manifestPath, manifest, staging, downloadDirectory)
-  await probePreparedRuntimes(manifest, staging, nodeExecutable, pythonExecutable)
+  await probePreparedRuntimes(
+    manifest,
+    staging,
+    nodeExecutable,
+    pythonExecutable,
+    ripgrepExecutable
+  )
 }
 
 export async function prepareArtifactRuntime({
@@ -2127,11 +2472,16 @@ export async function prepareArtifactRuntime({
         platform === 'win32' ? manifest.node.executable.win32 : manifest.node.executable.unix
       const pythonExecutableRelative =
         platform === 'win32' ? manifest.python.executable.win32 : manifest.python.executable.unix
+      const ripgrepExecutableRelative =
+        platform === 'win32'
+          ? manifest.tools.ripgrep.executable.win32
+          : manifest.tools.ripgrep.executable.unix
       await probePreparedRuntimes(
         manifest,
         staging,
         join(staging, ...nodeExecutableRelative.split('/')),
-        join(staging, ...pythonExecutableRelative.split('/'))
+        join(staging, ...pythonExecutableRelative.split('/')),
+        join(staging, ...ripgrepExecutableRelative.split('/'))
       )
     } else {
       await buildComponentSource({ manifestPath, manifest, staging, downloadDirectory })

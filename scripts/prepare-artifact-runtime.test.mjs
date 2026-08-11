@@ -25,6 +25,7 @@ import {
   prepareArtifactRuntime,
   prepareArtifactRuntimeLegalEvidence,
   prepareManagedNodeDependencies,
+  readPinnedZipMembers,
   selectArtifactRuntimeAssets,
   validateArtifactRuntimeDownloadUrl,
   validateArtifactRuntimeManifest
@@ -40,15 +41,111 @@ const requirementsPath = join(
 const builderPath = join(repositoryRoot, 'scripts', 'prepare-artifact-runtime.mjs')
 const bootstrapPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-bootstrap.mjs')
 const loaderPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-loader.mjs')
+const pdfCliPath = join(repositoryRoot, 'crates', 'core', 'src', 'command', 'pdf_runtime_cli.py')
 
 async function rawManifest() {
   return JSON.parse(await readFile(manifestPath, 'utf8'))
 }
 
-test('manifest pins runtime assets and Office/PDF dependency versions for every desktop target', async () => {
+function storedZip(entries) {
+  const localRecords = []
+  const centralRecords = []
+  let localOffset = 0
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, 'utf8')
+    const content = Buffer.from(entry.content)
+    const flags = entry.flags ?? 0
+    const declaredSize = entry.declaredSize ?? content.length
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(flags, 6)
+    local.writeUInt16LE(0, 8)
+    local.writeUInt32LE(0, 10)
+    local.writeUInt32LE(0, 14)
+    local.writeUInt32LE(content.length, 18)
+    local.writeUInt32LE(declaredSize, 22)
+    local.writeUInt16LE(name.length, 26)
+    local.writeUInt16LE(0, 28)
+    localRecords.push(local, name, content)
+
+    const central = Buffer.alloc(46)
+    central.writeUInt32LE(0x02014b50, 0)
+    central.writeUInt16LE(20, 4)
+    central.writeUInt16LE(20, 6)
+    central.writeUInt16LE(flags, 8)
+    central.writeUInt16LE(0, 10)
+    central.writeUInt32LE(0, 12)
+    central.writeUInt32LE(0, 16)
+    central.writeUInt32LE(content.length, 20)
+    central.writeUInt32LE(declaredSize, 24)
+    central.writeUInt16LE(name.length, 28)
+    central.writeUInt16LE(0, 30)
+    central.writeUInt16LE(0, 32)
+    central.writeUInt16LE(0, 34)
+    central.writeUInt16LE(0, 36)
+    central.writeUInt32LE(0, 38)
+    central.writeUInt32LE(localOffset, 42)
+    centralRecords.push(central, name)
+    localOffset += local.length + name.length + content.length
+  }
+  const local = Buffer.concat(localRecords)
+  const central = Buffer.concat(centralRecords)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(entries.length, 8)
+  eocd.writeUInt16LE(entries.length, 10)
+  eocd.writeUInt32LE(central.length, 12)
+  eocd.writeUInt32LE(local.length, 16)
+  return Buffer.concat([local, central, eocd])
+}
+
+test('pinned ripgrep ZIP extraction reads only exact bounded members and rejects hazards', () => {
+  const archive = storedZip([
+    { name: 'ripgrep/rg.exe', content: 'binary' },
+    { name: 'ripgrep/COPYING', content: 'license' },
+    { name: '../outside', content: 'must not be selected' }
+  ])
+  const members = readPinnedZipMembers(archive, ['ripgrep/rg.exe', 'ripgrep/COPYING'])
+  assert.equal(members.get('ripgrep/rg.exe').toString(), 'binary')
+  assert.equal(members.get('ripgrep/COPYING').toString(), 'license')
+  assert.equal(members.has('../outside'), false)
+
+  assert.throws(
+    () =>
+      readPinnedZipMembers(
+        storedZip([{ name: 'ripgrep/rg.exe', content: 'encrypted', flags: 1 }]),
+        ['ripgrep/rg.exe']
+      ),
+    /encrypted or malformed/
+  )
+  assert.throws(
+    () =>
+      readPinnedZipMembers(
+        storedZip([
+          { name: 'ripgrep/rg.exe', content: 'one' },
+          { name: 'ripgrep/rg.exe', content: 'two' }
+        ]),
+        ['ripgrep/rg.exe']
+      ),
+    /repeats required entry/
+  )
+  assert.throws(
+    () =>
+      readPinnedZipMembers(
+        storedZip([
+          { name: 'ripgrep/rg.exe', content: 'small', declaredSize: 600 * 1024 * 1024 }
+        ]),
+        ['ripgrep/rg.exe']
+      ),
+    /oversized or truncated/
+  )
+})
+
+test('manifest pins runtime assets, PDF tools, and dependency versions for every desktop target', async () => {
   const manifest = await loadArtifactRuntimeManifest(manifestPath)
-  assert.equal(manifest.schemaVersion, 3)
-  assert.equal(manifest.bundleVersion, '2026.08.1')
+  assert.equal(manifest.schemaVersion, 4)
+  assert.equal(manifest.bundleVersion, '2026.08.2')
   assert.equal(manifest.node.version, '22.23.1')
   assert.equal(manifest.python.version, '3.12.13')
   assert.deepEqual(
@@ -72,13 +169,20 @@ test('manifest pins runtime assets and Office/PDF dependency versions for every 
       ['xlsxwriter', '3.2.9']
     ]
   )
+  assert.equal(manifest.tools.pdfCli.version, '1')
+  assert.equal(manifest.tools.pdfCli.target, 'runtime/pdf-runtime-cli.py')
+  assert.equal(manifest.tools.ripgrep.version, '15.1.0')
+  assert.equal(manifest.tools.ripgrep.licenseFiles.length, 3)
   for (const platform of ['darwin', 'linux', 'win32']) {
     for (const arch of ['arm64', 'x64']) {
       const selected = selectArtifactRuntimeAssets(manifest, platform, arch)
       assert.match(selected.node.sha256, /^[a-f0-9]{64}$/)
       assert.match(selected.python.sha256, /^[a-f0-9]{64}$/)
+      assert.match(selected.ripgrep.sha256, /^[a-f0-9]{64}$/)
       assert.ok(selected.node.size > 20_000_000)
       assert.ok(selected.python.size > 15_000_000)
+      assert.ok(selected.ripgrep.size > 1_000_000)
+      assert.equal(selected.ripgrep.format, platform === 'win32' ? 'zip' : 'tar.gz')
     }
   }
 })
@@ -395,6 +499,21 @@ async function offlineComponentSource() {
       await writeFile(license, `fixture license for ${dependency.name}\n`)
     }
   }
+  const ripgrepExecutable = join(directory, ...manifest.tools.ripgrep.executable.unix.split('/'))
+  await mkdir(dirname(ripgrepExecutable), { recursive: true })
+  await writeFile(
+    ripgrepExecutable,
+    `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 'ripgrep ${manifest.tools.ripgrep.version}'; exit 0; fi\nexit 2\n`
+  )
+  await chmod(ripgrepExecutable, 0o755)
+  const pdfCliTarget = join(directory, ...manifest.tools.pdfCli.target.split('/'))
+  await mkdir(dirname(pdfCliTarget), { recursive: true })
+  await cp(pdfCliPath, pdfCliTarget)
+  for (const descriptor of manifest.tools.ripgrep.licenseFiles) {
+    const target = join(directory, ...descriptor.target.split('/'))
+    await mkdir(dirname(target), { recursive: true })
+    await writeFile(target, `fixture ripgrep ${descriptor.source}\n`)
+  }
   await cp(manifestPath, join(directory, 'runtime-manifest.json'))
   const nodeLicense = join(directory, ...manifest.node.licenseFile.target.split('/'))
   await mkdir(dirname(nodeLicense), { recursive: true })
@@ -433,6 +552,15 @@ test(
         'dependencies/node/node-package-evidence.json'
       )
     )
+    assert.equal(first.receipt.tools.pdfCli.path, 'runtime/pdf-runtime-cli.py')
+    assert.deepEqual(first.receipt.tools.pdfCli.identityFiles, [
+      'runtime/pdf-runtime-cli.py'
+    ])
+    assert.equal(first.receipt.tools.ripgrep.version, '15.1.0')
+    assert.ok(first.receipt.tools.ripgrep.identityFiles.includes('dependencies/tools/rg'))
+    assert.ok(
+      first.receipt.tools.ripgrep.identityFiles.includes('legal/ripgrep/LICENSE-MIT')
+    )
     const supplyChainEvidencePath = 'dependencies/node/node-package-evidence.json'
     const supplyChainReceiptFile = first.receipt.files.find(
       ({ path }) => path === supplyChainEvidencePath
@@ -451,7 +579,15 @@ test(
       )
     )
     const legal = JSON.parse(await readFile(join(output, 'component-legal.json'), 'utf8'))
-    assert.equal(legal.schemaVersion, 2)
+    assert.equal(legal.schemaVersion, 3)
+    assert.deepEqual(
+      legal.tools.map(({ name, version, licenseExpression }) => ({
+        name,
+        version,
+        licenseExpression
+      })),
+      [{ name: 'ripgrep', version: '15.1.0', licenseExpression: 'MIT OR Unlicense' }]
+    )
     assert.ok(legal.packages.node.some(({ name, direct }) => name === 'exceljs' && direct))
     assert.ok(legal.packages.node.some(({ name }) => name === 'buffers'))
     assert.equal(
@@ -486,7 +622,12 @@ test(
       legal.packages.python.find(({ name }) => name === 'pypdfium2').licenseExpression,
       'NOASSERTION'
     )
-    for (const entry of [...legal.runtimes, ...legal.packages.node, ...legal.packages.python]) {
+    for (const entry of [
+      ...legal.runtimes,
+      ...legal.tools,
+      ...legal.packages.node,
+      ...legal.packages.python
+    ]) {
       for (const evidence of entry.evidence) {
         assert.ok((await stat(join(output, ...evidence.path.split('/')))).isFile())
       }
@@ -542,6 +683,26 @@ test(
       verifyOnly: true
     })
     assert.equal(afterStaleInput.receipt.bundleRevision, first.receipt.bundleRevision)
+
+    const preparedRipgrep = join(output, 'dependencies', 'tools', 'rg')
+    const ripgrepBytes = await readFile(preparedRipgrep)
+    await chmod(preparedRipgrep, 0o644)
+    await assert.rejects(
+      prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true }),
+      /not an executable regular file/
+    )
+    await chmod(preparedRipgrep, 0o755)
+    await prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true })
+
+    await writeFile(preparedRipgrep, '#!/bin/sh\nexit 9\n')
+    await chmod(preparedRipgrep, 0o755)
+    await assert.rejects(
+      prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true }),
+      /component files do not match|SHA-256|receipt/
+    )
+    await writeFile(preparedRipgrep, ripgrepBytes)
+    await chmod(preparedRipgrep, 0o755)
+    await prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true })
     assert.equal((await readdir(parent)).filter((name) => name.endsWith('.staging')).length, 0)
   }
 )

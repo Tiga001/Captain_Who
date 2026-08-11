@@ -954,3 +954,194 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
         .unwrap();
     assert_eq!(archive_count_after_restart, 1);
 }
+
+#[tokio::test]
+async fn rejected_command_after_restart_resumes_the_model_without_starting_a_session() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (continuation_tx, continuation_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut approval_stream, _) = listener.accept().await.unwrap();
+        let _approval_request = read_json_request(&mut approval_stream).await;
+        write_tool_call_stream(
+            &mut approval_stream,
+            "provider-rejected-command-restart",
+            "run_command",
+            json!({
+                "command": "printf should-not-run > rejected-command-marker.txt",
+                "reason": "prove that rejection remains pre-dispatch across restart"
+            }),
+            "Preparing the command for approval.",
+        )
+        .await;
+        drop(approval_stream);
+
+        let (mut continuation_stream, _) = listener.accept().await.unwrap();
+        let continuation_request = read_json_request(&mut continuation_stream).await;
+        continuation_tx.send(continuation_request).unwrap();
+        write_text_stream(
+            &mut continuation_stream,
+            "The command was rejected and was not executed.",
+        )
+        .await;
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("rejected-command-restart.sqlite");
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: "project-rejected-command-restart".to_string(),
+            name: "Rejected command restart".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+
+    let service = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-rejected-command-restart".to_string()),
+                project_id: Some("project-rejected-command-restart".to_string()),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Prepare the command, but wait for my decision.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-rejected-command-restart".to_string()),
+                assistant_message_id: Some("assistant-rejected-command-restart".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::RequireApproval,
+                    command_safety: AgentCommandSafetyPolicy::FullAccess,
+                    ..AgentPermissions::default()
+                },
+            },
+            notifications,
+        )
+        .unwrap();
+
+    let mut saw_approval = false;
+    let mut saw_waiting_done = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(saw_approval && saw_waiting_done) {
+            let notification = receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "run failed before approval: {notification}"
+            );
+            match notification["params"]["type"].as_str() {
+                Some("approval_required") => saw_approval = true,
+                Some("done") => saw_waiting_done = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    let action_id = pending[0].action_id.clone();
+    let call_id = pending[0]
+        .tool_call_id
+        .clone()
+        .expect("rejected command retains its ToolCall identity");
+    assert!(!workspace.join("rejected-command-marker.txt").exists());
+
+    drop(receiver);
+    drop(service);
+    drop(storage);
+
+    let restarted_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted =
+        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
+            .unwrap();
+    assert_eq!(restarted.list_pending_actions().len(), 1);
+    let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let rejection = restarted
+        .reject_action(
+            &turn.run_id,
+            &action_id,
+            Some("Do not execute this command.".to_string()),
+            restart_notifications,
+        )
+        .unwrap();
+    assert_eq!(rejection.agent_output.status, AgentRunStatus::Running);
+
+    let continuation_request = tokio::time::timeout(Duration::from_secs(5), continuation_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let rejected_tool_result = continuation_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| {
+            message["role"] == "tool" && message["tool_call_id"].as_str() == Some(call_id.as_str())
+        })
+        .and_then(|message| message["content"].as_str())
+        .expect("rejection continuation contains the paired ToolResult");
+    assert_eq!(
+        serde_json::from_str::<Value>(rejected_tool_result).unwrap()["status"],
+        "rejected"
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = restart_receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "rejection continuation failed: {notification}"
+            );
+            if notification["params"]["type"] == "done"
+                && notification["params"]["status"] == "completed"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert!(restarted.list_pending_actions().is_empty());
+    assert!(restarted_storage
+        .list_agent_command_sessions(&turn.conversation_id, 10)
+        .unwrap()
+        .is_empty());
+    assert!(!workspace.join("rejected-command-marker.txt").exists());
+    let pending_status: String = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [pending_action_storage_id(&turn.run_id, &action_id)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "rejected");
+
+    drop(restarted);
+    drop(restarted_storage);
+    let after_second_restart = Arc::new(StorageService::open(&database_path).unwrap());
+    let reconciled =
+        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&after_second_restart))
+            .unwrap();
+    assert!(reconciled.list_pending_actions().is_empty());
+    assert!(after_second_restart
+        .list_agent_command_sessions(&turn.conversation_id, 10)
+        .unwrap()
+        .is_empty());
+    assert!(!workspace.join("rejected-command-marker.txt").exists());
+}

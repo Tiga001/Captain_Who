@@ -12,22 +12,55 @@ use crate::AgentCommandRuntimeProfile;
 use crate::AgentCommandRuntimeResolvedPackage;
 use std::ffi::{OsStr, OsString};
 
-const MANAGED_PDF_CLI_SOURCE: &str = include_str!("pdf_runtime_cli.py");
-
 #[cfg(target_os = "macos")]
 const MANAGED_PDF_SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
 #[cfg(target_os = "macos")]
+const MANAGED_PDF_SHELL_EXECUTABLE: &str = "/bin/bash";
+
+#[cfg(target_os = "macos")]
 const MANAGED_PDF_SANDBOX_PROFILE: &str = r#"(version 1)
 (deny default)
-(import "system.sb")
+(import "dyld-support.sb")
+(allow sysctl-read)
+(allow system-info)
+(deny syscall-unix (syscall-number SYS_setsid))
+(deny syscall-unix (syscall-number SYS_setpgid))
 (deny network*)
-(allow process-exec (literal (param "EXECUTABLE")))
+(deny process-fork)
+(deny process-exec)
+(deny file-link file-clone)
+(deny file-write-create (vnode-type SYMLINK))
 (allow file-read-metadata file-test-existence
+  (literal "/dev")
+  (literal "/dev/null")
+  (literal "/dev/urandom"))
+(allow file-read-data
+  (literal "/dev/null")
+  (literal "/dev/urandom"))
+(allow file-write-data (literal "/dev/null"))
+(with-filter (process-path (param "SANDBOX_EXEC"))
+  (allow process-exec (literal (param "SHELL"))))
+(with-filter (process-path (param "SHELL"))
+  (allow process-fork)
+  (allow process-exec
+    (literal (param "PYTHON"))
+    (literal (param "RIPGREP"))))
+(allow file-read-metadata file-test-existence
+  (literal (param "SHELL"))
+  (literal (param "SANDBOX_EXEC"))
+  (literal (param "RUNTIME_ROOT"))
+  (literal (param "INPUT_ROOT"))
+  (literal (param "EXECUTION_ROOT"))
   (path-ancestors (param "RUNTIME_ROOT"))
   (path-ancestors (param "INPUT_ROOT"))
   (path-ancestors (param "EXECUTION_ROOT")))
 (allow file-read* file-test-existence
+  (literal (param "SHELL"))
+  (literal (param "SANDBOX_EXEC"))
+  (literal (param "RUNTIME_ROOT"))
+  (literal (param "INPUT_ROOT"))
+  (literal (param "EXECUTION_ROOT"))
   (subpath (param "RUNTIME_ROOT"))
   (subpath (param "INPUT_ROOT"))
   (subpath (param "EXECUTION_ROOT")))
@@ -184,7 +217,7 @@ pub(crate) fn prepare_managed_command_session(
             unresolved_binding_resolution(binding),
         )));
     }
-    let mut parsed = match parse_frozen_managed_command(&request.command, binding) {
+    let parsed = match parse_frozen_managed_command(&request.command, binding) {
         Ok(parsed) => parsed,
         Err(message) => {
             return Ok(immediate(runtime_failure_result(
@@ -287,52 +320,82 @@ pub(crate) fn prepare_managed_command_session(
         .as_ref()
         .map(|inputs| inputs.evidence().to_vec())
         .unwrap_or_default();
-    if binding.profile == AgentCommandRuntimeProfile::Pdf {
-        if let Err(message) =
-            resolve_materialized_pdf_input_script(&mut parsed, prepared_inputs.as_ref())
-        {
-            return Ok(immediate(runtime_failure_result(
-                root.as_deref(),
-                &cwd,
-                request,
-                binding_resolution_error(
-                    binding,
-                    ERROR_INVALID_COMMAND,
-                    ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
-                    &message,
-                ),
-                0,
-            )));
-        }
-    }
     let mut arguments = prepared_runtime.invocation.arguments_prefix().to_vec();
-    arguments.extend(parsed.process_arguments.iter().map(OsString::from));
+    arguments.extend(parsed.process_arguments.iter().cloned());
     let mut environment =
         managed_environment(&prepared_runtime.invocation, prepared_inputs.as_ref());
     let hard_timeout = managed_command_hard_timeout(managed_pdf, request.timeout_ms);
     let launch = if let Some(workspace) = managed_workspace.as_ref() {
-        match prepare_managed_pdf_sandbox_launch(
-            &prepared_runtime.invocation,
-            arguments,
-            &mut environment,
-            workspace,
-            prepared_inputs.as_ref(),
-            provider.component_root(),
-        ) {
-            Ok(launch) => launch,
-            Err(message) => {
+        let pdf_cli = match provider.pdf_cli_path() {
+            Ok(path) => path,
+            Err(error) => {
                 return Ok(immediate(runtime_failure_result(
                     root.as_deref(),
                     &cwd,
                     request,
                     binding_resolution_error(
                         binding,
-                        ERROR_UNAVAILABLE,
-                        ArtifactRuntimeRecovery::InstallComponent.stable_name(),
-                        &message,
+                        error.code().stable_name(),
+                        error.recovery().stable_name(),
+                        error.message(),
                     ),
                     0,
                 )))
+            }
+        };
+        let ripgrep = match provider.ripgrep_executable() {
+            Ok(path) => path,
+            Err(error) => {
+                return Ok(immediate(runtime_failure_result(
+                    root.as_deref(),
+                    &cwd,
+                    request,
+                    binding_resolution_error(
+                        binding,
+                        error.code().stable_name(),
+                        error.recovery().stable_name(),
+                        error.message(),
+                    ),
+                    0,
+                )))
+            }
+        };
+        match prepare_managed_pdf_shell_launch(
+            &prepared_runtime.invocation,
+            parsed
+                .pdf_shell
+                .as_ref()
+                .expect("managed PDF workspace must have an authoritative shell plan"),
+            &mut environment,
+            workspace,
+            prepared_inputs.as_ref(),
+            ManagedPdfToolPaths {
+                runtime_root: provider.component_root(),
+                pdf_cli: &pdf_cli,
+                ripgrep: &ripgrep,
+            },
+        ) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let (code, recovery, message) = match error {
+                    ManagedPdfShellLaunchError::InvalidCommand(message) => (
+                        ERROR_INVALID_COMMAND,
+                        ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                        message,
+                    ),
+                    ManagedPdfShellLaunchError::Unavailable(message) => (
+                        ERROR_UNAVAILABLE,
+                        ArtifactRuntimeRecovery::InstallComponent.stable_name(),
+                        message,
+                    ),
+                };
+                return Ok(immediate(runtime_failure_result(
+                    root.as_deref(),
+                    &cwd,
+                    request,
+                    binding_resolution_error(binding, code, recovery, &message),
+                    0,
+                )));
             }
         }
     } else {
@@ -428,89 +491,200 @@ fn managed_pdf_output_redactions(
     super::output_capture::ProcessOutputRedactionSet::new(replacements)
 }
 
-fn prepare_managed_pdf_sandbox_launch(
+struct ManagedPdfToolPaths<'a> {
+    runtime_root: &'a Path,
+    pdf_cli: &'a Path,
+    ripgrep: &'a Path,
+}
+
+#[derive(Debug)]
+enum ManagedPdfShellLaunchError {
+    InvalidCommand(String),
+    Unavailable(String),
+}
+
+fn prepare_managed_pdf_shell_launch(
     invocation: &ArtifactRuntimeInvocation,
-    process_arguments: Vec<OsString>,
+    shell_plan: &super::managed_pdf_shell::ManagedPdfShellPlan,
     environment: &mut Vec<(OsString, OsString)>,
     workspace: &ManagedCommandWorkspaceLease,
     prepared_inputs: Option<&PreparedAgentFileInputs>,
-    runtime_root: &Path,
-) -> Result<CommandDirectLaunchPlan, String> {
+    tools: ManagedPdfToolPaths<'_>,
+) -> Result<CommandDirectLaunchPlan, ManagedPdfShellLaunchError> {
+    let ManagedPdfToolPaths {
+        runtime_root,
+        pdf_cli,
+        ripgrep,
+    } = tools;
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
             invocation,
-            process_arguments,
+            shell_plan,
             environment,
             workspace,
             prepared_inputs,
             runtime_root,
+            pdf_cli,
+            ripgrep,
         );
-        return Err(
+        return Err(ManagedPdfShellLaunchError::Unavailable(
             "Managed PDF Runtime 当前缺少受支持的 Host 文件系统沙箱，已拒绝裸进程执行。"
                 .to_string(),
-        );
+        ));
     }
 
     #[cfg(target_os = "macos")]
     {
-        let sandbox_metadata = std::fs::symlink_metadata(MANAGED_PDF_SANDBOX_EXECUTABLE)
-            .map_err(|_| "Managed PDF Runtime 的 Host 沙箱不可用，已拒绝裸进程执行。")?;
-        if sandbox_metadata.file_type().is_symlink() || !sandbox_metadata.is_file() {
-            return Err("Managed PDF Runtime 的 Host 沙箱身份无效，已拒绝裸进程执行。".to_string());
+        for (path, label) in [
+            (Path::new(MANAGED_PDF_SANDBOX_EXECUTABLE), "Host 沙箱"),
+            (
+                Path::new(MANAGED_PDF_SHELL_EXECUTABLE),
+                "固定非交互式 Shell",
+            ),
+        ] {
+            let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+                ManagedPdfShellLaunchError::Unavailable(format!(
+                    "Managed PDF Runtime 的 {label} 不可用，已拒绝执行。"
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(ManagedPdfShellLaunchError::Unavailable(format!(
+                    "Managed PDF Runtime 的 {label} 身份无效，已拒绝执行。"
+                )));
+            }
         }
 
-        let runtime_root = runtime_root
-            .canonicalize()
-            .map_err(|_| "Managed PDF Runtime 无法验证受管运行时边界。".to_string())?;
-        let executable = invocation
-            .executable()
-            .canonicalize()
-            .map_err(|_| "Managed PDF Runtime 无法验证受管 Python 身份。".to_string())?;
+        let runtime_root = runtime_root.canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证受管运行时边界。".to_string(),
+            )
+        })?;
+        let executable = invocation.executable().canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证受管 Python 身份。".to_string(),
+            )
+        })?;
         if !executable.starts_with(&runtime_root) {
-            return Err("Managed PDF Runtime 的 Python 不属于冻结的受管运行时。".to_string());
+            return Err(ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 的 Python 不属于冻结的受管运行时。".to_string(),
+            ));
         }
-        let execution_root = workspace
-            .execution_root()
-            .canonicalize()
-            .map_err(|_| "Managed PDF Runtime 无法验证 Run 私有执行边界。".to_string())?;
+        let pdf_cli = pdf_cli.canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证受管 PDF CLI。".to_string(),
+            )
+        })?;
+        let ripgrep = ripgrep.canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证受管 ripgrep。".to_string(),
+            )
+        })?;
+        if !pdf_cli.starts_with(&runtime_root)
+            || !ripgrep.starts_with(&runtime_root)
+            || !pdf_cli.is_file()
+            || !ripgrep.is_file()
+        {
+            return Err(ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 的 receipt 工具不属于冻结的受管运行时。".to_string(),
+            ));
+        }
+        let execution_root = workspace.execution_root().canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证 Run 私有执行边界。".to_string(),
+            )
+        })?;
         let input_root = prepared_inputs
             .map(PreparedAgentFileInputs::root)
             .unwrap_or(execution_root.as_path())
             .canonicalize()
-            .map_err(|_| "Managed PDF Runtime 无法验证只读输入边界。".to_string())?;
-        let home_root = workspace
-            .home_root()
-            .canonicalize()
-            .map_err(|_| "Managed PDF Runtime 无法验证私有 HOME。".to_string())?;
-        let temp_root = workspace
-            .temp_root()
-            .canonicalize()
-            .map_err(|_| "Managed PDF Runtime 无法验证私有临时目录。".to_string())?;
+            .map_err(|_| {
+                ManagedPdfShellLaunchError::Unavailable(
+                    "Managed PDF Runtime 无法验证只读输入边界。".to_string(),
+                )
+            })?;
+        workspace.home_root().canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证私有 HOME。".to_string(),
+            )
+        })?;
+        workspace.temp_root().canonicalize().map_err(|_| {
+            ManagedPdfShellLaunchError::Unavailable(
+                "Managed PDF Runtime 无法验证私有临时目录。".to_string(),
+            )
+        })?;
 
-        replace_managed_environment_path(environment, "HOME", &home_root);
-        replace_managed_environment_path(environment, "TMPDIR", &temp_root);
-        replace_managed_environment_path(environment, "TMP", &temp_root);
-        replace_managed_environment_path(environment, "TEMP", &temp_root);
-        replace_managed_environment_path(environment, "USERPROFILE", &home_root);
+        shell_plan
+            .validate_private_redirections(&execution_root)
+            .map_err(ManagedPdfShellLaunchError::InvalidCommand)?;
+        let compiled_command = shell_plan
+            .compile(
+                prepared_inputs,
+                &super::managed_pdf_shell::ManagedPdfShellCompileTools {
+                    python: &executable,
+                    pdf_cli: &pdf_cli,
+                    ripgrep: &ripgrep,
+                    input_root: &input_root,
+                },
+            )
+            .map_err(ManagedPdfShellLaunchError::InvalidCommand)?;
 
-        let mut arguments = Vec::with_capacity(process_arguments.len() + 12);
+        // The compiled shell uses exact, receipt-verified executable paths. PATH stays empty and
+        // no model-visible environment value contains a private or runtime path.
+        environment.retain(|(key, _)| {
+            let key = key.to_string_lossy();
+            !matches!(key.as_ref(), "PATH" | "LANG" | "LC_ALL" | "LC_CTYPE" | "TZ")
+                && !key.starts_with("MYCOPILOT_")
+                && !key.starts_with("RIPGREP_")
+        });
+        for (key, value) in [
+            ("PATH", OsStr::new("")),
+            ("LANG", OsStr::new("C.UTF-8")),
+            ("LC_ALL", OsStr::new("C.UTF-8")),
+            ("TZ", OsStr::new("UTC")),
+            ("HOME", OsStr::new(".home")),
+            ("USERPROFILE", OsStr::new(".home")),
+            ("TMPDIR", OsStr::new(".tmp")),
+            ("TMP", OsStr::new(".tmp")),
+            ("TEMP", OsStr::new(".tmp")),
+        ] {
+            replace_managed_environment_value(environment, key, value);
+        }
+
+        // A single outer Seatbelt covers Bash and every descendant. Only Bash may fork to build a
+        // validated pipeline, and `process-path` restricts every exec edge: sandbox-exec may start
+        // the fixed Bash, while Bash may start only exact managed Python and ripgrep. Python and rg
+        // can neither fork nor reuse those exec grants. Raw setsid/setpgid syscalls are denied so a
+        // child cannot detach from cancellation.
+        let mut arguments = Vec::with_capacity(24);
         for (name, path) in [
-            ("EXECUTABLE", executable.as_path()),
+            ("SHELL", Path::new(MANAGED_PDF_SHELL_EXECUTABLE)),
+            ("SANDBOX_EXEC", Path::new(MANAGED_PDF_SANDBOX_EXECUTABLE)),
+            ("PYTHON", executable.as_path()),
+            ("RIPGREP", ripgrep.as_path()),
             ("RUNTIME_ROOT", runtime_root.as_path()),
             ("INPUT_ROOT", input_root.as_path()),
             ("EXECUTION_ROOT", execution_root.as_path()),
         ] {
             let value = path.to_str().ok_or_else(|| {
-                "Managed PDF Runtime 的 Host 沙箱不支持非 UTF-8 私有路径。".to_string()
+                ManagedPdfShellLaunchError::Unavailable(
+                    "Managed PDF Runtime 的 Host 沙箱不支持非 UTF-8 私有路径。".to_string(),
+                )
             })?;
             arguments.push(OsString::from("-D"));
             arguments.push(OsString::from(format!("{name}={value}")));
         }
         arguments.push(OsString::from("-p"));
         arguments.push(OsString::from(MANAGED_PDF_SANDBOX_PROFILE));
-        arguments.push(executable.into_os_string());
-        arguments.extend(process_arguments);
+        arguments.push(OsString::from(MANAGED_PDF_SHELL_EXECUTABLE));
+        arguments.push(OsString::from("--noprofile"));
+        arguments.push(OsString::from("--norc"));
+        arguments.push(OsString::from("-o"));
+        arguments.push(OsString::from("pipefail"));
+        arguments.push(OsString::from("-c"));
+        arguments.push(OsString::from(format!(
+            "readonly PATH HOME TMPDIR TMP TEMP USERPROFILE LANG LC_ALL TZ\n{compiled_command}"
+        )));
 
         Ok(CommandDirectLaunchPlan::isolated(
             PathBuf::from(MANAGED_PDF_SANDBOX_EXECUTABLE),
@@ -520,13 +694,13 @@ fn prepare_managed_pdf_sandbox_launch(
     }
 }
 
-fn replace_managed_environment_path(
+fn replace_managed_environment_value(
     environment: &mut Vec<(OsString, OsString)>,
     key: &str,
-    path: &Path,
+    value: &OsStr,
 ) {
     environment.retain(|(candidate, _)| candidate != OsStr::new(key));
-    environment.push((OsString::from(key), path.as_os_str().to_os_string()));
+    environment.push((OsString::from(key), value.to_os_string()));
 }
 
 fn append_private_path_spellings(
@@ -784,7 +958,21 @@ fn execute_with_frozen_profile(
             unresolved_binding_resolution(binding),
         );
     }
-    let mut parsed = match parse_frozen_managed_command(&request.command, binding) {
+    if binding.profile == AgentCommandRuntimeProfile::Pdf {
+        return runtime_failure_result(
+            root,
+            cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                ERROR_INVALID_REQUEST,
+                ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                "可信 PDF 命令只能通过 Host Session 运行，以获得 Run 私有工作区。",
+            ),
+            0,
+        );
+    }
+    let parsed = match parse_frozen_managed_command(&request.command, binding) {
         Ok(parsed) => parsed,
         Err(message) => {
             return runtime_failure_result(
@@ -888,24 +1076,6 @@ fn execute_with_frozen_profile(
             )
         }
     };
-    if binding.profile == AgentCommandRuntimeProfile::Pdf {
-        if let Err(message) =
-            resolve_materialized_pdf_input_script(&mut parsed, prepared_inputs.as_ref())
-        {
-            return runtime_failure_result(
-                root,
-                cwd,
-                request,
-                binding_resolution_error(
-                    binding,
-                    ERROR_INVALID_COMMAND,
-                    ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
-                    &message,
-                ),
-                0,
-            );
-        }
-    }
     let mut result = run_managed_process(
         root,
         cwd,
@@ -1136,8 +1306,8 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManagedArtifactCommand {
     script: Option<String>,
-    input_script_mount: Option<String>,
     process_arguments: Vec<OsString>,
+    pdf_shell: Option<super::managed_pdf_shell::ManagedPdfShellPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1399,8 +1569,8 @@ fn parse_managed_artifact_command(
 
     Ok(ManagedArtifactCommand {
         script: Some(script.clone()),
-        input_script_mount: None,
         process_arguments: tokens[1..].iter().map(OsString::from).collect(),
+        pdf_shell: None,
     })
 }
 
@@ -1409,9 +1579,14 @@ fn parse_frozen_managed_command(
     binding: &AgentCommandRuntimeBinding,
 ) -> Result<ManagedArtifactCommand, String> {
     if binding.profile == AgentCommandRuntimeProfile::Pdf {
-        return parse_managed_pdf_command(command)?.ok_or_else(|| {
-            "Managed PDF Runtime 只接受一个直接调用：pdfinfo、pdftotext、pdftoppm、python -c，或来自 run_command.inputs 的 Python 脚本。临时多行 Python 请放在带引号的 -c 代码参数内。"
-                .to_string()
+        let pdf_shell =
+            super::managed_pdf_shell::parse_managed_pdf_shell(command)?.ok_or_else(|| {
+                "Managed PDF Runtime 只接受受管 PDF/Python/rg Shell 工作流。".to_string()
+            })?;
+        return Ok(ManagedArtifactCommand {
+            script: None,
+            process_arguments: Vec::new(),
+            pdf_shell: Some(pdf_shell),
         });
     }
     parse_managed_artifact_command(command, binding.kind)
@@ -1424,313 +1599,16 @@ fn parse_frozen_managed_command(
 pub(crate) fn infer_managed_pdf_command_kind(
     command: &str,
 ) -> Result<Option<AgentCommandRuntimeKind>, String> {
-    parse_managed_pdf_command(command)
+    super::managed_pdf_shell::parse_managed_pdf_shell(command)
         .map(|command| command.map(|_| AgentCommandRuntimeKind::Python))
 }
 
-/// Returns a workspace-relative PDF path that can be frozen implicitly for the deliberately
-/// small, host-owned PDF CLI surface.
-///
-/// This is an ergonomic convenience for commands such as `pdfinfo "manual.pdf"` after the model
-/// has already discovered that file in the selected workspace. It never resolves attachments,
-/// Artifacts, external paths, environment variables, Python code, or output paths. The caller
-/// must still prove that the returned file exists in the selected workspace and freeze its bytes
-/// through the normal [`crate::file_input`] approval-boundary path.
-pub(crate) fn infer_managed_pdf_workspace_input(command: &str) -> Result<Option<String>, String> {
-    let lexed = lex_command(command).map_err(|error| {
-        format!(
-            "Managed PDF Runtime 命令语法无效（{}）：{}",
-            error.code, error.reason
-        )
-    })?;
-    if lexed.segments.len() != 1
-        || !lexed.embedded_commands.is_empty()
-        || lexed.segments[0].has_write_redirection
-        || !lexed.segments[0].input_redirections.is_empty()
-        || lexed.segments[0].has_heredoc
-    {
-        return Ok(None);
-    }
-    let tokens = &lexed.segments[0].tokens;
-    let candidate = match tokens.first().map(String::as_str) {
-        Some("pdfinfo") if tokens.len() == 2 => tokens.get(1).map(String::as_str),
-        Some("pdftotext") => {
-            managed_pdf_positional_arguments(&tokens[1..], &["-f", "-l"], &["-layout", "-nopgbrk"])
-                .filter(|arguments| matches!(arguments.len(), 1 | 2))
-                .and_then(|arguments| arguments.first().copied())
-        }
-        Some("pdftoppm") => managed_pdf_positional_arguments(
-            &tokens[1..],
-            &["-f", "-l", "-r"],
-            &["-png", "-jpeg", "-jpg", "-singlefile"],
-        )
-        .filter(|arguments| arguments.len() == 2)
-        .and_then(|arguments| arguments.first().copied()),
-        _ => None,
-    };
-    candidate
-        .map(normalize_managed_pdf_workspace_input)
-        .transpose()
-        .map(Option::flatten)
-}
-
-fn managed_pdf_positional_arguments<'a>(
-    arguments: &'a [String],
-    valued_options: &[&str],
-    switches: &[&str],
-) -> Option<Vec<&'a str>> {
-    let mut positional = Vec::new();
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = arguments[index].as_str();
-        if valued_options.contains(&argument) {
-            arguments.get(index + 1)?;
-            index += 2;
-        } else if switches.contains(&argument) {
-            index += 1;
-        } else if argument.starts_with('-') && argument != "-" {
-            return None;
-        } else {
-            positional.push(argument);
-            index += 1;
-        }
-    }
-    Some(positional)
-}
-
-fn normalize_managed_pdf_workspace_input(value: &str) -> Result<Option<String>, String> {
-    if value.is_empty()
-        || value.starts_with('@')
-        || value.starts_with('~')
-        || value.contains('$')
-        || value.contains("://")
-    {
-        return Ok(None);
-    }
-    let path = Path::new(value);
-    if path.is_absolute()
-        || !path
-            .extension()
-            .and_then(OsStr::to_str)
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-    {
-        return Ok(None);
-    }
-    let mut parts = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => {
-                let part = part.to_str().ok_or_else(|| {
-                    "Managed PDF Runtime 的 workspace PDF 路径必须是有效 UTF-8。".to_string()
-                })?;
-                parts.push(part);
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir
-            | std::path::Component::RootDir
-            | std::path::Component::Prefix(_) => {
-                return Err(
-                    "Managed PDF Runtime 的 workspace PDF 路径不能包含 `..`、根目录或平台前缀。"
-                        .to_string(),
-                );
-            }
-        }
-    }
-    if parts.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(parts.join("/")))
-}
-
-fn parse_managed_pdf_command(command: &str) -> Result<Option<ManagedArtifactCommand>, String> {
-    let lexed = lex_command(command).map_err(|error| {
-        format!(
-            "Managed PDF Runtime 命令语法无效（{}）：{}",
-            error.code, error.reason
-        )
-    })?;
-    let first_tokens = lexed.segments.first().map(|segment| &segment.tokens);
-    let Some(program) = first_tokens
-        .and_then(|tokens| tokens.first())
-        .map(String::as_str)
-    else {
-        return Ok(None);
-    };
-    let python_mode_is_pdf = matches!(program, "python" | "python3")
-        && first_tokens.is_some_and(|tokens| {
-            tokens.get(1).map(String::as_str) == Some("-c")
-                || tokens
-                    .get(1)
-                    .is_some_and(|script| pdf_input_script_mount(script).is_some())
-        });
-    if !matches!(program, "pdfinfo" | "pdftotext" | "pdftoppm") && !python_mode_is_pdf {
-        return Ok(None);
-    }
-    if lexed.segments.len() != 1
-        || !lexed.embedded_commands.is_empty()
-        || lexed.segments[0].has_write_redirection
-        || !lexed.segments[0].input_redirections.is_empty()
-    {
-        return Err(
-            "Managed PDF Runtime 每次只接受一个无重定向、无管道、无复合运算符、无 heredoc、无命令替换的直接调用；临时多行 Python 请放在带引号的 `python -c` 代码参数内。".to_string(),
-        );
-    }
-    let tokens = &lexed.segments[0].tokens;
-    match program {
-        "pdfinfo" | "pdftotext" | "pdftoppm" => {
-            if tokens.len() < 2 {
-                return Err(format!("Managed PDF Runtime 的 `{program}` 调用缺少参数。"));
-            }
-            let mut process_arguments = vec![
-                OsString::from("-c"),
-                OsString::from(MANAGED_PDF_CLI_SOURCE),
-                OsString::from(program),
-            ];
-            process_arguments.extend(tokens[1..].iter().map(OsString::from));
-            Ok(Some(ManagedArtifactCommand {
-                script: None,
-                input_script_mount: None,
-                process_arguments,
-            }))
-        }
-        "python" | "python3" if tokens.get(1).map(String::as_str) == Some("-c") => {
-            if tokens.get(2).is_none_or(String::is_empty) {
-                return Err("Managed PDF Runtime 的 python -c 调用缺少代码。".to_string());
-            }
-            Ok(Some(ManagedArtifactCommand {
-                script: None,
-                input_script_mount: None,
-                process_arguments: tokens[1..].iter().map(OsString::from).collect(),
-            }))
-        }
-        "python" | "python3" => {
-            let script = tokens
-                .get(1)
-                .and_then(|script| pdf_input_script_mount(script))
-                .transpose()?
-                .ok_or_else(|| {
-                    "Managed PDF Runtime 的保存脚本必须来自 `$MYCOPILOT_INPUT_ROOT/<mount>.py`。"
-                        .to_string()
-                })?;
-            Ok(Some(ManagedArtifactCommand {
-                script: None,
-                input_script_mount: Some(script),
-                process_arguments: tokens[1..].iter().map(OsString::from).collect(),
-            }))
-        }
-        _ => Ok(None),
-    }
-}
-
-fn pdf_input_script_mount(token: &str) -> Option<Result<String, String>> {
-    let relative = pdf_input_mount(token)?;
-    Some(relative.and_then(|relative| validate_pdf_input_script_mount(&relative)))
-}
-
-fn pdf_input_mount(token: &str) -> Option<Result<String, String>> {
-    let relative = token
-        .strip_prefix("$MYCOPILOT_INPUT_ROOT/")
-        .or_else(|| token.strip_prefix("${MYCOPILOT_INPUT_ROOT}/"))?;
-    let path = Path::new(relative);
-    if relative.is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Some(Err(
-            "Managed PDF Runtime 的 input root 路径必须是不含 `..` 的相对路径。".to_string(),
-        ));
-    }
-    Some(Ok(relative.to_string()))
-}
-
-fn validate_pdf_input_script_mount(relative: &str) -> Result<String, String> {
-    let path = Path::new(relative);
-    if relative.is_empty()
-        || path.is_absolute()
-        || path.extension().and_then(OsStr::to_str) != Some("py")
-        || path
-            .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
-    {
-        return Err(
-            "Managed PDF Runtime 的输入脚本必须是 input root 内无 `..` 的相对 .py 路径。"
-                .to_string(),
-        );
-    }
-    Ok(relative.to_string())
-}
-
-fn resolve_materialized_pdf_input_script(
-    parsed: &mut ManagedArtifactCommand,
-    prepared_inputs: Option<&PreparedAgentFileInputs>,
-) -> Result<(), String> {
-    let prepared = match (parsed.input_script_mount.as_deref(), prepared_inputs) {
-        (Some(_), None) => {
-            return Err(
-                "Managed PDF Runtime 的保存脚本必须同时声明为 run_command.inputs。".to_string(),
-            );
-        }
-        (_, Some(prepared)) => prepared,
-        (None, None) => return Ok(()),
-    };
-    if let Some(mount_path) = parsed.input_script_mount.as_deref() {
-        if !prepared
-            .evidence()
-            .iter()
-            .any(|evidence| evidence.mount_path == mount_path)
-        {
-            return Err(format!(
-                "Managed PDF Runtime 输入中不存在脚本 mountPath `{mount_path}`。"
-            ));
-        }
-    }
-
-    let input_root = prepared
-        .root()
-        .canonicalize()
-        .map_err(|error| format!("无法规范化受管命令输入根：{error}"))?;
-    for argument in &mut parsed.process_arguments {
-        let Some(token) = argument.to_str() else {
-            continue;
-        };
-        let explicit_input_root = pdf_input_mount(token);
-        let requires_declared_mount = explicit_input_root.is_some();
-        let relative = match explicit_input_root {
-            Some(relative) => Some(relative?),
-            None => normalize_managed_pdf_workspace_input(token)?,
-        };
-        let Some(relative) = relative else {
-            continue;
-        };
-        let declared = prepared
-            .evidence()
-            .iter()
-            .any(|evidence| evidence.mount_path == relative);
-        if !declared && requires_declared_mount {
-            return Err(format!(
-                "Managed PDF Runtime 输入中不存在 mountPath `{relative}`。"
-            ));
-        }
-        if !declared {
-            continue;
-        }
-        let path = input_root.join(&relative);
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| format!("无法读取 Managed PDF Runtime 输入文件：{error}"))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err("Managed PDF Runtime 输入必须是非符号链接普通文件。".to_string());
-        }
-        let path = path
-            .canonicalize()
-            .map_err(|error| format!("无法规范化 Managed PDF Runtime 输入文件：{error}"))?;
-        if !path.starts_with(&input_root) {
-            return Err("Managed PDF Runtime 输入文件逃离了冻结输入根。".to_string());
-        }
-        *argument = path.into_os_string();
-    }
-    Ok(())
+/// Returns every workspace-relative PDF operand that must cross the ordinary approval-bound
+/// FileInput path before a trusted managed shell can start.
+pub(crate) fn infer_managed_pdf_workspace_inputs(command: &str) -> Result<Vec<String>, String> {
+    Ok(super::managed_pdf_shell::parse_managed_pdf_shell(command)?
+        .map(|plan| plan.implicit_workspace_inputs())
+        .unwrap_or_default())
 }
 
 fn managed_artifact_command_tokens(command: &str) -> Result<Vec<String>, String> {
@@ -2493,89 +2371,6 @@ mod tests {
     }
 
     #[test]
-    fn managed_pdf_parser_is_narrow_and_does_not_claim_unrelated_commands() {
-        let pdfinfo = parse_managed_pdf_command("pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'")
-            .unwrap()
-            .unwrap();
-        assert!(pdfinfo.script.is_none());
-        assert!(pdfinfo.input_script_mount.is_none());
-
-        let script = parse_managed_pdf_command(
-            "python '$MYCOPILOT_INPUT_ROOT/scripts/edit.py' --mode verify",
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            script.input_script_mount.as_deref(),
-            Some("scripts/edit.py")
-        );
-        assert_eq!(
-            script.process_arguments[0],
-            OsString::from("$MYCOPILOT_INPUT_ROOT/scripts/edit.py")
-        );
-
-        assert!(
-            parse_managed_pdf_command("python scripts/office.py --output report.docx")
-                .unwrap()
-                .is_none()
-        );
-        assert!(parse_managed_pdf_command("echo value | sed s/a/b/")
-            .unwrap()
-            .is_none());
-        assert!(parse_managed_pdf_command("pdfinfo input.pdf | tee metadata.txt").is_err());
-        assert!(parse_managed_pdf_command("python '$MYCOPILOT_INPUT_ROOT/../escape.py'").is_err());
-
-        let multiline =
-            parse_managed_pdf_command("python -c 'from pypdf import PdfReader\nprint(PdfReader)'")
-                .unwrap()
-                .unwrap();
-        assert_eq!(
-            multiline.process_arguments[1],
-            OsString::from("from pypdf import PdfReader\nprint(PdfReader)")
-        );
-        let compound =
-            parse_managed_pdf_command("python -c 'print(1)'\npython -c 'print(2)'").unwrap_err();
-        assert!(compound.contains("一个无重定向"));
-        assert!(compound.contains("python -c"));
-    }
-
-    #[test]
-    fn managed_pdf_finds_only_the_native_workspace_pdf_input_argument() {
-        let aspen = "AspenPolymer-Unit Operations and Reaction Models.pdf";
-        assert_eq!(
-            infer_managed_pdf_workspace_input(&format!("pdfinfo \"{aspen}\""))
-                .unwrap()
-                .as_deref(),
-            Some(aspen)
-        );
-        assert_eq!(
-            infer_managed_pdf_workspace_input(
-                "pdftotext -f 307 -l 308 -layout manuals/aspen.pdf extracted.txt"
-            )
-            .unwrap()
-            .as_deref(),
-            Some("manuals/aspen.pdf")
-        );
-        assert_eq!(
-            infer_managed_pdf_workspace_input(
-                "pdftoppm -f 307 -l 308 -r 144 -png manuals/aspen.PDF outputs/aspen-page"
-            )
-            .unwrap()
-            .as_deref(),
-            Some("manuals/aspen.PDF")
-        );
-        for command in [
-            "pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'",
-            "pdfinfo '@attachments/pdf-1/manual.pdf'",
-            "pdfinfo 'artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
-            "python -c 'from pypdf import PdfReader; PdfReader(\"manual.pdf\")'",
-        ] {
-            assert_eq!(infer_managed_pdf_workspace_input(command).unwrap(), None);
-        }
-        assert!(infer_managed_pdf_workspace_input("pdfinfo ../outside.pdf").is_err());
-    }
-
-    #[test]
     fn managed_pdf_uses_one_host_owned_hard_timeout() {
         let expected = Some(Duration::from_millis(MANAGED_PDF_HARD_TIMEOUT_MS));
         assert_eq!(managed_command_hard_timeout(true, None), expected);
@@ -2587,229 +2382,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn managed_pdf_saved_script_is_resolved_only_from_the_frozen_input_root() {
-        let workspace = TempDir::new().unwrap();
-        fs::create_dir(workspace.path().join("scripts")).unwrap();
-        let script_bytes = b"print('ok')\n";
-        fs::write(workspace.path().join("scripts/edit.py"), script_bytes).unwrap();
-        let binding = crate::AgentFileInputBinding {
-            schema_version: crate::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
-            mount_path: "scripts/edit.py".to_string(),
-            source: crate::AgentFileInputRef::Workspace {
-                path: "scripts/edit.py".to_string(),
-            },
-            size_bytes: script_bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(script_bytes)),
-        };
-        let prepared = materialize_agent_file_inputs(
-            Some(workspace.path()),
-            AgentPermissions {
-                read: AgentReadPermission::WorkspaceOnly,
-                ..AgentPermissions::default()
-            },
-            &AgentFileInputExecutionContext::default(),
-            &[binding],
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        let mut parsed =
-            parse_managed_pdf_command("python '$MYCOPILOT_INPUT_ROOT/scripts/edit.py'")
-                .unwrap()
-                .unwrap();
-        resolve_materialized_pdf_input_script(&mut parsed, Some(&prepared)).unwrap();
-        let resolved = PathBuf::from(&parsed.process_arguments[0]);
-        assert!(resolved.is_absolute());
-        assert!(resolved.starts_with(prepared.root().canonicalize().unwrap()));
-
-        let mut missing =
-            parse_managed_pdf_command("python '$MYCOPILOT_INPUT_ROOT/scripts/missing.py'")
-                .unwrap()
-                .unwrap();
-        assert!(resolve_materialized_pdf_input_script(&mut missing, Some(&prepared)).is_err());
-    }
-
-    #[test]
-    fn managed_pdf_relative_workspace_argument_resolves_to_the_frozen_single_file() {
-        let workspace = TempDir::new().unwrap();
-        let filename = "AspenPolymer-Unit Operations and Reaction Models.pdf";
-        let bytes = b"%PDF-1.4\nfixture\n";
-        fs::write(workspace.path().join(filename), bytes).unwrap();
-        let binding = crate::AgentFileInputBinding {
-            schema_version: crate::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
-            mount_path: filename.to_string(),
-            source: crate::AgentFileInputRef::Workspace {
-                path: filename.to_string(),
-            },
-            size_bytes: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(bytes)),
-        };
-        let prepared = materialize_agent_file_inputs(
-            Some(workspace.path()),
-            AgentPermissions {
-                read: AgentReadPermission::WorkspaceOnly,
-                ..AgentPermissions::default()
-            },
-            &AgentFileInputExecutionContext::default(),
-            &[binding],
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        let mut parsed = parse_managed_pdf_command(&format!("pdfinfo \"{filename}\""))
-            .unwrap()
-            .unwrap();
-
-        resolve_materialized_pdf_input_script(&mut parsed, Some(&prepared)).unwrap();
-
-        let resolved = PathBuf::from(parsed.process_arguments.last().unwrap());
-        assert!(resolved.is_absolute());
-        assert!(resolved.starts_with(prepared.root().canonicalize().unwrap()));
-        assert_eq!(fs::read(resolved).unwrap(), bytes);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn managed_pdf_sandbox_child_probe() {
-        if std::env::var_os("MYCOPILOT_PDF_SANDBOX_CHILD").is_none() {
-            return;
-        }
-
-        let input = PathBuf::from(std::env::var_os("SANDBOX_ALLOWED_INPUT").unwrap());
-        assert_eq!(fs::read_to_string(input).unwrap(), "allowed");
-        fs::write("normal-output.txt", b"written").unwrap();
-
-        let external_read = PathBuf::from(std::env::var_os("SANDBOX_EXTERNAL_READ").unwrap());
-        assert_eq!(
-            fs::read(external_read).unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        let external_write = PathBuf::from(std::env::var_os("SANDBOX_EXTERNAL_WRITE").unwrap());
-        assert_eq!(
-            fs::write(external_write, b"blocked").unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        assert_eq!(
-            std::process::Command::new("/usr/bin/true")
-                .status()
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
-        let network_error = std::net::TcpStream::connect_timeout(
-            &"127.0.0.1:9".parse().unwrap(),
-            Duration::from_millis(100),
-        )
-        .unwrap_err();
-        assert_eq!(network_error.kind(), std::io::ErrorKind::PermissionDenied);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn managed_pdf_sandbox_denies_external_authority_and_allows_private_io() {
-        let fixture = TempDir::new().unwrap();
-        let source_root = fixture.path().join("source");
-        fs::create_dir(&source_root).unwrap();
-        fs::write(source_root.join("allowed.txt"), b"allowed").unwrap();
-        let binding = crate::AgentFileInputBinding {
-            schema_version: crate::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
-            mount_path: "allowed.txt".to_string(),
-            source: crate::AgentFileInputRef::Workspace {
-                path: "allowed.txt".to_string(),
-            },
-            size_bytes: 7,
-            sha256: format!("{:x}", Sha256::digest(b"allowed")),
-        };
-        let prepared = materialize_agent_file_inputs(
-            Some(&source_root),
-            AgentPermissions {
-                read: AgentReadPermission::WorkspaceOnly,
-                ..AgentPermissions::default()
-            },
-            &AgentFileInputExecutionContext::default(),
-            &[binding],
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        let external_read = fixture.path().join("external-secret.txt");
-        let external_write = fixture.path().join("external-write.txt");
-        fs::write(&external_read, b"secret").unwrap();
-        let workspace =
-            ManagedCommandWorkspaceLease::open(fixture.path().join("managed-run")).unwrap();
-        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-        let runtime_root = executable.parent().unwrap().to_path_buf();
-        let invocation = ArtifactRuntimeInvocation::new(
-            "test".to_string(),
-            "test".to_string(),
-            "test".to_string(),
-            ArtifactRuntimeKind::Python,
-            "test".to_string(),
-            executable,
-            Vec::new(),
-            BTreeMap::new(),
-        );
-        let mut environment = vec![
-            (
-                OsString::from("MYCOPILOT_PDF_SANDBOX_CHILD"),
-                OsString::from("1"),
-            ),
-            (
-                OsString::from("SANDBOX_ALLOWED_INPUT"),
-                prepared.root().join("allowed.txt").into_os_string(),
-            ),
-            (
-                OsString::from("SANDBOX_EXTERNAL_READ"),
-                external_read.into_os_string(),
-            ),
-            (
-                OsString::from("SANDBOX_EXTERNAL_WRITE"),
-                external_write.clone().into_os_string(),
-            ),
-            (
-                OsString::from(AGENT_FILE_INPUT_ROOT_ENV),
-                prepared.root().as_os_str().to_os_string(),
-            ),
-        ];
-        let plan = prepare_managed_pdf_sandbox_launch(
-            &invocation,
-            vec![
-                OsString::from("command::managed_runtime::tests::managed_pdf_sandbox_child_probe"),
-                OsString::from("--exact"),
-                OsString::from("--nocapture"),
-            ],
-            &mut environment,
-            &workspace,
-            Some(&prepared),
-            &runtime_root,
-        )
-        .unwrap();
-        let spawn = CommandSpawnPlan::direct(
-            "managed PDF sandbox probe".to_string(),
-            workspace.execution_root().to_path_buf(),
-            Some(workspace.execution_root()),
-            None,
-            plan,
-        );
-        let output = spawn.build().output().unwrap();
-        assert!(
-            output.status.success(),
-            "stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            fs::read(workspace.execution_root().join("normal-output.txt")).unwrap(),
-            b"written"
-        );
-        assert!(!external_write.exists());
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "release smoke test; requires MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT"]
-    fn managed_pdf_sandbox_runs_the_real_pdf_dependency_stack() {
+    fn managed_pdf_shell_runs_receipt_tools_in_one_outer_sandbox() {
         let component = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT")
             .expect("set MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT");
         let provider = ArtifactRuntimeProvider::discover(
@@ -2817,154 +2393,138 @@ mod tests {
                 .with_configured_component_dir(component),
         )
         .unwrap();
-        let ArtifactRuntimePreflight::Ready(invocation) = provider
-            .preflight(ArtifactRuntimeKind::Python, &[])
-            .unwrap()
-        else {
-            panic!("managed Python runtime must be ready")
-        };
-        assert!(
-            invocation
-                .arguments_prefix()
-                .iter()
-                .any(|argument| argument == OsStr::new("-B")),
-            "managed Python must never write bytecode into the immutable component"
-        );
-        assert_eq!(
-            invocation
-                .environment()
-                .get(OsStr::new("PYTHONDONTWRITEBYTECODE")),
-            Some(&OsString::from("1"))
-        );
+        let prepared = super::prepare_command_runtime_profile(
+            &provider,
+            AgentCommandRuntimeProfile::Pdf,
+            AgentCommandRuntimeKind::Python,
+        )
+        .unwrap();
         let fixture = TempDir::new().unwrap();
-        let external = fixture.path().join("external-secret.txt");
-        fs::write(&external, b"secret").unwrap();
         let workspace =
             ManagedCommandWorkspaceLease::open(fixture.path().join("managed-run")).unwrap();
+        let external = fixture.path().join("external-secret.txt");
+        fs::write(&external, b"secret").unwrap();
         let script = format!(
-            r#"from pathlib import Path
+            r#"python - <<'PY'
+import os, socket, subprocess
+from pathlib import Path
 from reportlab.pdfgen import canvas
 from pypdf import PdfReader, PdfWriter
 import pdfplumber
 import pypdfium2 as pdfium
-import socket
-import subprocess
-p = Path('outputs/smoke.pdf')
-c = canvas.Canvas(str(p))
-c.drawString(72, 720, 'managed pdf sandbox smoke')
-c.save()
-assert len(PdfReader(str(p)).pages) == 1
-with pdfplumber.open(p) as document:
-    assert 'managed pdf sandbox smoke' in (document.pages[0].extract_text() or '')
-page = pdfium.PdfDocument(p)[0]
-page.render(scale=1).to_pil().save('outputs/smoke.png')
 
-# Exercise editing and AcroForm handling against the exact bundled dependency stack. The source
-# form remains private intermediate state; only reopened and rendered deliverables enter outputs/.
+assert os.environ.get('PATH') == ''
+assert os.environ.get('HOME') == '.home'
+assert not any(key.startswith('MYCOPILOT_PDF_') for key in os.environ)
+assert 'MYCOPILOT_INPUT_ROOT' not in os.environ
+assert not any(key.startswith('MYCOPILOT_ARTIFACT_') for key in os.environ)
+for label, operation in (
+    ('fork', lambda: os.fork()),
+    ('setsid', lambda: os.setsid()),
+    ('setpgid', lambda: os.setpgid(0, 0)),
+    ('exec-bash', lambda: os.execv('/bin/bash', ['bash', '-c', 'true'])),
+    ('subprocess', lambda: subprocess.run(['/usr/bin/true'], check=True)),
+    ('network', lambda: socket.create_connection(('127.0.0.1', 9), timeout=0.1)),
+    ('system-passwd-read', lambda: Path('/etc/passwd').read_bytes()),
+    ('system-version-read', lambda: Path('/System/Library/CoreServices/SystemVersion.plist').read_bytes()),
+    ('external-read', lambda: Path({external:?}).read_bytes()),
+    ('external-write', lambda: Path({external:?}).write_text('changed')),
+    ('symlink', lambda: os.symlink({external:?}, 'outputs/escape-link')),
+    ('hardlink', lambda: os.link({external:?}, 'outputs/escape-hardlink')),
+):
+    try:
+        operation()
+        raise AssertionError(f'{{label}} sandbox escape unexpectedly succeeded')
+    except (PermissionError, OSError):
+        pass
+
+target = Path('outputs/smoke.pdf')
+pdf = canvas.Canvas(str(target))
+for page in range(40):
+    pdf.drawString(72, 720, f'Smoke marker page {{page}}')
+    pdf.showPage()
+pdf.save()
+assert len(PdfReader(str(target)).pages) == 40
+with pdfplumber.open(target) as document:
+    assert 'Smoke marker page 0' in (document.pages[0].extract_text() or '')
+pdfium.PdfDocument(target)[0].render(scale=1).to_pil().save('outputs/smoke.png')
+
 form_source = Path('form-source.pdf')
-form_canvas = canvas.Canvas(str(form_source))
-form_canvas.drawString(72, 720, 'Founder')
-form_canvas.acroForm.textfield(
-    name='founder',
-    tooltip='Founder name',
-    x=72,
-    y=680,
-    width=220,
-    height=24,
+form = canvas.Canvas(str(form_source))
+form.drawString(72, 720, 'Founder')
+form.acroForm.textfield(
+    name='founder', tooltip='Founder name', x=72, y=680, width=220, height=24
 )
-form_canvas.save()
+form.save()
 source_reader = PdfReader(str(form_source))
 assert source_reader.get_fields()['founder'].get('/V', '') == ''
-
-filled_path = Path('outputs/form-filled.pdf')
-filled_writer = PdfWriter()
-filled_writer.clone_document_from_reader(source_reader)
-filled_writer.update_page_form_field_values(
-    filled_writer.pages[0],
-    {{'founder': 'Ada Lovelace'}},
-    auto_regenerate=False,
+filled = Path('outputs/form-filled.pdf')
+writer = PdfWriter()
+writer.clone_document_from_reader(source_reader)
+writer.update_page_form_field_values(
+    writer.pages[0], {{'founder': 'Ada Lovelace'}}, auto_regenerate=False
 )
-with filled_path.open('wb') as stream:
-    filled_writer.write(stream)
-filled_reader = PdfReader(str(filled_path))
-assert filled_reader.get_fields()['founder']['/V'] == 'Ada Lovelace'
-filled_widgets = [
+with filled.open('wb') as stream:
+    writer.write(stream)
+reopened = PdfReader(str(filled))
+assert reopened.get_fields()['founder']['/V'] == 'Ada Lovelace'
+widgets = [
     annotation.get_object()
-    for annotation in filled_reader.pages[0].get('/Annots', [])
+    for annotation in reopened.pages[0].get('/Annots', [])
     if annotation.get_object().get('/Subtype') == '/Widget'
 ]
-assert filled_widgets and filled_widgets[0].get('/AP') is not None
-pdfium.PdfDocument(filled_path)[0].render(scale=1).to_pil().save(
-    'outputs/form-filled.png'
-)
-
-flattened_path = Path('outputs/form-flattened.pdf')
+assert widgets and widgets[0].get('/AP') is not None
+pdfium.PdfDocument(filled)[0].render(scale=1).to_pil().save('outputs/form-filled.png')
+flattened = Path('outputs/form-flattened.pdf')
 flattened_writer = PdfWriter()
-flattened_writer.clone_document_from_reader(filled_reader)
+flattened_writer.clone_document_from_reader(reopened)
 flattened_writer.update_page_form_field_values(
-    flattened_writer.pages[0],
-    {{'founder': 'Ada Lovelace'}},
-    auto_regenerate=False,
-    flatten=True,
+    flattened_writer.pages[0], {{'founder': 'Ada Lovelace'}},
+    auto_regenerate=False, flatten=True
 )
-with flattened_path.open('wb') as stream:
+with flattened.open('wb') as stream:
     flattened_writer.write(stream)
-flattened_reader = PdfReader(str(flattened_path))
+flattened_reader = PdfReader(str(flattened))
 assert flattened_reader.pages[0].extract_text()
-pdfium.PdfDocument(flattened_path)[0].render(scale=1).to_pil().save(
+pdfium.PdfDocument(flattened)[0].render(scale=1).to_pil().save(
     'outputs/form-flattened.png'
 )
-
-oversized_writer = PdfWriter()
-oversized_writer.add_blank_page(width=100_000, height=100_000)
-with Path('oversized.pdf').open('wb') as stream:
-    oversized_writer.write(stream)
-large_text_canvas = canvas.Canvas('large-text.pdf')
-large_text_object = large_text_canvas.beginText(72, 720)
-for line_number in range(200):
-    large_text_object.textLine(f'bounded-text-{{line_number}}-' + ('x' * 80))
-large_text_canvas.drawText(large_text_object)
-large_text_canvas.save()
-try:
-    Path({external:?}).read_bytes()
-    raise AssertionError('external read unexpectedly succeeded')
-except PermissionError:
-    pass
-try:
-    subprocess.run(['/usr/bin/true'], check=True)
-    raise AssertionError('subprocess unexpectedly succeeded')
-except PermissionError:
-    pass
-try:
-    socket.create_connection(('127.0.0.1', 9), timeout=0.1)
-    raise AssertionError('network unexpectedly succeeded')
-except PermissionError:
-    pass
-print('pdf-sandbox-smoke-ok')"#,
-            external = external.to_string_lossy()
+PY
+pdfinfo outputs/smoke.pdf | rg --max-count 1 '^Pages:'
+pdftotext outputs/smoke.pdf - | rg --max-count 1 'Smoke marker page 0'
+"#,
+            external = external.to_string_lossy(),
         );
-        let mut arguments = invocation.arguments_prefix().to_vec();
-        arguments.extend([OsString::from("-c"), OsString::from(script)]);
-        let mut environment = managed_environment(&invocation, None);
-        let launch = prepare_managed_pdf_sandbox_launch(
-            &invocation,
-            arguments,
-            &mut environment,
-            &workspace,
-            None,
-            provider.component_root(),
-        )
-        .unwrap();
-        let output = CommandSpawnPlan::direct(
-            "managed PDF dependency smoke".to_string(),
-            workspace.execution_root().to_path_buf(),
-            Some(workspace.execution_root()),
-            None,
-            launch,
-        )
-        .build()
-        .output()
-        .unwrap();
+        let run = |command: &str| {
+            let shell_plan = super::super::managed_pdf_shell::parse_managed_pdf_shell(command)
+                .unwrap()
+                .expect("smoke command uses the managed PDF shell surface");
+            let mut environment = managed_environment(&prepared.invocation, None);
+            let launch = prepare_managed_pdf_shell_launch(
+                &prepared.invocation,
+                &shell_plan,
+                &mut environment,
+                &workspace,
+                None,
+                ManagedPdfToolPaths {
+                    runtime_root: provider.component_root(),
+                    pdf_cli: &provider.pdf_cli_path().unwrap(),
+                    ripgrep: &provider.ripgrep_executable().unwrap(),
+                },
+            )
+            .unwrap();
+            CommandSpawnPlan::direct(
+                "managed PDF shell smoke".to_string(),
+                workspace.execution_root().to_path_buf(),
+                Some(workspace.execution_root()),
+                Some(Duration::from_secs(60)),
+                launch,
+            )
+            .build()
+            .output()
+            .unwrap()
+        };
+        let output = run(&script);
         assert!(
             output.status.success(),
             "stdout={} stderr={}",
@@ -2973,96 +2533,22 @@ print('pdf-sandbox-smoke-ok')"#,
         );
         assert!(workspace.outputs_root().join("smoke.pdf").is_file());
         assert!(workspace.outputs_root().join("smoke.png").is_file());
+        assert!(workspace.outputs_root().join("form-filled.pdf").is_file());
+        assert!(workspace.outputs_root().join("form-filled.png").is_file());
+        assert!(workspace
+            .outputs_root()
+            .join("form-flattened.pdf")
+            .is_file());
+        assert!(workspace
+            .outputs_root()
+            .join("form-flattened.png")
+            .is_file());
 
-        let run_managed_cli = |cli_source: &str, cli_arguments: &[&str]| {
-            let mut arguments = invocation.arguments_prefix().to_vec();
-            arguments.extend([OsString::from("-c"), OsString::from(cli_source)]);
-            arguments.extend(
-                cli_arguments
-                    .iter()
-                    .map(|argument| OsString::from(*argument)),
-            );
-            let mut environment = managed_environment(&invocation, None);
-            let launch = prepare_managed_pdf_sandbox_launch(
-                &invocation,
-                arguments,
-                &mut environment,
-                &workspace,
-                None,
-                provider.component_root(),
-            )
-            .unwrap();
-            CommandSpawnPlan::direct(
-                "managed PDF CLI limit probe".to_string(),
-                workspace.execution_root().to_path_buf(),
-                Some(workspace.execution_root()),
-                Some(Duration::from_secs(30)),
-                launch,
-            )
-            .build()
-            .output()
-            .unwrap()
-        };
-        let oversized_render = run_managed_cli(
-            MANAGED_PDF_CLI_SOURCE,
-            &[
-                "pdftoppm",
-                "-f",
-                "1",
-                "-l",
-                "1",
-                "-r",
-                "300",
-                "oversized.pdf",
-                "outputs/oversized",
-            ],
-        );
-        assert!(!oversized_render.status.success());
+        let no_match = run("pdftotext outputs/smoke.pdf - | rg 'definitely-not-present'");
         assert!(
-            String::from_utf8_lossy(&oversized_render.stderr).contains("single-page safety limit"),
-            "stderr={}",
-            String::from_utf8_lossy(&oversized_render.stderr)
+            !no_match.status.success(),
+            "pipefail must retain rg failure"
         );
-        assert!(!workspace.outputs_root().join("oversized-1.png").exists());
-
-        // Use the production implementation with a smaller test-only constant so the smoke test
-        // proves fail-closed streaming behavior without manufacturing a 32 MiB fixture.
-        let constrained_text_cli = MANAGED_PDF_CLI_SOURCE.replace(
-            "MAX_EXTRACTED_TEXT_BYTES = 32 * 1024 * 1024",
-            "MAX_EXTRACTED_TEXT_BYTES = 1024",
-        );
-        assert_ne!(constrained_text_cli, MANAGED_PDF_CLI_SOURCE);
-        let oversized_text = run_managed_cli(
-            &constrained_text_cli,
-            &["pdftotext", "-f", "1", "-l", "1", "large-text.pdf", "-"],
-        );
-        assert!(!oversized_text.status.success());
-        assert!(oversized_text.stdout.is_empty());
-        assert!(
-            String::from_utf8_lossy(&oversized_text.stderr)
-                .contains("narrow the page range with -f and -l"),
-            "stderr={}",
-            String::from_utf8_lossy(&oversized_text.stderr)
-        );
-
-        // The CLI wrapper independently rejects absolute inputs outside the private roots. The
-        // OS sandbox remains the enforcement boundary, but this deterministic validation keeps a
-        // malformed command from relying on an opaque kernel denial for ordinary recovery.
-        let mut cli_probe = std::process::Command::new(invocation.executable());
-        cli_probe
-            .env_clear()
-            .envs(invocation.environment())
-            .env("HOME", workspace.home_root())
-            .env("TMPDIR", workspace.temp_root())
-            .current_dir(workspace.execution_root())
-            .args(invocation.arguments_prefix())
-            .args([OsStr::new("-c"), OsStr::new(MANAGED_PDF_CLI_SOURCE)])
-            .arg("pdfinfo")
-            .arg(&external);
-        let cli_output = cli_probe.output().unwrap();
-        assert!(!cli_output.status.success());
-        assert!(String::from_utf8_lossy(&cli_output.stderr)
-            .contains("must come from the private input or execution root"));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -3083,13 +2569,21 @@ print('pdf-sandbox-smoke-ok')"#,
             Vec::new(),
             BTreeMap::new(),
         );
-        assert!(prepare_managed_pdf_sandbox_launch(
+        let shell_plan =
+            super::super::managed_pdf_shell::parse_managed_pdf_shell("pdfinfo outputs/test.pdf")
+                .unwrap()
+                .unwrap();
+        assert!(prepare_managed_pdf_shell_launch(
             &invocation,
-            Vec::new(),
+            &shell_plan,
             &mut Vec::new(),
             &workspace,
             None,
-            &runtime_root,
+            ManagedPdfToolPaths {
+                runtime_root: &runtime_root,
+                pdf_cli: &runtime_root,
+                ripgrep: &runtime_root,
+            },
         )
         .unwrap_err()
         .contains("拒绝裸进程执行"));
