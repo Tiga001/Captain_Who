@@ -134,12 +134,31 @@ const NODE_METADATA_LICENSE_EVIDENCE_ALLOWLIST = Object.freeze({
 
 const PYTHON_METADATA_LICENSE_EVIDENCE_ALLOWLIST = Object.freeze({
   'et-xmlfile@2.0.0': Object.freeze({
+    declaredLicense: 'MIT',
     licenseExpression: 'MIT',
     review: 'wheel METADATA declares MIT and its OSI-approved MIT classifier'
   }),
   'openpyxl@3.1.5': Object.freeze({
+    declaredLicense: 'MIT',
     licenseExpression: 'MIT',
     review: 'wheel METADATA declares MIT and its OSI-approved MIT classifier'
+  }),
+  'pdfplumber@0.11.9': Object.freeze({
+    declaredLicense: null,
+    licenseExpression: 'MIT',
+    review: 'wheel ships the upstream MIT LICENSE.txt while METADATA omits a license field'
+  }),
+  'pypdfium2@5.12.1': Object.freeze({
+    declaredLicense: 'BSD-3-Clause, Apache-2.0, dependency licenses',
+    licenseExpression: 'NOASSERTION',
+    review:
+      'wheel ships Apache-2.0, BSD-3-Clause, CC-BY-4.0, PDFium, and build-dependency license evidence without one aggregate SPDX expression'
+  }),
+  'reportlab@4.4.9': Object.freeze({
+    declaredLicense:
+      'BSD license (see license.txt for details), Copyright (c) 2000-2025, ReportLab Inc.',
+    licenseExpression: 'BSD-3-Clause',
+    review: 'wheel ships the ReportLab BSD license and METADATA identifies it as BSD'
   })
 })
 
@@ -340,8 +359,8 @@ export function validateArtifactRuntimeManifest(value) {
   if (manifest.providerId !== 'mycopilot.artifact-runtime') {
     throw new Error('manifest.providerId must be mycopilot.artifact-runtime')
   }
-  if (manifest.bundleVersion !== '2026.07.3') {
-    throw new Error('artifact runtime bundle must remain pinned to 2026.07.3')
+  if (manifest.bundleVersion !== '2026.08.1') {
+    throw new Error('artifact runtime bundle must remain pinned to 2026.08.1')
   }
   const buildInputs = validateBuildInputs(manifest.buildInputs)
 
@@ -425,8 +444,12 @@ export function validateArtifactRuntimeManifest(value) {
         python.dependencies,
         [
           ['openpyxl', '3.1.5'],
+          ['pdfplumber', '0.11.9'],
+          ['pypdf', '6.15.0'],
+          ['pypdfium2', '5.12.1'],
           ['python-docx', '1.2.0'],
           ['python-pptx', '1.0.2'],
+          ['reportlab', '4.4.9'],
           ['xlsxwriter', '3.2.9']
         ],
         'manifest.python.dependencies'
@@ -1541,7 +1564,7 @@ function parsePythonMetadata(text, label) {
   const version = first('version')
   if (!name || !version) throw new Error(`Python distribution has invalid METADATA: ${label}`)
   const projectUrls = values.get('project-url') ?? []
-  const preferredSource = ['source', 'repository', 'homepage', 'home']
+  const preferredSource = ['source', 'source code', 'repository', 'homepage', 'home', 'code']
     .map((kind) =>
       projectUrls.find((entry) => entry.slice(0, entry.indexOf(',')).trim().toLowerCase() === kind)
     )
@@ -1599,13 +1622,17 @@ async function buildPythonLegalInventory(manifest, staging) {
     if (!parsed.source) throw new Error(`Python distribution ${key} does not declare a source`)
     const licenseFiles = await collectLicenseFiles(distribution.directory)
     const exception = PYTHON_METADATA_LICENSE_EVIDENCE_ALLOWLIST[key]
+    if (exception && exception.declaredLicense !== parsed.licenseExpression) {
+      throw new Error(`Python distribution ${key} no longer matches its reviewed license metadata`)
+    }
+    const licenseExpression = exception?.licenseExpression ?? parsed.licenseExpression
     if (licenseFiles.length === 0) {
-      if (!exception || exception.licenseExpression !== parsed.licenseExpression) {
+      if (!exception) {
         throw new Error(
           `Python distribution ${key} has no license file or exact reviewed exception`
         )
       }
-    } else if (!parsed.licenseExpression) {
+    } else if (!licenseExpression) {
       throw new Error(`Python distribution ${key} has no declared license expression`)
     }
     const destinationRoot = join(
@@ -1639,7 +1666,7 @@ async function buildPythonLegalInventory(manifest, staging) {
       name: parsed.name,
       version: parsed.version,
       direct: direct.has(key),
-      licenseExpression: parsed.licenseExpression,
+      licenseExpression,
       source: parsed.source,
       installPath: distribution.directory.slice(staging.length + 1).replaceAll('\\', '/'),
       evidence,

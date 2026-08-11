@@ -1719,6 +1719,9 @@ pub struct AgentCommandSessionSnapshot {
     pub exit_code: Option<i32>,
     pub latest_sequence: u64,
     pub output_truncated: bool,
+    /// Presentation-safe immutable receipts for outputs published by this terminal Session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<crate::command::AgentCommandPublishedOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_ref: Option<String>,
 }
@@ -2316,17 +2319,20 @@ pub enum AgentCommandRuntimeKind {
     Python,
 }
 
-/// Stable, model-visible identifier for an application-owned artifact runtime profile.
+/// Stable identifier for an application-owned artifact runtime profile.
 ///
 /// A profile selects a reproducible capability family. It is deliberately not a package
 /// request: package names, exact versions, provider identity, and runtime integrity evidence are
-/// resolved by the trusted host and frozen in [`AgentCommandRuntimeBinding`].
+/// resolved by the trusted host and frozen in [`AgentCommandRuntimeBinding`]. `Pdf` is an
+/// internal-only binding selected from the exact activated bundled Skill identity; it is
+/// intentionally absent from the model-facing `run_command.runtimeProfile` schema.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentCommandRuntimeProfile {
     Documents,
     Spreadsheets,
     Presentations,
+    Pdf,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -2875,6 +2881,8 @@ pub enum AgentEvent {
         ended_at: u64,
         latest_sequence: u64,
         output_truncated: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outputs: Vec<crate::command::AgentCommandPublishedOutput>,
     },
     CommandInterrupted {
         run_id: String,
@@ -2887,6 +2895,8 @@ pub enum AgentEvent {
         ended_at: u64,
         latest_sequence: u64,
         output_truncated: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outputs: Vec<crate::command::AgentCommandPublishedOutput>,
     },
     Error {
         run_id: Option<String>,
@@ -3162,6 +3172,7 @@ mod tests {
             ended_at: 20,
             latest_sequence: 1,
             output_truncated: false,
+            outputs: Vec::new(),
         };
         let command_interrupted = AgentEvent::CommandInterrupted {
             run_id: "run-contract-v1".to_string(),
@@ -3173,6 +3184,7 @@ mod tests {
             ended_at: 21,
             latest_sequence: 1,
             output_truncated: false,
+            outputs: Vec::new(),
         };
         let done = AgentEvent::Done {
             run_id: "run-contract-v1".to_string(),
@@ -3231,6 +3243,7 @@ mod tests {
             exit_code: None,
             latest_sequence: 2,
             output_truncated: false,
+            outputs: Vec::new(),
             archive_ref: None,
         };
         let value = serde_json::to_value(&snapshot).unwrap();

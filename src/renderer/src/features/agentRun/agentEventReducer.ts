@@ -41,6 +41,10 @@ import {
 } from '../chat/agentWebSearch'
 import { mergeActivatedSkillSummaries } from '../skills/activatedSkillInventory'
 import { toSafeMcpDisplayText } from '../mcp/mcpSafeDisplay'
+import {
+  managedCommandOutputsEqual,
+  parseManagedCommandOutputs
+} from '../chat/managedCommandOutputs'
 import { getActionToolCall, withActionApprovalStatus } from './actionProjection'
 import {
   createRejectedToolResult,
@@ -536,6 +540,10 @@ function mergeCommandSessionView(
       : existing?.status === 'running' || incoming.status === 'running'
         ? 'running'
         : 'starting'
+  const outputs =
+    incoming.outputs && incoming.outputs.length > 0
+      ? incoming.outputs
+      : (existing?.outputs ?? incoming.outputs)
 
   const merged: ChatCommandSessionView = {
     callId: incoming.callId,
@@ -545,7 +553,8 @@ function mergeCommandSessionView(
     endedAt: existing?.endedAt ?? incoming.endedAt,
     exitCode: existing?.exitCode ?? incoming.exitCode,
     latestSequence: Math.max(existing?.latestSequence ?? 0, incoming.latestSequence),
-    outputTruncated: Boolean(existing?.outputTruncated || incoming.outputTruncated)
+    outputTruncated: Boolean(existing?.outputTruncated || incoming.outputTruncated),
+    ...(outputs === undefined ? {} : { outputs })
   }
   if (
     existing &&
@@ -556,7 +565,8 @@ function mergeCommandSessionView(
     existing.endedAt === merged.endedAt &&
     existing.exitCode === merged.exitCode &&
     existing.latestSequence === merged.latestSequence &&
-    existing.outputTruncated === merged.outputTruncated
+    existing.outputTruncated === merged.outputTruncated &&
+    managedCommandOutputsEqual(existing.outputs, merged.outputs)
   ) {
     return existing
   }
@@ -670,6 +680,7 @@ export function applyAgentCommandSessionSnapshotToChatMessage(
     endedAt: snapshot.endedAt,
     exitCode: snapshot.exitCode,
     latestSequence: snapshot.latestSequence,
+    outputs: parseManagedCommandOutputs(snapshot.outputs),
     outputTruncated: Boolean(
       snapshot.outputTruncated ||
       transcript?.outputCaptureTruncated ||
@@ -1607,6 +1618,7 @@ export function applyAgentEventToChatMessage(
       endedAt: agentEvent.endedAt,
       exitCode: agentEvent.type === 'command_exited' ? agentEvent.exitCode : undefined,
       latestSequence: agentEvent.latestSequence,
+      outputs: parseManagedCommandOutputs(agentEvent.outputs),
       outputTruncated: agentEvent.outputTruncated
     })
     return nextRun === currentRun ? message : { ...message, agentRun: nextRun }

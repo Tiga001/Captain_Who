@@ -56,6 +56,7 @@ function formatBytes(bytes: number): string {
 }
 
 function artifactFileName(entry: ImageGenerationArtifactEntry): string {
+  if (entry.displayName) return entry.displayName
   const extension = entry.artifact.format === 'jpeg' ? 'jpg' : entry.artifact.format
   return `generated-image-${entry.artifact.sha256.slice(0, 12)}.${extension}`
 }
@@ -158,9 +159,11 @@ function ImageArtifactRow({
 }
 
 export function ImageGenerationArtifactsCard({
+  conversationId,
   resolver,
   run
 }: {
+  conversationId?: string
   resolver?: ImageArtifactResolver
   run: ChatAgentRunView
 }) {
@@ -170,7 +173,11 @@ export function ImageGenerationArtifactsCard({
   const [failedSources, setFailedSources] = useState<ReadonlySet<string>>(() => new Set())
   const entries = useMemo(() => getImageGenerationArtifactEntries(run), [run])
   const artifacts = useMemo(() => entries.map((entry) => entry.artifact), [entries])
-  const resolutions = useImageArtifactResolutions(artifacts, isNearViewport ? resolver : undefined)
+  const resolutions = useImageArtifactResolutions(
+    artifacts,
+    isNearViewport ? resolver : undefined,
+    conversationId
+  )
   if (entries.length === 0) return null
 
   const effectiveResolution = (entry: ImageGenerationArtifactEntry): ImageArtifactResolution => {

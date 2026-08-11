@@ -9,6 +9,29 @@ fn external_read_risk_uses_the_protocol_wire_value() {
 }
 
 #[test]
+fn policy_and_tool_preparation_share_the_same_command_character_limit() {
+    let at_limit = format!("echo {}", "x".repeat(MAX_COMMAND_CHARS - "echo ".len()));
+    assert_ne!(
+        evaluate_command_policy(
+            &at_limit,
+            AgentCommandSafetyPolicy::FullAccess,
+            CommandAuthorizationSource::ExplicitUser,
+        )
+        .code,
+        "command.malformed.too_long"
+    );
+
+    let above_limit = format!("echo {}", "x".repeat(MAX_COMMAND_CHARS + 1));
+    let evaluation = evaluate_command_policy(
+        &above_limit,
+        AgentCommandSafetyPolicy::FullAccess,
+        CommandAuthorizationSource::ExplicitUser,
+    );
+    assert_eq!(evaluation.decision, CommandPolicyDecision::Deny);
+    assert_eq!(evaluation.code, "command.malformed.too_long");
+}
+
+#[test]
 fn rejects_cwd_outside_workspace() {
     let workspace = TestWorkspace::new();
     let error = resolve_command_cwd(

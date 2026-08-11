@@ -112,9 +112,24 @@ describe('command output runtime projection', () => {
       exitCode: 0,
       endedAt: 50,
       latestSequence: 2,
-      outputTruncated: false
+      outputTruncated: false,
+      outputs: [
+        {
+          name: 'pages/page-1.png',
+          kind: 'image',
+          readPath: `image-artifact://sha256/${'a'.repeat(64)}`,
+          mimeType: 'image/png',
+          sizeBytes: 2048,
+          sha256: 'a'.repeat(64),
+          width: 1200,
+          height: 1600
+        }
+      ]
     })
     expect(exited.agentRun?.commandSessions?.['command-call']?.status).toBe('exited')
+    expect(exited.agentRun?.commandSessions?.['command-call']?.outputs?.[0]?.readPath).toBe(
+      `image-artifact://sha256/${'a'.repeat(64)}`
+    )
     expect(exited.agentRun?.commandOutputPreviews?.['command-call']?.chunks).toHaveLength(2)
   })
 
@@ -624,7 +639,17 @@ describe('command output runtime projection', () => {
         endedAt: 30,
         exitCode: 0,
         latestSequence: 2,
-        outputTruncated: false
+        outputTruncated: false,
+        outputs: [
+          {
+            name: 'reports/final.pdf',
+            kind: 'document',
+            readPath: `artifact://sha256/${'b'.repeat(64)}`,
+            mimeType: 'application/pdf',
+            sizeBytes: 4096,
+            sha256: 'b'.repeat(64)
+          }
+        ]
       },
       {
         requestedAfterSequence: 0,
@@ -643,6 +668,9 @@ describe('command output runtime projection', () => {
     expect(restored.agentRun?.status).toBe('completed')
     expect(restored.agentRun?.toolCalls[0]?.approvalStatus).toBe('approved')
     expect(restored.agentRun?.commandSessions?.['command-call']?.status).toBe('exited')
+    expect(restored.agentRun?.commandSessions?.['command-call']?.outputs?.[0]?.readPath).toBe(
+      `artifact://sha256/${'b'.repeat(64)}`
+    )
     expect(restored.agentRun?.commandOutputPreviews?.['command-call']?.chunks).toHaveLength(2)
 
     const stale = applyAgentCommandSessionSnapshotToChatMessage(restored, {

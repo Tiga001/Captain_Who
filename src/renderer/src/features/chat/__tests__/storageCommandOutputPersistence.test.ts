@@ -145,6 +145,77 @@ it('keeps live command output transient while persisting the final tool result',
   expect(storedRun.toolResults).toEqual(message.agentRun?.toolResults)
 })
 
+it('preserves a multiline command exactly through persistence and hydration', async () => {
+  const command = "python3 <<'PY'\nif True:\n    print('Aspen PDF')\nPY\n"
+  const message: ChatMessage = {
+    id: 'assistant-multiline-command',
+    role: 'assistant',
+    content: 'Command complete.',
+    createdAt: 1,
+    status: 'sent',
+    agentRun: {
+      runId: 'run-multiline-command',
+      status: 'completed',
+      completedAt: 2,
+      toolDefinitions: [],
+      toolCalls: [
+        {
+          id: 'multiline-command-call',
+          tool: 'run_command',
+          args: { command, reason: '读取 PDF' },
+          approvalStatus: 'approved'
+        }
+      ],
+      toolResults: [],
+      approvals: [],
+      diffs: [],
+      timeline: [
+        {
+          id: 'tool-call-multiline-command-call',
+          type: 'tool_call',
+          callId: 'multiline-command-call'
+        }
+      ]
+    }
+  }
+
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+  await saveChatMessageState('conversation-multiline-command', message)
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+  const persisted = JSON.parse(storedMessage.agentRunJson)
+  expect(persisted.toolCalls[0].args.command).toBe(command)
+
+  storage.loadConversation.mockResolvedValueOnce({
+    id: 'conversation-multiline-command',
+    projectId: null,
+    modelId: 'model-1',
+    title: 'Multiline command persistence',
+    messages: [
+      {
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        status: message.status,
+        attachments: [],
+        agentRunJson: storedMessage.agentRunJson,
+        uiStateJson: null
+      }
+    ],
+    createdAt: 1,
+    updatedAt: 2,
+    pinnedAt: null,
+    archivedAt: null,
+    unreadAt: null
+  })
+
+  const restored = await loadConversation('conversation-multiline-command')
+  expect(restored?.messages[0].agentRun?.toolCalls[0]?.args).toEqual({
+    command,
+    reason: '读取 PDF'
+  })
+})
+
 it('discards legacy persisted managed command projections during reload', async () => {
   storage.loadConversation.mockResolvedValueOnce({
     id: 'conversation-command-reload',
@@ -210,6 +281,17 @@ it('discards legacy persisted managed command projections during reload', async 
 })
 
 it('persists and reloads only immutable command terminal metadata', async () => {
+  const publishedHash = 'a'.repeat(64)
+  const publishedOutput = {
+    name: 'pages/page-1.png',
+    kind: 'image' as const,
+    readPath: `image-artifact://sha256/${publishedHash}`,
+    mimeType: 'image/png',
+    sizeBytes: 2048,
+    sha256: publishedHash,
+    width: 1200,
+    height: 1600
+  }
   const message: ChatMessage = {
     id: 'assistant-command-terminal',
     role: 'assistant',
@@ -260,7 +342,8 @@ it('persists and reloads only immutable command terminal metadata', async () => 
           endedAt: 12,
           exitCode: 0,
           latestSequence: 1,
-          outputTruncated: false
+          outputTruncated: false,
+          outputs: [publishedOutput]
         }
       },
       timeline: [{ id: 'tool-call-command-call', type: 'tool_call', callId: 'command-call' }]
@@ -280,7 +363,8 @@ it('persists and reloads only immutable command terminal metadata', async () => 
       endedAt: 12,
       exitCode: 0,
       latestSequence: 1,
-      outputTruncated: false
+      outputTruncated: false,
+      outputs: [publishedOutput]
     }
   })
 

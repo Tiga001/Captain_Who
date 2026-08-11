@@ -49,7 +49,7 @@ import type {
   GitReviewSummaryInput,
   GitTurnDiffSummaries,
   GitTurnDiffSummariesInput,
-  AgentImageGenerationArtifact,
+  ManagedArtifactReadIdentity,
   ImageGenerationArtifactReadInput,
   ImageGenerationArtifactReadOutput,
   ImageGenerationGetConfigurationOutput,
@@ -389,9 +389,9 @@ function rethrowValidatedMcpManagementError(error: unknown): never {
 
 function validatedImageGenerationArtifactContent(
   output: ImageGenerationArtifactReadOutput,
-  expected: AgentImageGenerationArtifact
+  expected: ManagedArtifactReadIdentity
 ): ImageGenerationArtifactContent {
-  if (!sameImageGenerationArtifact(output.artifact, expected)) {
+  if (!sameManagedArtifact(output.artifact, expected)) {
     throw new Error('Invalid Image generation Artifact read response: frozen identity changed')
   }
   const bytes = Buffer.from(output.dataBase64, 'base64')
@@ -413,21 +413,25 @@ function validatedImageGenerationArtifactContent(
   }
 }
 
-function sameImageGenerationArtifact(
-  left: AgentImageGenerationArtifact,
-  right: AgentImageGenerationArtifact
+function sameManagedArtifact(
+  left: ManagedArtifactReadIdentity,
+  right: ManagedArtifactReadIdentity
 ): boolean {
-  return (
-    left.artifactId === right.artifactId &&
-    left.uri === right.uri &&
-    left.kind === right.kind &&
-    left.format === right.format &&
-    left.mimeType === right.mimeType &&
-    left.width === right.width &&
-    left.height === right.height &&
-    left.sizeBytes === right.sizeBytes &&
-    left.sha256 === right.sha256
-  )
+  if (
+    left.artifactId !== right.artifactId ||
+    left.uri !== right.uri ||
+    left.kind !== right.kind ||
+    left.format !== right.format ||
+    left.mimeType !== right.mimeType ||
+    left.sizeBytes !== right.sizeBytes ||
+    left.sha256 !== right.sha256
+  ) {
+    return false
+  }
+  if (left.kind === 'image' && right.kind === 'image') {
+    return left.width === right.width && left.height === right.height
+  }
+  return left.kind === 'document' && right.kind === 'document'
 }
 
 export interface CoreServerOptions {

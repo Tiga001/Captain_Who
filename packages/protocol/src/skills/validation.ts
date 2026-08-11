@@ -37,6 +37,14 @@ export function expectString(value: unknown, context: string): string {
   return value
 }
 
+export function hasAsciiControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)
+    if (codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)) return true
+  }
+  return false
+}
+
 export function expectFullGitCommitSha(value: unknown, context: string): string {
   const sha = expectNonEmptyString(value, context)
   if (!/^[0-9a-f]{40}$/.test(sha)) {

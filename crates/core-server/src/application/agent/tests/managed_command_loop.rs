@@ -1,9 +1,23 @@
 use super::*;
 use mycopilot_core::command::CommandSessionManager;
+use mycopilot_core::storage::agent_command_session_repository::{
+    AgentCommandSessionCreate, AgentCommandSessionCreateOutcome,
+};
 use mycopilot_core::{AgentCommandPermission, AgentCommandSafetyPolicy, AgentCommandSessionStatus};
+use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+const APPROVED_COMMAND_WITH_MIXED_LINE_ENDINGS: &str =
+    "\r\n  printf 'approval-first\\n'\r\nprintf 'approval-second\\n'\r  printf 'single-authoritative-command-archive\\n'\r\n";
+const APPROVED_COMMAND_CANONICAL: &str =
+    "\n  printf 'approval-first\\n'\nprintf 'approval-second\\n'\n  printf 'single-authoritative-command-archive\\n'\n";
+const BACKGROUND_COMMAND_WITH_MIXED_LINE_ENDINGS: &str =
+    "printf 'ready\\n'\r\nsleep 0.25\rprintf 'progress\\n'\r\nsleep 0.35\r\nexit 7";
+const BACKGROUND_COMMAND_CANONICAL: &str =
+    "printf 'ready\\n'\nsleep 0.25\nprintf 'progress\\n'\nsleep 0.35\nexit 7";
 
 async fn read_json_request(stream: &mut TcpStream) -> Value {
     let mut request = Vec::new();
@@ -326,7 +340,7 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
             "provider-build-command",
             "run_command",
             json!({
-                "command": "printf 'ready\\n'; sleep 0.25; printf 'progress\\n'; sleep 0.35; exit 7",
+                "command": BACKGROUND_COMMAND_WITH_MIXED_LINE_ENDINGS,
                 "reason": "exercise explicit terminal polling"
             }),
             "Starting the build.",
@@ -372,6 +386,11 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
         assert_eq!(poll_result["status"], "exited");
         assert_eq!(poll_result["exitCode"], 7);
         assert!(poll_result["output"].as_str().unwrap().contains("progress"));
+        assert!(poll_result["historyOpen"].as_str().is_some());
+        assert_eq!(
+            poll_result["continueWith"]["args"]["open"],
+            poll_result["historyOpen"]
+        );
         write_text_stream(&mut third, "The build exited with status 7.").await;
         drop(third);
 
@@ -383,7 +402,8 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
     });
 
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let database_path = fixture.path().join("managed-poll.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
         .save_project(ProjectRecord {
             id: "project-managed-poll".to_string(),
@@ -474,6 +494,32 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
         .unwrap();
     assert_eq!(record.snapshot.status, AgentCommandSessionStatus::Exited);
     assert_eq!(record.snapshot.exit_code, Some(7));
+    assert_eq!(record.snapshot.command, BACKGROUND_COMMAND_CANONICAL);
+    let background_history_open = poll_result["historyOpen"]
+        .as_str()
+        .expect("terminal background Session returns an exact-history route");
+    let background_page = storage
+        .read_conversation_history_archive_page_from_open(
+            &turn.conversation_id,
+            background_history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("background command historyOpen resolves in the current conversation");
+    assert!(background_page.content.contains("progress"));
+    let trace = storage
+        .get_conversation_turn_trace("assistant-managed-poll")
+        .unwrap()
+        .expect("background command keeps its durable Trace");
+    assert!(trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolCall {
+            call_id,
+            operation,
+            ..
+        } if call_id == &record.snapshot.call_id
+            && operation["command"] == BACKGROUND_COMMAND_CANONICAL
+    )));
     assert_eq!(
         storage
             .load_conversation(&turn.conversation_id)
@@ -484,4 +530,427 @@ async fn model_poll_observes_nonzero_terminal_result_without_background_continua
         2,
         "command polling and terminal events stay inside the original assistant turn"
     );
+
+    let background_history_open = background_history_open.to_string();
+    drop(service);
+    drop(storage);
+    let restarted_storage = StorageService::open(&database_path).unwrap();
+    let restarted_session = restarted_storage
+        .load_agent_command_session(&turn.conversation_id, &session_id)
+        .unwrap()
+        .expect("terminal background Session survives restart");
+    assert_eq!(
+        restarted_session.snapshot.command,
+        BACKGROUND_COMMAND_CANONICAL
+    );
+    let restarted_page = restarted_storage
+        .read_conversation_history_archive_page_from_open(
+            &turn.conversation_id,
+            &background_history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("background historyOpen is deterministic after restart");
+    assert!(restarted_page.content.contains("progress"));
+}
+
+#[tokio::test]
+async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_resume() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (continuation_tx, continuation_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut approval_stream, _) = listener.accept().await.unwrap();
+        let _approval_request = read_json_request(&mut approval_stream).await;
+        write_tool_call_stream(
+            &mut approval_stream,
+            "provider-approved-command-archive",
+            "run_command",
+            json!({
+                "command": APPROVED_COMMAND_WITH_MIXED_LINE_ENDINGS,
+                "reason": "exercise approval resume archive identity"
+            }),
+            "Preparing the command for approval.",
+        )
+        .await;
+        drop(approval_stream);
+
+        let (mut continuation_stream, _) = listener.accept().await.unwrap();
+        let continuation_request = read_json_request(&mut continuation_stream).await;
+        continuation_tx.send(continuation_request).unwrap();
+        release_rx.await.unwrap();
+        write_text_stream(
+            &mut continuation_stream,
+            "The approved command completed successfully.",
+        )
+        .await;
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("approved-command-archive.sqlite");
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: "project-approved-command-archive".to_string(),
+            name: "Approved command archive".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+
+    let service = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-approved-command-archive".to_string()),
+                project_id: Some("project-approved-command-archive".to_string()),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Run the command after I approve it.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-approved-command-archive".to_string()),
+                assistant_message_id: Some("assistant-approved-command-archive".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::RequireApproval,
+                    command_safety: AgentCommandSafetyPolicy::FullAccess,
+                    ..AgentPermissions::default()
+                },
+            },
+            notifications,
+        )
+        .unwrap();
+
+    let mut saw_approval = false;
+    let mut saw_waiting_done = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !(saw_approval && saw_waiting_done) {
+            let notification = receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "run failed before approval: {notification}"
+            );
+            match notification["params"]["type"].as_str() {
+                Some("approval_required") => saw_approval = true,
+                Some("done") => saw_waiting_done = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    let AgentProposedAction::Command { command } = &pending[0].action else {
+        panic!("approval must freeze a command action");
+    };
+    assert_eq!(command.command, APPROVED_COMMAND_CANONICAL);
+    let action_id = pending[0].action_id.clone();
+    let call_id = pending[0]
+        .tool_call_id
+        .clone()
+        .expect("command approval keeps its ToolCall identity");
+
+    let persisted_pending = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(persisted_pending.len(), 1);
+    assert!(matches!(
+        storage
+            .store_pending_agent_action(persisted_pending[0].clone())
+            .unwrap(),
+        PendingActionStoreOutcome::Idempotent
+    ));
+    let persisted_action =
+        serde_json::from_str::<AgentProposedAction>(&persisted_pending[0].action_json).unwrap();
+    let AgentProposedAction::Command { command } = persisted_action else {
+        panic!("pending action JSON must retain the command variant");
+    };
+    assert_eq!(command.command, APPROVED_COMMAND_CANONICAL);
+    let persisted_resume =
+        PersistedAgentResumeInput::decode(&persisted_pending[0].agent_input_json)
+            .unwrap()
+            .agent_input;
+    let checkpoint = persisted_resume
+        .resume_checkpoint
+        .expect("approval pending row keeps its resume checkpoint");
+    let checkpoint_command = checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .find(|call| call.id == call_id)
+        .and_then(|call| call.args.get("command"))
+        .and_then(Value::as_str)
+        .expect("checkpoint keeps the canonical command ToolCall");
+    assert_eq!(checkpoint_command, APPROVED_COMMAND_CANONICAL);
+    assert!(checkpoint
+        .conversation_trace_items
+        .iter()
+        .any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::ToolCall {
+                call_id: item_call_id,
+                operation,
+                ..
+            } if item_call_id == &call_id
+                && operation["command"] == APPROVED_COMMAND_CANONICAL
+        )));
+
+    drop(receiver);
+    drop(service);
+    drop(storage);
+
+    let restarted_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let restarted =
+        AgentService::try_new_deferred_startup_reconciliation(Arc::clone(&restarted_storage))
+            .unwrap();
+    let restarted_pending = restarted.list_pending_actions();
+    assert_eq!(restarted_pending.len(), 1);
+    let AgentProposedAction::Command { command } = &restarted_pending[0].action else {
+        panic!("restarted pending action must retain the command variant");
+    };
+    assert_eq!(command.command, APPROVED_COMMAND_CANONICAL);
+    {
+        let records = restarted
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let record = records
+            .values()
+            .find(|record| record.snapshot.action_id == action_id)
+            .expect("restarted Host reloads the pending command record");
+        let checkpoint_command = record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .expect("restarted pending record keeps its checkpoint")
+            .context_items
+            .iter()
+            .flat_map(|item| item.tool_calls.iter())
+            .find(|call| call.id == call_id)
+            .and_then(|call| call.args.get("command"))
+            .and_then(Value::as_str)
+            .expect("restarted checkpoint keeps the canonical command");
+        assert_eq!(checkpoint_command, APPROVED_COMMAND_CANONICAL);
+    }
+    let (restart_notifications, mut restart_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let approval = restarted
+        .approve_action(&turn.run_id, &action_id, restart_notifications)
+        .unwrap();
+    assert_eq!(approval.agent_output.status, AgentRunStatus::Running);
+
+    let continuation_request = tokio::time::timeout(Duration::from_secs(5), continuation_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let model_result = continuation_request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| {
+            message["role"] == "tool" && message["tool_call_id"].as_str() == Some(call_id.as_str())
+        })
+        .and_then(|message| message["content"].as_str())
+        .and_then(|content| serde_json::from_str::<Value>(content).ok())
+        .expect("approval continuation request contains the terminal run_command result");
+    let history_open = model_result["historyOpen"]
+        .as_str()
+        .expect("terminal run_command result keeps its authoritative history route")
+        .to_string();
+    assert_eq!(model_result["continueWith"]["args"]["open"], history_open);
+
+    // Runtime publishes its setup snapshot before issuing the continuation model request. Holding
+    // the response lets this test inspect that first publication before any new narration exists.
+    let setup_snapshot = restarted
+        .trace_snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&turn.run_id)
+        .cloned()
+        .expect("runtime approval resume publishes its setup Trace snapshot");
+    let committed_trace = restarted_storage
+        .get_conversation_turn_trace("assistant-approved-command-archive")
+        .unwrap()
+        .expect("approval continuation committed Trace");
+    assert_eq!(setup_snapshot.items, committed_trace.items);
+    assert_eq!(
+        setup_snapshot.model_context_items,
+        restarted_storage
+            .get_conversation_model_context_log("assistant-approved-command-archive")
+            .unwrap()
+            .expect("approval continuation model log")
+            .items
+    );
+
+    let session = restarted_storage
+        .list_agent_command_sessions(&turn.conversation_id, 10)
+        .unwrap()
+        .into_iter()
+        .find(|record| record.snapshot.call_id == call_id)
+        .expect("approved command owns a durable terminal Session");
+    assert_eq!(session.snapshot.status, AgentCommandSessionStatus::Exited);
+    assert_eq!(session.snapshot.command, APPROVED_COMMAND_CANONICAL);
+    assert_eq!(
+        session.snapshot.command_digest,
+        format!(
+            "sha256:{:x}",
+            Sha256::digest(APPROVED_COMMAND_CANONICAL.as_bytes())
+        )
+    );
+    let mut replay_snapshot = session.snapshot.clone();
+    replay_snapshot.status = AgentCommandSessionStatus::Starting;
+    replay_snapshot.ended_at = None;
+    replay_snapshot.exit_code = None;
+    replay_snapshot.latest_sequence = 0;
+    replay_snapshot.output_truncated = false;
+    replay_snapshot.outputs.clear();
+    replay_snapshot.archive_ref = None;
+    assert_eq!(
+        restarted_storage
+            .create_agent_command_session(&AgentCommandSessionCreate {
+                snapshot: replay_snapshot,
+                authorization_source: session.authorization_source,
+                approval_provenance: session.approval_provenance.clone(),
+                permission_provenance: session.permission_provenance.clone(),
+                created_at: session.created_at,
+            })
+            .unwrap(),
+        AgentCommandSessionCreateOutcome::Idempotent
+    );
+    let archive_ref = session
+        .snapshot
+        .archive_ref
+        .clone()
+        .expect("terminal command Session owns Archive B");
+    let trace_archive_ref = committed_trace
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolResult {
+                call_id: item_call_id,
+                archive,
+                ..
+            } if item_call_id == &call_id => archive.archive_ref.clone(),
+            _ => None,
+        })
+        .expect("committed ToolResult carries an Archive ref");
+    assert_eq!(trace_archive_ref, archive_ref);
+    assert!(committed_trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolCall {
+            call_id: item_call_id,
+            operation,
+            ..
+        } if item_call_id == &call_id
+            && operation["command"] == APPROVED_COMMAND_CANONICAL
+    )));
+    let routed_page = restarted_storage
+        .read_conversation_history_archive_page_from_open(
+            &turn.conversation_id,
+            &history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("model historyOpen resolves inside the current conversation");
+    assert_eq!(routed_page.descriptor.archive_ref, archive_ref);
+    assert!(routed_page
+        .content
+        .contains("single-authoritative-command-archive"));
+    let archive_count: u64 = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_history_blobs WHERE conversation_id = ?1",
+            [&turn.conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count, 1, "approval must not create Archive A");
+    let audited_action_json: String = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT action_json FROM agent_action_audit
+             WHERE run_id = ?1 AND tool_name = 'run_command'",
+            [&turn.run_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let audited_action = serde_json::from_str::<AgentProposedAction>(&audited_action_json).unwrap();
+    let AgentProposedAction::Command { command } = audited_action else {
+        panic!("command audit must retain its frozen action");
+    };
+    assert_eq!(command.command, APPROVED_COMMAND_CANONICAL);
+
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = restart_receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "approval continuation failed: {notification}"
+            );
+            if notification["params"]["type"] == "done"
+                && notification["params"]["status"] == "completed"
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    drop(restarted);
+    drop(restarted_storage);
+    let after_second_restart = StorageService::open(&database_path).unwrap();
+    let restarted_trace = after_second_restart
+        .get_conversation_turn_trace("assistant-approved-command-archive")
+        .unwrap()
+        .expect("terminal Trace survives the second restart");
+    assert!(restarted_trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolResult { call_id: item_call_id, archive, .. }
+            if item_call_id == &call_id
+                && archive.archive_ref.as_deref() == Some(archive_ref.as_str())
+    )));
+    assert!(restarted_trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolCall {
+            call_id: item_call_id,
+            operation,
+            ..
+        } if item_call_id == &call_id
+            && operation["command"] == APPROVED_COMMAND_CANONICAL
+    )));
+    let restarted_model_log = after_second_restart
+        .get_conversation_model_context_log("assistant-approved-command-archive")
+        .unwrap()
+        .expect("model projection survives the second restart");
+    let restarted_model_result = restarted_model_log
+        .items
+        .iter()
+        .find(|item| item.tool_call_id.as_deref() == Some(call_id.as_str()))
+        .and_then(|item| serde_json::from_str::<Value>(&item.content).ok())
+        .expect("restarted model log keeps the run_command result");
+    assert_eq!(restarted_model_result["historyOpen"], history_open);
+    let archive_count_after_restart: u64 = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_history_blobs WHERE conversation_id = ?1",
+            [&turn.conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(archive_count_after_restart, 1);
 }

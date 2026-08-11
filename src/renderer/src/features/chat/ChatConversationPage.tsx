@@ -194,6 +194,7 @@ export const ChatMessageList = memo(function ChatMessageList({
       {conversation.messages.map((message) => (
         <Fragment key={message.id}>
           <ChatMessageItem
+            conversationId={conversation.id}
             isLastAssistantMessage={message.id === lastAssistantMessageId}
             message={message}
             onApprove={onApproveAgentAction}

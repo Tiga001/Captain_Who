@@ -12,6 +12,7 @@ export interface ResolvedImageArtifact {
 }
 
 export interface ImageArtifactResolutionOptions {
+  conversationId?: string
   signal?: AbortSignal
 }
 
@@ -30,7 +31,8 @@ export type ImageArtifactResolution =
 
 export function useImageArtifactResolutions(
   artifacts: readonly AgentImageGenerationArtifact[],
-  resolver?: ImageArtifactResolver
+  resolver?: ImageArtifactResolver,
+  conversationId?: string
 ): ReadonlyMap<string, ImageArtifactResolution> {
   const [resolutions, setResolutions] = useState<ReadonlyMap<string, ImageArtifactResolution>>(() =>
     initialResolutions(artifacts, resolver)
@@ -49,7 +51,10 @@ export function useImageArtifactResolutions(
 
     for (const artifact of artifacts) {
       void resolver
-        .resolve(artifact, { signal: abortController.signal })
+        .resolve(artifact, {
+          signal: abortController.signal,
+          ...(conversationId ? { conversationId } : {})
+        })
         .then((value) => {
           if (!active) {
             value.release?.()
@@ -73,7 +78,7 @@ export function useImageArtifactResolutions(
       abortController.abort()
       resolvedValues.forEach((value) => value.release?.())
     }
-  }, [artifacts, resolver])
+  }, [artifacts, conversationId, resolver])
 
   return resolutions
 }

@@ -24,7 +24,6 @@ export function getToolDisplayName(tool: string, t: Translate) {
     git_diff: 'tool.gitDiff',
     read_file: 'tool.readFile',
     read_image: 'tool.readImage',
-    read_pdf: 'tool.readPdf',
     read_presentation: 'tool.readPresentation',
     read_spreadsheet: 'tool.readSpreadsheet',
     read_word: 'tool.readWord',

@@ -104,6 +104,7 @@ fn manual_command_settlement(
         decision_source: Some("manual".to_string()),
     };
     let command_result = AgentCommandExecutionResult {
+        outputs: Vec::new(),
         command: "node script.mjs".to_string(),
         cwd: "/workspace".to_string(),
         exit_code: Some(0),
@@ -122,6 +123,9 @@ fn manual_command_settlement(
         artifact_observation: None,
         input_files: Vec::new(),
         runtime: None,
+        managed_outputs: None,
+        authoritative_archive_ref: None,
+        history_open: None,
     };
     let tool_result = AgentToolResult {
         exact_archive_file: None,
@@ -1328,6 +1332,195 @@ fn startup_reconciliation_conservatively_restores_interrupted_manual_file_effect
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn seed_approved_command_with_terminal_session(
+    service: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    storage_id: &str,
+    call_id: &str,
+    session_id: &str,
+    status: crate::AgentCommandSessionStatus,
+    exit_code: Option<i32>,
+) {
+    use crate::storage::agent_command_session_repository::{
+        AgentCommandSessionCreate, AgentCommandSessionTerminalUpdate,
+        AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+    };
+    let (pending, approved, _terminal, _trace) =
+        manual_command_settlement(storage_id, call_id, conversation_id, assistant_message_id);
+    save_assistant_conversation(service, conversation_id, assistant_message_id);
+    service.store_pending_agent_action(pending).unwrap();
+    service.upsert_agent_action_audit(approved).unwrap();
+    service
+        .create_agent_command_session(&AgentCommandSessionCreate {
+            snapshot: crate::AgentCommandSessionSnapshot {
+                schema_version: AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+                session_id: session_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                origin_run_id: "run-1".to_string(),
+                call_id: call_id.to_string(),
+                project_id: Some("project-1".to_string()),
+                command: "node script.mjs".to_string(),
+                cwd: "/workspace".to_string(),
+                command_digest:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_string(),
+                status: crate::AgentCommandSessionStatus::Starting,
+                started_at: 12,
+                ended_at: None,
+                exit_code: None,
+                latest_sequence: 0,
+                output_truncated: false,
+                outputs: Vec::new(),
+                archive_ref: None,
+            },
+            authorization_source: crate::command::CommandAuthorizationSource::ExplicitUser,
+            approval_provenance: serde_json::json!({"decision": "approved"}),
+            permission_provenance: serde_json::json!({"mode": "default"}),
+            created_at: 12,
+        })
+        .unwrap();
+    service
+        .mark_agent_command_session_running(conversation_id, session_id, 13)
+        .unwrap();
+    if status == crate::AgentCommandSessionStatus::OutcomeUnknown {
+        let reconciled = service
+            .reconcile_agent_command_sessions_on_startup(14)
+            .unwrap();
+        assert!(reconciled
+            .iter()
+            .any(|record| record.snapshot.session_id == session_id));
+        return;
+    }
+    service
+        .settle_agent_command_session(&AgentCommandSessionTerminalUpdate {
+            conversation_id,
+            session_id,
+            status,
+            ended_at: 14,
+            exit_code,
+            latest_sequence: 0,
+            transcript_truncated: false,
+            output_capture_truncated: false,
+            archive_ref: None,
+            terminal_reason: Some("missing input PDF"),
+            published_outputs: &[],
+            committed_at: 14,
+        })
+        .unwrap();
+}
+
+#[test]
+fn startup_reconciliation_fail_closes_an_approved_command_with_only_a_terminal_session() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-approved-terminal-session";
+    let assistant_message_id = "assistant-approved-terminal-session";
+    let storage_id = "run-1:approved-terminal-session";
+    let call_id = "approved-terminal-session";
+    let session_id = "cmd_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    seed_approved_command_with_terminal_session(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        storage_id,
+        call_id,
+        session_id,
+        crate::AgentCommandSessionStatus::Exited,
+        Some(2),
+    );
+
+    // Reproduce the old crash cut exactly: operational Session is terminal, while the approved
+    // action never materialized its terminal audit/ToolResult lifecycle. Startup must not replay
+    // the command or infer success from the Session alone; it retires the action as failed and
+    // retains the failed audit for inspection. The exact terminal Session proves that no process
+    // remains active, so it safely releases only the runtime FileEffect fence.
+    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    assert_eq!(
+        reopened
+            .load_agent_command_session(conversation_id, session_id)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .status,
+        crate::AgentCommandSessionStatus::Exited
+    );
+    assert_eq!(
+        reopened
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap()
+            .len(),
+        1
+    );
+    let connection = reopened.state.connection().unwrap();
+    let state: (String, Option<String>, String, Option<String>) = connection
+        .query_row(
+            "SELECT pending.status, pending.target_status, audit.status, audit.tool_result_json
+             FROM agent_pending_actions pending
+             JOIN agent_action_audit audit ON audit.action_id = pending.action_id
+             WHERE pending.action_id = ?1",
+            [storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        state,
+        (
+            "failed".to_string(),
+            Some("failed".to_string()),
+            "approved".to_string(),
+            None,
+        )
+    );
+    drop(connection);
+    assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
+    assert!(reopened
+        .reconcile_interrupted_pending_agent_actions(43)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn outcome_unknown_command_session_keeps_the_interrupted_file_effect_fence() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-outcome-unknown-session";
+    let assistant_message_id = "assistant-outcome-unknown-session";
+    let storage_id = "run-1:outcome-unknown-session";
+    let call_id = "outcome-unknown-session";
+    let session_id = "cmd_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    seed_approved_command_with_terminal_session(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        storage_id,
+        call_id,
+        session_id,
+        crate::AgentCommandSessionStatus::OutcomeUnknown,
+        None,
+    );
+
+    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    assert_eq!(
+        reopened
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened.list_unsettled_file_effects().unwrap(),
+        vec![AgentUnsettledFileEffect {
+            project_id: Some("project-1".to_string()),
+            conversation_id: conversation_id.to_string(),
+            run_id: "run-1".to_string(),
+            action_id: storage_id.to_string(),
+        }]
+    );
+}
+
 #[test]
 fn unsettled_file_effects_preserve_conversation_scope_without_a_project() {
     let fixture = StorageFixture::new();
@@ -2105,6 +2298,150 @@ fn manual_command_audit_target_and_trace_commit_as_one_idempotent_transaction() 
         )
         .unwrap();
     assert_eq!(retry, AgentPendingActionResultCommitOutcome::Idempotent);
+}
+
+#[test]
+fn failed_managed_pdf_settlement_preserves_opaque_history_route_across_durable_audit() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let (mut pending, mut approved, mut terminal, mut trace) = manual_command_settlement(
+        "run-1:managed-pdf-failure",
+        "managed-pdf-failure",
+        "conversation-managed-pdf-failure",
+        "assistant-managed-pdf-failure",
+    );
+    let command = "pdftotext \"$MYCOPILOT_INPUT_ROOT/missing.pdf\" -";
+    let mut frozen_action =
+        serde_json::from_str::<AgentProposedAction>(&pending.action_json).unwrap();
+    let AgentProposedAction::Command {
+        command: frozen_command,
+    } = &mut frozen_action
+    else {
+        unreachable!("manual command settlement must freeze a command action");
+    };
+    frozen_command.command = command.to_string();
+    let frozen_action_json = serde_json::to_string(&frozen_action).unwrap();
+    pending.action_json = frozen_action_json.clone();
+    approved.action_json = frozen_action_json.clone();
+    terminal.action_json = frozen_action_json;
+
+    let mut command_result = serde_json::from_str::<AgentCommandExecutionResult>(
+        terminal.command_result_json.as_deref().unwrap(),
+    )
+    .unwrap();
+    command_result.command = command.to_string();
+    command_result.exit_code = Some(1);
+    command_result.stdout.clear();
+    command_result.stderr = "missing.pdf: No such file or directory".to_string();
+    command_result.runtime = Some(crate::AgentCommandRuntimeResolution {
+        schema_version: crate::AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
+        provider_id: crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
+        profile: Some(crate::AgentCommandRuntimeProfile::Pdf),
+        profile_revision: Some("pdf-profile-v1".to_string()),
+        bundle_version: Some("test-bundle".to_string()),
+        bundle_revision: Some("test-bundle-revision".to_string()),
+        kind: crate::AgentCommandRuntimeKind::Python,
+        runtime_version: Some("3.12.0".to_string()),
+        runtime_fingerprint: Some("artifact-runtime-sha256-v1:test".to_string()),
+        resolved_packages: Vec::new(),
+        error_code: None,
+        recovery: None,
+        message: None,
+    });
+    crate::command::bind_authoritative_command_archive(
+        &mut command_result,
+        "archive-managed-pdf-failure".to_string(),
+    )
+    .unwrap();
+
+    let live_tool_result =
+        crate::command::command_tool_result("managed-pdf-failure", &command_result);
+    assert!(!live_tool_result.ok);
+    let history_open = live_tool_result.result.as_ref().unwrap()["historyOpen"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let durable_command_json = serde_json::to_string(&command_result).unwrap();
+    assert!(durable_command_json.contains("\"historyOpen\""));
+    assert!(!durable_command_json.contains("authoritativeArchiveRef"));
+    let durable_command =
+        serde_json::from_str::<AgentCommandExecutionResult>(&durable_command_json).unwrap();
+    assert!(durable_command.authoritative_archive_ref.is_none());
+    assert_eq!(
+        durable_command.history_open.as_deref(),
+        Some(history_open.as_str())
+    );
+    let rebuilt_tool_result =
+        crate::command::command_tool_result("managed-pdf-failure", &durable_command);
+    assert_eq!(rebuilt_tool_result.ok, live_tool_result.ok);
+    assert_eq!(rebuilt_tool_result.error, live_tool_result.error);
+    assert_eq!(rebuilt_tool_result.result, live_tool_result.result);
+
+    terminal.status = "failed".to_string();
+    terminal.command_result_json = Some(durable_command_json);
+    terminal.tool_result_json = Some(serde_json::to_string(&live_tool_result).unwrap());
+    terminal.error = live_tool_result.error.clone();
+    let trace_operation = serde_json::json!({
+        "command": command,
+        "reason": "test atomic settlement",
+    });
+    let ConversationTurnTraceItem::ToolCall { operation, .. } = &mut trace.items[0] else {
+        unreachable!("manual command settlement trace must start with a ToolCall");
+    };
+    *operation = trace_operation.clone();
+    let trace_call = AgentToolCall {
+        id: "managed-pdf-failure".to_string(),
+        tool: "run_command".to_string(),
+        args: trace_operation,
+        approval_status: crate::AgentApprovalStatus::Approved,
+        reason: Some("test atomic settlement".to_string()),
+    };
+    trace.items[1] = crate::conversation_trace::projected_tool_result_trace_item(
+        1,
+        &trace_call,
+        &live_tool_result,
+    );
+
+    save_assistant_conversation(
+        &service,
+        "conversation-managed-pdf-failure",
+        "assistant-managed-pdf-failure",
+    );
+    service.store_pending_agent_action(pending).unwrap();
+    service.upsert_agent_action_audit(approved).unwrap();
+    assert_eq!(
+        service
+            .commit_pending_agent_action_audited_result_trace(
+                &terminal, "approved", "failed", &trace, 12,
+            )
+            .unwrap(),
+        AgentPendingActionResultCommitOutcome::Committed {
+            trace_changed: true,
+        }
+    );
+    assert!(service.list_unsettled_file_effects().unwrap().is_empty());
+
+    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    assert_eq!(
+        reopened
+            .commit_pending_agent_action_audited_result_trace(
+                &terminal, "approved", "failed", &trace, 12,
+            )
+            .unwrap(),
+        AgentPendingActionResultCommitOutcome::Idempotent
+    );
+    assert_eq!(
+        reopened
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
+    assert!(reopened
+        .reconcile_interrupted_pending_agent_actions(43)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

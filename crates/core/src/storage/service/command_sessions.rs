@@ -21,6 +21,99 @@ pub enum AgentCommandSessionLifecycleAppendOutcome {
 }
 
 impl StorageService {
+    /// Resolves the complete process archive advertised by a durable `run_command` result.
+    ///
+    /// Command Sessions archive the authoritative stdout/stderr spool before a ToolResult is
+    /// exposed. Approval settlement and Runtime resume must reuse that same immutable archive;
+    /// creating a second trace-item archive would give the same ToolResult two different durable
+    /// identities and break the append-only Trace prefix contract.
+    ///
+    /// A `run_command` result without `historyOpen` is not Session-backed and returns `None`.
+    /// Once a result claims such a route, every ownership check is fail-closed.
+    pub fn resolve_authoritative_command_archive_metadata(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        result: &AgentToolResult,
+    ) -> Result<Option<ConversationHistoryArchiveTraceMetadata>, String> {
+        if result.tool != "run_command" {
+            return Ok(None);
+        }
+        let Some(result_object) = result
+            .result
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Ok(None);
+        };
+        if result_object.contains_key("historyOpenInvalid") {
+            return Err(
+                "run_command durable historyOpen claim failed validation; refusing fallback archival"
+                    .to_string(),
+            );
+        }
+        let Some(history_open) = result_object.get("historyOpen") else {
+            return Ok(None);
+        };
+        let open = history_open.as_str().ok_or_else(|| {
+            "run_command historyOpen must be an opaque string capability".to_string()
+        })?;
+        let crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            archive_ref,
+            start_char: 0,
+        } = crate::storage::conversation_history_open::decode_history_open(open)
+            .map_err(|error| format!("run_command historyOpen is invalid: {error}"))?
+        else {
+            return Err(
+                "run_command historyOpen must reference the beginning of an Exact Archive"
+                    .to_string(),
+            );
+        };
+
+        let connection = self.state.connection()?;
+        let archive = conversation_history_archive_repository::find_archive_by_ref(
+            &connection,
+            conversation_id,
+            &archive_ref,
+        )
+        .map_err(storage_error)?
+        .ok_or_else(|| "run_command historyOpen archive does not exist".to_string())?;
+        let session_id = archive
+            .call_id
+            .strip_prefix("command-session:")
+            .ok_or_else(|| {
+                "run_command historyOpen does not reference a Command Session archive".to_string()
+            })?;
+        let session =
+            agent_command_session_repository::get_session(&connection, conversation_id, session_id)
+                .map_err(storage_error)?
+                .ok_or_else(|| {
+                    "run_command historyOpen Command Session does not exist".to_string()
+                })?;
+        if archive.assistant_message_id != assistant_message_id
+            || archive.tool != "run_command"
+            || session.snapshot.assistant_message_id != assistant_message_id
+            || session.snapshot.call_id != result.call_id
+            || session.snapshot.archive_ref.as_deref() != Some(archive.archive_ref.as_str())
+            || !session.snapshot.status.is_terminal()
+        {
+            return Err(
+                "run_command historyOpen does not belong to the settled ToolCall".to_string(),
+            );
+        }
+
+        Ok(Some(ConversationHistoryArchiveTraceMetadata {
+            archive_ref: Some(archive.archive_ref),
+            content_hash: Some(archive.content_hash),
+            archived_bytes: Some(archive.total_bytes),
+            archived_completely: Some(archive.archived_completely),
+            truncated_at_source: archive.truncated_at_source,
+            model_projection_truncated: archive.model_projection_truncated,
+            history_projection_truncated: false,
+            archive_projection_truncated: archive.archive_projection_truncated,
+        }))
+    }
+
     pub fn create_agent_command_session(
         &self,
         input: &AgentCommandSessionCreate,
@@ -665,6 +758,7 @@ mod tests {
                     exit_code: None,
                     latest_sequence: 0,
                     output_truncated: false,
+                    outputs: Vec::new(),
                     archive_ref: None,
                 },
                 authorization_source: CommandAuthorizationSource::ExplicitUser,
@@ -833,6 +927,7 @@ mod tests {
                                 output_capture_truncated: false,
                                 archive_ref: None,
                                 terminal_reason: None,
+                                published_outputs: &[],
                                 committed_at: 50,
                             },
                         )
@@ -878,6 +973,7 @@ mod tests {
                     output_capture_truncated: false,
                     archive_ref: None,
                     terminal_reason: Some("conflicting retry"),
+                    published_outputs: &[],
                     committed_at: 51,
                 },)
                 .unwrap(),
@@ -988,6 +1084,7 @@ mod tests {
                     output_capture_truncated: false,
                     archive_ref: None,
                     terminal_reason: None,
+                    published_outputs: &[],
                     committed_at: 50,
                 },)
                 .unwrap(),
@@ -1081,6 +1178,7 @@ mod tests {
             output_capture_truncated: false,
             archive_ref: Some("history-archive-missing"),
             terminal_reason: None,
+            published_outputs: &[],
             committed_at: 50,
         };
         assert!(service

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 3,
   "providerId": "mycopilot.artifact-runtime",
-  "bundleVersion": "2026.07.3",
+  "bundleVersion": "2026.08.1",
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "69ac8369a9dc62859b7977a5f401405865616189d710671877ee33e59589a553"
+      "sha256": "e4b2f0e09f0f6c96a2dbf8c2db773ddde6e4530749349429252e049153ad3776"
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",
@@ -29,7 +29,7 @@
     },
     "pythonRequirements": {
       "path": "resources/artifact-runtime-python-requirements.txt",
-      "sha256": "a0662a4c086c13f57763d4c78385a276860c92a1c6d44ac75b899dc0abb14f82"
+      "sha256": "00f07736ba51e7c20d7f6aab446107d1f8013cdafef738c1c140fafd022bce8b"
     }
   },
   "node": {
@@ -123,6 +123,21 @@
         "identityFile": "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA"
       },
       {
+        "name": "pdfplumber",
+        "version": "0.11.9",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA"
+      },
+      {
+        "name": "pypdf",
+        "version": "6.15.0",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA"
+      },
+      {
+        "name": "pypdfium2",
+        "version": "5.12.1",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA"
+      },
+      {
         "name": "python-docx",
         "version": "1.2.0",
         "identityFile": "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA"
@@ -131,6 +146,11 @@
         "name": "python-pptx",
         "version": "1.0.2",
         "identityFile": "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA"
+      },
+      {
+        "name": "reportlab",
+        "version": "4.4.9",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/reportlab-4.4.9.dist-info/METADATA"
       },
       {
         "name": "xlsxwriter",

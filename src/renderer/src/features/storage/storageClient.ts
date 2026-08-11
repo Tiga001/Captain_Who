@@ -39,6 +39,7 @@ import type {
 } from '../chat/chatTypes'
 import { ensureAgentRun, settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
 import { normalizeSkillSelections, parseStoredSkillSelections } from '../skills/skillSelection'
+import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
 import { hostClient } from '../../host/hostClient'
 import {
   normalizeStoredComposerPermissionMode,
@@ -551,9 +552,9 @@ function optionalSafeInteger(value: unknown, minimum?: number): number | undefin
 }
 
 /**
- * Persist only immutable terminal process metadata. Active state and transcript bytes remain
- * exclusively Host-owned, while this small projection keeps old Timeline cards truthful after the
- * Host's bounded operational Session row has aged out.
+ * Persist only immutable terminal process metadata and bounded published-Artifact receipts. Active
+ * state and transcript bytes remain Host-owned, while this projection keeps old Timeline cards
+ * truthful after the Host's bounded operational Session row has aged out.
  */
 function projectDurableTerminalCommandSession(
   value: unknown,
@@ -578,6 +579,7 @@ function projectDurableTerminalCommandSession(
   const endedAt = optionalSafeInteger(value.endedAt, 0)
   const exitCode = optionalSafeInteger(value.exitCode)
   const latestSequence = optionalSafeInteger(value.latestSequence, 0) ?? 0
+  const outputs = parseManagedCommandOutputs(value.outputs)
   return {
     callId: expectedCallId,
     status: value.status as ChatCommandSessionView['status'],
@@ -585,7 +587,8 @@ function projectDurableTerminalCommandSession(
     ...(endedAt === undefined ? {} : { endedAt }),
     ...(exitCode === undefined ? {} : { exitCode }),
     latestSequence,
-    outputTruncated: value.outputTruncated === true
+    outputTruncated: value.outputTruncated === true,
+    ...(outputs === undefined || outputs.length === 0 ? {} : { outputs })
   }
 }
 

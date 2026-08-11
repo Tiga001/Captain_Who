@@ -1090,70 +1090,84 @@ impl AgentService {
                 agent_input.api_style,
                 &continuation.result,
             );
-        let truncated_at_source =
-            mycopilot_core::tool_result_truncated_at_source(&continuation.result);
-        let exact_preview_truncated = continuation.result.exact_archive_file.is_some()
-            && continuation.result.result.as_ref().is_some_and(
-                mycopilot_core::exact_capture::value_has_recoverable_preview_truncation,
-            );
-        let model_projection_truncated =
-            tool_result_projection_differs(&archive_result, &model_result)
-                || model_gate_truncates
-                || exact_preview_truncated;
-        let archive_projection_truncated =
-            tool_result_projection_differs(&continuation.result, &archive_result);
-        let archive = if let Some(exact_file) = continuation
-            .result
-            .exact_archive_file
-            .as_ref()
-            .or(archive_result.exact_archive_file.as_ref())
-        {
-            self.storage.archive_conversation_tool_result_file(
-                mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchiveFileInput {
-                    conversation_id: conversation_id.to_string(),
-                    assistant_message_id: assistant_message_id.to_string(),
-                    sequence,
-                    call_id: archive_result.call_id.clone(),
-                    tool: archive_result.tool.clone(),
-                    content_type:
-                        "application/vnd.mycopilot.agent-tool-result+json".to_string(),
-                    content_path: exact_file.path().to_path_buf(),
-                    truncated_at_source,
-                    model_projection_truncated,
-                    archive_projection_truncated,
-                    created_at,
-                },
-            )
+        let archive_metadata = if let Some(metadata) = self
+            .storage
+            .resolve_authoritative_command_archive_metadata(
+                conversation_id,
+                assistant_message_id,
+                &continuation.result,
+            )? {
+            // A Host-owned Command Session has already archived the complete stdout/stderr spool.
+            // Reuse that immutable identity for the approval Trace as well as Runtime resume. A
+            // second per-ToolResult archive would make the same Trace item reconstruct with a
+            // different archiveRef after approval.
+            metadata
         } else {
-            let content = serde_json::to_string(&archive_result)
-                .map_err(|error| format!("无法序列化审批工具的精确历史结果：{error}"))?;
-            self.storage.archive_conversation_tool_result(
-                mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
-                    conversation_id: conversation_id.to_string(),
-                    assistant_message_id: assistant_message_id.to_string(),
-                    sequence,
-                    call_id: archive_result.call_id.clone(),
-                    tool: archive_result.tool.clone(),
-                    content_type:
-                        "application/vnd.mycopilot.agent-tool-result+json".to_string(),
-                    content,
-                    truncated_at_source,
-                    model_projection_truncated,
-                    archive_projection_truncated,
-                    created_at,
-                },
-            )
-        }
-        .map_err(|error| format!("无法归档审批工具的精确历史结果：{error}"))?;
-        let archive_metadata = mycopilot_core::ConversationHistoryArchiveTraceMetadata {
-            archive_ref: Some(archive.archive_ref),
-            content_hash: Some(archive.content_hash),
-            archived_bytes: Some(archive.total_bytes),
-            archived_completely: Some(archive.archived_completely),
-            truncated_at_source: archive.truncated_at_source,
-            model_projection_truncated: archive.model_projection_truncated,
-            history_projection_truncated: false,
-            archive_projection_truncated: archive.archive_projection_truncated,
+            let truncated_at_source =
+                mycopilot_core::tool_result_truncated_at_source(&continuation.result);
+            let exact_preview_truncated = continuation.result.exact_archive_file.is_some()
+                && continuation.result.result.as_ref().is_some_and(
+                    mycopilot_core::exact_capture::value_has_recoverable_preview_truncation,
+                );
+            let model_projection_truncated =
+                tool_result_projection_differs(&archive_result, &model_result)
+                    || model_gate_truncates
+                    || exact_preview_truncated;
+            let archive_projection_truncated =
+                tool_result_projection_differs(&continuation.result, &archive_result);
+            let archive = if let Some(exact_file) = continuation
+                .result
+                .exact_archive_file
+                .as_ref()
+                .or(archive_result.exact_archive_file.as_ref())
+            {
+                self.storage.archive_conversation_tool_result_file(
+                    mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchiveFileInput {
+                        conversation_id: conversation_id.to_string(),
+                        assistant_message_id: assistant_message_id.to_string(),
+                        sequence,
+                        call_id: archive_result.call_id.clone(),
+                        tool: archive_result.tool.clone(),
+                        content_type:
+                            "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+                        content_path: exact_file.path().to_path_buf(),
+                        truncated_at_source,
+                        model_projection_truncated,
+                        archive_projection_truncated,
+                        created_at,
+                    },
+                )
+            } else {
+                let content = serde_json::to_string(&archive_result)
+                    .map_err(|error| format!("无法序列化审批工具的精确历史结果：{error}"))?;
+                self.storage.archive_conversation_tool_result(
+                    mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                        conversation_id: conversation_id.to_string(),
+                        assistant_message_id: assistant_message_id.to_string(),
+                        sequence,
+                        call_id: archive_result.call_id.clone(),
+                        tool: archive_result.tool.clone(),
+                        content_type:
+                            "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+                        content,
+                        truncated_at_source,
+                        model_projection_truncated,
+                        archive_projection_truncated,
+                        created_at,
+                    },
+                )
+            }
+            .map_err(|error| format!("无法归档审批工具的精确历史结果：{error}"))?;
+            mycopilot_core::ConversationHistoryArchiveTraceMetadata {
+                archive_ref: Some(archive.archive_ref),
+                content_hash: Some(archive.content_hash),
+                archived_bytes: Some(archive.total_bytes),
+                archived_completely: Some(archive.archived_completely),
+                truncated_at_source: archive.truncated_at_source,
+                model_projection_truncated: archive.model_projection_truncated,
+                history_projection_truncated: false,
+                archive_projection_truncated: archive.archive_projection_truncated,
+            }
         };
 
         let model_observation = project_persisted_continuation_observation(

@@ -11,6 +11,73 @@ use tempfile::NamedTempFile;
 
 use serde::{Deserialize, Serialize};
 
+/// Host-only substitutions applied before managed process output reaches any consumer.
+///
+/// The byte representation and custom `Debug` prevent private paths from entering logs. Each
+/// process stream owns independent streaming state, while this immutable replacement set can be
+/// shared across stdout and stderr.
+#[derive(Clone, Default)]
+pub(crate) struct ProcessOutputRedactionSet {
+    replacements: Arc<Vec<(Vec<u8>, Vec<u8>)>>,
+}
+
+impl ProcessOutputRedactionSet {
+    pub(crate) fn new(replacements: Vec<(String, String)>) -> Self {
+        let mut replacements = replacements
+            .into_iter()
+            .filter(|(source, _)| !source.is_empty())
+            .map(|(source, replacement)| (source.into_bytes(), replacement.into_bytes()))
+            .collect::<Vec<_>>();
+        replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.0.len()));
+        replacements.dedup_by(|left, right| left.0 == right.0);
+        Self {
+            replacements: Arc::new(replacements),
+        }
+    }
+
+    fn replacements(&self) -> &[(Vec<u8>, Vec<u8>)] {
+        self.replacements.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ProcessOutputRedactionSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProcessOutputRedactionSet")
+            .field("replacement_count", &self.replacements.len())
+            .finish()
+    }
+}
+
+struct StreamingProcessOutputRedactor {
+    source_pending: Vec<u8>,
+    replacements: ProcessOutputRedactionSet,
+}
+
+struct RedactedOutputSegment {
+    bytes: Vec<u8>,
+    source_bytes: usize,
+    atomic_replacement: bool,
+}
+
+impl StreamingProcessOutputRedactor {
+    fn new(replacements: ProcessOutputRedactionSet) -> Self {
+        Self {
+            source_pending: Vec::new(),
+            replacements,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], end_of_stream: bool) -> Vec<RedactedOutputSegment> {
+        self.source_pending.extend_from_slice(bytes);
+        drain_redacted_output_bytes(
+            &mut self.source_pending,
+            self.replacements.replacements(),
+            end_of_stream,
+        )
+    }
+}
+
 /// Product-wide safety ceiling for the combined stdout and stderr captured from one process.
 ///
 /// This is a source-safety limit, not a model-context budget. The complete capture below this
@@ -482,6 +549,88 @@ fn write_redacted_json_string_bytes(
     write_decoded_json_string_bytes(writer, utf8_pending, false)
 }
 
+/// Returns the largest safely decidable redacted prefix while retaining enough overlap to match
+/// a private path split across arbitrary OS pipe reads. At EOF every remaining byte is emitted.
+fn drain_redacted_output_bytes(
+    source_pending: &mut Vec<u8>,
+    redactions: &[(Vec<u8>, Vec<u8>)],
+    end_of_stream: bool,
+) -> Vec<RedactedOutputSegment> {
+    if redactions.is_empty() {
+        let bytes = std::mem::take(source_pending);
+        let source_bytes = bytes.len();
+        return (!bytes.is_empty())
+            .then_some(RedactedOutputSegment {
+                bytes,
+                source_bytes,
+                atomic_replacement: false,
+            })
+            .into_iter()
+            .collect();
+    }
+    let overlap = redactions
+        .iter()
+        .map(|(source, _)| source.len())
+        .max()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let process_before = if end_of_stream {
+        source_pending.len()
+    } else {
+        source_pending.len().saturating_sub(overlap)
+    };
+    let mut output = Vec::new();
+    let mut cursor = 0;
+    while cursor < process_before {
+        let Some((start, source_len, replacement)) =
+            next_redaction(source_pending, cursor, process_before, redactions)
+        else {
+            let bytes = source_pending[cursor..process_before].to_vec();
+            if !bytes.is_empty() {
+                output.push(RedactedOutputSegment {
+                    source_bytes: bytes.len(),
+                    bytes,
+                    atomic_replacement: false,
+                });
+            }
+            cursor = process_before;
+            break;
+        };
+        let literal = source_pending[cursor..start].to_vec();
+        if !literal.is_empty() {
+            output.push(RedactedOutputSegment {
+                source_bytes: literal.len(),
+                bytes: literal,
+                atomic_replacement: false,
+            });
+        }
+        output.push(RedactedOutputSegment {
+            bytes: replacement.to_vec(),
+            source_bytes: source_len,
+            atomic_replacement: true,
+        });
+        cursor = start.saturating_add(source_len);
+    }
+    if cursor > 0 {
+        source_pending.drain(..cursor);
+    }
+    output
+}
+
+fn retained_segment_bytes(segment: &RedactedOutputSegment, retained_source: usize) -> &[u8] {
+    if retained_source == 0 {
+        return &[];
+    }
+    if segment.atomic_replacement {
+        // If a capture/preview boundary lands inside a private source path, keep the safe logical
+        // replacement atomically. Emitting a prefix of the source would disclose the path, while
+        // emitting a prefix of the replacement would invent an invalid routing token.
+        &segment.bytes
+    } else {
+        &segment.bytes[..retained_source.min(segment.bytes.len())]
+    }
+}
+
 fn next_redaction<'a>(
     source: &[u8],
     cursor: usize,
@@ -695,7 +844,15 @@ pub fn spawn_process_output_capture<R>(
 where
     R: Read + Send + 'static,
 {
-    spawn_process_output_capture_with_observers(reader, budget, policy, None, None, None)
+    spawn_process_output_capture_with_observers(
+        reader,
+        budget,
+        policy,
+        None,
+        None,
+        None,
+        ProcessOutputRedactionSet::default(),
+    )
 }
 
 /// Drains one process pipe and emits only the same bounded prefix retained for the ToolResult
@@ -710,7 +867,15 @@ pub fn spawn_process_output_capture_with_observer<R>(
 where
     R: Read + Send + 'static,
 {
-    spawn_process_output_capture_with_observers(reader, budget, policy, stream, observer, None)
+    spawn_process_output_capture_with_observers(
+        reader,
+        budget,
+        policy,
+        stream,
+        observer,
+        None,
+        ProcessOutputRedactionSet::default(),
+    )
 }
 
 pub(crate) fn spawn_process_output_capture_with_observers<R>(
@@ -720,6 +885,7 @@ pub(crate) fn spawn_process_output_capture_with_observers<R>(
     stream: Option<AgentCommandOutputStream>,
     preview_observer: Option<ProcessOutputObserver>,
     transcript_observer: Option<ProcessOutputTranscriptObserver>,
+    redactions: ProcessOutputRedactionSet,
 ) -> ProcessOutputCaptureHandle
 where
     R: Read + Send + 'static,
@@ -729,45 +895,71 @@ where
         let mut preview = Vec::with_capacity(policy.preview_bytes());
         let mut pending_live_utf8 = Vec::new();
         let mut pending_transcript_utf8 = Vec::new();
+        let mut redactor = StreamingProcessOutputRedactor::new(redactions);
         let mut original_bytes = 0_u64;
         let mut captured_bytes = 0_u64;
+        let mut preview_source_bytes = 0_u64;
         let mut buffer = [0_u8; 16 * 1024];
 
-        loop {
-            let read = reader.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            original_bytes = original_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-            if let (Some(stream), Some(observer)) = (stream, transcript_observer.as_ref()) {
-                pending_transcript_utf8.extend_from_slice(&buffer[..read]);
-                emit_complete_utf8_chunks(
-                    &mut pending_transcript_utf8,
-                    stream,
-                    observer.as_ref(),
-                    false,
-                );
-            }
-            let retained = budget.reserve(read);
-            if retained > 0 {
-                spool.write_all(&buffer[..retained])?;
-                captured_bytes =
-                    captured_bytes.saturating_add(u64::try_from(retained).unwrap_or(u64::MAX));
-                let preview_remaining = policy.preview_bytes().saturating_sub(preview.len());
-                let preview_from_chunk = preview_remaining.min(retained);
-                preview.extend_from_slice(&buffer[..preview_from_chunk]);
-                if preview_from_chunk > 0 {
-                    if let (Some(stream), Some(observer)) = (stream, preview_observer.as_ref()) {
-                        pending_live_utf8.extend_from_slice(&buffer[..preview_from_chunk]);
-                        emit_complete_utf8_chunks(
-                            &mut pending_live_utf8,
-                            stream,
-                            observer.as_ref(),
-                            false,
+        {
+            let mut consume_segments =
+                |segments: Vec<RedactedOutputSegment>| -> std::io::Result<()> {
+                    for segment in segments {
+                        if let (Some(stream), Some(observer)) =
+                            (stream, transcript_observer.as_ref())
+                        {
+                            pending_transcript_utf8.extend_from_slice(&segment.bytes);
+                            emit_complete_utf8_chunks(
+                                &mut pending_transcript_utf8,
+                                stream,
+                                observer.as_ref(),
+                                false,
+                            );
+                        }
+
+                        let retained = budget.reserve(segment.source_bytes);
+                        if retained == 0 {
+                            continue;
+                        }
+                        spool.write_all(retained_segment_bytes(&segment, retained))?;
+                        captured_bytes = captured_bytes
+                            .saturating_add(u64::try_from(retained).unwrap_or(u64::MAX));
+
+                        let preview_remaining = policy.preview_bytes().saturating_sub(
+                            usize::try_from(preview_source_bytes).unwrap_or(usize::MAX),
                         );
+                        let preview_retained = preview_remaining.min(retained);
+                        if preview_retained == 0 {
+                            continue;
+                        }
+                        preview_source_bytes = preview_source_bytes
+                            .saturating_add(u64::try_from(preview_retained).unwrap_or(u64::MAX));
+                        let preview_bytes = retained_segment_bytes(&segment, preview_retained);
+                        preview.extend_from_slice(preview_bytes);
+                        if let (Some(stream), Some(observer)) = (stream, preview_observer.as_ref())
+                        {
+                            pending_live_utf8.extend_from_slice(preview_bytes);
+                            emit_complete_utf8_chunks(
+                                &mut pending_live_utf8,
+                                stream,
+                                observer.as_ref(),
+                                false,
+                            );
+                        }
                     }
+                    Ok(())
+                };
+
+            loop {
+                let read = reader.read(&mut buffer)?;
+                if read == 0 {
+                    break;
                 }
+                original_bytes =
+                    original_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+                consume_segments(redactor.push(&buffer[..read], false))?;
             }
+            consume_segments(redactor.push(&[], true))?;
         }
         if let (Some(stream), Some(observer)) = (stream, preview_observer.as_ref()) {
             emit_complete_utf8_chunks(&mut pending_live_utf8, stream, observer.as_ref(), true);
@@ -782,7 +974,7 @@ where
         }
         spool.flush()?;
         let omitted_bytes = original_bytes.saturating_sub(captured_bytes);
-        let preview_truncated = original_bytes > u64::try_from(preview.len()).unwrap_or(u64::MAX);
+        let preview_truncated = original_bytes > preview_source_bytes;
         Ok(CapturedProcessOutput {
             preview: utf8_boundary_safe_lossy_preview(&preview),
             original_bytes,
@@ -854,7 +1046,28 @@ pub fn join_process_output_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Read};
+
+    struct TinyChunkReader {
+        bytes: Vec<u8>,
+        cursor: usize,
+        chunk_bytes: usize,
+    }
+
+    impl Read for TinyChunkReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.cursor >= self.bytes.len() {
+                return Ok(0);
+            }
+            let read = self
+                .chunk_bytes
+                .min(buffer.len())
+                .min(self.bytes.len() - self.cursor);
+            buffer[..read].copy_from_slice(&self.bytes[self.cursor..self.cursor + read]);
+            self.cursor += read;
+            Ok(read)
+        }
+    }
 
     #[test]
     fn exact_capture_keeps_preview_and_spools_complete_text() {
@@ -881,6 +1094,62 @@ mod tests {
             captured.spool_file().unwrap().metadata().unwrap().len(),
             captured.captured_bytes()
         );
+    }
+
+    #[test]
+    fn output_fanout_emits_plain_and_redacted_text_exactly_once() {
+        for (source, redactions, expected) in [
+            (
+                "plain-output".to_string(),
+                ProcessOutputRedactionSet::default(),
+                "plain-output".to_string(),
+            ),
+            (
+                "path=/private/managed-run/file.pdf".to_string(),
+                ProcessOutputRedactionSet::new(vec![(
+                    "/private/managed-run".to_string(),
+                    ".".to_string(),
+                )]),
+                "path=./file.pdf".to_string(),
+            ),
+        ] {
+            let policy = ProcessOutputCapturePolicy::with_limits(64, 64);
+            let budget = ProcessOutputCaptureBudget::new(policy.max_capture_bytes());
+            let preview = Arc::new(std::sync::Mutex::new(String::new()));
+            let preview_for_callback = Arc::clone(&preview);
+            let preview_observer: ProcessOutputObserver = Arc::new(move |_, chunk| {
+                preview_for_callback.lock().unwrap().push_str(&chunk);
+            });
+            let transcript = Arc::new(std::sync::Mutex::new(String::new()));
+            let transcript_for_callback = Arc::clone(&transcript);
+            let transcript_observer: ProcessOutputTranscriptObserver = Arc::new(move |_, chunk| {
+                transcript_for_callback.lock().unwrap().push_str(&chunk);
+            });
+
+            let captured = join_process_output_capture(
+                spawn_process_output_capture_with_observers(
+                    TinyChunkReader {
+                        bytes: source.as_bytes().to_vec(),
+                        cursor: 0,
+                        chunk_bytes: 2,
+                    },
+                    budget,
+                    policy,
+                    Some(AgentCommandOutputStream::Stdout),
+                    Some(preview_observer),
+                    Some(transcript_observer),
+                    redactions,
+                ),
+                "stdout",
+            )
+            .unwrap();
+
+            assert_eq!(captured.preview(), expected);
+            assert_eq!(*preview.lock().unwrap(), expected);
+            assert_eq!(*transcript.lock().unwrap(), expected);
+            assert_eq!(captured.read_captured_text().unwrap(), expected);
+            assert_eq!(captured.original_bytes(), source.len() as u64);
+        }
     }
 
     #[test]
@@ -934,12 +1203,137 @@ mod tests {
                 Some(AgentCommandOutputStream::Stdout),
                 None,
                 Some(observer),
+                ProcessOutputRedactionSet::default(),
             ),
             "stdout",
         )
         .unwrap();
         assert!(captured.truncated_at_source());
         assert_eq!(*observed.lock().unwrap(), "head-middle-tail");
+    }
+
+    #[test]
+    fn private_path_redactions_precede_every_output_consumer_and_cross_pipe_chunks() {
+        let workspace = "/private/var/folders/managed-run";
+        let outputs = format!("{workspace}/outputs");
+        let input = "/private/var/folders/managed-input";
+        let source = format!("前缀 {workspace} | {outputs}/page-1.png | {input}/manual.pdf 尾部");
+        let expected = "前缀 . | outputs/page-1.png | $MYCOPILOT_INPUT_ROOT/manual.pdf 尾部";
+        let policy = ProcessOutputCapturePolicy::with_limits(source.len(), 64 * 1024);
+        let budget = ProcessOutputCaptureBudget::new(policy.max_capture_bytes());
+        let preview = Arc::new(std::sync::Mutex::new(String::new()));
+        let preview_for_callback = Arc::clone(&preview);
+        let preview_observer: ProcessOutputObserver = Arc::new(move |_, chunk| {
+            preview_for_callback.lock().unwrap().push_str(&chunk);
+        });
+        let transcript = Arc::new(std::sync::Mutex::new(String::new()));
+        let transcript_for_callback = Arc::clone(&transcript);
+        let transcript_observer: ProcessOutputTranscriptObserver = Arc::new(move |_, chunk| {
+            transcript_for_callback.lock().unwrap().push_str(&chunk);
+        });
+
+        let captured = join_process_output_capture(
+            spawn_process_output_capture_with_observers(
+                TinyChunkReader {
+                    bytes: source.as_bytes().to_vec(),
+                    cursor: 0,
+                    chunk_bytes: 3,
+                },
+                budget,
+                policy,
+                Some(AgentCommandOutputStream::Stdout),
+                Some(preview_observer),
+                Some(transcript_observer),
+                ProcessOutputRedactionSet::new(vec![
+                    (workspace.to_string(), ".".to_string()),
+                    (outputs, "outputs".to_string()),
+                    (input.to_string(), "$MYCOPILOT_INPUT_ROOT".to_string()),
+                ]),
+            ),
+            "stdout",
+        )
+        .unwrap();
+
+        assert_eq!(captured.original_bytes(), source.len() as u64);
+        assert_eq!(captured.captured_bytes(), source.len() as u64);
+        assert_eq!(captured.preview(), expected);
+        assert_eq!(*preview.lock().unwrap(), expected);
+        assert_eq!(*transcript.lock().unwrap(), expected);
+        assert_eq!(captured.read_captured_text().unwrap(), expected);
+        for physical in [workspace, input] {
+            assert!(!captured.preview().contains(physical));
+            assert!(!transcript.lock().unwrap().contains(physical));
+        }
+
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "call-redacted-process".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(serde_json::json!({
+                "stdout": captured.preview(),
+                "stderr": ""
+            })),
+            error: None,
+        };
+        let archive = materialize_process_tool_result_archive(
+            &result,
+            &[ProcessOutputSpoolSubstitution {
+                field: "stdout",
+                spool: captured.spool(),
+            }],
+        )
+        .unwrap()
+        .unwrap();
+        let mut archive_text = String::new();
+        archive
+            .reopen()
+            .unwrap()
+            .read_to_string(&mut archive_text)
+            .unwrap();
+        assert!(archive_text.contains(expected));
+        assert!(!archive_text.contains(workspace));
+        assert!(!archive_text.contains(input));
+    }
+
+    #[test]
+    fn capture_budget_cut_inside_private_path_keeps_the_replacement_atomic() {
+        let private_path = "/private/var/folders/managed-run";
+        let source = format!("head {private_path}/secret tail");
+        let retained_source = "head ".len() + 5;
+        let policy =
+            ProcessOutputCapturePolicy::with_limits(retained_source, retained_source as u64);
+        let budget = ProcessOutputCaptureBudget::new(policy.max_capture_bytes());
+        let transcript = Arc::new(std::sync::Mutex::new(String::new()));
+        let transcript_for_callback = Arc::clone(&transcript);
+        let observer: ProcessOutputTranscriptObserver = Arc::new(move |_, chunk| {
+            transcript_for_callback.lock().unwrap().push_str(&chunk);
+        });
+
+        let captured = join_process_output_capture(
+            spawn_process_output_capture_with_observers(
+                TinyChunkReader {
+                    bytes: source.as_bytes().to_vec(),
+                    cursor: 0,
+                    chunk_bytes: 2,
+                },
+                budget,
+                policy,
+                Some(AgentCommandOutputStream::Stdout),
+                None,
+                Some(observer),
+                ProcessOutputRedactionSet::new(vec![(private_path.to_string(), ".".to_string())]),
+            ),
+            "stdout",
+        )
+        .unwrap();
+
+        assert_eq!(captured.captured_bytes(), retained_source as u64);
+        assert_eq!(captured.preview(), "head .");
+        assert_eq!(captured.read_captured_text().unwrap(), "head .");
+        assert_eq!(*transcript.lock().unwrap(), "head ./secret tail");
+        assert!(!captured.preview().contains("/private"));
+        assert!(!transcript.lock().unwrap().contains("/private"));
     }
 
     #[test]

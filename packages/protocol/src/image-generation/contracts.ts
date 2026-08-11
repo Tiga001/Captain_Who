@@ -195,15 +195,35 @@ export interface AgentImageGenerationArtifact {
   sha256: string
 }
 
+/** Immutable identity of a conversation-authorized PDF published by a managed command. */
+export interface AgentManagedDocumentArtifact {
+  artifactId: string
+  uri: string
+  kind: 'document'
+  format: 'pdf'
+  mimeType: 'application/pdf'
+  sizeBytes: number
+  sha256: string
+}
+
+/** Existing read transport generalized without adding another Host method. */
+export type ManagedArtifactReadIdentity =
+  AgentImageGenerationArtifact | AgentManagedDocumentArtifact
+
 /**
- * Reads one immutable generated image previously persisted in an Agent result.
+ * Reads one immutable generated image or managed-command PDF persisted in an Agent result.
  *
  * Supplying the complete frozen identity lets the backend reject stale or tampered history before
  * returning content. Provider URLs and managed filesystem paths are never accepted as locators.
  */
 export interface ImageGenerationArtifactReadInput {
   schemaVersion: typeof IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION
-  artifact: AgentImageGenerationArtifact
+  artifact: ManagedArtifactReadIdentity
+  /**
+   * Optional authority for generic managed-command Artifacts. Legacy image-generation Artifacts
+   * remain readable without it; command-produced images and documents require an exact grant.
+   */
+  conversationId?: string
 }
 
 /**
@@ -212,7 +232,7 @@ export interface ImageGenerationArtifactReadInput {
  */
 export interface ImageGenerationArtifactReadOutput {
   schemaVersion: typeof IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION
-  artifact: AgentImageGenerationArtifact
+  artifact: ManagedArtifactReadIdentity
   fileName: string
   dataBase64: string
 }

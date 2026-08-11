@@ -4,7 +4,6 @@ import type { ChatAgentRunView, ChatReadActivity, ChatReadActivityKind } from '.
 const READ_ACTIVITY_KINDS: Partial<Record<string, ChatReadActivityKind>> = {
   read_file: 'file',
   read_image: 'image',
-  read_pdf: 'pdf',
   read_presentation: 'presentation',
   read_spreadsheet: 'spreadsheet',
   read_word: 'word'

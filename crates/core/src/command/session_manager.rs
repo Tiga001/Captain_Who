@@ -9,12 +9,13 @@ use super::session::{
 };
 use super::{
     canonicalize_workspace_root, enforce_command_policy, force_terminate_command_process_group,
-    resolve_command_cwd, AgentCommandArtifactObservationPhase, AgentCommandRequest,
-    AgentPermissions, CommandArtifactObserver, CommandAuthorizationSource, CommandExecutionError,
-    CommandSessionError, CommandSessionId, CommandSessionPoll, CommandSessionProjection,
-    CommandSessionScopeId, CommandSessionSnapshot, CommandSpawnPlan, CommandStartOutcome,
-    CommandTerminalResult, ManagedCommandChild, ProcessOutputCaptureBudget,
-    ProcessOutputCaptureHandle, ProcessOutputCapturePolicy, ProcessOutputObserver, MAX_TIMEOUT_MS,
+    normalize_command_text, resolve_command_cwd, AgentCommandArtifactObservationPhase,
+    AgentCommandRequest, AgentPermissions, CommandArtifactObserver, CommandAuthorizationSource,
+    CommandExecutionError, CommandSessionError, CommandSessionId, CommandSessionPoll,
+    CommandSessionProjection, CommandSessionScopeId, CommandSessionSnapshot, CommandSpawnPlan,
+    CommandStartOutcome, CommandTerminalResult, ManagedCommandChild, ManagedCommandWorkspaceLease,
+    ProcessOutputCaptureBudget, ProcessOutputCaptureHandle, ProcessOutputCapturePolicy,
+    ProcessOutputObserver, MAX_TIMEOUT_MS,
 };
 use crate::artifact_runtime::ArtifactRuntimeProvider;
 use crate::file_input::AgentFileInputExecutionContext;
@@ -251,6 +252,7 @@ impl CommandSessionManager {
         options: CommandStartOptions,
         artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
         file_inputs: Option<&AgentFileInputExecutionContext>,
+        managed_workspace: Option<ManagedCommandWorkspaceLease>,
         lifecycle_observer: CommandSessionLifecycleObserver,
         cancellation_token: crate::AgentCancellationToken,
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -281,8 +283,11 @@ impl CommandSessionManager {
             permissions,
             authorization_source,
             cancellation_token,
-            artifact_runtime,
-            file_inputs,
+            super::managed_runtime::ManagedCommandSessionServices {
+                artifact_runtime,
+                file_inputs,
+                managed_workspace,
+            },
         )? {
             super::managed_runtime::ManagedCommandSessionPreparation::Immediate(execution) => {
                 Ok(immediate_terminal_outcome(scope_id, *execution))
@@ -338,6 +343,13 @@ impl CommandSessionManager {
             root.as_deref(),
             Some(&cwd),
         )?;
+        // Policy and process launch must consume the exact same canonical script. The model/tool
+        // ingestion path normally already freezes this representation; repeat the deterministic
+        // normalization here so lower-level Host callers cannot execute CRLF/lone-CR bytes that
+        // were classified as LF.
+        let canonical_command = normalize_command_text(&request.command).map_err(|error| {
+            CommandExecutionError::from(format!("命令无效（{}）：{}", error.code, error.reason))
+        })?;
         // Artifact observation is a terminal-session concern, not an Agent Run concern. Capture
         // the before image before spawn and move the lease into the process watcher so a handed-
         // off command can still produce its bounded after image after the originating run ends.
@@ -361,8 +373,7 @@ impl CommandSessionManager {
         let hard_timeout = request
             .timeout_ms
             .map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)));
-        let plan =
-            CommandSpawnPlan::shell(request.command.clone(), cwd, root.as_deref(), hard_timeout);
+        let plan = CommandSpawnPlan::shell(canonical_command, cwd, root.as_deref(), hard_timeout);
         self.start_plan_with_observers(
             scope_id,
             plan,
@@ -468,6 +479,7 @@ impl CommandSessionManager {
 
         let capture_policy = ProcessOutputCapturePolicy::process_default();
         let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
+        let output_redactions = plan.output_redactions().clone();
         let weak_session = Arc::downgrade(&session);
         let transcript_observer: ProcessOutputTranscriptObserver = Arc::new(move |stream, text| {
             if let Some(session) = weak_session.upgrade() {
@@ -481,6 +493,7 @@ impl CommandSessionManager {
             Some(crate::AgentCommandOutputStream::Stdout),
             None,
             Some(transcript_observer.clone()),
+            output_redactions.clone(),
         );
         let stderr_reader = spawn_process_output_capture_with_observers(
             stderr,
@@ -489,6 +502,7 @@ impl CommandSessionManager {
             Some(crate::AgentCommandOutputStream::Stderr),
             None,
             Some(transcript_observer),
+            output_redactions,
         );
         let stdout_rx = relay_capture(stdout_reader, "stdout");
         let stderr_rx = relay_capture(stderr_reader, "stderr");

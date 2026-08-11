@@ -650,8 +650,10 @@
 }
 
 .agent-activity__details .run-command-shell pre.run-command-shell__command {
-  overflow-x: auto;
-  overflow-y: hidden;
+  max-height: 260px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   white-space: pre;
   overflow-wrap: normal;
   word-break: normal;

@@ -25,6 +25,33 @@ fn runs_simple_command_in_workspace() {
 }
 
 #[test]
+fn executes_multiline_commands_and_quoted_heredoc_without_rewriting_the_script() {
+    let workspace = TestWorkspace::new();
+    let raw = "\r\nprintf 'one\\n'\rprintf 'two\\n'\r\ncat <<'TEXT'\r\nthree\r\nTEXT\r\n";
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &request(raw, Some(5_000)),
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, "one\ntwo\nthree\n");
+    assert_eq!(
+        result.command,
+        "\nprintf 'one\\n'\nprintf 'two\\n'\ncat <<'TEXT'\nthree\nTEXT\n"
+    );
+}
+
+#[test]
 fn compatibility_entry_never_executes_a_host_bound_runtime_through_path() {
     let workspace = TestWorkspace::new();
     let marker = workspace.path.join("compatibility-bypass.txt");
@@ -308,6 +335,76 @@ fn drains_and_bounds_large_stdout_and_stderr_without_deadlock() {
         archived["result"]["stderr"].as_str().unwrap().len(),
         200_000
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_managed_pdf_result_keeps_the_same_opaque_history_route_after_audit_round_trip() {
+    let workspace = TestWorkspace::new();
+    let mut result = run_shell_command(
+        &workspace.path,
+        Some(&workspace.path),
+        &request("cat definitely-missing-manual.pdf >/dev/null", Some(5_000)),
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+    assert_ne!(result.exit_code, Some(0));
+    result.runtime = Some(crate::AgentCommandRuntimeResolution {
+        schema_version: crate::AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
+        provider_id: crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
+        profile: Some(crate::AgentCommandRuntimeProfile::Pdf),
+        profile_revision: Some("pdf-profile-v1".to_string()),
+        bundle_version: Some("test-bundle".to_string()),
+        bundle_revision: Some("test-bundle-revision".to_string()),
+        kind: crate::AgentCommandRuntimeKind::Python,
+        runtime_version: Some("3.12.0".to_string()),
+        runtime_fingerprint: Some("artifact-runtime-sha256-v1:test".to_string()),
+        resolved_packages: Vec::new(),
+        error_code: None,
+        recovery: None,
+        message: None,
+    });
+    bind_authoritative_command_archive(&mut result, "archive-managed-pdf-failure".to_string())
+        .unwrap();
+
+    let live = command_tool_result("managed-pdf-failure", &result);
+    assert!(!live.ok);
+    let live_body = live.result.as_ref().unwrap();
+    let history_open = live_body["historyOpen"].as_str().unwrap();
+    assert_eq!(live_body["continueWith"]["args"]["open"], history_open);
+
+    let durable_json = serde_json::to_string(&result).unwrap();
+    assert!(durable_json.contains("\"historyOpen\""));
+    assert!(!durable_json.contains("authoritativeArchiveRef"));
+    let durable = serde_json::from_str::<AgentCommandExecutionResult>(&durable_json).unwrap();
+    assert!(durable.authoritative_archive_ref.is_none());
+    assert_eq!(durable.history_open.as_deref(), Some(history_open));
+
+    let rebuilt = command_tool_result("managed-pdf-failure", &durable);
+    assert_eq!(rebuilt.ok, live.ok);
+    assert_eq!(rebuilt.error, live.error);
+    assert_eq!(rebuilt.result, live.result);
+}
+
+#[test]
+fn malformed_persisted_command_history_route_is_marked_invalid_without_exposing_it() {
+    let workspace = TestWorkspace::new();
+    let mut result = run_shell_command(
+        &workspace.path,
+        Some(&workspace.path),
+        &request("printf failed >&2; exit 1", Some(5_000)),
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+    result.history_open = Some("hist_v1_not-a-valid-route".to_string());
+
+    let tool_result = command_tool_result("invalid-history-route", &result);
+    let body = tool_result.result.as_ref().unwrap();
+    assert!(body.get("historyOpen").is_none());
+    assert!(body.get("continueWith").is_none());
+    assert_eq!(body["historyOpenInvalid"], true);
 }
 
 #[test]

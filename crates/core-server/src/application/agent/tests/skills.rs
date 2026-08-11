@@ -224,6 +224,9 @@ fn bundled_skill_activates_without_a_project_in_turn_and_preview_paths() {
 
 #[test]
 fn projectless_turn_discovers_enabled_managed_skills_without_explicit_activation() {
+    const PDF_INSTRUCTION_MARKER: &str = "Use only `run_command` for PDF processing";
+    const PDF_REFERENCE_MARKER: &str =
+        "Visual appearance and logical form data are separate correctness surfaces.";
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage.save_model_settings(test_model_settings()).unwrap();
@@ -262,11 +265,94 @@ fn projectless_turn_discovers_enabled_managed_skills_without_explicit_activation
         .skills
         .iter()
         .any(|skill| skill.id == "bundled:application:image-generation"));
+    let pdf = discovery
+        .skills
+        .iter()
+        .find(|skill| skill.id == "bundled:application:pdf")
+        .expect("bundled PDF Skill metadata should be discoverable before activation");
+    assert_eq!(pdf.name, "pdf");
+    assert!(pdf.description.contains("fillable forms"));
+    let unactivated_context = serde_json::to_string(&prepared.agent_input).unwrap();
+    assert!(!unactivated_context.contains(PDF_INSTRUCTION_MARKER));
+    assert!(!unactivated_context.contains(PDF_REFERENCE_MARKER));
     assert!(prepared
         .skill_resources
         .as_ref()
         .is_some_and(|resources| resources.is_empty()));
     assert!(prepared.output.activated_skills.is_empty());
+}
+
+#[test]
+fn trusted_pdf_skill_discloses_full_instructions_only_after_activation() {
+    const PDF_INSTRUCTION_MARKER: &str = "Use only `run_command` for PDF processing";
+    const PDF_REFERENCE_MARKER: &str =
+        "Visual appearance and logical form data are separate correctness surfaces.";
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let skills = SkillsService::new().with_bundled_source().unwrap();
+    let descriptor = skills
+        .list()
+        .unwrap()
+        .skills()
+        .iter()
+        .find(|skill| skill.id().as_str() == "bundled:application:pdf")
+        .unwrap()
+        .clone();
+    let expected = skills.activate(&[descriptor.selection()]).unwrap();
+    let selection = mycopilot_protocol_rs::SkillSelectionDto {
+        id: descriptor.id().as_str().to_string(),
+        revision: descriptor.revision().as_str().to_string(),
+    };
+
+    let prepared = prepare_conversation_turn(
+        &storage,
+        &skills,
+        global_skill_turn_input(selection, "conversation-pdf-progressive-disclosure"),
+        "run-pdf-progressive-disclosure",
+    )
+    .unwrap();
+
+    let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
+    assert_eq!(activation.skills.len(), 1);
+    assert_eq!(activation.skills[0].id, "bundled:application:pdf");
+    assert_eq!(
+        activation.skills[0].instructions,
+        expected.skills()[0].instructions()
+    );
+    assert!(activation.skills[0]
+        .instructions
+        .contains(PDF_INSTRUCTION_MARKER));
+    assert!(!activation.skills[0]
+        .instructions
+        .contains(PDF_REFERENCE_MARKER));
+    let resources = activation.skills[0]
+        .resources
+        .as_ref()
+        .expect("PDF references should be available for progressive reading");
+    assert_eq!(resources.resource_count, 3);
+    assert_eq!(resources.kinds, vec!["reference"]);
+
+    let session = prepared.skill_resources.as_ref().unwrap();
+    let package = mycopilot_core::skills::SkillPackageUri::parse(&resources.root_uri).unwrap();
+    let page = session
+        .list(
+            &package,
+            &mycopilot_core::skills::SkillResourceListOptions::new(10).unwrap(),
+        )
+        .unwrap();
+    let forms = page
+        .entries()
+        .iter()
+        .find(|entry| entry.descriptor().path() == "references/forms.md")
+        .unwrap();
+    let forms = session
+        .read_text(
+            forms.uri(),
+            mycopilot_core::skills::SkillResourceTextReadOptions::new(0, 16_384).unwrap(),
+        )
+        .unwrap();
+    assert!(forms.text().contains(PDF_REFERENCE_MARKER));
 }
 
 #[test]

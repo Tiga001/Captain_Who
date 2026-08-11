@@ -242,10 +242,15 @@ where
                     }
                 };
                 let request_store = Arc::clone(&image_generation_artifacts);
+                let request_storage = Arc::clone(&storage);
                 let request_outbound = image_artifact_outbound.clone();
                 tokio::spawn(async move {
-                    let response =
-                        handle_image_generation_artifact_request(request_store, request).await;
+                    let response = handle_image_generation_artifact_request(
+                        request_store,
+                        request_storage,
+                        request,
+                    )
+                    .await;
                     let _ = request_outbound
                         .send(ImageArtifactOutbound {
                             message: response,

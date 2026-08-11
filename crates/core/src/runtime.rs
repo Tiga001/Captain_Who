@@ -2083,7 +2083,7 @@ impl AgentRuntime {
                                             archive_result: &archive_result,
                                             model_result: &llm_result,
                                             model_tool_result_gate: &model_tool_result_gate,
-                                        })
+                                        })?
                                     } else {
                                         ConversationHistoryArchiveTraceMetadata::default()
                                     };
@@ -2690,7 +2690,7 @@ impl AgentRuntime {
                             archive_result: &archive_result,
                             model_result: &llm_result,
                             model_tool_result_gate: &model_tool_result_gate,
-                        })
+                        })?
                     } else {
                         ConversationHistoryArchiveTraceMetadata::default()
                     };
@@ -2704,6 +2704,7 @@ impl AgentRuntime {
                             &llm_result,
                             &checkpoint_result,
                             &archive_metadata,
+                            is_mcp_tool,
                         ) {
                             Ok(observations) => observations,
                             Err(error) => {
@@ -3432,6 +3433,7 @@ fn settle_terminal_grouped_tool_batch(
                 &model_result,
                 &checkpoint_result,
                 &archive_metadata,
+                is_mcp_tool,
             )?;
             Ok::<_, AgentError>((
                 result,
@@ -3787,7 +3789,7 @@ struct ToolResultArchiveRequest<'a> {
 
 fn archive_tool_result(
     request: ToolResultArchiveRequest<'_>,
-) -> ConversationHistoryArchiveTraceMetadata {
+) -> AgentResult<ConversationHistoryArchiveTraceMetadata> {
     let truncated_at_source = crate::tools::tool_result_truncated_at_source(request.raw_result);
     let gate_truncates = request.model_tool_result_gate.would_truncate_with_source(
         &request.model_result.call_id,
@@ -3820,8 +3822,32 @@ fn archive_tool_result(
         request.assistant_message_id,
         request.sequence,
     ) else {
-        return metadata;
+        return Ok(metadata);
     };
+    if let Some(archive) = storage
+        .resolve_authoritative_command_archive_metadata(
+            conversation_id,
+            assistant_message_id,
+            request.raw_result,
+        )
+        .map_err(AgentError::new)?
+    {
+        if request
+            .raw_result
+            .result
+            .as_ref()
+            .is_some_and(crate::exact_capture::value_has_recoverable_preview_truncation)
+        {
+            metadata.model_projection_truncated = true;
+        }
+        metadata.truncated_at_source = archive.truncated_at_source;
+        metadata.archive_projection_truncated = archive.archive_projection_truncated;
+        metadata.archive_ref = archive.archive_ref;
+        metadata.content_hash = archive.content_hash;
+        metadata.archived_bytes = archive.archived_bytes;
+        metadata.archived_completely = archive.archived_completely;
+        return Ok(metadata);
+    }
     let archive = if let Some(exact_file) = request
         .raw_result
         .exact_archive_file
@@ -3846,7 +3872,7 @@ fn archive_tool_result(
             Ok(content) => content,
             Err(error) => {
                 eprintln!("failed to serialize exact history tool result: {error}");
-                return metadata;
+                return Ok(metadata);
             }
         };
         storage.archive_conversation_tool_result(ConversationHistoryArchiveInput {
@@ -3877,7 +3903,7 @@ fn archive_tool_result(
             eprintln!("failed to store exact history tool result: {error}");
         }
     }
-    metadata
+    Ok(metadata)
 }
 
 pub(crate) fn finalize_model_tool_observation(
@@ -3907,10 +3933,13 @@ pub(crate) fn finalize_model_tool_observation(
     Ok(output.content)
 }
 
-/// Applies the same completed Archive settlement to both consumers.
+/// Applies one semantic Model projection to both the live request and its persisted replay.
 ///
-/// Checkpoint projections may retain more detail than live model projections, so dropping the
-/// Archive metadata from either branch can turn a recoverable 10K compaction into a run failure.
+/// `checkpoint_result` remains the canonical recovery/audit value recorded by the checkpoint and
+/// Trace lanes. It must not be rendered into model-context history: otherwise a restart or later
+/// turn would observe a larger, different Tool result than the live model saw. MCP is the explicit
+/// exception: external result bodies are live-only by policy, so its durable replay must use the
+/// persistence-safe checkpoint projection instead.
 fn finalize_tool_observations(
     gate: &ModelToolResultGate,
     call_id: &str,
@@ -3918,11 +3947,15 @@ fn finalize_tool_observations(
     model_result: &AgentToolResult,
     checkpoint_result: &AgentToolResult,
     archive: &ConversationHistoryArchiveTraceMetadata,
+    durable_replay_uses_checkpoint_projection: bool,
 ) -> AgentResult<(String, String)> {
     let model_observation =
         finalize_model_tool_observation(gate, call_id, is_error, model_result, archive)?;
-    let checkpoint_observation =
-        finalize_model_tool_observation(gate, call_id, is_error, checkpoint_result, archive)?;
+    let checkpoint_observation = if durable_replay_uses_checkpoint_projection {
+        finalize_model_tool_observation(gate, call_id, is_error, checkpoint_result, archive)?
+    } else {
+        model_observation.clone()
+    };
     Ok((model_observation, checkpoint_observation))
 }
 
@@ -3949,6 +3982,20 @@ fn load_continuation_archive_metadata(
     else {
         return Ok(ConversationHistoryArchiveTraceMetadata::default());
     };
+    // A Host-owned command Session uses a separate immutable archive sequence so it can commit
+    // the complete process spool before the ordinary ToolResult (and before an approval
+    // continuation) becomes visible. Resolve that opaque, conversation-scoped ref first instead
+    // of assuming the archive sequence must equal the ToolResult trace sequence.
+    if let Some(archive) = storage
+        .resolve_authoritative_command_archive_metadata(
+            conversation_id,
+            assistant_message_id,
+            &continuation.result,
+        )
+        .map_err(AgentError::new)?
+    {
+        return Ok(archive);
+    }
     let sequence = continuation_result_sequence(checkpoint, &continuation.call.id);
     let Some(archive) = storage
         .find_conversation_history_archive_for_trace_item(

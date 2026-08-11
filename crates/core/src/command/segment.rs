@@ -66,6 +66,32 @@ pub(super) fn assess_segment(
     let tokens = &segment.tokens[program_index..];
     let program = program_basename(&tokens[0]);
 
+    if segment.has_heredoc && is_shell_program(&program) {
+        findings.push(finding(
+            segment_index,
+            &program,
+            CommandRiskClass::Unsupported,
+            "command.unsupported.shell_heredoc",
+            "shell 解释器会把 heredoc 正文作为脚本执行，当前安全分析器拒绝这种组合。",
+        ));
+        return Ok(());
+    }
+
+    // A quoted here-document is an explicit, finite program body for these interpreters rather
+    // than interactive terminal input. Its contents remain opaque code: guarded automatic mode
+    // must route it to approval, while an explicit/full-access authorization may run it.
+    if segment.has_heredoc && matches!(program.as_str(), "python" | "python3" | "node") {
+        findings.push(finding(
+            segment_index,
+            &program,
+            CommandRiskClass::Unknown,
+            "command.risk.heredoc_interpreter",
+            "解释器将执行 quoted heredoc 中的不透明代码；自动执行需要明确批准。",
+        ));
+        append_redirection_findings(segment, segment_index, &program, read_permission, findings);
+        return Ok(());
+    }
+
     if is_shell_reserved_program(&program) {
         findings.push(finding(
             segment_index,

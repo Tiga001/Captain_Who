@@ -79,7 +79,8 @@ async function resolveHostImageArtifact(
     if (options?.signal?.aborted) throw abortError()
     result = await hostClient.imageGeneration.readArtifact({
       schemaVersion: 1,
-      artifact
+      artifact,
+      ...(options?.conversationId ? { conversationId: options.conversationId } : {})
     })
   } finally {
     releaseReadSlot()
@@ -90,6 +91,7 @@ async function resolveHostImageArtifact(
   const content = result.value
   if (
     content.schemaVersion !== 1 ||
+    content.artifact.kind !== 'image' ||
     !sameArtifact(content.artifact, artifact) ||
     !(content.bytes instanceof Uint8Array) ||
     content.bytes.byteLength !== artifact.sizeBytes

@@ -33,6 +33,12 @@ pub(super) fn agent_file_input_execution_context(
         skill_resources,
     )
     .with_storage(Some(storage))
+    .with_conversation_id(
+        input
+            .context
+            .as_ref()
+            .and_then(|context| context.conversation_id.as_deref()),
+    )
 }
 
 pub(super) fn bounded_audit_error(error: &str) -> String {

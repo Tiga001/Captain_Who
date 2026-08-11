@@ -5,7 +5,9 @@
 //! rows here answer only "what can the Host currently observe or control?" and retain a bounded
 //! transcript so a Renderer reload does not depend on in-process memory.
 
-use crate::command::CommandAuthorizationSource;
+use crate::command::{
+    AgentCommandPublishedOutput, AgentCommandPublishedOutputKind, CommandAuthorizationSource,
+};
 use crate::storage::command_session_receipt_payload::{
     decode_command_session_receipt_payload, encode_command_session_receipt_payload,
 };
@@ -102,6 +104,7 @@ pub struct AgentCommandSessionModelReadReceipt {
 pub struct AgentCommandSessionModelRead {
     pub receipt: AgentCommandSessionModelReadReceipt,
     pub chunks: Vec<AgentCommandSessionOutputChunk>,
+    pub outputs: Vec<AgentCommandPublishedOutput>,
 }
 
 struct StoredAgentCommandSessionModelReadReceipt {
@@ -134,6 +137,7 @@ pub struct AgentCommandSessionTerminalUpdate<'a> {
     pub output_capture_truncated: bool,
     pub archive_ref: Option<&'a str>,
     pub terminal_reason: Option<&'a str>,
+    pub published_outputs: &'a [AgentCommandPublishedOutput],
     pub committed_at: i64,
 }
 
@@ -390,12 +394,14 @@ pub(crate) fn commit_terminal_in_connection(
         return Ok(AgentCommandSessionTransitionOutcome::NotFound);
     };
     if current.snapshot.status.is_terminal() {
+        let published_outputs = load_published_outputs(connection, input.session_id)?;
         let idempotent = current.snapshot.status == input.status
             && current.snapshot.ended_at == Some(input.ended_at)
             && current.snapshot.exit_code == input.exit_code
             && current.snapshot.latest_sequence == input.latest_sequence
             && current.snapshot.archive_ref.as_deref() == input.archive_ref
-            && current.terminal_reason.as_deref() == input.terminal_reason;
+            && current.terminal_reason.as_deref() == input.terminal_reason
+            && published_outputs == input.published_outputs;
         return Ok(if idempotent {
             AgentCommandSessionTransitionOutcome::Idempotent
         } else {
@@ -439,6 +445,7 @@ pub(crate) fn commit_terminal_in_connection(
             "command session terminal transition lost its active-state CAS",
         ));
     }
+    insert_published_outputs(connection, input.session_id, input.published_outputs)?;
     Ok(AgentCommandSessionTransitionOutcome::Updated)
 }
 
@@ -473,9 +480,11 @@ pub fn list_sessions_for_conversation(
              session_id ASC",
         record_select()
     ))?;
-    let records = statement
+    let mut records = statement
         .query_map([conversation_id], record_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    attach_terminal_outputs(connection, &mut records)?;
     let mut terminal_seen = 0_usize;
     Ok(records
         .into_iter()
@@ -655,8 +664,17 @@ pub fn read_or_create_model_read(
         validate_model_read_retry(&stored.receipt, input)?;
         let chunks = decode_model_receipt_chunks(&stored)?;
         let receipt = stored.receipt;
+        let outputs = if receipt.status.is_terminal() {
+            load_published_outputs(&transaction, input.session_id)?
+        } else {
+            Vec::new()
+        };
         transaction.commit()?;
-        return Ok(Some(AgentCommandSessionModelRead { receipt, chunks }));
+        return Ok(Some(AgentCommandSessionModelRead {
+            receipt,
+            chunks,
+            outputs,
+        }));
     }
 
     let Some(record) =
@@ -725,10 +743,16 @@ pub fn read_or_create_model_read(
             params![input.conversation_id, input.session_id],
         )?;
     }
+    let outputs = if receipt.status.is_terminal() {
+        load_published_outputs(&transaction, input.session_id)?
+    } else {
+        Vec::new()
+    };
     transaction.commit()?;
     Ok(Some(AgentCommandSessionModelRead {
         receipt,
         chunks: transcript.chunks,
+        outputs,
     }))
 }
 
@@ -754,7 +778,16 @@ pub fn load_model_read(
     validate_model_read_retry(&stored.receipt, input)?;
     let chunks = decode_model_receipt_chunks(&stored)?;
     let receipt = stored.receipt;
-    Ok(Some(AgentCommandSessionModelRead { receipt, chunks }))
+    let outputs = if receipt.status.is_terminal() {
+        load_published_outputs(connection, input.session_id)?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(AgentCommandSessionModelRead {
+        receipt,
+        chunks,
+        outputs,
+    }))
 }
 
 pub fn advance_model_read_sequence(
@@ -996,6 +1029,54 @@ pub(crate) fn list_outcome_unknown_sessions_in_connection(
     Ok(records)
 }
 
+/// Proves only that the exact Host-owned process for one approved command can no longer run.
+///
+/// This is deliberately narrower than action settlement: it does not claim that the command
+/// succeeded, that its ToolResult was materialized, or that its file effects are known. It lets
+/// startup reconciliation release the active-process deletion fence after the pending action has
+/// already been retired to a terminal target, while `outcome_unknown` remains fenced.
+pub(crate) fn has_resolved_terminal_session_for_action(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    origin_run_id: &str,
+    call_id: &str,
+    command: &str,
+) -> rusqlite::Result<bool> {
+    if [
+        conversation_id,
+        assistant_message_id,
+        origin_run_id,
+        call_id,
+        command,
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Ok(false);
+    }
+    connection.query_row(
+        "SELECT EXISTS (
+                 SELECT 1
+                 FROM agent_command_sessions
+                 WHERE conversation_id = ?1
+                   AND assistant_message_id = ?2
+                   AND origin_run_id = ?3
+                   AND call_id = ?4
+                   AND command_projection = ?5
+                   AND status IN ('exited', 'failed', 'timed_out', 'interrupted')
+             )",
+        params![
+            conversation_id,
+            assistant_message_id,
+            origin_run_id,
+            call_id,
+            command
+        ],
+        |row| row.get(0),
+    )
+}
+
 pub(crate) fn reconcile_active_session_in_connection(
     connection: &Connection,
     conversation_id: &str,
@@ -1065,7 +1146,7 @@ fn get_session_in_connection(
     conversation_id: &str,
     session_id: &str,
 ) -> rusqlite::Result<Option<AgentCommandSessionRecord>> {
-    connection
+    let mut record = connection
         .query_row(
             &format!(
                 "{} WHERE conversation_id = ?1 AND session_id = ?2",
@@ -1074,7 +1155,26 @@ fn get_session_in_connection(
             params![conversation_id, session_id],
             record_from_row,
         )
-        .optional()
+        .optional()?;
+    if let Some(record) = record.as_mut() {
+        if record.snapshot.status.is_terminal() {
+            record.snapshot.outputs = load_published_outputs(connection, session_id)?;
+        }
+    }
+    Ok(record)
+}
+
+fn attach_terminal_outputs(
+    connection: &Connection,
+    records: &mut [AgentCommandSessionRecord],
+) -> rusqlite::Result<()> {
+    for record in records {
+        if record.snapshot.status.is_terminal() {
+            record.snapshot.outputs =
+                load_published_outputs(connection, &record.snapshot.session_id)?;
+        }
+    }
+    Ok(())
 }
 
 fn session_for_call_exists(
@@ -1227,6 +1327,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommandSess
             exit_code: row.get(16)?,
             latest_sequence: row.get(17)?,
             output_truncated: transcript_truncated || output_capture_truncated,
+            outputs: Vec::new(),
             archive_ref: row.get(21)?,
         },
         authorization_source,
@@ -1250,6 +1351,127 @@ fn output_chunk_from_row(
         stream: output_stream_from_str(&row.get::<_, String>(1)?)?,
         output: row.get(2)?,
     })
+}
+
+fn insert_published_outputs(
+    connection: &Connection,
+    session_id: &str,
+    outputs: &[AgentCommandPublishedOutput],
+) -> rusqlite::Result<()> {
+    if outputs.len() > 32 {
+        return Err(invalid_input(
+            "command session published output count exceeds the durable limit",
+        ));
+    }
+    for (ordinal, output) in outputs.iter().enumerate() {
+        validate_published_output(output)?;
+        connection.execute(
+            "INSERT INTO agent_command_session_published_outputs (
+                session_id, ordinal, name, kind, read_path, mime_type,
+                size_bytes, sha256, width, height
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                session_id,
+                sqlite_integer(ordinal as u64)?,
+                &output.name,
+                published_output_kind_as_str(output.kind),
+                &output.read_path,
+                &output.mime_type,
+                sqlite_integer(output.size_bytes)?,
+                &output.sha256,
+                output.width.map(i64::from),
+                output.height.map(i64::from),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn load_published_outputs(
+    connection: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Vec<AgentCommandPublishedOutput>> {
+    let mut statement = connection.prepare(
+        "SELECT name, kind, read_path, mime_type, size_bytes, sha256, width, height
+         FROM agent_command_session_published_outputs
+         WHERE session_id = ?1 ORDER BY ordinal ASC",
+    )?;
+    let outputs = statement
+        .query_map([session_id], |row| {
+            let size_bytes = u64::try_from(row.get::<_, i64>(4)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(4, Type::Integer, Box::new(error))
+            })?;
+            let width = row
+                .get::<_, Option<i64>>(6)?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(6, Type::Integer, Box::new(error))
+                })?;
+            let height = row
+                .get::<_, Option<i64>>(7)?
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(7, Type::Integer, Box::new(error))
+                })?;
+            Ok(AgentCommandPublishedOutput {
+                name: row.get(0)?,
+                kind: published_output_kind_from_str(&row.get::<_, String>(1)?)?,
+                read_path: row.get(2)?,
+                mime_type: row.get(3)?,
+                size_bytes,
+                sha256: row.get(5)?,
+                width,
+                height,
+            })
+        })?
+        .collect();
+    outputs
+}
+
+fn published_output_kind_as_str(kind: AgentCommandPublishedOutputKind) -> &'static str {
+    match kind {
+        AgentCommandPublishedOutputKind::Image => "image",
+        AgentCommandPublishedOutputKind::Document => "document",
+    }
+}
+
+fn published_output_kind_from_str(
+    value: &str,
+) -> rusqlite::Result<AgentCommandPublishedOutputKind> {
+    match value {
+        "image" => Ok(AgentCommandPublishedOutputKind::Image),
+        "document" => Ok(AgentCommandPublishedOutputKind::Document),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn validate_published_output(output: &AgentCommandPublishedOutput) -> rusqlite::Result<()> {
+    let read_path_prefix = match output.kind {
+        AgentCommandPublishedOutputKind::Image => "image-artifact://sha256/",
+        AgentCommandPublishedOutputKind::Document => "artifact://sha256/",
+    };
+    if output.name.is_empty()
+        || output.name.len() > 1024
+        || output.name.chars().any(char::is_control)
+        || output.read_path != format!("{read_path_prefix}{}", output.sha256)
+        || output.sha256.len() != 64
+        || !output
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || output.mime_type.is_empty()
+        || output.mime_type.len() > 128
+        || output.size_bytes == 0
+        || matches!(output.kind, AgentCommandPublishedOutputKind::Image)
+            != (output.width.is_some() && output.height.is_some())
+    {
+        return Err(invalid_input(
+            "command session published output receipt is invalid",
+        ));
+    }
+    Ok(())
 }
 
 fn model_read_receipt_from_row(
@@ -1312,6 +1534,7 @@ fn validate_create(input: &AgentCommandSessionCreate) -> rusqlite::Result<()> {
         || snapshot.ended_at.is_some()
         || snapshot.exit_code.is_some()
         || snapshot.archive_ref.is_some()
+        || !snapshot.outputs.is_empty()
         || snapshot.latest_sequence != 0
         || snapshot.command_digest.len() != 71
         || !snapshot.command_digest.starts_with("sha256:")

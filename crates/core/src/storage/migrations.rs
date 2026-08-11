@@ -6,7 +6,7 @@ use crate::{
     AgentCommandOutputStream, AgentCommandSessionOutputChunk,
     CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::io::{Error as IoError, ErrorKind};
 
@@ -17,6 +17,11 @@ const REMOVE_RETIRED_BUNDLED_SKILL_TASK: &str = "remove_retired_bundled_skill_v1
 const SCRUB_LEGACY_AGENT_ACTION_PAYLOADS_TASK: &str = "scrub_legacy_agent_action_payloads_v1";
 const RETIRED_BUNDLED_SKILL_ID: &str = "bundled:application:repository-evidence-auditor";
 const INITIAL_API_URL: &str = "https://zju.smartml.cn/userapi/v1/model/v1/chat/completions";
+const LEGACY_COMMAND_PROJECTION_LIMIT_SQL: &str =
+    "length(CAST(command_projection AS BLOB)) BETWEEN 1 AND 8192";
+const COMMAND_PROJECTION_LIMIT_SQL: &str =
+    "length(CAST(command_projection AS BLOB)) BETWEEN 1 AND 65536";
+const COMMAND_SESSION_LIMIT_MIGRATION_TABLE: &str = "agent_command_sessions_command_projection_v2";
 
 fn add_column_if_missing(
     connection: &Connection,
@@ -183,7 +188,7 @@ fn ensure_agent_command_session_schema(connection: &Connection) -> rusqlite::Res
             ),
             project_id TEXT,
             command_projection TEXT NOT NULL CHECK (
-                length(CAST(command_projection AS BLOB)) BETWEEN 1 AND 8192
+                length(CAST(command_projection AS BLOB)) BETWEEN 1 AND 65536
             ),
             cwd_projection TEXT NOT NULL CHECK (
                 length(CAST(cwd_projection AS BLOB)) BETWEEN 1 AND 8192
@@ -266,6 +271,31 @@ fn ensure_agent_command_session_schema(connection: &Connection) -> rusqlite::Res
             ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             PRIMARY KEY (session_id, sequence),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_command_session_published_outputs (
+            session_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 32),
+            name TEXT NOT NULL CHECK (
+                length(CAST(name AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            kind TEXT NOT NULL CHECK (kind IN ('image', 'document')),
+            read_path TEXT NOT NULL CHECK (
+                length(CAST(read_path AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            mime_type TEXT NOT NULL CHECK (
+                length(CAST(mime_type AS BLOB)) BETWEEN 1 AND 128
+            ),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            width INTEGER CHECK (width IS NULL OR width BETWEEN 1 AND 16384),
+            height INTEGER CHECK (height IS NULL OR height BETWEEN 1 AND 16384),
+            PRIMARY KEY (session_id, ordinal),
             FOREIGN KEY (session_id)
                 REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
         );
@@ -690,6 +720,109 @@ fn ensure_command_session_lifecycle_identity_index(
          )
          WHERE item_kind = 'command_session_lifecycle';",
     )
+}
+
+/// Rebuilds only the command Session parent table when upgrading the persisted command projection
+/// bound. SQLite cannot alter a CHECK constraint in place. Keeping the original column order and
+/// table SQL preserves every row and all child foreign-key targets; parent indexes/triggers are
+/// recreated immediately afterwards by `ensure_agent_command_session_schema`.
+fn rebuild_agent_command_session_command_projection_limit(
+    connection: &Connection,
+    expected_limit_sql: &str,
+    replacement_limit_sql: &str,
+) -> rusqlite::Result<bool> {
+    let Some(table_sql) = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'table' AND name = 'agent_command_sessions'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if table_sql.contains(replacement_limit_sql) {
+        return Ok(false);
+    }
+    if !table_sql.contains(expected_limit_sql) || !connection.is_autocommit() {
+        return Err(command_projection_migration_error(
+            "agent_command_sessions command_projection 约束不是可安全升级的已知版本。",
+        ));
+    }
+    let replacement_table_sql = table_sql
+        .replacen(
+            "agent_command_sessions",
+            COMMAND_SESSION_LIMIT_MIGRATION_TABLE,
+            1,
+        )
+        .replacen(expected_limit_sql, replacement_limit_sql, 1);
+
+    let foreign_keys_enabled =
+        connection.pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))?;
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    if let Err(error) = connection.execute_batch("BEGIN IMMEDIATE;") {
+        if foreign_keys_enabled {
+            let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
+        }
+        return Err(error);
+    }
+    let migration_result = (|| {
+        connection.execute_batch(&format!(
+            "DROP TRIGGER IF EXISTS validate_agent_command_session_output_active;
+             DROP TRIGGER IF EXISTS validate_agent_command_session_model_receipt_owner;
+             DROP TRIGGER IF EXISTS validate_agent_command_session_lifecycle_owner;
+             DROP TABLE IF EXISTS {COMMAND_SESSION_LIMIT_MIGRATION_TABLE};
+             {replacement_table_sql};
+             INSERT INTO {COMMAND_SESSION_LIMIT_MIGRATION_TABLE}
+             SELECT * FROM agent_command_sessions;
+             DROP TABLE agent_command_sessions;
+             ALTER TABLE {COMMAND_SESSION_LIMIT_MIGRATION_TABLE}
+                 RENAME TO agent_command_sessions;"
+        ))?;
+        let has_foreign_key_violation = {
+            let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+            let mut rows = statement.query([])?;
+            let has_violation = rows.next()?.is_some();
+            has_violation
+        };
+        if has_foreign_key_violation {
+            return Err(command_projection_migration_error(
+                "agent_command_sessions command_projection 迁移破坏了外键完整性。",
+            ));
+        }
+        connection.execute_batch("COMMIT")?;
+        Ok(())
+    })();
+    if migration_result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK");
+    }
+    let restore_result = if foreign_keys_enabled {
+        connection.execute_batch("PRAGMA foreign_keys = ON;")
+    } else {
+        Ok(())
+    };
+    migration_result?;
+    restore_result?;
+    Ok(true)
+}
+
+fn upgrade_agent_command_session_command_projection_limit(
+    connection: &Connection,
+) -> rusqlite::Result<()> {
+    rebuild_agent_command_session_command_projection_limit(
+        connection,
+        LEGACY_COMMAND_PROJECTION_LIMIT_SQL,
+        COMMAND_PROJECTION_LIMIT_SQL,
+    )?;
+    Ok(())
+}
+
+fn command_projection_migration_error(error: impl std::fmt::Display) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(IoError::new(
+        ErrorKind::InvalidData,
+        error.to_string(),
+    )))
 }
 
 fn ensure_conversation_history_fts_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -2149,6 +2282,57 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS image_generation_artifacts_identity_idx
             ON image_generation_artifacts (artifact_id, state);
 
+        -- Immutable artifacts produced by trusted managed command runtimes. This registry is
+        -- intentionally generic and shares the existing content-addressed Artifact object
+        -- directory; the richer image-generation execution journal remains unchanged.
+        CREATE TABLE IF NOT EXISTS managed_artifacts (
+            artifact_id TEXT PRIMARY KEY CHECK (
+                length(artifact_id) = 71
+                AND substr(artifact_id, 1, 7) = 'sha256:'
+                AND substr(artifact_id, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            kind TEXT NOT NULL CHECK (kind IN ('image', 'document')),
+            storage_relative_path TEXT NOT NULL CHECK (
+                length(CAST(storage_relative_path AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            format TEXT NOT NULL CHECK (format IN ('png', 'jpeg', 'webp', 'pdf')),
+            media_type TEXT NOT NULL CHECK (
+                media_type IN ('image/png', 'image/jpeg', 'image/webp', 'application/pdf')
+            ),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            width INTEGER CHECK (width IS NULL OR width BETWEEN 1 AND 16384),
+            height INTEGER CHECK (height IS NULL OR height BETWEEN 1 AND 16384),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            CHECK (
+                (kind = 'image' AND format IN ('png', 'jpeg', 'webp')
+                    AND width IS NOT NULL AND height IS NOT NULL)
+                OR
+                (kind = 'document' AND format = 'pdf'
+                    AND width IS NULL AND height IS NULL)
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS managed_artifact_grants (
+            artifact_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (artifact_id, conversation_id, run_id, call_id),
+            FOREIGN KEY (artifact_id) REFERENCES managed_artifacts(artifact_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS managed_artifact_grants_conversation_idx
+            ON managed_artifact_grants (conversation_id, artifact_id);
+
         CREATE TABLE IF NOT EXISTS models (
             id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
@@ -3580,6 +3764,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
     upgrade_usage_consistency_schema(connection)?;
     ensure_conversation_goal_schema(connection)?;
+    upgrade_agent_command_session_command_projection_limit(connection)?;
     ensure_agent_command_session_schema(connection)?;
     ensure_conversation_history_fts_schema(connection)?;
 
@@ -3589,6 +3774,119 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrades_legacy_command_projection_limit_without_losing_session_children() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        assert!(rebuild_agent_command_session_command_projection_limit(
+            &connection,
+            COMMAND_PROJECTION_LIMIT_SQL,
+            LEGACY_COMMAND_PROJECTION_LIMIT_SQL,
+        )
+        .unwrap());
+        connection
+            .execute(
+                "INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                 ) VALUES (
+                    'conversation-command-limit', NULL, NULL, 'command limit', 1, 1,
+                    NULL, NULL, NULL
+                 )",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                    id, conversation_id, role, content, status,
+                    agent_run_json, ui_state_json, created_at, position
+                 ) VALUES (
+                    'assistant-command-limit', 'conversation-command-limit', 'assistant',
+                    '', 'streaming', NULL, NULL, 1, 0
+                 )",
+                [],
+            )
+            .unwrap();
+
+        let insert_session = |session_id: &str, call_id: &str, command: &str, digest: &str| {
+            connection.execute(
+                "INSERT INTO agent_command_sessions (
+                    session_id, schema_version, conversation_id, assistant_message_id,
+                    origin_run_id, call_id, project_id, command_projection, cwd_projection,
+                    command_digest, authorization_source, approval_provenance_json,
+                    permission_provenance_json, status, started_at, ended_at, exit_code,
+                    latest_sequence, model_read_sequence, transcript_truncated,
+                    output_capture_truncated, archive_ref, terminal_reason,
+                    created_at, updated_at, settled_at
+                 ) VALUES (
+                    ?1, 1, 'conversation-command-limit', 'assistant-command-limit',
+                    'run-command-limit', ?2, NULL, ?3, '.', ?4, 'explicit_user', '{}', '{}',
+                    'starting', 1, NULL, NULL, 0, 0, 0, 0, NULL, NULL, 1, 1, NULL
+                 )",
+                rusqlite::params![session_id, call_id, command, digest],
+            )
+        };
+        let legacy_session = "cmd_00000000000000000000000000000001";
+        insert_session(
+            legacy_session,
+            "call-legacy-limit",
+            "echo legacy",
+            &format!("sha256:{}", "a".repeat(64)),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_command_session_output_chunks (
+                    session_id, sequence, stream, output, output_bytes, created_at
+                 ) VALUES (?1, 1, 'stdout', 'preserved', 9, 1)",
+                [legacy_session],
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT command_projection FROM agent_command_sessions WHERE session_id = ?1",
+                    [legacy_session],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "echo legacy"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT output FROM agent_command_session_output_chunks
+                     WHERE session_id = ?1 AND sequence = 1",
+                    [legacy_session],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "preserved"
+        );
+
+        let at_product_limit = "😀".repeat(16_000);
+        insert_session(
+            "cmd_00000000000000000000000000000002",
+            "call-current-limit",
+            &at_product_limit,
+            &format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap();
+        let above_database_limit = "😀".repeat(16_385);
+        assert!(insert_session(
+            "cmd_00000000000000000000000000000003",
+            "call-above-limit",
+            &above_database_limit,
+            &format!("sha256:{}", "c".repeat(64)),
+        )
+        .is_err());
+        let mut violations = connection.prepare("PRAGMA foreign_key_check").unwrap();
+        assert!(violations.query([]).unwrap().next().unwrap().is_none());
+    }
 
     #[test]
     fn scrubs_all_legacy_terminal_and_audit_only_payload_columns_once() {

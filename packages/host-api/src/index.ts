@@ -48,7 +48,7 @@ import type {
   GitReviewSummaryInput,
   GitTurnDiffSummaries,
   GitTurnDiffSummariesInput,
-  AgentImageGenerationArtifact,
+  ManagedArtifactReadIdentity,
   ImageGenerationArtifactReadInput,
   ImageGenerationGetConfigurationOutput,
   ImageGenerationSetEnabledInput,
@@ -196,7 +196,7 @@ export interface ImageGenerationHostApi {
     input: ImageGenerationSetEnabledInput
   ): Promise<HostInvocationResult<ImageGenerationSetEnabledOutput>>
   getStatus(): Promise<HostInvocationResult<ImageGenerationStatus>>
-  /** Resolves a private immutable Artifact without exposing its managed path or provider URL. */
+  /** Resolves a private immutable image/PDF Artifact without exposing its managed path. */
   readArtifact(
     input: ImageGenerationArtifactReadInput
   ): Promise<HostInvocationResult<ImageGenerationArtifactContent>>
@@ -204,7 +204,7 @@ export interface ImageGenerationHostApi {
 
 export interface ImageGenerationArtifactContent {
   schemaVersion: 1
-  artifact: AgentImageGenerationArtifact
+  artifact: ManagedArtifactReadIdentity
   fileName: string
   bytes: Uint8Array
 }

@@ -80,6 +80,7 @@ const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
 
 interface ChatMessageItemProps {
+  conversationId?: string
   editSelectedModelAvailable?: boolean
   editSelectedModelSupportsImage?: boolean
   isLastAssistantMessage?: boolean
@@ -458,12 +459,14 @@ function AgentTimelineItemView({
 }
 
 function AgentRunView({
+  conversationId,
   message,
   onReviewLastTurn,
   onUiStateChange,
   projectId,
   turnDiffSummary
 }: {
+  conversationId?: string
   message: ChatMessage
   onReviewLastTurn?: (filePath?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
@@ -627,9 +630,15 @@ function AgentRunView({
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
       )}
       {isRunSettled(run) && (
-        <ImageGenerationArtifactsCard resolver={hostImageArtifactResolver} run={run} />
+        <ImageGenerationArtifactsCard
+          conversationId={conversationId}
+          resolver={hostImageArtifactResolver}
+          run={run}
+        />
       )}
-      {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}
+      {isRunSettled(run) && (
+        <OfficeArtifactsCard conversationId={conversationId} projectId={projectId} run={run} />
+      )}
       {isRunSettled(run) && turnDiffSummary && (
         <EditSummaryCard onReview={onReviewLastTurn} summary={turnDiffSummary} />
       )}
@@ -655,6 +664,7 @@ function AgentRunView({
 }
 
 function MessageContent({
+  conversationId,
   message,
   onReviewLastTurn,
   onUiStateChange,
@@ -664,6 +674,7 @@ function MessageContent({
   if (message.role === 'assistant') {
     return (
       <AgentRunView
+        conversationId={conversationId}
         message={message}
         onReviewLastTurn={onReviewLastTurn}
         onUiStateChange={onUiStateChange}
@@ -871,6 +882,7 @@ function MessageAttachments({
 }
 
 export function ChatMessageItem({
+  conversationId,
   editSelectedModelAvailable = true,
   editSelectedModelSupportsImage = true,
   isLastAssistantMessage = false,
@@ -948,6 +960,7 @@ export function ChatMessageItem({
       ) : showBody ? (
         <div className="chat-message__body">
           <MessageContent
+            conversationId={conversationId}
             message={message}
             onApprove={onApprove}
             onCancel={onCancel}

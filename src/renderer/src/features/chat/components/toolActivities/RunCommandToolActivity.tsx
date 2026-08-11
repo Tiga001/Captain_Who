@@ -47,9 +47,17 @@ function getStringField(value: unknown, key: string) {
   return typeof fieldValue === 'string' && fieldValue.trim() ? fieldValue.trim() : ''
 }
 
+function getCommandField(value: unknown, key: string) {
+  const objectValue = getObjectValue(value)
+  const fieldValue = objectValue?.[key]
+  // A command is executable source, not display prose. Preserve its exact newlines and
+  // indentation while still treating an all-whitespace value as absent.
+  return typeof fieldValue === 'string' && fieldValue.trim() ? fieldValue : ''
+}
+
 function getRunCommandDetails(call: AgentToolCall) {
   return {
-    command: getStringField(call.args, 'command'),
+    command: getCommandField(call.args, 'command'),
     reason: getStringField(call.args, 'reason') || call.reason || ''
   }
 }
@@ -98,7 +106,11 @@ function getCommandResult(result: AgentToolResult | undefined, fallbackCommand =
     return null
   }
   const command =
-    typeof resultValue.command === 'string' ? resultValue.command.trim() : fallbackCommand.trim()
+    typeof resultValue.command === 'string' && resultValue.command.trim()
+      ? resultValue.command
+      : fallbackCommand.trim()
+        ? fallbackCommand
+        : ''
   const status = typeof resultValue.status === 'string' ? resultValue.status : ''
   const isCommandResult =
     Boolean(command) ||

@@ -91,6 +91,13 @@ pub(crate) fn prepare_command_runtime_profile(
     profile: AgentCommandRuntimeProfile,
     kind: AgentCommandRuntimeKind,
 ) -> Result<PreparedCommandRuntimeProfile, CommandRuntimeProfileError> {
+    if profile == AgentCommandRuntimeProfile::Pdf && kind != AgentCommandRuntimeKind::Python {
+        return Err(CommandRuntimeProfileError::new(
+            "artifactRuntime.invalidRequest",
+            ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+            "Managed PDF Runtime 只支持受管 Python 执行环境。",
+        ));
+    }
     let artifact_kind = artifact_kind(kind);
     let status = provider.runtime_status(artifact_kind);
     let mut resolved_packages = profile_package_names(profile, kind)
@@ -244,6 +251,10 @@ fn profile_package_names(
         (AgentCommandRuntimeProfile::Presentations, AgentCommandRuntimeKind::Python) => {
             &["python-pptx"]
         }
+        (AgentCommandRuntimeProfile::Pdf, AgentCommandRuntimeKind::Python) => {
+            &["pdfplumber", "pypdf", "pypdfium2", "reportlab"]
+        }
+        (AgentCommandRuntimeProfile::Pdf, AgentCommandRuntimeKind::Node) => &[],
     }
 }
 
@@ -291,6 +302,7 @@ fn profile_name(profile: AgentCommandRuntimeProfile) -> &'static str {
         AgentCommandRuntimeProfile::Documents => "documents",
         AgentCommandRuntimeProfile::Spreadsheets => "spreadsheets",
         AgentCommandRuntimeProfile::Presentations => "presentations",
+        AgentCommandRuntimeProfile::Pdf => "pdf",
     }
 }
 

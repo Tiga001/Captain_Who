@@ -24,7 +24,7 @@ const MAX_COMPONENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SHA256_HEX_LENGTH: usize = 64;
 
-pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.07.3";
+pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.1";
 pub const ARTIFACT_RUNTIME_NODE_VERSION: &str = "22.23.1";
 pub const ARTIFACT_RUNTIME_PYTHON_VERSION: &str = "3.12.13";
 
@@ -35,8 +35,12 @@ const EXPECTED_NODE_DEPENDENCIES: &[(&str, &str)] = &[
 ];
 const EXPECTED_PYTHON_DEPENDENCIES: &[(&str, &str)] = &[
     ("openpyxl", "3.1.5"),
+    ("pdfplumber", "0.11.9"),
+    ("pypdf", "6.15.0"),
+    ("pypdfium2", "5.12.1"),
     ("python-docx", "1.2.0"),
     ("python-pptx", "1.0.2"),
+    ("reportlab", "4.4.9"),
     ("xlsxwriter", "3.2.9"),
 ];
 
@@ -1269,12 +1273,28 @@ mod tests {
                     b"Name: openpyxl\nVersion: 3.1.5\n".as_slice(),
                 ),
                 (
+                    "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA",
+                    b"Name: pdfplumber\nVersion: 0.11.9\n".as_slice(),
+                ),
+                (
+                    "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA",
+                    b"Name: pypdf\nVersion: 6.15.0\n".as_slice(),
+                ),
+                (
+                    "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA",
+                    b"Name: pypdfium2\nVersion: 5.12.1\n".as_slice(),
+                ),
+                (
                     "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA",
                     b"Name: python-docx\nVersion: 1.2.0\n".as_slice(),
                 ),
                 (
                     "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA",
                     b"Name: python-pptx\nVersion: 1.0.2\n".as_slice(),
+                ),
+                (
+                    "dependencies/python/lib/python3.12/site-packages/reportlab-4.4.9.dist-info/METADATA",
+                    b"Name: reportlab\nVersion: 4.4.9\n".as_slice(),
                 ),
                 (
                     "dependencies/python/lib/python3.12/site-packages/xlsxwriter-3.2.9.dist-info/METADATA",
@@ -1379,6 +1399,21 @@ mod tests {
                             identity_file: "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA".to_string(),
                         },
                         DependencyReceipt {
+                            name: "pdfplumber".to_string(),
+                            version: "0.11.9".to_string(),
+                            identity_file: "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA".to_string(),
+                        },
+                        DependencyReceipt {
+                            name: "pypdf".to_string(),
+                            version: "6.15.0".to_string(),
+                            identity_file: "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA".to_string(),
+                        },
+                        DependencyReceipt {
+                            name: "pypdfium2".to_string(),
+                            version: "5.12.1".to_string(),
+                            identity_file: "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA".to_string(),
+                        },
+                        DependencyReceipt {
                             name: "python-docx".to_string(),
                             version: "1.2.0".to_string(),
                             identity_file: "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA".to_string(),
@@ -1389,6 +1424,11 @@ mod tests {
                             identity_file: "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA".to_string(),
                         },
                         DependencyReceipt {
+                            name: "reportlab".to_string(),
+                            version: "4.4.9".to_string(),
+                            identity_file: "dependencies/python/lib/python3.12/site-packages/reportlab-4.4.9.dist-info/METADATA".to_string(),
+                        },
+                        DependencyReceipt {
                             name: "xlsxwriter".to_string(),
                             version: "3.2.9".to_string(),
                             identity_file: "dependencies/python/lib/python3.12/site-packages/xlsxwriter-3.2.9.dist-info/METADATA".to_string(),
@@ -1397,8 +1437,12 @@ mod tests {
                     identity_files: vec![
                         "dependencies/python/bin/python3".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA".to_string(),
+                        "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA".to_string(),
+                        "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA".to_string(),
+                        "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA".to_string(),
+                        "dependencies/python/lib/python3.12/site-packages/reportlab-4.4.9.dist-info/METADATA".to_string(),
                         "dependencies/python/lib/python3.12/site-packages/xlsxwriter-3.2.9.dist-info/METADATA".to_string(),
                     ],
                 },
@@ -1463,6 +1507,32 @@ mod tests {
                 .map(|package| (package.name.as_str(), package.version.as_str()))
                 .collect::<Vec<_>>(),
             vec![("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")]
+        );
+    }
+
+    #[test]
+    fn verified_python_runtime_exposes_the_frozen_pdf_toolchain() {
+        let fixture = Fixture::new();
+        let provider = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap();
+        let ArtifactRuntimePreflight::Ready(invocation) = provider
+            .preflight(
+                ArtifactRuntimeKind::Python,
+                &[
+                    ArtifactRuntimeRequirement::exact("pdfplumber", "0.11.9").unwrap(),
+                    ArtifactRuntimeRequirement::exact("pypdf", "6.15.0").unwrap(),
+                    ArtifactRuntimeRequirement::exact("pypdfium2", "5.12.1").unwrap(),
+                    ArtifactRuntimeRequirement::exact("reportlab", "4.4.9").unwrap(),
+                ],
+            )
+            .unwrap()
+        else {
+            panic!("PDF dependencies should be available without installation")
+        };
+        assert_eq!(invocation.kind(), ArtifactRuntimeKind::Python);
+        assert_eq!(invocation.version(), ARTIFACT_RUNTIME_PYTHON_VERSION);
+        assert_eq!(
+            invocation.arguments_prefix(),
+            &[OsString::from("-I"), OsString::from("-B")]
         );
     }
 

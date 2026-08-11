@@ -143,6 +143,54 @@ fn command_tool_call_projects_only_the_model_visible_runtime_profile() {
     assert!(!model_args.contains("pptxgenjs"));
     assert!(!model_args.contains("4.0.1"));
     assert!(!model_args.contains("runtimeFingerprint"));
+
+    let mut pdf_request = request;
+    let pdf_binding = pdf_request.runtime_binding.as_mut().unwrap();
+    pdf_binding.profile = AgentCommandRuntimeProfile::Pdf;
+    pdf_binding.kind = AgentCommandRuntimeKind::Python;
+    pdf_request.command = "pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'".to_string();
+    pdf_request.cwd = None;
+    let private_artifact_path = "/private/managed-artifacts/objects/secret/manual.pdf";
+    let artifact_uri =
+        "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    pdf_request.inputs = vec![mycopilot_core::AgentFileInputBinding {
+        schema_version: mycopilot_core::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
+        mount_path: "manual.pdf".to_string(),
+        source: mycopilot_core::AgentFileInputRef::GeneratedArtifact {
+            uri: artifact_uri.to_string(),
+            path: private_artifact_path.to_string(),
+        },
+        size_bytes: 123,
+        sha256: "a".repeat(64),
+    }];
+    let pdf_call = command_tool_call(&pdf_request);
+    assert!(pdf_call.args.get("runtimeProfile").is_none());
+    assert!(pdf_call.args.get("runtime").is_none());
+    assert_eq!(pdf_call.args["inputs"][0]["path"], artifact_uri);
+    assert_eq!(pdf_call.args["inputs"][0]["mountPath"], "manual.pdf");
+    assert!(pdf_call.args["inputs"][0].get("source").is_none());
+    assert!(!serde_json::to_string(&pdf_call)
+        .unwrap()
+        .contains(private_artifact_path));
+
+    let renderer_event = agent_event_notification(AgentEvent::Done {
+        run_id: "run-pdf".to_string(),
+        success: false,
+        status: Some(AgentRunStatus::WaitingForApproval),
+        content: None,
+        usage: None,
+        finish_reason: None,
+        proposed_actions: vec![AgentProposedAction::Command {
+            command: pdf_request,
+        }],
+    });
+    let rendered = serde_json::to_string(&renderer_event).unwrap();
+    assert!(!rendered.contains(private_artifact_path));
+    assert!(!rendered.contains("runtimeFingerprint"));
+    assert!(!rendered.contains("runtimeBinding"));
+    assert!(renderer_event["params"]["proposedActions"][0]["command"]
+        .get("inputs")
+        .is_none());
 }
 
 #[test]
@@ -323,6 +371,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
 #[test]
 fn failed_command_tool_result_keeps_the_complete_execution_observation() {
     let execution = AgentCommandExecutionResult {
+        outputs: Vec::new(),
         output_capture: Default::default(),
         stdout_spool: Default::default(),
         stderr_spool: Default::default(),
@@ -341,6 +390,9 @@ fn failed_command_tool_result_keeps_the_complete_execution_observation() {
         artifact_observation: None,
         input_files: Vec::new(),
         runtime: None,
+        managed_outputs: None,
+        authoritative_archive_ref: None,
+        history_open: None,
     };
 
     let result = command_tool_result("command-1", &execution);

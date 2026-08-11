@@ -42,6 +42,15 @@ describe('CoreServer command Session client', () => {
     })
   })
 
+  it('preserves a multiline command across the Core RPC boundary', async () => {
+    const command = "python3 <<'PY'\nif True:\n    print('Aspen PDF')\nPY\n"
+    rpcRequest.mockResolvedValue({ sessions: [{ ...session, command }] })
+
+    await expect(
+      new CoreServer().listCommandSessions({ conversationId: 'conversation-1' })
+    ).resolves.toMatchObject({ sessions: [{ command }] })
+  })
+
   it('routes an explicit transcript cursor without consuming the model poll cursor', async () => {
     rpcRequest.mockResolvedValue({
       session,

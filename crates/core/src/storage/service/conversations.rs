@@ -532,6 +532,55 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    /// Follows the same opaque Archive route accepted by `conversation_history` while preserving
+    /// the caller's conversation boundary. This narrow storage entry point is useful to Host
+    /// integrations that must verify a ToolResult recovery route without exposing archive ids or
+    /// the route codec itself.
+    pub fn read_conversation_history_archive_page_from_open(
+        &self,
+        conversation_id: &str,
+        open: &str,
+        maximum_chars: u64,
+    ) -> Result<
+        Option<conversation_history_archive_repository::ConversationHistoryArchivePage>,
+        String,
+    > {
+        let crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            archive_ref,
+            start_char,
+        } = crate::storage::conversation_history_open::decode_history_open(open)?
+        else {
+            return Err("history open does not reference an Exact Archive page".to_string());
+        };
+        self.read_conversation_history_archive_page(
+            conversation_id,
+            &archive_ref,
+            conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            start_char,
+            maximum_chars,
+        )
+    }
+
+    /// Creates the opaque Archive route accepted by `conversation_history` after verifying that
+    /// the immutable Archive belongs to the caller's conversation.
+    ///
+    /// Host integrations use this narrow method to project a recovery capability without exposing
+    /// the raw Archive reference or the route codec across the Core boundary.
+    pub fn conversation_history_archive_open(
+        &self,
+        conversation_id: &str,
+        archive_ref: &str,
+    ) -> Result<Option<String>, String> {
+        if self
+            .find_conversation_history_archive_by_ref(conversation_id, archive_ref)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        crate::storage::conversation_history_open::encode_archive_history_open(archive_ref, 0)
+            .map(Some)
+    }
+
     pub fn save_conversation(
         &self,
         conversation: ChatConversationRecord,

@@ -131,7 +131,7 @@ fn attachment_policy_section() -> String {
     - 视觉能力只以最新 World State 的 `model.selection.capabilities.imageInput` 为准：为 true 时可理解当前请求直接提供的图片；读取路径或历史附件中的图片仍须使用本次实际可用的读图工具。为 false 或缺失时不要尝试读图，遇到必须理解图片内容的需求应说明当前模型不支持图片输入，并请用户切换到支持图片输入的模型。\n\
     - 附件库是否可用及当前数量由可信后端 World State 的 `attachments.library_summary` 提供。@attachments 是后端虚拟路径，不是 workspace 路径；不要臆造真实本地路径。\n\
     - 当前聊天附件使用 attachments_list，同项目其他聊天附件使用 attachments_list_project。获取 readPath 后，只使用当前模型请求实际提供的匹配读取工具。\n\
-    - 图片、普通文本和 PDF 使用对应读取工具；Word、电子表格或演示文稿附件必须先激活对应 Skill，再使用激活后实际提供的读取能力。"
+    - 图片和普通文本使用对应读取工具；PDF 必须先激活 `bundled:application:pdf`，再把准确 readPath 绑定到 run_command.inputs，并将命令返回的图片 readPath 原样交给 read_image；Word、电子表格或演示文稿附件必须先激活对应 Skill，再使用激活后实际提供的读取能力。"
         .to_string()
 }
 
@@ -146,7 +146,6 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         &[
             "read_file",
             "read_image",
-            "read_pdf",
             "read_word",
             "read_presentation",
             "read_spreadsheet",
@@ -222,8 +221,8 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 的任何 applied/rejected/conflict/failed 结果都会终结当前草稿；后续再次修改同一文件必须重新 phase=begin。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
-        rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确规定脚本生成二进制或结构化产物时，必须先用文件编辑工具保存可审查脚本，再用 run_command 执行，并按 Skill 契约填写产物观察提示；产物观察只记录结果，不授予任何权限。".to_string());
-        rules.push("- run_command.command 必须是单行字符串。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
+        rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确允许的短暂检查或结构化产物转换可以使用有界内联代码；需要复用、审查或修改项目源文件的逻辑仍应先用文件编辑工具保存脚本，再用 run_command 执行。产物观察只记录结果，不授予任何权限。".to_string());
+        rules.push("- run_command.command 是一个可包含多行的命令字符串；Host 会规范化换行并分别审查 newline、pipeline、&&、|| 和 ; 的每个片段。普通命令需要 heredoc 时必须引用 delimiter（例如 <<'PY'）；受管 Skill 若要求直接调用则遵循 Skill 的更窄规则。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
     }
     if has_tool(tool_definitions, "command_session") {
         rules.push("- 对同一个 command Session 的 wait 是原命令阶段内的安静等待，不是新的工作进展。调用 wait 前不要输出“继续等待”类进展文字；返回后若仍为 running，也不要逐次向用户播报。命令的实时输出和状态由 Timeline 展示，只在进入终态、需要用户决策或出现新的可操作事实时再说明。".to_string());
@@ -394,6 +393,8 @@ mod tests {
             ],
         );
 
+        assert!(prompt.contains("PDF 必须先激活 `bundled:application:pdf`"));
+        assert!(prompt.contains("readPath 绑定到 run_command.inputs"));
         assert!(prompt.contains("Word、电子表格或演示文稿附件必须先激活对应 Skill"));
         assert!(!prompt.contains("read_word"));
         assert!(!prompt.contains("read_spreadsheet"));
@@ -534,6 +535,9 @@ mod tests {
         assert!(prompt.contains("command Session 的 wait 是原命令阶段内的安静等待"));
         assert!(prompt.contains("不要输出“继续等待”类进展文字"));
         assert!(prompt.contains("实时输出和状态由 Timeline 展示"));
+        assert!(prompt.contains("可包含多行的命令字符串"));
+        assert!(prompt.contains("分别审查 newline、pipeline、&&、|| 和 ;"));
+        assert!(prompt.contains("必须引用 delimiter"));
 
         let without_session = build_system_prompt(None, &[tool_definition("run_command")]);
         assert!(!without_session.contains("command Session 的 wait"));

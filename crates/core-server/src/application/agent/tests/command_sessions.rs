@@ -1386,6 +1386,26 @@ fn short_large_output_is_archived_before_terminal_visibility_without_a_second_ex
     let ordinary_tool_result =
         mycopilot_core::command::command_tool_result(&fixture.call_id, &terminal.execution);
     assert!(ordinary_tool_result.exact_archive_file.is_none());
+    let ordinary_body = ordinary_tool_result
+        .result
+        .as_ref()
+        .expect("terminal run_command body");
+    let history_open = ordinary_body["historyOpen"]
+        .as_str()
+        .expect("terminal result carries the authoritative history route");
+    assert!(history_open.starts_with("hist_v1_"));
+    assert_eq!(ordinary_body["continueWith"]["args"]["open"], history_open);
+    let routed_page = fixture
+        .storage
+        .read_conversation_history_archive_page_from_open(
+            &fixture.conversation_id,
+            history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("conversation_history-compatible route resolves");
+    assert!(routed_page.content.contains("archive-line-19999"));
+    assert_eq!(routed_page.descriptor.archive_ref, archive_ref);
     let connection = Connection::open(&fixture.database_path).unwrap();
     let archive_count: u64 = connection
         .query_row(
@@ -2731,6 +2751,76 @@ fn handed_off_terminal_output_is_archived_exactly_once() {
 }
 
 #[test]
+fn background_terminal_model_read_exposes_deterministic_full_history_route() {
+    let fixture = RunningFixture::new("terminal-model-history-route");
+    let command = r#"sleep 0.08; awk 'BEGIN { for (i = 0; i < 20000; i++) printf "background-line-%05d\n", i }'"#;
+    let (snapshot, initial_result) = fixture.start(command, None);
+    assert_eq!(initial_result.result.as_ref().unwrap()["status"], "running");
+
+    let running = fixture.poll(&snapshot.session_id, Duration::ZERO);
+    assert_eq!(running.status, AgentCommandSessionStatus::Running);
+    assert!(running.history_open.is_none());
+    fixture.adopt(&snapshot, command);
+    wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+
+    let request = AgentCommandSessionExecutionRequest {
+        conversation_id: fixture.conversation_id.clone(),
+        run_id: "run-terminal-history-route".to_string(),
+        call_id: "call-terminal-history-route".to_string(),
+        session_id: snapshot.session_id.clone(),
+        action: AgentCommandSessionAction::Poll,
+        wait_ms: 0,
+        max_output_bytes: AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    };
+    let terminal = fixture
+        .registry
+        .execute_command_session(request.clone(), observation_control())
+        .unwrap();
+    assert_eq!(terminal.status, AgentCommandSessionStatus::Exited);
+    assert!(terminal.output.len() <= AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES);
+    let history_open = terminal
+        .history_open
+        .as_deref()
+        .expect("terminal command_session result exposes opaque full-history route");
+    assert!(history_open.starts_with("hist_v1_"));
+    let full = fixture
+        .storage
+        .read_conversation_history_archive_page_from_open(
+            &fixture.conversation_id,
+            history_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("conversation_history route resolves after background completion");
+    assert!(full.content.contains("background-line-19999"));
+
+    let restarted = AgentCommandSessionRegistry::with_manager(
+        Arc::clone(&fixture.storage),
+        CommandSessionManager::new(test_manager_config()).unwrap(),
+        INITIAL_YIELD,
+    );
+    let replay = restarted
+        .execute_command_session(request, observation_control())
+        .unwrap();
+    assert_eq!(replay, terminal);
+    let replay_open = replay.history_open.as_deref().unwrap();
+    let replayed_full = fixture
+        .storage
+        .read_conversation_history_archive_page_from_open(
+            &fixture.conversation_id,
+            replay_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .expect("same opaque route remains readable after registry restart");
+    assert!(replayed_full.content.contains("background-line-19999"));
+}
+
+#[test]
 fn transient_terminal_cas_failure_retries_without_duplicate_archive_or_lifecycle() {
     let fixture = RunningFixture::new("terminal-retry");
     let command = "sleep 0.20; printf retry-archive-marker";
@@ -3173,6 +3263,7 @@ fn every_restart_restores_outcome_unknown_conversation_and_project_fences() {
                 exit_code: None,
                 latest_sequence: 0,
                 output_truncated: false,
+                outputs: Vec::new(),
                 archive_ref: None,
             },
             authorization_source: CommandAuthorizationSource::ExplicitUser,

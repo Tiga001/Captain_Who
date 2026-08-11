@@ -2,6 +2,8 @@ import type { AgentProposedAction } from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { AgentApprovalDialog } from '../../features/chat/components/AgentApprovalDialog'
+import '../../styles/global.css'
+import '../../features/chat/ChatConversationPage.approvals.css'
 
 const translations: Record<string, string> = {
   'agent.approval.dialog.approve': '批准',
@@ -75,6 +77,46 @@ describe('AgentApprovalDialog Skill script approval', () => {
     expect(snapshot?.textContent).toContain('sha256:runtime')
     expect(snapshot?.textContent).toContain('30000')
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
+
+    await screen.getByRole('button', { name: '批准' }).click()
+    expect(onApprove).toHaveBeenCalledWith('assistant-message', action, {
+      rememberForRun: false
+    })
+  })
+})
+
+describe('AgentApprovalDialog command approval', () => {
+  it('shows a multiline heredoc as one scrollable preformatted command', async () => {
+    const command = [
+      "python3 <<'PY'",
+      'for page in range(1, 80):',
+      "    print(f'page={page}')",
+      'PY'
+    ].join('\n')
+    const action: AgentProposedAction = {
+      type: 'command',
+      command: {
+        id: 'command-action',
+        command,
+        approvalStatus: 'required',
+        reason: '检查 PDF 页面'
+      }
+    }
+    const onApprove = vi.fn()
+    const screen = await render(
+      <AgentApprovalDialog
+        target={{ action, messageId: 'assistant-message' }}
+        onApprove={onApprove}
+      />
+    )
+
+    const code = screen.container.querySelector<HTMLElement>('.agent-approval-dialog__command')
+    expect(screen.container.querySelectorAll('.agent-approval-dialog__command')).toHaveLength(1)
+    expect(code?.getAttribute('data-multiline')).toBe('true')
+    expect(code?.textContent).toBe(command)
+    expect(window.getComputedStyle(code!).maxHeight).toBe('180px')
+    expect(window.getComputedStyle(code!).overflow).toBe('auto')
+    expect(window.getComputedStyle(code!).whiteSpace).toBe('pre-wrap')
 
     await screen.getByRole('button', { name: '批准' }).click()
     expect(onApprove).toHaveBeenCalledWith('assistant-message', action, {

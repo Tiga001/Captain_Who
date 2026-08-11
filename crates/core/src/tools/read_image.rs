@@ -2,7 +2,7 @@ use super::{AgentTool, ToolExecutionContext};
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::file_input::{
     agent_file_input_ref_from_model_path, model_path_for_agent_file_input_ref,
-    read_verified_agent_file_input, AgentFileInputExecutionContext,
+    read_verified_agent_file_input, AgentFileInputExecutionContext, MAX_AGENT_VISUAL_INPUT_BYTES,
 };
 use crate::protocol::{
     AgentError, AgentFileInputRef, AgentResult, AgentToolDefinition, AgentToolResult,
@@ -14,7 +14,6 @@ use image::{DynamicImage, ImageEncoder, ImageFormat};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const MAX_READ_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const THUMBNAIL_MAX_EDGE: u32 = 160;
 const MAX_THUMBNAIL_DATA_URL_BYTES: usize = 192 * 1024;
 
@@ -76,7 +75,8 @@ impl AgentTool for ReadImageTool {
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
         )
-        .with_storage(context.storage_optional());
+        .with_storage(context.storage_optional())
+        .with_conversation_id(context.conversation_id_optional());
         let workspace_root = context.workspace_root_optional()?;
         let snapshot = read_verified_agent_file_input(
             workspace_root.as_deref(),
@@ -84,7 +84,7 @@ impl AgentTool for ReadImageTool {
             &file_inputs,
             &source,
             Some(&context.cancellation_token()),
-            MAX_READ_IMAGE_BYTES,
+            MAX_AGENT_VISUAL_INPUT_BYTES,
         )
         .map_err(AgentError::from)?;
         context.check_cancelled()?;
@@ -283,7 +283,8 @@ impl ReadImageArgs {
             context.attachment_library().cloned(),
             context.skill_resources_optional(),
         )
-        .with_storage(context.storage_optional());
+        .with_storage(context.storage_optional())
+        .with_conversation_id(context.conversation_id_optional());
         agent_file_input_ref_from_model_path(&file_inputs, legacy).map_err(AgentError::from)
     }
 }
@@ -300,9 +301,7 @@ fn generated_artifact_receipt(
     let AgentFileInputRef::GeneratedArtifact { uri, .. } = source else {
         return Ok(None);
     };
-    let expected = uri
-        .strip_prefix("image-artifact://sha256/")
-        .or_else(|| uri.strip_prefix("artifact://sha256/"));
+    let expected = uri.strip_prefix("image-artifact://sha256/");
     if expected != Some(sha256) {
         return Err(AgentError::structured(
             "agent.fileInput.integrityMismatch",

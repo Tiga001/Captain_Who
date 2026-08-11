@@ -186,4 +186,92 @@ describe('image generation activity projection', () => {
       getImageGenerationArtifactEntries(liveRun)
     )
   })
+
+  it('adapts authoritative run_command and command_session image receipts to existing cards', () => {
+    const commandCall = call({ id: 'command-1', tool: 'run_command', args: {} })
+    const sessionCall = call({ id: 'session-1', tool: 'command_session', args: {} })
+    const output = {
+      name: 'pages/page-307.png',
+      kind: 'image',
+      readPath: `image-artifact://sha256/${HASH}`,
+      mimeType: 'image/png',
+      sizeBytes: 2048,
+      sha256: HASH,
+      width: 1200,
+      height: 1600
+    }
+    const currentRun = run({
+      toolCalls: [commandCall, sessionCall],
+      toolResults: [
+        result(
+          { execution: { exitCode: 0, outputs: [output] } },
+          {
+            callId: commandCall.id,
+            tool: commandCall.tool
+          }
+        ),
+        result(
+          { status: 'completed', outputs: [output] },
+          {
+            callId: sessionCall.id,
+            tool: sessionCall.tool
+          }
+        )
+      ]
+    })
+
+    expect(getImageGenerationArtifactEntries(currentRun)).toEqual([
+      {
+        artifact: {
+          artifactId: `sha256:${HASH}`,
+          uri: output.readPath,
+          kind: 'image',
+          format: 'png',
+          mimeType: 'image/png',
+          width: 1200,
+          height: 1600,
+          sizeBytes: 2048,
+          sha256: HASH
+        },
+        callId: commandCall.id,
+        displayName: 'pages/page-307.png',
+        operation: 'command'
+      }
+    ])
+  })
+
+  it('restores a managed image card from the original run_command Session snapshot', () => {
+    const commandCall = call({ id: 'command-restart', tool: 'run_command', args: {} })
+    const output = {
+      name: 'pages/page-1.png',
+      kind: 'image' as const,
+      readPath: `image-artifact://sha256/${HASH}`,
+      mimeType: 'image/png',
+      sizeBytes: 2048,
+      sha256: HASH,
+      width: 1200,
+      height: 1600
+    }
+    const restoredRun = run({
+      toolCalls: [commandCall],
+      toolResults: [],
+      commandSessions: {
+        [commandCall.id]: {
+          callId: commandCall.id,
+          status: 'exited',
+          latestSequence: 0,
+          outputTruncated: false,
+          outputs: [output]
+        }
+      }
+    })
+
+    expect(getImageGenerationArtifactEntries(restoredRun)).toMatchObject([
+      {
+        callId: commandCall.id,
+        displayName: output.name,
+        artifact: { uri: output.readPath, sha256: HASH }
+      }
+    ])
+  })
 })

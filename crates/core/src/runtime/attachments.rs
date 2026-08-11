@@ -96,6 +96,17 @@ fn build_attachment_context_in_workspace(
             continue;
         }
 
+        if is_pdf_attachment(attachment, &safe_name) {
+            sections.push(format!(
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；先激活匹配该文件类型的 Skill `bundled:application:pdf`，再将上述 readPath 绑定到 run_command.inputs；页面渲染后将命令返回的准确图片 readPath 原样传给 read_image。",
+                attachment.name,
+                mime_type,
+                attachment.size_bytes,
+                read_path_line(read_path)
+            ));
+            continue;
+        }
+
         let Some(tool_name) = candidate_read_tool_for_attachment(attachment, &safe_name) else {
             sections.push(format!(
                 "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：已收到附件，但当前没有适合的只读解析工具。",
@@ -242,7 +253,6 @@ fn candidate_read_tool_for_attachment(
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "pdf" => Some("read_pdf"),
         "doc" | "docx" => Some("read_word"),
         "pptx" => Some("read_presentation"),
         "xlsx" | "csv" | "tsv" => Some("read_spreadsheet"),
@@ -252,6 +262,15 @@ fn candidate_read_tool_for_attachment(
         _ if is_text_attachment(attachment, safe_name) => Some("read_file"),
         _ => None,
     }
+}
+
+fn is_pdf_attachment(attachment: &AgentInputAttachment, safe_name: &str) -> bool {
+    attachment_extension(safe_name) == "pdf"
+        || attachment
+            .mime_type
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|mime_type| mime_type.eq_ignore_ascii_case("application/pdf"))
 }
 
 fn is_word_mime_type(mime_type: &str) -> bool {

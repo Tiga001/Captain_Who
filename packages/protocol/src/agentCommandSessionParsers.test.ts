@@ -10,6 +10,16 @@ import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from './agent'
 import { parseAgentEventForHost } from './agentMcpParsers'
 
 const sessionId = 'cmd_1234567890abcdef1234567890abcdef'
+const publishedImage = {
+  name: 'pages/page-1.png',
+  kind: 'image',
+  readPath: `image-artifact://sha256/${'b'.repeat(64)}`,
+  mimeType: 'image/png',
+  sizeBytes: 2048,
+  sha256: 'b'.repeat(64),
+  width: 1200,
+  height: 1600
+} as const
 const snapshot = {
   schemaVersion: 1,
   sessionId,
@@ -70,9 +80,10 @@ describe('Agent command Session protocol', () => {
         exitCode: 0,
         endedAt: 20,
         latestSequence: 2,
-        outputTruncated: false
+        outputTruncated: false,
+        outputs: [publishedImage]
       })
-    ).toMatchObject({ type: 'command_exited', exitCode: 0 })
+    ).toMatchObject({ type: 'command_exited', exitCode: 0, outputs: [publishedImage] })
 
     expect(
       parseAgentCommandSessionEvent({
@@ -109,6 +120,68 @@ describe('Agent command Session protocol', () => {
         }
       })
     ).toMatchObject({ session: { sessionId }, transcript: { latestSequence: 2 } })
+  })
+
+  it('preserves the full 16K-character command product boundary in Session snapshots', () => {
+    const command = '😀'.repeat(16_000)
+    expect(
+      parseAgentCommandSessionListOutput({
+        sessions: [{ ...snapshot, command }]
+      }).sessions[0]?.command
+    ).toBe(command)
+
+    expect(() =>
+      parseAgentCommandSessionListOutput({
+        sessions: [{ ...snapshot, command: '😀'.repeat(16_385) }]
+      })
+    ).toThrow(/exceeded 65536 UTF-8 bytes/)
+  })
+
+  it('preserves multiline commands and heredoc indentation byte-for-byte', () => {
+    const command = "python3 <<'PY'\nif True:\n    print('Aspen PDF')\nPY\n"
+    const listed = parseAgentCommandSessionListOutput({
+      sessions: [{ ...snapshot, command }]
+    })
+    expect(listed.sessions[0]?.command).toBe(command)
+
+    const restored = parseAgentCommandSessionGetOutput({
+      session: { ...snapshot, command, latestSequence: 1 },
+      transcript: {
+        requestedAfterSequence: 0,
+        firstAvailableSequence: 1,
+        latestSequence: 1,
+        truncatedBefore: false,
+        outputCaptureTruncated: false,
+        chunks: [{ sequence: 1, stream: 'stdout', output: 'Aspen PDF\n' }]
+      }
+    })
+    expect(restored.session.command).toBe(command)
+  })
+
+  it('strictly restores terminal published outputs while accepting legacy snapshots without them', () => {
+    const terminal = {
+      ...snapshot,
+      status: 'exited',
+      endedAt: 20,
+      exitCode: 0,
+      outputs: [publishedImage]
+    } as const
+    expect(parseAgentCommandSessionListOutput({ sessions: [terminal] })).toEqual({
+      sessions: [terminal]
+    })
+    expect(parseAgentCommandSessionListOutput({ sessions: [snapshot] })).toEqual({
+      sessions: [snapshot]
+    })
+    expect(() =>
+      parseAgentCommandSessionListOutput({
+        sessions: [
+          {
+            ...terminal,
+            outputs: [{ ...publishedImage, readPath: `image-artifact://sha256/${'c'.repeat(64)}` }]
+          }
+        ]
+      })
+    ).toThrow(/readPath does not match/)
   })
 
   it('accepts the Host transcript chunk boundary and rejects one item beyond it', () => {

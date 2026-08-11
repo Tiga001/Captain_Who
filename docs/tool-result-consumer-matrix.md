@@ -66,16 +66,16 @@ Tool observation 文本现在只序列化精简后的 `result`/`error`，不再�
 
 ## 3. 完整 Tool 清单
 
-| 类别           | Tool                                                                                                                                        |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| 附件与读取     | `attachments_list`、`attachments_list_project`、`read_file`、`read_image`、`read_pdf`、`read_word`、`read_presentation`、`read_spreadsheet` |
-| 工作区检索     | `workspace_map`、`search_files`、`search_code`、`git_diff`                                                                                  |
-| Web            | `web_search`、`web_fetch`                                                                                                                   |
-| 文件与命令     | `apply_patch`、`write_file`、`run_command`                                                                                                  |
-| Skill          | `skills_list_resources`、`skills_read_resource`、`skills_materialize_resource`、`skills_preflight_script`、`skills_run_script`              |
-| 历史与 Goal    | `conversation_history`、`get_goal`、`create_goal`、`update_goal`                                                                            |
-| 条件能力       | `office_document`、`office_spreadsheet`、`office_presentation`、`image_generation`                                                          |
-| 动态 Extension | `todo_update`、`skills_activate`                                                                                                            |
+| 类别           | Tool                                                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 附件与读取     | `attachments_list`、`attachments_list_project`、`read_file`、`read_image`、`read_word`、`read_presentation`、`read_spreadsheet` |
+| 工作区检索     | `workspace_map`、`search_files`、`search_code`、`git_diff`                                                                      |
+| Web            | `web_search`、`web_fetch`                                                                                                       |
+| 文件与命令     | `apply_patch`、`write_file`、`run_command`                                                                                      |
+| Skill          | `skills_list_resources`、`skills_read_resource`、`skills_materialize_resource`、`skills_preflight_script`、`skills_run_script`  |
+| 历史与 Goal    | `conversation_history`、`get_goal`、`create_goal`、`update_goal`                                                                |
+| 条件能力       | `office_document`、`office_spreadsheet`、`office_presentation`、`image_generation`                                              |
+| 动态 Extension | `todo_update`、`skills_activate`                                                                                                |
 
 激活 Skill 后披露的应用自有 Tool 仍走同一 `ToolRegistry` 投影管线。其 Schema 绑定 Skill revision，注册新 Tool 时必须同时增加消费者契约，不能在本文件中虚构固定结果字段。
 
@@ -286,24 +286,27 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 第 4 节记录 Raw Result 的完整消费者归属；下表是当前实际送入 M 的白名单。未列出的同组字段仍只属于 E/R/T/A/C。
 
-| Tool                                     | 当前 M 投影                                                                                                                             |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `attachments_list*`                      | scope、total/returned/omitted、truncated/nextCursor、附件 name/kind/mimeType/sizeBytes/readPath                                         |
-| `read_file`                              | path、行/总量、content、truncated/reason、next cursor                                                                                   |
-| `read_pdf/word/presentation/spreadsheet` | path/format、页/部件/幻灯片/工作表计数、text、truncated                                                                                 |
-| `read_image`                             | path/format/mimeType/sizeBytes；像素另走原生多模态消息                                                                                  |
-| `workspace_map`                          | summary、treeText、coverage/refine、truncated；不重复发送 tree/workspace 参数                                                           |
-| `search_files/search_code`               | total/returned/omitted、matches、truncated/nextCursor、来源遗漏说明；不重复发送 query                                                   |
-| `web_search`                             | Provider answer/snippets、title/url/publishedDate、images、contentKind/fullContentTool 和 Provider 恢复字段                             |
-| `web_fetch`                              | url、content、images、失败摘要、truncated                                                                                               |
-| `write_file`                             | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误                               |
-| `run_command`                            | exit/stdout/stderr/真实截断与失败状态、精简 policy、Artifact partial/stopReasons/scanned/returned/omitted/changes/expected outputs      |
-| 三个 Office Tool                         | documentKind/operation、可复用 outputs、进程结果与失败不确定性                                                                          |
-| Skill 资源/脚本 Tool                     | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint                                                       |
-| `skills_activate`                        | status、Skill name/hasResources；完整激活记录由 Extension 消费                                                                          |
-| `image_generation`                       | status/operation、可直接交给 `read_image` 的 path、Artifact 展示元数据、savedPath、failure/visualInputDelivery；去除 audit/hash/后端 ID |
-| `conversation_history`                   | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳                                           |
-| `todo_update`                            | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费                                 |
+| Tool                                 | 当前 M 投影                                                                                                                             |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `attachments_list*`                  | scope、total/returned/omitted、truncated/nextCursor、附件 name/kind/mimeType/sizeBytes/readPath                                         |
+| `read_file`                          | path、行/总量、content、truncated/reason、next cursor                                                                                   |
+| `read_word/presentation/spreadsheet` | path/format、部件/幻灯片/工作表计数、text、truncated                                                                                    |
+| `read_image`                         | path/format/mimeType/sizeBytes；像素另走原生多模态消息                                                                                  |
+| `workspace_map`                      | summary、treeText、coverage/refine、truncated；不重复发送 tree/workspace 参数                                                           |
+| `search_files/search_code`           | total/returned/omitted、matches、truncated/nextCursor、来源遗漏说明；不重复发送 query                                                   |
+| `web_search`                         | Provider answer/snippets、title/url/publishedDate、images、contentKind/fullContentTool 和 Provider 恢复字段                             |
+| `web_fetch`                          | url、content、images、失败摘要、truncated                                                                                               |
+| `write_file`                         | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误                               |
+| `run_command`                        | exit/stdout/stderr/真实截断与失败状态、精简 policy、Artifact partial/stopReasons/scanned/returned/omitted/changes/expected outputs      |
+| 三个 Office Tool                     | documentKind/operation、可复用 outputs、进程结果与失败不确定性                                                                          |
+| Skill 资源/脚本 Tool                 | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint                                                       |
+| `skills_activate`                    | status、Skill name/hasResources；完整激活记录由 Extension 消费                                                                          |
+| `image_generation`                   | status/operation、可直接交给 `read_image` 的 path、Artifact 展示元数据、savedPath、failure/visualInputDelivery；去除 audit/hash/后端 ID |
+| `conversation_history`               | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳                                           |
+| `todo_update`                        | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费                                 |
+
+旧 PDF 专用读取工具及其 Protocol、Renderer 和 Timeline 兼容分支已完全删除；PDF
+处理统一通过内置 PDF Skill、`run_command` 和 `read_image` 完成。
 
 所有失败投影还会统一保留 `code/errorCode/recovery/phase`、权限/能力要求和副作用不确定性；重复的 `message/error` 只保留一份。
 

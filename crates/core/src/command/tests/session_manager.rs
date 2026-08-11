@@ -1101,6 +1101,39 @@ fn authorized_start_keeps_background_escape_policy_fail_closed() {
 }
 
 #[test]
+fn authorized_session_launch_uses_the_same_canonical_lf_as_policy() {
+    let workspace = TestWorkspace::new();
+    let manager = CommandSessionManager::new(test_config()).unwrap();
+    let outcome = manager
+        .start_authorized_command(
+            CommandSessionScopeId::new("canonical-command").unwrap(),
+            Some(&workspace.path),
+            &request("\r\nprintf 'one\\n'\rprintf 'two\\n'\r\n", None),
+            AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                ..Default::default()
+            },
+            CommandAuthorizationSource::ExplicitUser,
+            CommandStartOptions {
+                initial_yield: Duration::from_millis(500),
+            },
+            None,
+        )
+        .unwrap();
+    let CommandStartOutcome::Exited(terminal) = outcome else {
+        panic!("canonical command should exit inside the initial yield");
+    };
+
+    assert_eq!(terminal.execution.stdout, "one\ntwo\n");
+    assert_eq!(
+        terminal.execution.command,
+        "\nprintf 'one\\n'\nprintf 'two\\n'\n"
+    );
+}
+
+#[test]
 fn interrupt_kills_descendants_before_they_can_write_a_marker() {
     let workspace = TestWorkspace::new();
     let manager = CommandSessionManager::new(test_config()).unwrap();

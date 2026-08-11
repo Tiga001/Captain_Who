@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::command::AgentCommandExecutionResult;
+use crate::command::{AgentCommandExecutionResult, ManagedCommandWorkspaceRegistry};
 use crate::storage::models::{
     AgentActionAuditRecord, AgentFileDraftChunkRecord, AgentFileDraftOperationRecord,
     AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
@@ -55,6 +55,8 @@ mod goals;
 mod guidance;
 mod image_generation;
 mod lifecycle;
+mod managed_artifacts;
+mod managed_command_workspaces;
 mod mcp_approval_envelopes;
 mod messages;
 mod pending_actions;
@@ -68,7 +70,12 @@ mod world_state;
 use attachments::*;
 pub use command_sessions::AgentCommandSessionLifecycleAppendOutcome;
 pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutcome};
+pub use image_generation::{ResolvedGeneratedArtifactInput, ResolvedGeneratedArtifactKind};
 pub use lifecycle::*;
+pub use managed_artifacts::{
+    AuthorizedManagedArtifactContent, ManagedArtifactAuthority, PublishedManagedArtifact,
+    MAX_MANAGED_DOCUMENT_ARTIFACT_BYTES,
+};
 pub use pending_actions::{
     AgentPendingActionResultCommitOutcome, AgentPendingActionSettlementInspection,
     McpActionTerminalizationRequest, McpAutoActionJournalTerminalOutcome,

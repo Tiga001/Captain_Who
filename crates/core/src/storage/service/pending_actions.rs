@@ -835,6 +835,46 @@ fn manual_file_effect_has_authoritative_settlement(
     Ok(proof.is_ok())
 }
 
+/// Releases only the active-process fence for an interrupted approved command.
+///
+/// The pending target and pre-terminal audit remain available for diagnosis. A matching resolved
+/// Session proves that the exact Host process can no longer mutate files, but does not fabricate a
+/// terminal ToolResult or claim success. `outcome_unknown` is intentionally excluded because its
+/// process/file-effect outcome is still unresolved.
+fn manual_command_has_resolved_terminal_session(
+    connection: &rusqlite::Connection,
+    pending: &AgentPendingActionRecord,
+) -> Result<bool, String> {
+    if pending.tool_name != "run_command"
+        || !matches!(
+            pending.target_status.as_deref(),
+            Some("completed" | "failed" | "cancelled")
+        )
+    {
+        return Ok(false);
+    }
+    let (Some(conversation_id), Some(assistant_message_id), Some(call_id)) = (
+        pending.conversation_id.as_deref(),
+        pending.assistant_message_id.as_deref(),
+        pending.tool_call_id.as_deref(),
+    ) else {
+        return Ok(false);
+    };
+    let command = match serde_json::from_str::<AgentProposedAction>(&pending.action_json) {
+        Ok(AgentProposedAction::Command { command }) if command.id == call_id => command.command,
+        _ => return Ok(false),
+    };
+    agent_command_session_repository::has_resolved_terminal_session_for_action(
+        connection,
+        conversation_id,
+        assistant_message_id,
+        &pending.run_id,
+        call_id,
+        &command,
+    )
+    .map_err(storage_error)
+}
+
 fn terminalize_mcp_action_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     request: &McpActionTerminalizationRequest,
@@ -1221,7 +1261,13 @@ impl StorageService {
                 }
                 None => false,
             };
-            if !is_authoritatively_settled {
+            let command_process_is_known_stopped = match pending.as_ref() {
+                Some(pending) => {
+                    manual_command_has_resolved_terminal_session(&connection, pending)?
+                }
+                None => false,
+            };
+            if !is_authoritatively_settled && !command_process_is_known_stopped {
                 unsettled.push(candidate);
             }
         }

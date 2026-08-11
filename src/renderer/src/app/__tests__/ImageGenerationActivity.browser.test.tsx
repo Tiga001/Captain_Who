@@ -274,6 +274,49 @@ describe('image generation activity UI', () => {
     expect(resolver.resolve).toHaveBeenCalledTimes(1)
   })
 
+  it('reuses the image card for managed command outputs with conversation authority', async () => {
+    const commandCall = call({ id: 'command-image', tool: 'run_command', args: {} })
+    const currentRun = {
+      ...run([commandCall], []),
+      commandSessions: {
+        [commandCall.id]: {
+          callId: commandCall.id,
+          status: 'exited' as const,
+          latestSequence: 0,
+          outputTruncated: false,
+          exitCode: 0,
+          outputs: [
+            {
+              name: 'pages/page-307.png',
+              kind: 'image' as const,
+              readPath: `image-artifact://sha256/${HASH}`,
+              mimeType: 'image/png',
+              sizeBytes: 4096,
+              sha256: HASH,
+              width: 1200,
+              height: 1600
+            }
+          ]
+        }
+      }
+    }
+    const resolver = { resolve: vi.fn(async () => ({ src: PREVIEW_DATA_URL })) }
+    const screen = await render(
+      <ImageGenerationArtifactsCard
+        conversationId="conversation-1"
+        resolver={resolver}
+        run={currentRun}
+      />
+    )
+
+    await expect.poll(() => screen.container.querySelector('img')).not.toBeNull()
+    await expect.element(screen.getByText('pages/page-307.png')).toBeVisible()
+    expect(resolver.resolve).toHaveBeenCalledWith(
+      expect.objectContaining({ uri: `image-artifact://sha256/${HASH}` }),
+      expect.objectContaining({ conversationId: 'conversation-1' })
+    )
+  })
+
   it('joins multiple resolved Artifacts into one image grid', async () => {
     const secondHash = 'c'.repeat(64)
     const thirdHash = 'd'.repeat(64)

@@ -7,10 +7,29 @@ use crate::storage::image_generation_execution_repository::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedGeneratedArtifactInput {
+pub struct ResolvedGeneratedArtifactInput {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub sha256: String,
+    pub kind: ResolvedGeneratedArtifactKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedGeneratedArtifactKind {
+    ImageGeneration,
+    Managed(crate::storage::managed_artifact_repository::ManagedArtifactKind),
+}
+
+impl ResolvedGeneratedArtifactKind {
+    pub const fn is_image(self) -> bool {
+        matches!(
+            self,
+            Self::ImageGeneration
+                | Self::Managed(
+                    crate::storage::managed_artifact_repository::ManagedArtifactKind::Image
+                )
+        )
+    }
 }
 
 impl StorageService {
@@ -80,14 +99,25 @@ impl StorageService {
         .map_err(storage_error)
     }
 
-    /// Resolves one immutable generated-image Artifact from the authoritative publication journal.
+    /// Resolves one immutable image Artifact from an authoritative publication journal.
     ///
-    /// Caller-provided paths and hashes are never consulted here. Duplicate successful journal
+    /// A conversation-authorized managed image takes precedence over the legacy image-generation
+    /// journal. Managed documents are deliberately ignored: callers of this method are resolving
+    /// an `image-artifact://` capability and must never reinterpret a document grant as an image.
+    /// Caller-provided paths and hashes are never consulted here. Duplicate successful legacy
     /// rows are accepted only when every immutable storage identity is identical.
-    pub(crate) fn resolve_published_generated_artifact_input(
+    pub fn resolve_published_generated_artifact_input(
         &self,
         artifact_id: &str,
+        conversation_id: Option<&str>,
     ) -> Result<Option<ResolvedGeneratedArtifactInput>, String> {
+        if let Some(artifact) =
+            self.resolve_published_managed_artifact_input(artifact_id, conversation_id)?
+        {
+            if artifact.kind.is_image() {
+                return Ok(Some(artifact));
+            }
+        }
         let connection = self.state.connection()?;
         let records = image_generation_execution_repository::list_published_artifact_inputs_by_id(
             &connection,
@@ -111,7 +141,35 @@ impl StorageService {
             path: self.image_artifact_root.join(relative),
             size_bytes: first.size_bytes,
             sha256: first.sha256.clone(),
+            kind: ResolvedGeneratedArtifactKind::ImageGeneration,
         }))
+    }
+
+    /// Resolves one conversation-authorized managed document for an `artifact://` capability.
+    ///
+    /// This path intentionally has no legacy image-generation fallback. The content hash alone is
+    /// not an authority boundary, and an image publication with the same digest must not authorize
+    /// document access in another conversation or under another URI scheme.
+    pub fn resolve_published_document_artifact_input(
+        &self,
+        artifact_id: &str,
+        conversation_id: Option<&str>,
+    ) -> Result<Option<ResolvedGeneratedArtifactInput>, String> {
+        let Some(artifact) =
+            self.resolve_published_managed_artifact_input(artifact_id, conversation_id)?
+        else {
+            return Ok(None);
+        };
+        if matches!(
+            artifact.kind,
+            ResolvedGeneratedArtifactKind::Managed(
+                crate::storage::managed_artifact_repository::ManagedArtifactKind::Document
+            )
+        ) {
+            Ok(Some(artifact))
+        } else {
+            Ok(None)
+        }
     }
 }
 

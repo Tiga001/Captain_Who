@@ -34,6 +34,7 @@ mod allowlist;
 mod artifact_observer;
 mod execution;
 mod lexer;
+mod managed_output_publication;
 mod managed_runtime;
 mod output_capture;
 mod policy;
@@ -54,8 +55,14 @@ pub(crate) use artifact_observer::{
 };
 pub use execution::*;
 use lexer::*;
+pub use managed_output_publication::{
+    publish_managed_command_outputs, snapshot_managed_command_output_baseline,
+    MAX_MANAGED_COMMAND_OUTPUT_DEPTH, MAX_MANAGED_COMMAND_OUTPUT_ENTRIES,
+    MAX_MANAGED_COMMAND_OUTPUT_FILES, MAX_MANAGED_COMMAND_OUTPUT_TOTAL_BYTES,
+};
 pub(crate) use managed_runtime::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
+    infer_managed_pdf_command_kind, infer_managed_pdf_workspace_input,
     validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
     validate_managed_artifact_command_shape,
 };
@@ -160,8 +167,92 @@ fn command_terminal_result_value(
             "status".to_string(),
             serde_json::Value::String("exited".to_string()),
         );
+        // `history_open` is durable evidence, not an independently trusted projection field.
+        // Reinsert it only after validating the route shape below. If durable evidence claims a
+        // route but validation fails, retain only an explicit invalid marker: the storage resolver
+        // must fail closed instead of mistaking the result for a non-Session command and creating
+        // a second Exact Archive.
+        let history_route_claimed = command_result.authoritative_archive_ref.is_some()
+            || command_result.history_open.is_some();
+        object.remove("historyOpen");
+        // A live Host result still owns the raw archive identity, so derive the route from that
+        // authority first. A deserialized action-audit receipt deliberately has only the opaque
+        // route; accept it only when it decodes to the exact archive-start shape emitted below.
+        // This keeps live and durable canonical ToolResults identical without letting a malformed
+        // persisted string smuggle another conversation_history operation into the model result.
+        let history_open = command_result
+            .authoritative_archive_ref
+            .as_deref()
+            .and_then(|archive_ref| {
+                match crate::storage::conversation_history_open::encode_archive_history_open(
+                    archive_ref,
+                    0,
+                ) {
+                    Ok(open) => Some(open),
+                    Err(error) => {
+                        eprintln!("failed to encode authoritative command history route: {error}");
+                        None
+                    }
+                }
+            })
+            .or_else(|| validated_persisted_command_history_open(command_result));
+        if let Some(open) = history_open {
+            object.insert(
+                "historyOpen".to_string(),
+                serde_json::Value::String(open.clone()),
+            );
+            object.insert(
+                "continueWith".to_string(),
+                serde_json::json!({
+                    "tool": "conversation_history",
+                    "args": { "open": open }
+                }),
+            );
+        } else if history_route_claimed {
+            object.insert(
+                "historyOpenInvalid".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
     }
     value
+}
+
+fn validated_persisted_command_history_open(
+    command_result: &AgentCommandExecutionResult,
+) -> Option<String> {
+    let open = command_result.history_open.as_deref()?;
+    match crate::storage::conversation_history_open::decode_history_open(open) {
+        Ok(crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            start_char: 0,
+            ..
+        }) => Some(open.to_string()),
+        Ok(_) => {
+            eprintln!("ignored non-archive command history route in durable execution evidence");
+            None
+        }
+        Err(error) => {
+            eprintln!(
+                "ignored invalid command history route in durable execution evidence: {error}"
+            );
+            None
+        }
+    }
+}
+
+/// Binds one Host-verified Exact Archive to a command execution without exposing its raw id.
+///
+/// The backend-only ref remains available until runtime archival finishes, while the deterministic
+/// opaque route is the only identity serialized into action audit evidence or model projections.
+pub fn bind_authoritative_command_archive(
+    command_result: &mut AgentCommandExecutionResult,
+    archive_ref: String,
+) -> Result<(), String> {
+    let history_open =
+        crate::storage::conversation_history_open::encode_archive_history_open(&archive_ref, 0)?;
+    command_result.authoritative_archive_ref = Some(archive_ref);
+    command_result.history_open = Some(history_open);
+    Ok(())
 }
 
 #[cfg(all(test, not(windows)))]

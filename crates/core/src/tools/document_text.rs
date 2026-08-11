@@ -327,12 +327,7 @@ mod tests {
     #[test]
     fn document_tool_schemas_keep_only_an_unbounded_compatibility_hint() {
         let registry = ToolRegistry::defaults_with_search(None);
-        for tool in [
-            "read_pdf",
-            "read_word",
-            "read_spreadsheet",
-            "read_presentation",
-        ] {
+        for tool in ["read_word", "read_spreadsheet", "read_presentation"] {
             let definition = registry
                 .definitions()
                 .into_iter()

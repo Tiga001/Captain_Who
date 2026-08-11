@@ -1,6 +1,8 @@
 //! Construction of the already-authorized OS spawn request.
 
-use super::{configure_command_process_group, relative_cwd};
+use super::{
+    configure_command_process_group, output_capture::ProcessOutputRedactionSet, relative_cwd,
+};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,6 +15,7 @@ pub(crate) struct CommandSpawnPlan {
     cwd_projection: String,
     hard_timeout: Option<Duration>,
     launch: CommandLaunchPlan,
+    output_redactions: ProcessOutputRedactionSet,
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +71,7 @@ impl CommandSpawnPlan {
             cwd_projection,
             hard_timeout,
             launch: CommandLaunchPlan::Shell,
+            output_redactions: ProcessOutputRedactionSet::default(),
         }
     }
 
@@ -96,7 +100,13 @@ impl CommandSpawnPlan {
                 environment,
                 clear_environment,
             },
+            output_redactions: ProcessOutputRedactionSet::default(),
         }
+    }
+
+    pub(crate) fn with_output_redactions(mut self, redactions: ProcessOutputRedactionSet) -> Self {
+        self.output_redactions = redactions;
+        self
     }
 
     pub(crate) fn build(&self) -> Command {
@@ -137,6 +147,10 @@ impl CommandSpawnPlan {
 
     pub(crate) fn hard_timeout(&self) -> Option<Duration> {
         self.hard_timeout
+    }
+
+    pub(crate) fn output_redactions(&self) -> &ProcessOutputRedactionSet {
+        &self.output_redactions
     }
 }
 

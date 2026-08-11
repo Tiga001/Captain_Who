@@ -7,6 +7,10 @@ pub(super) struct ShellSegment {
     pub(super) tokens: Vec<String>,
     pub(super) has_write_redirection: bool,
     pub(super) input_redirections: Vec<ShellInputRedirection>,
+    /// A safely quoted here-document feeds data to this segment. The body is deliberately absent:
+    /// it is shell input, not another command. Shell interpreters remain forbidden below because
+    /// they would execute that input as a script.
+    pub(super) has_heredoc: bool,
 }
 
 #[derive(Debug)]
@@ -19,12 +23,16 @@ pub(super) struct ShellInputRedirection {
 pub(super) struct LexedCommand {
     pub(super) segments: Vec<ShellSegment>,
     pub(super) embedded_commands: Vec<String>,
+    /// Character ranges occupied by quoted here-document bodies and terminators. Independent
+    /// policy scans must skip these ranges so data containing `>` or command-looking text is not
+    /// reinterpreted as shell syntax.
+    pub(super) ignored_policy_ranges: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Debug)]
-pub(super) struct CommandSyntaxError {
-    pub(super) code: &'static str,
-    pub(super) reason: &'static str,
+pub(crate) struct CommandSyntaxError {
+    pub(crate) code: &'static str,
+    pub(crate) reason: &'static str,
 }
 
 /// Evaluates a command using the same classifier used to populate proposal risk metadata.
@@ -245,9 +253,9 @@ pub(super) fn analyze_command(
             reason: "命令的嵌套层级超过安全分析上限。",
         });
     }
-    validate_command_shape(command)?;
-    validate_write_redirection_targets(command)?;
-    let lexed = lex_command(command)?;
+    let command = normalize_command_text(command)?;
+    let lexed = lex_command(&command)?;
+    validate_write_redirection_targets(&command, &lexed.ignored_policy_ranges)?;
     let mut findings = Vec::new();
 
     for (segment_index, segment) in lexed.segments.iter().enumerate() {
@@ -272,35 +280,49 @@ pub(super) fn analyze_command(
     Ok(findings)
 }
 
-pub(super) fn validate_command_shape(command: &str) -> Result<(), CommandSyntaxError> {
-    let command = command.trim();
-    if command.is_empty() {
+/// Returns the one canonical command representation used by model ingestion, policy, approval,
+/// checkpoints, and process launch.
+///
+/// JSON providers commonly emit CRLF (and occasionally lone CR) even on Unix. Normalize both
+/// transport spellings to LF before any durable or executable consumer sees the command. Leading
+/// and trailing whitespace is semantically meaningful for scripts and here-documents, so it is
+/// preserved; trimming is used only to reject an all-whitespace command.
+pub(crate) fn normalize_command_text(command: &str) -> Result<String, CommandSyntaxError> {
+    let normalized = command.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.trim().is_empty() {
         return Err(CommandSyntaxError {
             code: "command.malformed.empty",
             reason: "命令不能为空。",
         });
     }
-    if command.chars().count() > MAX_COMMAND_CHARS {
+    if normalized.chars().count() > MAX_COMMAND_CHARS {
         return Err(CommandSyntaxError {
             code: "command.malformed.too_long",
             reason: "命令超过允许的长度上限。",
         });
     }
-    if command.contains('\0') || command.contains('\n') || command.contains('\r') {
+    if normalized.contains('\0') {
         return Err(CommandSyntaxError {
-            code: "command.malformed.control_character",
-            reason: "命令不能包含空字符或换行符。",
+            code: "command.malformed.nul",
+            reason: "命令不能包含空字符。",
         });
     }
-    Ok(())
+    Ok(normalized)
 }
 
-pub(super) fn validate_write_redirection_targets(command: &str) -> Result<(), CommandSyntaxError> {
+pub(super) fn validate_write_redirection_targets(
+    command: &str,
+    ignored_ranges: &[std::ops::Range<usize>],
+) -> Result<(), CommandSyntaxError> {
     let chars = command.chars().collect::<Vec<_>>();
     let mut quote = None;
     let mut escaped = false;
     let mut index = 0;
     while index < chars.len() {
+        if let Some(range) = ignored_ranges.iter().find(|range| range.contains(&index)) {
+            index = range.end;
+            continue;
+        }
         let character = chars[index];
         if escaped {
             escaped = false;

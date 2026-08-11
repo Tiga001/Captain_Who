@@ -232,11 +232,17 @@ pub(super) fn run_shell_command_with_output_observer(
     action_cancel_flag: Option<Arc<AtomicBool>>,
     output_observer: Option<ProcessOutputObserver>,
 ) -> Result<AgentCommandExecutionResult, String> {
+    let mut canonical_request = request.clone();
+    canonical_request.command = normalize_command_text(&request.command)
+        .map_err(|error| format!("命令无效（{}）：{}", error.code, error.reason))?;
+    let request = &canonical_request;
+
     // An approval can be cancelled after the backend registers the frozen action but before its
     // worker reaches this blocking executor. Consume that intent before spawning a process so a
     // successfully acknowledged pre-start cancellation cannot produce side effects.
     if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
         return Ok(AgentCommandExecutionResult {
+            outputs: Vec::new(),
             command: request.command.clone(),
             cwd: relative_cwd(root, cwd),
             exit_code: None,
@@ -255,6 +261,9 @@ pub(super) fn run_shell_command_with_output_observer(
             artifact_observation: None,
             input_files: Vec::new(),
             runtime: None,
+            managed_outputs: None,
+            authoritative_archive_ref: None,
+            history_open: None,
         });
     }
     // The managed-session kernel treats an absent hard timeout as genuinely

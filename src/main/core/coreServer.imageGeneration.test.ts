@@ -208,6 +208,37 @@ describe('CoreServer image generation configuration client', () => {
     )
   })
 
+  it('uses the same validated read channel for a conversation-authorized PDF', async () => {
+    const documentArtifact = {
+      artifactId: `sha256:${artifactSha256}`,
+      uri: `artifact://sha256/${artifactSha256}`,
+      kind: 'document',
+      format: 'pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 5,
+      sha256: artifactSha256
+    } as const
+    const input = {
+      schemaVersion: 1,
+      artifact: documentArtifact,
+      conversationId: 'conversation-1'
+    } as const
+    rpcRequest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      artifact: documentArtifact,
+      fileName: `artifact-${artifactSha256.slice(0, 12)}.pdf`,
+      dataBase64: 'aGVsbG8='
+    })
+
+    await expect(new CoreServer().readImageGenerationArtifact(input)).resolves.toEqual({
+      schemaVersion: 1,
+      artifact: documentArtifact,
+      fileName: `artifact-${artifactSha256.slice(0, 12)}.pdf`,
+      bytes: Uint8Array.from(Buffer.from('hello'))
+    })
+    expect(rpcRequest).toHaveBeenCalledWith(IMAGE_GENERATION_READ_ARTIFACT_METHOD, input)
+  })
+
   it('rejects changed Artifact content and response identity', async () => {
     const response = {
       schemaVersion: 1,

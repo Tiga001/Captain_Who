@@ -128,6 +128,7 @@ fn persist_settled_manual_command(
         .unwrap();
 
     let command_result = AgentCommandExecutionResult {
+        outputs: Vec::new(),
         command: "node build.mjs".to_string(),
         cwd: "/workspace".to_string(),
         exit_code: Some(0),
@@ -146,6 +147,9 @@ fn persist_settled_manual_command(
         artifact_observation: None,
         input_files: Vec::new(),
         runtime: None,
+        managed_outputs: None,
+        authoritative_archive_ref: None,
+        history_open: None,
     };
     let tool_result = crate::command::command_tool_result(call_id, &command_result);
     let mut terminal_audit = approved_audit;

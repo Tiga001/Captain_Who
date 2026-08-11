@@ -24,8 +24,10 @@ use mycopilot_protocol_rs::{
     ImageGenerationDefaultsDto, ImageGenerationGetConfigurationResponse,
     ImageGenerationReadinessDto, ImageGenerationSetEnabledRequest, ImageGenerationSizePresetDto,
     ImageGenerationStatusDto, ImageGenerationUpdateConfigurationRequest,
-    ImageGenerationUpdateConfigurationResponse, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
-    IMAGE_GENERATION_ARTIFACT_ERROR_CODE, IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+    ImageGenerationUpdateConfigurationResponse, ManagedArtifactReadIdentityDto,
+    ManagedDocumentArtifactDto, ManagedDocumentArtifactFormatDto, ManagedDocumentArtifactKindDto,
+    IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION, IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+    IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
 };
 
 pub(crate) fn image_generation_configuration_operation(
@@ -169,6 +171,7 @@ pub(crate) fn handle_image_generation_configuration_request(
 
 pub(crate) async fn handle_image_generation_artifact_request(
     store: Arc<ManagedImageGenerationArtifactStore>,
+    storage: Arc<StorageService>,
     request: JsonRpcRequest,
 ) -> Value {
     let id = request.id;
@@ -189,8 +192,16 @@ pub(crate) async fn handle_image_generation_artifact_request(
             )
         }
     };
-    let candidate = match artifact_candidate(&input.artifact) {
-        Some(candidate) => candidate,
+    if input.conversation_id.as_deref().is_some_and(|value| {
+        value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+    }) {
+        return image_generation_artifact_error_response(
+            id,
+            ImageGenerationArtifactErrorCodeDto::InvalidRequest,
+        );
+    }
+    let target = match artifact_read_target(&input.artifact) {
+        Some(target) => target,
         None => {
             return image_generation_artifact_error_response(
                 id,
@@ -199,24 +210,94 @@ pub(crate) async fn handle_image_generation_artifact_request(
         }
     };
 
-    let content = match store.read_published(&candidate).await {
-        Ok(Some(content)) => content,
-        Ok(None) => {
+    let managed_content = if let Some(conversation_id) = input.conversation_id.as_deref() {
+        let storage = Arc::clone(&storage);
+        let artifact_id = target.artifact_id().to_string();
+        let conversation_id = conversation_id.to_string();
+        match tokio::task::spawn_blocking(move || {
+            storage.read_authorized_managed_artifact(&artifact_id, &conversation_id)
+        })
+        .await
+        {
+            Ok(Ok(content)) => content,
+            Ok(Err(_)) | Err(_) => {
+                return image_generation_artifact_error_response(
+                    id,
+                    ImageGenerationArtifactErrorCodeDto::Unavailable,
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let bytes = if let Some(content) = managed_content {
+        let identity_matches = target.matches_managed_content(&content);
+        if !identity_matches {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::IntegrityCheckFailed,
+            );
+        }
+        content.bytes
+    } else {
+        let ArtifactReadTarget::Image(candidate) = &target else {
+            // Generic documents are always conversation grants. A guessed content-addressed URI
+            // must never fall through to the legacy generated-image journal.
             return image_generation_artifact_error_response(
                 id,
                 ImageGenerationArtifactErrorCodeDto::NotFound,
-            )
+            );
+        };
+        // The image store is shared by legacy generation and generic managed-command Artifacts.
+        // Require the legacy publication journal before consulting raw objects so an ungranted
+        // generic sha256 URI cannot cross a conversation boundary merely by being guessed.
+        let storage_for_lookup = Arc::clone(&storage);
+        let artifact_id = candidate.artifact_id.clone();
+        let legacy = match tokio::task::spawn_blocking(move || {
+            storage_for_lookup.resolve_published_generated_artifact_input(&artifact_id, None)
+        })
+        .await
+        {
+            Ok(Ok(legacy)) => legacy,
+            Ok(Err(_)) | Err(_) => {
+                return image_generation_artifact_error_response(
+                    id,
+                    ImageGenerationArtifactErrorCodeDto::Unavailable,
+                )
+            }
+        };
+        let Some(legacy) = legacy else {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::NotFound,
+            );
+        };
+        if !matches!(
+            legacy.kind,
+            mycopilot_core::storage::service::ResolvedGeneratedArtifactKind::ImageGeneration
+        ) || legacy.sha256 != candidate.sha256
+            || legacy.size_bytes != candidate.size_bytes
+        {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::IntegrityCheckFailed,
+            );
         }
-        Err(error) => return image_generation_artifact_store_error_response(id, error.code),
+        match store.read_published(candidate).await {
+            Ok(Some(content)) => content.bytes,
+            Ok(None) => {
+                return image_generation_artifact_error_response(
+                    id,
+                    ImageGenerationArtifactErrorCodeDto::NotFound,
+                )
+            }
+            Err(error) => return image_generation_artifact_store_error_response(id, error.code),
+        }
     };
-    let artifact = artifact_dto(&content.candidate);
-    let file_name = format!(
-        "generated-image-{}.{}",
-        &content.candidate.sha256[..12],
-        content.candidate.format.extension()
-    );
+    let artifact = target.identity();
+    let file_name = target.file_name();
     let data_base64 = match tokio::task::spawn_blocking(move || {
-        base64::engine::general_purpose::STANDARD.encode(content.bytes)
+        base64::engine::general_purpose::STANDARD.encode(bytes)
     })
     .await
     {
@@ -237,6 +318,87 @@ pub(crate) async fn handle_image_generation_artifact_request(
             data_base64,
         },
     )
+}
+
+enum ArtifactReadTarget {
+    Image(ImageGenerationArtifactCandidate),
+    Document(ManagedDocumentArtifactDto),
+}
+
+impl ArtifactReadTarget {
+    fn artifact_id(&self) -> &str {
+        match self {
+            Self::Image(candidate) => &candidate.artifact_id,
+            Self::Document(document) => &document.artifact_id,
+        }
+    }
+
+    fn identity(&self) -> ManagedArtifactReadIdentityDto {
+        match self {
+            Self::Image(candidate) => {
+                ManagedArtifactReadIdentityDto::Image(artifact_dto(candidate))
+            }
+            Self::Document(document) => ManagedArtifactReadIdentityDto::Document(document.clone()),
+        }
+    }
+
+    fn file_name(&self) -> String {
+        match self {
+            Self::Image(candidate) => format!(
+                "generated-image-{}.{}",
+                &candidate.sha256[..12],
+                candidate.format.extension()
+            ),
+            Self::Document(document) => format!("artifact-{}.pdf", &document.sha256[..12]),
+        }
+    }
+
+    fn matches_managed_content(
+        &self,
+        content: &mycopilot_core::storage::service::AuthorizedManagedArtifactContent,
+    ) -> bool {
+        use mycopilot_core::storage::managed_artifact_repository::ManagedArtifactKind;
+        match self {
+            Self::Image(candidate) => {
+                content.kind == ManagedArtifactKind::Image
+                    && content.format == candidate.format.extension()
+                    && content.media_type == candidate.media_type
+                    && content.size_bytes == candidate.size_bytes
+                    && content.sha256 == candidate.sha256
+                    && content.width == Some(candidate.width)
+                    && content.height == Some(candidate.height)
+            }
+            Self::Document(document) => {
+                content.kind == ManagedArtifactKind::Document
+                    && content.format == "pdf"
+                    && content.media_type == "application/pdf"
+                    && content.size_bytes == document.size_bytes
+                    && content.sha256 == document.sha256
+                    && content.width.is_none()
+                    && content.height.is_none()
+            }
+        }
+    }
+}
+
+fn artifact_read_target(artifact: &ManagedArtifactReadIdentityDto) -> Option<ArtifactReadTarget> {
+    match artifact {
+        ManagedArtifactReadIdentityDto::Image(artifact) => {
+            artifact_candidate(artifact).map(ArtifactReadTarget::Image)
+        }
+        ManagedArtifactReadIdentityDto::Document(artifact) => {
+            let sha256 = artifact.sha256.as_str();
+            (is_lower_hex_sha256(sha256)
+                && artifact.artifact_id == format!("sha256:{sha256}")
+                && artifact.uri == format!("artifact://sha256/{sha256}")
+                && artifact.kind == ManagedDocumentArtifactKindDto::Document
+                && artifact.format == ManagedDocumentArtifactFormatDto::Pdf
+                && artifact.mime_type == "application/pdf"
+                && artifact.size_bytes > 0
+                && artifact.size_bytes <= 128 * 1024 * 1024)
+                .then(|| ArtifactReadTarget::Document(artifact.clone()))
+        }
+    }
 }
 
 fn artifact_candidate(
@@ -522,6 +684,11 @@ fn readiness_dto(readiness: ImageGenerationReadiness) -> ImageGenerationReadines
 mod tests {
     use super::*;
     use mycopilot_core::image_generation::InMemoryCredentialStore;
+    use mycopilot_core::storage::image_generation_execution_repository::{
+        ImageGenerationArtifactJournalRecord, ImageGenerationExecutionIdentityRecord,
+        ImageGenerationExecutionTerminalUpdate, StoredImageGenerationArtifactState,
+        StoredImageGenerationExecutionStatus,
+    };
     use sha2::{Digest, Sha256};
     use std::fs;
 
@@ -583,13 +750,14 @@ mod tests {
     fn artifact_fixture() -> (
         tempfile::TempDir,
         Arc<ManagedImageGenerationArtifactStore>,
+        Arc<StorageService>,
         Vec<u8>,
         Value,
     ) {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(
             ManagedImageGenerationArtifactStore::new(
-                temp.path(),
+                temp.path().join("image-generation-artifacts"),
                 ImageArtifactStoreConfig::default(),
             )
             .unwrap(),
@@ -601,10 +769,61 @@ mod tests {
             .unwrap();
         let sha256 = format!("{:x}", Sha256::digest(&bytes));
         fs::write(
-            temp.path().join("objects").join(format!("{sha256}.png")),
+            temp.path()
+                .join("image-generation-artifacts/objects")
+                .join(format!("{sha256}.png")),
             &bytes,
         )
         .unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let identity = ImageGenerationExecutionIdentityRecord {
+            execution_id: "legacy-execution-1".to_string(),
+            request_fingerprint: format!("sha256:{}", "a".repeat(64)),
+            safe_request_json: r#"{"schemaVersion":1}"#.to_string(),
+            profile_id: "default".to_string(),
+            adapter_id: "smartmlSeedream".to_string(),
+            profile_revision: 1,
+            model_id: "image-model".to_string(),
+            operation: "generate".to_string(),
+        };
+        storage.claim_image_generation_execution(&identity).unwrap();
+        storage
+            .prepare_image_generation_artifact(
+                &identity.execution_id,
+                &ImageGenerationArtifactJournalRecord {
+                    ordinal: 0,
+                    artifact_id: format!("sha256:{sha256}"),
+                    state: StoredImageGenerationArtifactState::Candidate,
+                    storage_relative_path: format!("objects/{sha256}.png"),
+                    format: "png".to_string(),
+                    media_type: "image/png".to_string(),
+                    width: 1,
+                    height: 1,
+                    size_bytes: bytes.len() as u64,
+                    sha256: sha256.clone(),
+                    created_at: 1,
+                    published_at: None,
+                },
+                Some("provider-request"),
+                Some(200),
+            )
+            .unwrap();
+        storage
+            .finalize_image_generation_execution(
+                &identity.execution_id,
+                &ImageGenerationExecutionTerminalUpdate {
+                    expected_request_fingerprint: identity.request_fingerprint,
+                    expected_artifact_sha256: Some(sha256.clone()),
+                    status: StoredImageGenerationExecutionStatus::Succeeded,
+                    remote_outcome_unknown: false,
+                    provider_succeeded: true,
+                    commit_may_have_succeeded: false,
+                    provider_request_id: Some("provider-request".to_string()),
+                    http_status: Some(200),
+                    terminal_result_json: r#"{"schemaVersion":1,"status":"succeeded"}"#.to_string(),
+                },
+            )
+            .unwrap();
         let artifact = json!({
             "artifactId": format!("sha256:{sha256}"),
             "uri": format!("image-artifact://sha256/{sha256}"),
@@ -616,7 +835,7 @@ mod tests {
             "sizeBytes": bytes.len(),
             "sha256": sha256,
         });
-        (temp, store, bytes, artifact)
+        (temp, store, storage, bytes, artifact)
     }
 
     #[test]
@@ -727,9 +946,10 @@ mod tests {
 
     #[tokio::test]
     async fn historical_artifact_read_is_independent_of_current_provider_configuration() {
-        let (_temp, store, bytes, artifact) = artifact_fixture();
+        let (_temp, store, storage, bytes, artifact) = artifact_fixture();
         let response = handle_image_generation_artifact_request(
             store,
+            storage,
             JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 id: JsonRpcId::Number(1),
@@ -754,11 +974,12 @@ mod tests {
 
     #[tokio::test]
     async fn artifact_read_returns_stable_not_found_and_identity_errors() {
-        let (_temp, store, _bytes, artifact) = artifact_fixture();
+        let (_temp, store, storage, _bytes, artifact) = artifact_fixture();
         let mut mismatched = artifact.clone();
         mismatched["width"] = json!(2);
         let invalid = handle_image_generation_artifact_request(
             Arc::clone(&store),
+            Arc::clone(&storage),
             JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 id: JsonRpcId::Number(1),
@@ -779,6 +1000,7 @@ mod tests {
         let missing_sha = "f".repeat(64);
         let missing = handle_image_generation_artifact_request(
             store,
+            storage,
             JsonRpcRequest {
                 jsonrpc: "2.0".to_string(),
                 id: JsonRpcId::Number(2),
@@ -802,5 +1024,174 @@ mod tests {
         .await;
         assert_eq!(missing["error"]["data"]["code"], "notFound");
         assert_eq!(missing["error"]["data"]["recovery"], "regenerate");
+    }
+
+    #[tokio::test]
+    async fn managed_command_image_read_requires_the_exact_conversation_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("storage.sqlite");
+        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, 1, 1)",
+                ["conversation-1", "test"],
+            )
+            .unwrap();
+        let store = Arc::new(
+            ManagedImageGenerationArtifactStore::new(
+                temp.path().join("image-generation-artifacts"),
+                ImageArtifactStoreConfig::default(),
+            )
+            .unwrap(),
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            )
+            .unwrap();
+        let source = temp.path().join("page.png");
+        fs::write(&source, &bytes).unwrap();
+        let published = storage
+            .publish_managed_artifact_file(
+                &source,
+                mycopilot_core::storage::service::ManagedArtifactAuthority {
+                    conversation_id: "conversation-1",
+                    run_id: "run-1",
+                    call_id: "call-1",
+                },
+            )
+            .unwrap();
+        let artifact = json!({
+            "artifactId": format!("sha256:{}", published.sha256),
+            "uri": published.read_path(),
+            "kind": "image",
+            "format": "png",
+            "mimeType": "image/png",
+            "width": 1,
+            "height": 1,
+            "sizeBytes": published.size_bytes,
+            "sha256": published.sha256,
+        });
+        let request = |id, conversation_id: Option<&str>| JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: JsonRpcId::Number(id),
+            method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+            params: Some(json!({
+                "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                "artifact": artifact,
+                "conversationId": conversation_id,
+            })),
+        };
+
+        let authorized = handle_image_generation_artifact_request(
+            Arc::clone(&store),
+            Arc::clone(&storage),
+            request(1, Some("conversation-1")),
+        )
+        .await;
+        assert_eq!(
+            authorized["result"]["dataBase64"],
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+
+        for (id, conversation_id) in [(2, Some("conversation-2")), (3, None)] {
+            let rejected = handle_image_generation_artifact_request(
+                Arc::clone(&store),
+                Arc::clone(&storage),
+                request(id, conversation_id),
+            )
+            .await;
+            assert_eq!(rejected["error"]["data"]["code"], "notFound");
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_pdf_read_requires_grant_and_exact_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("storage.sqlite");
+        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, 1, 1)",
+                ["conversation-pdf", "test"],
+            )
+            .unwrap();
+        let store = Arc::new(
+            ManagedImageGenerationArtifactStore::new(
+                temp.path().join("image-generation-artifacts"),
+                ImageArtifactStoreConfig::default(),
+            )
+            .unwrap(),
+        );
+        let bytes = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n".to_vec();
+        let source = temp.path().join("report.pdf");
+        fs::write(&source, &bytes).unwrap();
+        let published = storage
+            .publish_managed_artifact_file(
+                &source,
+                mycopilot_core::storage::service::ManagedArtifactAuthority {
+                    conversation_id: "conversation-pdf",
+                    run_id: "run-pdf",
+                    call_id: "call-pdf",
+                },
+            )
+            .unwrap();
+        let artifact = json!({
+            "artifactId": format!("sha256:{}", published.sha256),
+            "uri": published.read_path(),
+            "kind": "document",
+            "format": "pdf",
+            "mimeType": "application/pdf",
+            "sizeBytes": published.size_bytes,
+            "sha256": published.sha256,
+        });
+        let request = |id, conversation_id: &str, artifact: Value| JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: JsonRpcId::Number(id),
+            method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+            params: Some(json!({
+                "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                "artifact": artifact,
+                "conversationId": conversation_id,
+            })),
+        };
+
+        let authorized = handle_image_generation_artifact_request(
+            Arc::clone(&store),
+            Arc::clone(&storage),
+            request(1, "conversation-pdf", artifact.clone()),
+        )
+        .await;
+        assert_eq!(
+            authorized["result"]["dataBase64"],
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+        assert!(authorized["result"]["fileName"]
+            .as_str()
+            .unwrap()
+            .ends_with(".pdf"));
+
+        let cross_conversation = handle_image_generation_artifact_request(
+            Arc::clone(&store),
+            Arc::clone(&storage),
+            request(2, "conversation-other", artifact.clone()),
+        )
+        .await;
+        assert_eq!(cross_conversation["error"]["data"]["code"], "notFound");
+
+        let mut tampered = artifact;
+        tampered["sizeBytes"] = json!(published.size_bytes + 1);
+        let identity_error = handle_image_generation_artifact_request(
+            store,
+            storage,
+            request(3, "conversation-pdf", tampered),
+        )
+        .await;
+        assert_eq!(
+            identity_error["error"]["data"]["code"],
+            "integrityCheckFailed"
+        );
     }
 }

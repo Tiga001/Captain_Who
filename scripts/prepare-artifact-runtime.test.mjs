@@ -32,6 +32,12 @@ import {
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const manifestPath = join(repositoryRoot, 'resources', 'artifact-runtime-manifest.json')
+const requirementsPath = join(
+  repositoryRoot,
+  'resources',
+  'artifact-runtime-python-requirements.txt'
+)
+const builderPath = join(repositoryRoot, 'scripts', 'prepare-artifact-runtime.mjs')
 const bootstrapPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-bootstrap.mjs')
 const loaderPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-loader.mjs')
 
@@ -39,10 +45,10 @@ async function rawManifest() {
   return JSON.parse(await readFile(manifestPath, 'utf8'))
 }
 
-test('manifest pins runtime assets and Office dependency versions for every desktop target', async () => {
+test('manifest pins runtime assets and Office/PDF dependency versions for every desktop target', async () => {
   const manifest = await loadArtifactRuntimeManifest(manifestPath)
   assert.equal(manifest.schemaVersion, 3)
-  assert.equal(manifest.bundleVersion, '2026.07.3')
+  assert.equal(manifest.bundleVersion, '2026.08.1')
   assert.equal(manifest.node.version, '22.23.1')
   assert.equal(manifest.python.version, '3.12.13')
   assert.deepEqual(
@@ -57,8 +63,12 @@ test('manifest pins runtime assets and Office dependency versions for every desk
     manifest.python.dependencies.map(({ name, version }) => [name, version]),
     [
       ['openpyxl', '3.1.5'],
+      ['pdfplumber', '0.11.9'],
+      ['pypdf', '6.15.0'],
+      ['pypdfium2', '5.12.1'],
       ['python-docx', '1.2.0'],
       ['python-pptx', '1.0.2'],
+      ['reportlab', '4.4.9'],
       ['xlsxwriter', '3.2.9']
     ]
   )
@@ -71,6 +81,49 @@ test('manifest pins runtime assets and Office dependency versions for every desk
       assert.ok(selected.python.size > 15_000_000)
     }
   }
+})
+
+test('managed Python requirements freeze the PDF dependency closure and binary-only install policy', async () => {
+  const requirements = await readFile(requirementsPath, 'utf8')
+  const records = requirements
+    .replaceAll(/\\\r?\n\s*/g, ' ')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+  const expectedPins = [
+    'cffi==2.1.1',
+    'charset-normalizer==3.4.9',
+    'cryptography==46.0.3',
+    'et-xmlfile==2.0.0',
+    'lxml==6.0.2',
+    'openpyxl==3.1.5',
+    'pdfminer-six==20251230',
+    'pdfplumber==0.11.9',
+    'pillow==12.2.0',
+    'pycparser==3.0',
+    'pypdf==6.15.0',
+    'pypdfium2==5.12.1',
+    'python-docx==1.2.0',
+    'python-pptx==1.0.2',
+    'reportlab==4.4.9',
+    'typing-extensions==4.16.0',
+    'xlsxwriter==3.2.9'
+  ]
+  assert.deepEqual(
+    records.map((record) => record.slice(0, record.indexOf(' '))).sort(),
+    expectedPins.sort()
+  )
+  assert.ok(records.every((record) => / --hash=sha256:[a-f0-9]{64}(?: |$)/.test(record)))
+  assert.equal(
+    records.find((record) => record.startsWith('pypdfium2==')).match(/--hash=/g).length,
+    6
+  )
+
+  const builder = await readFile(builderPath, 'utf8')
+  assert.match(builder, /'--require-hashes'/)
+  assert.match(builder, /'--only-binary=:all:'/)
+  assert.match(builder, /'--no-cache-dir'/)
+  assert.match(builder, /'--no-compile'/)
 })
 
 test('manifest and download policy fail closed on mutable or foreign supply-chain inputs', async () => {
@@ -317,12 +370,21 @@ async function offlineComponentSource() {
   for (const dependency of manifest.python.dependencies) {
     const identity = join(directory, ...dependency.identityFile.split('/'))
     await mkdir(dirname(identity), { recursive: true })
+    const reviewedLicenseMetadata = {
+      pdfplumber: null,
+      pypdfium2: 'BSD-3-Clause, Apache-2.0, dependency licenses',
+      reportlab:
+        'BSD license (see license.txt for details), Copyright (c) 2000-2025, ReportLab Inc.'
+    }
+    const declaredLicense = Object.hasOwn(reviewedLicenseMetadata, dependency.name)
+      ? reviewedLicenseMetadata[dependency.name]
+      : 'MIT'
     await writeFile(
       identity,
       [
         `Name: ${dependency.name}`,
         `Version: ${dependency.version}`,
-        'License: MIT',
+        ...(declaredLicense === null ? [] : [`License: ${declaredLicense}`]),
         `Home-page: https://example.invalid/${dependency.name}`,
         ''
       ].join('\n')
@@ -405,7 +467,24 @@ test(
         .filter(({ direct }) => direct)
         .map(({ name }) => name)
         .sort(),
-      ['openpyxl', 'python-docx', 'python-pptx', 'xlsxwriter']
+      [
+        'openpyxl',
+        'pdfplumber',
+        'pypdf',
+        'pypdfium2',
+        'python-docx',
+        'python-pptx',
+        'reportlab',
+        'xlsxwriter'
+      ]
+    )
+    assert.equal(
+      legal.packages.python.find(({ name }) => name === 'pdfplumber').licenseExpression,
+      'MIT'
+    )
+    assert.equal(
+      legal.packages.python.find(({ name }) => name === 'pypdfium2').licenseExpression,
+      'NOASSERTION'
     )
     for (const entry of [...legal.runtimes, ...legal.packages.node, ...legal.packages.python]) {
       for (const evidence of entry.evidence) {
@@ -541,5 +620,25 @@ test('legal evidence generation fails closed for an unreviewed package without a
   await assert.rejects(
     prepareArtifactRuntimeLegalEvidence(source.manifest, source.directory),
     /has no license file or exact reviewed exception/
+  )
+})
+
+test('reviewed Python PDF license evidence fails closed when wheel metadata changes', async () => {
+  const source = await offlineComponentSource()
+  const dependency = source.manifest.python.dependencies.find(({ name }) => name === 'pypdfium2')
+  const identity = join(source.directory, ...dependency.identityFile.split('/'))
+  await writeFile(
+    identity,
+    [
+      `Name: ${dependency.name}`,
+      `Version: ${dependency.version}`,
+      'License: BSD-3-Clause',
+      'Home-page: https://example.invalid/pypdfium2',
+      ''
+    ].join('\n')
+  )
+  await assert.rejects(
+    prepareArtifactRuntimeLegalEvidence(source.manifest, source.directory),
+    /no longer matches its reviewed license metadata/
   )
 })

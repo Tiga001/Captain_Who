@@ -143,6 +143,10 @@ function StandardAgentApprovalDialog({
   const [isSubmitting, setIsSubmitting] = useState(false)
   const request = getApprovalRequest(action, t)
   const code = getApprovalCode(action)
+  const codeMultiline =
+    action.type === 'skill_script' ||
+    action.type === 'office_operation' ||
+    (action.type === 'command' && /[\r\n]/u.test(code))
   const policyHint = getApprovalPolicyHint(action, t)
   const rememberPrefix = getRememberCommandPrefix(action)
   const showRememberChoice = canRememberForRun(action)
@@ -169,7 +173,7 @@ function StandardAgentApprovalDialog({
       approvalKind="standard"
       approveLabel={t('agent.approval.dialog.approve')}
       code={code}
-      codeMultiline={action.type === 'skill_script' || action.type === 'office_operation'}
+      codeMultiline={codeMultiline}
       isSubmitting={isSubmitting}
       onApprove={() => approve(false)}
       onReject={reject}

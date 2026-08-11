@@ -236,6 +236,18 @@ pub enum ImageGenerationArtifactFormatDto {
     Webp,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagedDocumentArtifactKindDto {
+    Document,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ManagedDocumentArtifactFormatDto {
+    Pdf,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageGenerationArtifactDto {
@@ -250,18 +262,44 @@ pub struct ImageGenerationArtifactDto {
     pub sha256: String,
 }
 
+/// Immutable identity for a generic command-published document.
+///
+/// The existing `imageGeneration.readArtifact` transport accepts this presentation-safe union so
+/// Renderer clients can download a managed PDF without adding another RPC/IPC surface. The name
+/// is retained for wire compatibility; authorization remains conversation-scoped in the Host.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedDocumentArtifactDto {
+    pub artifact_id: String,
+    pub uri: String,
+    pub kind: ManagedDocumentArtifactKindDto,
+    pub format: ManagedDocumentArtifactFormatDto,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ManagedArtifactReadIdentityDto {
+    Image(ImageGenerationArtifactDto),
+    Document(ManagedDocumentArtifactDto),
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageGenerationArtifactReadRequest {
     pub schema_version: u32,
-    pub artifact: ImageGenerationArtifactDto,
+    pub artifact: ManagedArtifactReadIdentityDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageGenerationArtifactReadResponse {
     pub schema_version: u32,
-    pub artifact: ImageGenerationArtifactDto,
+    pub artifact: ManagedArtifactReadIdentityDto,
     pub file_name: String,
     pub data_base64: String,
 }

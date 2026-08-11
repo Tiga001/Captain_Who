@@ -1,7 +1,8 @@
 use super::{clean_relative_path, AgentTool, ToolExecutionContext};
 use crate::command::{
     classify_command_risk, infer_managed_artifact_builder_command,
-    infer_managed_artifact_command_kind, validate_command_runtime_binding,
+    infer_managed_artifact_command_kind, infer_managed_pdf_command_kind,
+    infer_managed_pdf_workspace_input, normalize_command_text, validate_command_runtime_binding,
     validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
     validate_managed_artifact_command_shape, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
     MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
@@ -15,12 +16,13 @@ use crate::file_input::{
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandArtifactObservationKind,
     AgentCommandArtifactObservationRequest, AgentCommandRequest, AgentCommandRuntimeProfile,
-    AgentCommandRuntimeRequest, AgentError, AgentFileInputSpec, AgentProposedAction, AgentResult,
-    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus, AgentToolCall,
-    AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentCommandRuntimeRequest, AgentError, AgentFileInputRef, AgentFileInputSpec,
+    AgentProposedAction, AgentResult, AgentSkillMaterializationResult,
+    AgentSkillMaterializationResultStatus, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    AgentToolSafety,
 };
 use crate::skills::{
-    SkillResourceUri, APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID,
+    SkillResourceUri, APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, PDF_LOCAL_ID,
     PRESENTATIONS_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
 };
 use crate::system_paths::expand_system_path;
@@ -43,12 +45,12 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. The Host owns process lifetime and its short initial yield; do not add a deadline merely to bound tool waiting or confirm startup. A command that outlives that initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized files into a private read-only input root. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, @attachments, image-artifact, and revision-bound skill paths automatically. The managed script reads MYCOPILOT_INPUT_ROOT plus each resolved mountPath; it must never open @attachments or skill:// directly.".to_string(),
+            description: "Run one bounded non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. The command string may contain multiple lines; the Host normalizes line endings and evaluates every newline, pipeline, `&&`, `||`, and `;` segment before execution. A safely quoted heredoc delimiter such as `<<'PY'` is supported for ordinary commands; unquoted delimiters, here-strings, background execution, and shell-interpreter heredocs are denied. Command policy may execute the command automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The Host owns process lifetime and its short initial yield; do not add a deadline merely to bound tool waiting or confirm startup. A command that outlives that initial yield returns status=running with a sessionId; running is not final success. For a GUI app or long-lived server, normally finish the turn after confirming startup instead of waiting for natural exit. For a build, test, or other serial command whose final result is required, call command_session once with action=wait and let the Host wait quietly; do not repeatedly poll or narrate waiting. Background output and exit update Host state but never start a new model turn. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. Trusted activated built-in Skills may also bind a managed runtime, private working directory, and output publication contract; follow the activated Skill instructions rather than guessing Host paths or runtimeProfile. inputs may bind authorized files read-only for a Host-bound managed workflow. Give each input only the path returned by another tool or supplied by the user; the host recognizes workspace, absolute/system, attachment, artifact, and revision-bound Skill paths automatically.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "A single-line, non-interactive shell command without literal newline or null characters. Side effects and every compound shell segment are evaluated by the host policy." },
-                    "cwd": { "type": "string", "description": "Working directory. May be workspace-relative, absolute, or @home/@desktop/@documents/@downloads when permissions allow. Required when no workspace exists." },
+                    "command": { "type": "string", "maxLength": MAX_COMMAND_CHARS, "description": "One bounded, non-interactive shell command. Literal newlines are allowed; CRLF/CR are normalized to LF and every newline, pipeline, `&&`, `||`, and `;` segment is evaluated by Host policy. A quoted heredoc delimiter such as `<<'PY'` is supported for ordinary commands; unquoted heredocs, here-strings, background execution, and NUL are rejected." },
+                    "cwd": { "type": "string", "description": "Working directory. May be workspace-relative, absolute, or @home/@desktop/@documents/@downloads when permissions allow. Required when no workspace exists unless a trusted activated built-in Skill explicitly supplies a private working directory." },
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
@@ -84,20 +86,20 @@ impl AgentTool for RunCommandTool {
                     "inputs": {
                         "type": "array",
                         "maxItems": MAX_AGENT_FILE_INPUTS,
-                        "description": "Optional read-only inputs for a managed Office Builder or explicit runtimeProfile command. Pass one path per file; the host resolves its authority, freezes hash/size, revalidates after approval, and materializes it below MYCOPILOT_INPUT_ROOT. This field is unavailable for ordinary shell commands.",
+                        "description": "Optional read-only inputs for a Host-bound managed workflow. Pass one authorized path per file; the host freezes hash/size and revalidates it after approval. This field is unavailable for ordinary shell commands; follow the activated Skill for its private input convention.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "path": {
                                     "type": "string",
                                     "minLength": 1,
-                                    "description": "A workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... URI, or revision-bound skill://... URI."
+                                    "description": "A workspace-relative path, absolute path, system alias, @attachments/... path, image-artifact://... or artifact://... URI, or revision-bound skill://... URI."
                                 },
                                 "mountPath": {
                                     "type": "string",
                                     "minLength": 1,
                                     "maxLength": MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
-                                    "description": "Optional stable safe relative path beneath MYCOPILOT_INPUT_ROOT. If omitted, the host uses the source filename."
+                                    "description": "Optional stable safe relative input path. If omitted, the host uses the source filename."
                                 }
                             },
                             "required": ["path"],
@@ -181,6 +183,12 @@ fn project_command_execution(value: &Value) -> Option<Value> {
         "stdout",
         "stderr",
         "error",
+        // A Host-owned command Session may already have committed the full stdout/stderr body
+        // before the ordinary ToolResult is assembled. Preserve its opaque recovery route so the
+        // central 10K gate reuses that authoritative archive instead of inventing a second,
+        // bounded-preview archive.
+        "historyOpen",
+        "continueWith",
     ] {
         super::model_projection::insert_field(&mut output, value, field);
     }
@@ -222,6 +230,17 @@ fn project_command_execution(value: &Value) -> Option<Value> {
         .and_then(project_artifact_observation)
     {
         output.insert("artifacts".to_string(), observation);
+    }
+    if let Some(outputs) = value.get("outputs").and_then(Value::as_array) {
+        let outputs = outputs
+            .iter()
+            .filter_map(|item| {
+                super::model_projection::retain_object_fields(item, &["name", "kind", "readPath"])
+            })
+            .collect::<Vec<_>>();
+        if !outputs.is_empty() {
+            output.insert("outputs".to_string(), Value::Array(outputs));
+        }
     }
     (!output.is_empty()).then_some(Value::Object(output))
 }
@@ -328,7 +347,23 @@ fn command_request_from_call(
     let args: RunCommandArgs = serde_json::from_value(call.args.clone())
         .map_err(|error| AgentError::new(format!("run_command 参数无效：{error}")))?;
     let command = sanitize_command(&args.command)?;
-    let cwd = sanitize_cwd(context, args.cwd)?;
+    if args.runtime_profile == Some(AgentCommandRuntimeProfile::Pdf) {
+        return Err(AgentError::structured(
+            "artifactRuntime.invalidRequest",
+            "PDF Runtime 由已激活的可信内置 PDF Skill 自动绑定，不能通过 runtimeProfile 请求。",
+            json!({
+                "type": "commandRuntimeProfile",
+                "code": "artifactRuntime.invalidRequest",
+                "recovery": "removeRuntimeProfile"
+            }),
+        ));
+    }
+    let managed_pdf_profile = trusted_managed_pdf_profile(context, &command, args.runtime_profile)?;
+    let cwd = if managed_pdf_profile.is_some() {
+        sanitize_managed_pdf_cwd(args.cwd)?
+    } else {
+        sanitize_cwd(context, args.cwd)?
+    };
     let reason = args
         .reason
         .or_else(|| call.reason.clone())
@@ -347,14 +382,14 @@ fn command_request_from_call(
         cwd.as_deref(),
         &builder_config.inferred_outputs,
     )?;
-    let runtime_binding = builder_config
-        .runtime_profile
+    let runtime_profile = builder_config.runtime_profile.or(managed_pdf_profile);
+    let runtime_binding = runtime_profile
         .map(|profile| prepare_runtime_binding(context, &command, profile))
         .transpose()?;
     if !args.inputs.is_empty() && runtime_binding.is_none() {
         return Err(AgentError::structured(
             "agent.fileInput.invalidRequest",
-            "run_command.inputs 只适用于带有 `--output` Office 文件的 Managed Builder，或显式设置了 runtimeProfile 的托管脚本命令。",
+            "run_command.inputs 只适用于后端已绑定的受管 Office/PDF 命令。",
             json!({
                 "type": "agentFileInput",
                 "code": "agent.fileInput.invalidRequest",
@@ -366,9 +401,59 @@ fn command_request_from_call(
         context.attachment_library().cloned(),
         context.skill_resources_optional(),
     )
-    .with_storage(context.storage_optional());
-    let input_specs = resolve_run_command_inputs(&input_context, args.inputs)?;
+    .with_storage(context.storage_optional())
+    .with_conversation_id(context.conversation_id_optional());
     let workspace_root = context.workspace_root_optional()?;
+    let mut input_specs = resolve_run_command_inputs(&input_context, args.inputs)?;
+    if managed_pdf_profile.is_some() && input_specs.is_empty() {
+        if let Some(relative) = infer_managed_pdf_workspace_input(&command).map_err(|message| {
+            AgentError::structured(
+                "agent.fileInput.invalidRequest",
+                message,
+                json!({
+                    "type": "agentFileInput",
+                    "code": "agent.fileInput.invalidRequest",
+                    "recovery": "changeRequest"
+                }),
+            )
+        })? {
+            // `outputs/` belongs to the private Run workspace and may have been produced by an
+            // earlier managed PDF command. It is deliberately not interpreted as a workspace
+            // input even when the selected workspace happens to contain a path with that name.
+            if !relative.starts_with("outputs/") {
+                let workspace_root = workspace_root.as_deref().ok_or_else(|| {
+                    AgentError::structured(
+                        "agent.fileInput.notFound",
+                        format!(
+                            "相对 PDF `{relative}` 没有可用的 workspace。附件、Artifact 或外部 PDF 必须通过 run_command.inputs 绑定，并在命令中使用 `$MYCOPILOT_INPUT_ROOT/<mountPath>`。"
+                        ),
+                        json!({
+                            "type": "agentFileInput",
+                            "code": "agent.fileInput.notFound",
+                            "recovery": "bindInput"
+                        }),
+                    )
+                })?;
+                if !workspace_root.join(&relative).is_file() {
+                    return Err(AgentError::structured(
+                        "agent.fileInput.notFound",
+                        format!(
+                            "当前 workspace 中不存在 PDF `{relative}`。请核对准确的工作区相对路径；如果它来自附件、Artifact 或外部位置，请通过 run_command.inputs 绑定，并在命令中使用 `$MYCOPILOT_INPUT_ROOT/<mountPath>`。"
+                        ),
+                        json!({
+                            "type": "agentFileInput",
+                            "code": "agent.fileInput.notFound",
+                            "recovery": "bindInput"
+                        }),
+                    ));
+                }
+                input_specs.push(AgentFileInputSpec {
+                    mount_path: relative.clone(),
+                    source: AgentFileInputRef::Workspace { path: relative },
+                });
+            }
+        }
+    }
     let inputs = prepare_agent_file_input_bindings(
         workspace_root.as_deref(),
         context.permissions(),
@@ -401,6 +486,56 @@ fn command_request_from_call(
         runtime: None,
         runtime_binding: runtime_binding.map(Box::new),
     })
+}
+
+fn trusted_managed_pdf_profile(
+    context: &ToolExecutionContext,
+    command: &str,
+    explicit_profile: Option<AgentCommandRuntimeProfile>,
+) -> AgentResult<Option<AgentCommandRuntimeProfile>> {
+    if explicit_profile.is_some() {
+        return Ok(None);
+    }
+    let Some(kind) = infer_managed_pdf_command_kind(command).map_err(|message| {
+        AgentError::structured(
+            "artifactRuntime.invalidCommandShape",
+            message,
+            json!({
+                "type": "managedPdfRuntime",
+                "code": "artifactRuntime.invalidCommandShape",
+                "recovery": "changeRequest"
+            }),
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+    debug_assert_eq!(kind, crate::AgentCommandRuntimeKind::Python);
+    let activated = context.skill_resources_optional().is_some_and(|resources| {
+        resources.package_uris().iter().any(|package| {
+            package.skill_id().source_id().as_str() == APPLICATION_BUNDLED_SKILL_SOURCE_ID
+                && package.skill_id().local_id() == PDF_LOCAL_ID
+        })
+    });
+    Ok(activated.then_some(AgentCommandRuntimeProfile::Pdf))
+}
+
+fn sanitize_managed_pdf_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
+    if cwd
+        .as_deref()
+        .is_none_or(|cwd| cwd.trim().is_empty() || cwd.trim() == ".")
+    {
+        return Ok(None);
+    }
+    Err(AgentError::structured(
+        "artifactRuntime.invalidRequest",
+        "受管 PDF 命令由后端提供私有工作目录；请省略 run_command.cwd。",
+        json!({
+            "type": "managedPdfRuntime",
+            "code": "artifactRuntime.invalidRequest",
+            "recovery": "removeCwd"
+        }),
+    ))
 }
 
 fn resolve_run_command_inputs(
@@ -871,7 +1006,14 @@ fn prepare_runtime_binding(
     command: &str,
     profile: AgentCommandRuntimeProfile,
 ) -> AgentResult<crate::AgentCommandRuntimeBinding> {
-    let kind = infer_managed_artifact_command_kind(command).map_err(|message| {
+    let kind = if profile == AgentCommandRuntimeProfile::Pdf {
+        infer_managed_pdf_command_kind(command).and_then(|kind| {
+            kind.ok_or_else(|| "命令不属于受管 PDF Runtime 支持的调用。".to_string())
+        })
+    } else {
+        infer_managed_artifact_command_kind(command)
+    }
+    .map_err(|message| {
         AgentError::structured(
             "artifactRuntime.invalidCommandShape",
             message,
@@ -949,9 +1091,22 @@ pub(crate) fn validate_frozen_command_trace_args(
             source: binding.source.clone(),
         })
         .collect::<Vec<_>>();
-    let inputs = normalize_frozen_run_command_inputs(args.inputs, &frozen_inputs)?;
+    let frozen_pdf = frozen
+        .runtime_binding
+        .as_deref()
+        .is_some_and(|binding| binding.profile == AgentCommandRuntimeProfile::Pdf);
+    let inputs =
+        normalize_frozen_run_command_inputs(&command, args.inputs, &frozen_inputs, frozen_pdf)?;
     let mut expected_observe = explicit_observe.clone();
     let runtime_matches = match (&frozen.runtime_binding, &frozen.runtime) {
+        (Some(binding), None) if binding.profile == AgentCommandRuntimeProfile::Pdf => {
+            expected_observe = explicit_observe.clone();
+            validate_command_runtime_binding(binding).is_ok()
+                && args.runtime_profile.is_none()
+                && args.runtime.is_none()
+                && frozen.observe == explicit_observe
+                && infer_managed_pdf_command_kind(&command).ok().flatten() == Some(binding.kind)
+        }
         (Some(binding), None) => {
             let derived = derive_managed_builder_config(
                 &command,
@@ -1020,9 +1175,22 @@ struct FrozenRunCommandArgs {
 }
 
 fn normalize_frozen_run_command_inputs(
+    command: &str,
     inputs: Vec<RunCommandInputWire>,
     frozen_inputs: &[AgentFileInputSpec],
+    frozen_pdf: bool,
 ) -> Result<Vec<AgentFileInputSpec>, String> {
+    if inputs.is_empty() && frozen_pdf {
+        if let Some(relative) = infer_managed_pdf_workspace_input(command)? {
+            let implicit = vec![AgentFileInputSpec {
+                mount_path: relative.clone(),
+                source: AgentFileInputRef::Workspace { path: relative },
+            }];
+            if implicit == frozen_inputs {
+                return Ok(implicit);
+            }
+        }
+    }
     if inputs.len() != frozen_inputs.len() {
         return Err("run_command frozen ToolCall inputs differ from prepared inputs".to_string());
     }
@@ -1146,22 +1314,13 @@ fn sanitize_observation_paths(
 }
 
 fn sanitize_command(command: &str) -> AgentResult<String> {
-    let command = command.trim();
-    if command.is_empty() {
-        return Err(AgentError::new("run_command.command 不能为空。"));
-    }
-    if command.chars().count() > MAX_COMMAND_CHARS {
-        return Err(AgentError::new(format!(
-            "run_command.command 过长，最多允许 {MAX_COMMAND_CHARS} 个字符。"
-        )));
-    }
-    if command.contains('\0') || command.contains('\n') || command.contains('\r') {
-        return Err(AgentError::new(
-            "run_command.command 不能包含空字符或换行符。请改成单行命令；可审查的源代码编辑应优先使用 apply_patch。",
-        ));
-    }
-
-    Ok(command.to_string())
+    normalize_command_text(command).map_err(|error| {
+        AgentError::new(if error.code == "command.malformed.too_long" {
+            format!("run_command.command 过长，最多允许 {MAX_COMMAND_CHARS} 个字符。")
+        } else {
+            format!("run_command.command 无效：{}", error.reason)
+        })
+    })
 }
 
 fn sanitize_cwd(
@@ -1237,8 +1396,8 @@ mod tests {
         AgentWorkspaceContext, AgentWritePermission, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
     };
     use crate::skills::{
-        SkillId, SkillPackageUri, SkillResourcePath, SkillRevision,
-        APPLICATION_BUNDLED_SKILL_SOURCE_ID,
+        memory_resource_session_for_test, SkillId, SkillPackageUri, SkillResourceKind,
+        SkillResourcePath, SkillRevision, SkillSourceId, APPLICATION_BUNDLED_SKILL_SOURCE_ID,
     };
     use crate::storage::models::AgentActionAuditRecord;
     use crate::storage::service::StorageService;
@@ -1285,7 +1444,7 @@ mod tests {
                 &resolved_packages,
             ),
             provider_id: crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
-            bundle_version: "2026.07.3".to_string(),
+            bundle_version: "2026.08.1".to_string(),
             bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
             kind,
             runtime_version: "22.23.1".to_string(),
@@ -1315,6 +1474,9 @@ mod tests {
             }
             AgentCommandRuntimeProfile::Presentations => {
                 (PRESENTATIONS_LOCAL_ID, "templates/builder.mjs")
+            }
+            AgentCommandRuntimeProfile::Pdf => {
+                panic!("PDF does not use the Office Builder materialization helper")
             }
         };
         let revision = SkillRevision::parse(format!("revision-{local_id}")).unwrap();
@@ -1377,9 +1539,19 @@ mod tests {
         assert!(properties.contains_key("runtimeProfile"));
         assert!(!properties.contains_key("timeoutMs"));
         assert!(!properties.contains_key("runtime"));
+        assert_eq!(properties["command"]["maxLength"], json!(MAX_COMMAND_CHARS));
         let input_item = &properties["inputs"]["items"];
+        assert_eq!(
+            properties["runtimeProfile"]["enum"],
+            json!(["documents", "spreadsheets", "presentations"])
+        );
         assert_eq!(input_item["required"], json!(["path"]));
         assert!(input_item["properties"]["path"].is_object());
+        let input_path_description = input_item["properties"]["path"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(input_path_description.contains("image-artifact://"));
+        assert!(input_path_description.contains("artifact://"));
         assert!(input_item["properties"]["mountPath"].is_object());
         assert!(input_item["properties"].get("source").is_none());
         let serialized = serde_json::to_string(&definition.input_schema).unwrap();
@@ -1389,12 +1561,330 @@ mod tests {
             "pptxgenjs",
             "4.0.1",
             "3.12.0",
+            "MYCOPILOT_INPUT_ROOT",
+            "built-in PDF",
         ] {
             assert!(
                 !serialized.contains(forbidden),
                 "model schema leaked backend runtime authority: {forbidden}"
             );
         }
+    }
+
+    fn pdf_skill_session(source_id: &str) -> Arc<crate::skills::SkillResourceSession> {
+        let skill_id = SkillId::parse(format!("{source_id}:{PDF_LOCAL_ID}")).unwrap();
+        Arc::new(
+            memory_resource_session_for_test(
+                skill_id,
+                SkillRevision::parse("pdf-test-revision").unwrap(),
+                SkillSourceId::parse(source_id).unwrap(),
+                vec![(
+                    "references/reading.md".to_string(),
+                    SkillResourceKind::Reference,
+                    b"test".to_vec(),
+                )],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn only_exact_bundled_pdf_skill_binds_the_hidden_pdf_runtime() {
+        let command = "python -c 'from pypdf import PdfWriter; print(PdfWriter)'";
+        let binding = test_binding(
+            AgentCommandRuntimeProfile::Pdf,
+            AgentCommandRuntimeKind::Python,
+            &[
+                ("pdfplumber", "0.11.9"),
+                ("pypdf", "6.15.0"),
+                ("pypdfium2", "5.12.1"),
+                ("reportlab", "4.4.9"),
+            ],
+        );
+        let trusted = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-pdf".to_string()),
+                project_id: None,
+                workspace: None,
+                attachment_library: None,
+                permissions: AgentPermissions::default(),
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            binding,
+        );
+        let call = AgentToolCall {
+            id: "pdf-command".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({"command": command, "reason": "Create a PDF"}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let request = command_request_from_call(&trusted, &call).unwrap();
+        assert!(request.cwd.is_none());
+        assert_eq!(
+            request
+                .runtime_binding
+                .as_deref()
+                .map(|binding| binding.profile),
+            Some(AgentCommandRuntimeProfile::Pdf)
+        );
+
+        let untrusted = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: Some("conversation-pdf".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        }))
+        .with_skill_resources(Some(pdf_skill_session("bundled:test")));
+        assert_eq!(
+            trusted_managed_pdf_profile(&untrusted, command, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn bundled_pdf_freezes_a_discovered_workspace_path_without_model_inputs() {
+        let workspace = tempfile::tempdir().unwrap();
+        let filename = "AspenPolymer-Unit Operations and Reaction Models.pdf";
+        let bytes = b"%PDF-1.4\nworkspace fixture\n";
+        std::fs::write(workspace.path().join(filename), bytes).unwrap();
+        let binding = test_binding(
+            AgentCommandRuntimeProfile::Pdf,
+            AgentCommandRuntimeKind::Python,
+            &[
+                ("pdfplumber", "0.11.9"),
+                ("pypdf", "6.15.0"),
+                ("pypdfium2", "5.12.1"),
+                ("reportlab", "4.4.9"),
+            ],
+        );
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-aspen".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("Aspen manual".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..AgentPermissions::default()
+                },
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            binding,
+        );
+        let call = AgentToolCall {
+            id: "pdf-aspen-info".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": format!("pdfinfo \"{filename}\""),
+                "reason": "Inspect the Aspen manual"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert!(request.cwd.is_none());
+        assert_eq!(request.command, format!("pdfinfo \"{filename}\""));
+        assert_eq!(request.inputs.len(), 1);
+        assert_eq!(request.inputs[0].mount_path, filename);
+        assert_eq!(
+            request.inputs[0].source,
+            AgentFileInputRef::Workspace {
+                path: filename.to_string()
+            }
+        );
+        assert_eq!(request.inputs[0].size_bytes, bytes.len() as u64);
+        assert_eq!(
+            request.inputs[0].sha256,
+            format!("{:x}", Sha256::digest(bytes))
+        );
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
+        assert!(!serde_json::to_string(&request)
+            .unwrap()
+            .contains(workspace.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn bundled_pdf_missing_workspace_path_returns_an_inputs_recovery() {
+        let workspace = tempfile::tempdir().unwrap();
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-missing-pdf".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("missing PDF".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..AgentPermissions::default()
+                },
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            test_binding(
+                AgentCommandRuntimeProfile::Pdf,
+                AgentCommandRuntimeKind::Python,
+                &[
+                    ("pdfplumber", "0.11.9"),
+                    ("pypdf", "6.15.0"),
+                    ("pypdfium2", "5.12.1"),
+                    ("reportlab", "4.4.9"),
+                ],
+            ),
+        );
+        let call = AgentToolCall {
+            id: "pdf-missing-info".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({"command": "pdfinfo \"not-here.pdf\""}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let error = command_request_from_call(&context, &call).unwrap_err();
+        assert_eq!(error.code(), Some("agent.fileInput.notFound"));
+        assert!(error.to_string().contains("run_command.inputs"));
+        assert!(error.to_string().contains("$MYCOPILOT_INPUT_ROOT"));
+    }
+
+    #[test]
+    fn bundled_pdf_outputs_path_never_binds_a_same_named_workspace_file() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("outputs")).unwrap();
+        std::fs::write(
+            workspace.path().join("outputs/draft.pdf"),
+            b"workspace decoy",
+        )
+        .unwrap();
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-private-pdf-output".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("PDF output isolation".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..AgentPermissions::default()
+                },
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            test_binding(
+                AgentCommandRuntimeProfile::Pdf,
+                AgentCommandRuntimeKind::Python,
+                &[
+                    ("pdfplumber", "0.11.9"),
+                    ("pypdf", "6.15.0"),
+                    ("pypdfium2", "5.12.1"),
+                    ("reportlab", "4.4.9"),
+                ],
+            ),
+        );
+        let call = AgentToolCall {
+            id: "pdf-private-output-info".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({"command": "pdfinfo outputs/draft.pdf"}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert!(request.inputs.is_empty());
+        assert_eq!(request.command, "pdfinfo outputs/draft.pdf");
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
+    }
+
+    #[test]
+    fn bundled_pdf_explicit_external_input_requires_and_accepts_full_read() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let external = fixture.path().join("external manual.pdf");
+        let bytes = b"%PDF-1.4\nexternal fixture\n";
+        std::fs::write(&external, bytes).unwrap();
+        // `tempfile` lives below `/var` on macOS, whose public spelling is a symlink to
+        // `/private/var`. External input authority deliberately rejects symlink traversal, so
+        // exercise the same canonical absolute path a real file picker/Host resolver provides.
+        let external = external.canonicalize().unwrap();
+        let binding = test_binding(
+            AgentCommandRuntimeProfile::Pdf,
+            AgentCommandRuntimeKind::Python,
+            &[
+                ("pdfplumber", "0.11.9"),
+                ("pypdf", "6.15.0"),
+                ("pypdfium2", "5.12.1"),
+                ("reportlab", "4.4.9"),
+            ],
+        );
+        let make_context = |read| {
+            with_profile_resolver(
+                ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                    conversation_id: Some("conversation-external-pdf".to_string()),
+                    project_id: None,
+                    workspace: Some(AgentWorkspaceContext {
+                        project_id: None,
+                        display_name: Some("external PDF".to_string()),
+                        root_path: Some(workspace.to_string_lossy().into_owned()),
+                    }),
+                    attachment_library: None,
+                    permissions: AgentPermissions {
+                        read,
+                        write: AgentWritePermission::WorkspaceOnly,
+                        ..AgentPermissions::default()
+                    },
+                }))
+                .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+                binding.clone(),
+            )
+        };
+        let call = AgentToolCall {
+            id: "pdf-external-info".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "pdfinfo \"$MYCOPILOT_INPUT_ROOT/external.pdf\"",
+                "inputs": [{
+                    "path": external.to_string_lossy(),
+                    "mountPath": "external.pdf"
+                }]
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let denied =
+            command_request_from_call(&make_context(AgentReadPermission::WorkspaceOnly), &call)
+                .unwrap_err();
+        assert_eq!(denied.code(), Some("agent.fileInput.authorizationDenied"));
+
+        let request =
+            command_request_from_call(&make_context(AgentReadPermission::All), &call).unwrap();
+        assert_eq!(request.inputs.len(), 1);
+        assert_eq!(request.inputs[0].mount_path, "external.pdf");
+        assert_eq!(
+            request.inputs[0].source,
+            AgentFileInputRef::External {
+                path: external.to_string_lossy().into_owned()
+            }
+        );
+        assert_eq!(request.inputs[0].size_bytes, bytes.len() as u64);
+        assert_eq!(
+            request.inputs[0].sha256,
+            format!("{:x}", Sha256::digest(bytes))
+        );
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
     }
 
     #[test]
@@ -1449,7 +1939,7 @@ mod tests {
         let request = command_request_from_call(&context, &call).unwrap();
 
         assert_eq!(request.id, "tool-1");
-        assert_eq!(request.command, "cargo test");
+        assert_eq!(request.command, " cargo test ");
         assert_eq!(request.cwd.as_deref(), Some("agent/rust"));
         assert_eq!(request.timeout_ms, None);
         assert_eq!(request.approval_status, AgentApprovalStatus::Required);
@@ -1886,6 +2376,111 @@ mod tests {
     }
 
     #[test]
+    fn pdf_saved_script_and_document_attachments_freeze_without_a_workspace() {
+        let library = tempfile::tempdir().unwrap();
+        let root = library.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("objects")).unwrap();
+        let pdf = b"%PDF-1.4\nfixture\n";
+        let script = b"from pathlib import Path\nprint(Path(__file__).name)\n";
+        std::fs::write(root.join("objects/manual.pdf"), pdf).unwrap();
+        std::fs::write(root.join("objects/edit.py"), script).unwrap();
+        let pdf_read_path = "@attachments/pdf-1/manual.pdf";
+        let script_read_path = "@attachments/script-1/edit.py";
+        let attachments = [
+            (
+                "pdf-1",
+                "manual.pdf",
+                "application/pdf",
+                pdf_read_path,
+                "objects/manual.pdf",
+                pdf.len() as u64,
+            ),
+            (
+                "script-1",
+                "edit.py",
+                "text/x-python",
+                script_read_path,
+                "objects/edit.py",
+                script.len() as u64,
+            ),
+        ]
+        .into_iter()
+        .map(
+            |(id, name, mime_type, read_path, storage_rel_path, size_bytes)| {
+                AgentAttachmentReference {
+                    id: id.to_string(),
+                    conversation_id: "conversation-pdf".to_string(),
+                    message_id: "message-pdf".to_string(),
+                    project_id: None,
+                    kind: AgentInputAttachmentKind::File,
+                    name: name.to_string(),
+                    mime_type: Some(mime_type.to_string()),
+                    size_bytes,
+                    read_path: read_path.to_string(),
+                    storage_rel_path: storage_rel_path.to_string(),
+                    created_at: 1,
+                }
+            },
+        )
+        .collect();
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-pdf".to_string()),
+                project_id: None,
+                workspace: None,
+                attachment_library: Some(AgentAttachmentLibraryContext {
+                    root_path: Some(root.to_string_lossy().into_owned()),
+                    conversation_id: Some("conversation-pdf".to_string()),
+                    project_id: None,
+                    conversation_attachments: attachments,
+                    project_attachments: Vec::new(),
+                }),
+                permissions: AgentPermissions::default(),
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            test_binding(
+                AgentCommandRuntimeProfile::Pdf,
+                AgentCommandRuntimeKind::Python,
+                &[
+                    ("pdfplumber", "0.11.9"),
+                    ("pypdf", "6.15.0"),
+                    ("pypdfium2", "5.12.1"),
+                    ("reportlab", "4.4.9"),
+                ],
+            ),
+        );
+        let call = AgentToolCall {
+            id: "pdf-script-command".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "python '$MYCOPILOT_INPUT_ROOT/edit.py' '$MYCOPILOT_INPUT_ROOT/manual.pdf'",
+                "inputs": [
+                    {"path": script_read_path, "mountPath": "edit.py"},
+                    {"path": pdf_read_path, "mountPath": "manual.pdf"}
+                ],
+                "reason": "Edit and verify the attached PDF"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert!(request.cwd.is_none());
+        assert_eq!(request.inputs.len(), 2);
+        assert_eq!(
+            request
+                .runtime_binding
+                .as_deref()
+                .map(|binding| binding.profile),
+            Some(AgentCommandRuntimeProfile::Pdf)
+        );
+        validate_frozen_command_trace_args(&request, &call.args).unwrap();
+        assert!(!serde_json::to_string(&request)
+            .unwrap()
+            .contains(root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
     fn frozen_trace_argument_verifier_binds_every_command_authority_field() {
         let live_args = json!({
             "command": "node scripts/build.mjs --output outputs/report.xlsx",
@@ -2037,10 +2632,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsafe_command_shape_before_approval() {
-        let error = sanitize_command("echo one\necho two").unwrap_err();
+    fn canonicalizes_multiline_commands_without_discarding_script_whitespace() {
+        let raw = "\r\n  printf one\rprintf two\r\n";
+        assert_eq!(
+            sanitize_command(raw).unwrap(),
+            "\n  printf one\nprintf two\n"
+        );
 
-        assert!(error.to_string().contains("换行符"));
+        assert!(sanitize_command(" \r\n\t ")
+            .unwrap_err()
+            .to_string()
+            .contains("不能为空"));
+        assert!(sanitize_command("printf ok\0hidden")
+            .unwrap_err()
+            .to_string()
+            .contains("空字符"));
+    }
+
+    #[test]
+    fn command_character_limit_matches_the_model_schema_at_both_boundaries() {
+        let at_limit = "x".repeat(MAX_COMMAND_CHARS);
+        assert_eq!(sanitize_command(&at_limit).unwrap(), at_limit);
+
+        let above_limit = "x".repeat(MAX_COMMAND_CHARS + 1);
+        let error = sanitize_command(&above_limit).unwrap_err();
+        assert!(error.to_string().contains(&MAX_COMMAND_CHARS.to_string()));
+
+        let definition = RunCommandTool.definition();
+        assert_eq!(
+            definition.input_schema["properties"]["command"]["maxLength"],
+            json!(MAX_COMMAND_CHARS)
+        );
     }
 
     #[test]
@@ -2191,6 +2813,116 @@ mod tests {
         assert_eq!(result["latestSequence"], 3);
         assert_eq!(result["outputTruncated"], false);
         assert!(result.get("hostPrivateField").is_none());
+    }
+
+    #[test]
+    fn model_projection_preserves_authoritative_exact_history_route() {
+        let history_open = "hist_v1_authoritative_command_page";
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "command-exited".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "status": "exited",
+                "exitCode": 0,
+                "stdout": "bounded preview",
+                "historyOpen": history_open,
+                "continueWith": {
+                    "tool": "conversation_history",
+                    "args": { "open": history_open }
+                },
+                "hostPrivateField": "must not reach the model"
+            })),
+            error: None,
+        };
+
+        let projected = run_command_model_projection(&raw);
+        let result = projected.result.unwrap();
+
+        assert_eq!(result["historyOpen"], history_open);
+        assert_eq!(result["continueWith"]["tool"], "conversation_history");
+        assert_eq!(result["continueWith"]["args"]["open"], history_open);
+        assert!(result.get("hostPrivateField").is_none());
+    }
+
+    #[test]
+    fn model_projection_retains_routes_while_other_consumers_keep_audit_fields() {
+        let history_open = "hist_v1_authoritative_command_page";
+        let read_path = format!("artifact://sha256/{}", "a".repeat(64));
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "command-persisted-model-projection".to_string(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "status": "exited",
+                "command": "pdfinfo $MYCOPILOT_INPUT_ROOT/manual.pdf",
+                "cwd": ".",
+                "exitCode": 0,
+                "stdout": "bounded preview",
+                "stderr": "",
+                "historyOpen": history_open,
+                "continueWith": {
+                    "tool": "conversation_history",
+                    "args": { "open": history_open }
+                },
+                "outputs": [{
+                    "name": "manual.pdf",
+                    "kind": "document",
+                    "readPath": read_path,
+                    "mimeType": "application/pdf",
+                    "sizeBytes": 123,
+                    "sha256": "a".repeat(64)
+                }],
+                "inputFiles": [{
+                    "mountPath": "manual.pdf",
+                    "sourceKind": "attachment",
+                    "sizeBytes": 456,
+                    "sha256": "b".repeat(64)
+                }],
+                "runtime": {
+                    "schemaVersion": 1,
+                    "providerId": "managed-artifact-runtime",
+                    "profile": "pdf",
+                    "kind": "python",
+                    "runtimeFingerprint": "host-audit-only",
+                    "resolvedPackages": [{ "name": "pypdf", "version": "6.15.0" }]
+                }
+            })),
+            error: None,
+        };
+
+        let tool = RunCommandTool;
+        let live = tool.model_projection(&raw);
+        let checkpoint = tool.checkpoint_projection(&raw);
+
+        let model_result = live.result.as_ref().unwrap();
+        assert_eq!(model_result["historyOpen"], history_open);
+        assert_eq!(model_result["continueWith"]["args"]["open"], history_open);
+        assert_eq!(model_result["outputs"][0]["readPath"], read_path);
+        assert!(model_result.get("runtime").is_none());
+        assert!(model_result.get("inputFiles").is_none());
+        assert!(model_result["outputs"][0].get("sha256").is_none());
+
+        let checkpoint_result = checkpoint.result.as_ref().unwrap();
+        assert_eq!(checkpoint_result["runtime"]["profile"], "pdf");
+        assert_eq!(
+            checkpoint_result["inputFiles"][0]["mountPath"],
+            "manual.pdf"
+        );
+        assert_eq!(checkpoint_result["outputs"][0]["sha256"], "a".repeat(64));
+
+        for durable in [
+            tool.trace_projection(&raw),
+            tool.archive_projection(&raw),
+            tool.event_projection(&raw),
+        ] {
+            let result = durable.result.as_ref().unwrap();
+            assert_eq!(result["runtime"]["profile"], "pdf");
+            assert_eq!(result["inputFiles"][0]["mountPath"], "manual.pdf");
+            assert_eq!(result["outputs"][0]["sha256"], "a".repeat(64));
+        }
     }
 
     #[test]

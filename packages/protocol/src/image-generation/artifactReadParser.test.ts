@@ -28,6 +28,12 @@ describe('image generation Artifact read protocol', () => {
       artifact
     } as const
     expect(parseImageGenerationArtifactReadInput(input)).toEqual(input)
+    expect(
+      parseImageGenerationArtifactReadInput({ ...input, conversationId: 'conversation-1' })
+    ).toEqual({ ...input, conversationId: 'conversation-1' })
+    expect(() =>
+      parseImageGenerationArtifactReadInput({ ...input, conversationId: 'bad\nconversation' })
+    ).toThrow(/conversationId/)
     expect(() =>
       parseImageGenerationArtifactReadInput({
         ...input,
@@ -65,6 +71,49 @@ describe('image generation Artifact read protocol', () => {
         managedPath: '/private/image-generation-artifacts/object.png'
       })
     ).toThrow(/unexpected field managedPath/)
+  })
+
+  it('reuses the read transport for a conversation-authorized PDF identity', () => {
+    const documentArtifact = {
+      artifactId: `sha256:${sha256}`,
+      uri: `artifact://sha256/${sha256}`,
+      kind: 'document',
+      format: 'pdf',
+      mimeType: 'application/pdf',
+      sizeBytes: 5,
+      sha256
+    } as const
+    const input = {
+      schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+      artifact: documentArtifact,
+      conversationId: 'conversation-1'
+    } as const
+    expect(parseImageGenerationArtifactReadInput(input)).toEqual(input)
+    expect(
+      parseImageGenerationArtifactReadOutput({
+        schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+        artifact: documentArtifact,
+        fileName: `artifact-${sha256.slice(0, 12)}.pdf`,
+        dataBase64: 'aGVsbG8='
+      })
+    ).toEqual({
+      schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+      artifact: documentArtifact,
+      fileName: `artifact-${sha256.slice(0, 12)}.pdf`,
+      dataBase64: 'aGVsbG8='
+    })
+    expect(() =>
+      parseImageGenerationArtifactReadInput({
+        ...input,
+        artifact: { ...documentArtifact, uri: `image-artifact://sha256/${sha256}` }
+      })
+    ).toThrow(/immutable document identity/)
+    expect(() =>
+      parseImageGenerationArtifactReadInput({
+        ...input,
+        artifact: { ...documentArtifact, sizeBytes: IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES + 1 }
+      })
+    ).toThrow(/sizeBytes/)
   })
 
   it('accepts only bounded path-free structured errors', () => {

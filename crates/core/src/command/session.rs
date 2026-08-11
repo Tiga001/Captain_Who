@@ -422,6 +422,7 @@ impl ManagedCommandSession {
         error: Option<String>,
     ) {
         let result = AgentCommandExecutionResult {
+            outputs: Vec::new(),
             command: self.projection.command.clone(),
             cwd: self.projection.cwd.clone(),
             exit_code: None,
@@ -440,6 +441,9 @@ impl ManagedCommandSession {
             artifact_observation: None,
             input_files: Vec::new(),
             runtime: None,
+            managed_outputs: None,
+            authoritative_archive_ref: None,
+            history_open: None,
         };
         self.complete(state, result, error, false);
     }
@@ -856,6 +860,7 @@ pub(crate) fn run_session_watcher(
         .as_ref()
         .map_or_else(ProcessOutputSpool::default, CapturedProcessOutput::spool);
     let mut result = AgentCommandExecutionResult {
+        outputs: Vec::new(),
         command: session.projection.command.clone(),
         cwd: session.projection.cwd.clone(),
         exit_code: exit_status
@@ -876,6 +881,9 @@ pub(crate) fn run_session_watcher(
         artifact_observation: None,
         input_files: Vec::new(),
         runtime: None,
+        managed_outputs: None,
+        authoritative_archive_ref: None,
+        history_open: None,
     };
     if let Some(completion_hook) = completion_hook {
         let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

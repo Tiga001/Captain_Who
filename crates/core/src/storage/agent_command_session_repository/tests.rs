@@ -127,6 +127,7 @@ fn create_input(
             exit_code: None,
             latest_sequence: 0,
             output_truncated: false,
+            outputs: Vec::new(),
             archive_ref: None,
         },
         authorization_source: CommandAuthorizationSource::ExplicitUser,
@@ -251,6 +252,7 @@ fn output_and_model_cursors_are_independent_and_terminal_cas_is_idempotent() {
         output_capture_truncated: false,
         archive_ref: None,
         terminal_reason: None,
+        published_outputs: &[],
         committed_at: 20,
     };
     assert_eq!(
@@ -267,6 +269,63 @@ fn output_and_model_cursors_are_independent_and_terminal_cas_is_idempotent() {
             current_status: AgentCommandSessionStatus::Exited
         }
     ));
+}
+
+#[test]
+fn terminal_snapshot_restores_published_outputs_after_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("storage.sqlite");
+    let session_id = "cmd_0000000000000000000000000000000f";
+    let digest = "a".repeat(64);
+    let output = AgentCommandPublishedOutput {
+        name: "pages/page-1.png".to_string(),
+        kind: AgentCommandPublishedOutputKind::Image,
+        read_path: format!("image-artifact://sha256/{digest}"),
+        mime_type: "image/png".to_string(),
+        size_bytes: 2_048,
+        sha256: digest,
+        width: Some(1_200),
+        height: Some(1_600),
+    };
+
+    {
+        let mut connection = Connection::open(&database_path).unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        seed_conversation(&connection, "project-1", "conversation-1", "assistant-1");
+        create_session(
+            &mut connection,
+            &create_input(session_id, "conversation-1", "assistant-1", "project-1", 10),
+        )
+        .unwrap();
+        mark_running(&mut connection, "conversation-1", session_id, 11).unwrap();
+        commit_terminal(
+            &mut connection,
+            &AgentCommandSessionTerminalUpdate {
+                conversation_id: "conversation-1",
+                session_id,
+                status: AgentCommandSessionStatus::Exited,
+                ended_at: 20,
+                exit_code: Some(0),
+                latest_sequence: 0,
+                transcript_truncated: false,
+                output_capture_truncated: false,
+                archive_ref: None,
+                terminal_reason: None,
+                published_outputs: std::slice::from_ref(&output),
+                committed_at: 20,
+            },
+        )
+        .unwrap();
+    }
+
+    let connection = Connection::open(&database_path).unwrap();
+    migrations::run_migrations(&connection).unwrap();
+    let restored = get_session(&connection, "conversation-1", session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.snapshot.outputs, vec![output.clone()]);
+    let listed = list_sessions_for_conversation(&connection, "conversation-1", 8).unwrap();
+    assert_eq!(listed[0].snapshot.outputs, vec![output]);
 }
 
 #[test]
@@ -772,6 +831,7 @@ fn archive_reference_is_restricted_to_the_same_conversation_and_message() {
         output_capture_truncated: false,
         archive_ref: Some(&foreign_archive.archive_ref),
         terminal_reason: None,
+        published_outputs: &[],
         committed_at: 20,
     };
     assert!(commit_terminal(&mut connection, &terminal).is_err());
@@ -947,6 +1007,7 @@ fn terminal_retention_prunes_operational_rows_but_preserves_exact_archive() {
                 output_capture_truncated: false,
                 archive_ref: (index == 0).then_some(descriptor.archive_ref.as_str()),
                 terminal_reason: None,
+                published_outputs: &[],
                 committed_at: 1_000 + i64::try_from(index).unwrap(),
             },
         )

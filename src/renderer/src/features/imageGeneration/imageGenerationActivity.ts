@@ -8,6 +8,7 @@ import type {
 } from '@mycopilot/protocol'
 import { parseAgentImageGenerationResult } from '@mycopilot/protocol'
 import type { ChatAgentRunView } from '../chat/chatTypes'
+import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
 import type { SettledToolStatus } from '../chat/components/toolActivities/toolActivityUtils'
 
 export type ImageGenerationActivityOperation = AgentImageGenerationOperation | 'unknown'
@@ -26,7 +27,8 @@ export interface ImageGenerationActivityView {
 export interface ImageGenerationArtifactEntry {
   artifact: AgentImageGenerationArtifact
   callId: string
-  operation: AgentImageGenerationOperation
+  displayName?: string
+  operation: AgentImageGenerationOperation | 'command'
 }
 
 export function getImageGenerationActivityView(
@@ -73,8 +75,8 @@ export function getImageGenerationActivityView(
 }
 
 /**
- * Successful cards are derived exclusively from strict v1 Tool results. Markdown links, private
- * paths, and provider URLs never participate in Artifact identity or history restoration.
+ * Successful cards come only from strict generated-image results or authoritative managed-command
+ * receipts. Markdown links, private paths, and provider URLs never participate in Artifact identity.
  */
 export function getImageGenerationArtifactEntries(
   run: ChatAgentRunView
@@ -84,14 +86,79 @@ export function getImageGenerationArtifactEntries(
 
   for (const call of run.toolCalls) {
     const result = run.toolResults.find((candidate) => candidate.callId === call.id)
-    const entry = getImageGenerationArtifactEntry(call, result)
-    if (!entry || seenArtifactIds.has(entry.artifact.artifactId)) continue
-
-    seenArtifactIds.add(entry.artifact.artifactId)
-    entries.push(entry)
+    const callEntries = [
+      getImageGenerationArtifactEntry(call, result),
+      ...getManagedCommandImageArtifactEntries(call, result),
+      ...(call.tool === 'run_command'
+        ? getManagedCommandImageArtifactEntriesFromOutputs(
+            call.id,
+            run.commandSessions?.[call.id]?.outputs
+          )
+        : [])
+    ].filter((entry): entry is ImageGenerationArtifactEntry => entry !== undefined)
+    for (const entry of callEntries) {
+      if (seenArtifactIds.has(entry.artifact.artifactId)) continue
+      seenArtifactIds.add(entry.artifact.artifactId)
+      entries.push(entry)
+    }
   }
 
   return entries
+}
+
+function getManagedCommandImageArtifactEntries(
+  call: AgentToolCall,
+  result?: AgentToolResult
+): ImageGenerationArtifactEntry[] {
+  if ((call.tool !== 'run_command' && call.tool !== 'command_session') || !result?.ok) return []
+  const payload = isRecord(result.result) ? result.result : undefined
+  const execution = isRecord(payload?.execution) ? payload.execution : undefined
+  const outputs = Array.isArray(execution?.outputs)
+    ? execution.outputs
+    : Array.isArray(payload?.outputs)
+      ? payload.outputs
+      : []
+  return getManagedCommandImageArtifactEntriesFromOutputs(call.id, outputs)
+}
+
+function getManagedCommandImageArtifactEntriesFromOutputs(
+  callId: string,
+  value: unknown
+): ImageGenerationArtifactEntry[] {
+  const outputs = parseManagedCommandOutputs(value) ?? []
+  return outputs.flatMap((output) => {
+    if (output.kind !== 'image') return []
+    const { sha256, readPath, mimeType, name, sizeBytes, width, height } = output
+    const format =
+      mimeType === 'image/png'
+        ? 'png'
+        : mimeType === 'image/jpeg'
+          ? 'jpeg'
+          : mimeType === 'image/webp'
+            ? 'webp'
+            : undefined
+    if (!format || !width || !height) {
+      return []
+    }
+    return [
+      {
+        artifact: {
+          artifactId: `sha256:${sha256}`,
+          uri: readPath,
+          kind: 'image',
+          format,
+          mimeType,
+          width,
+          height,
+          sizeBytes,
+          sha256
+        },
+        callId,
+        displayName: name,
+        operation: 'command' as const
+      }
+    ]
+  })
 }
 
 export function getImageGenerationArtifactEntry(

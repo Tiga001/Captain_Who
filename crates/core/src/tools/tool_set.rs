@@ -752,7 +752,6 @@ mod tests {
             ("git_diff", AgentToolExposure::Stable),
             ("read_file", AgentToolExposure::Stable),
             ("read_image", AgentToolExposure::Stable),
-            ("read_pdf", AgentToolExposure::Stable),
             (
                 "read_presentation",
                 AgentToolExposure::RequiresCapability(ToolCapabilityId::application_owned(

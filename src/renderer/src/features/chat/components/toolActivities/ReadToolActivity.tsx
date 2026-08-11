@@ -46,7 +46,6 @@ const lazyHostImageArtifactResolver: ImageArtifactResolver = {
 const TOOL_KINDS: Partial<Record<string, ChatReadActivityKind>> = {
   read_file: 'file',
   read_image: 'image',
-  read_pdf: 'pdf',
   read_presentation: 'presentation',
   read_spreadsheet: 'spreadsheet',
   read_word: 'word'
@@ -74,12 +73,6 @@ const STATUS_LABELS: Record<
     completed: 'agent.read.image.completed',
     failed: 'agent.read.image.failed',
     cancelled: 'agent.read.image.cancelled'
-  },
-  pdf: {
-    running: 'agent.read.pdf.running',
-    completed: 'agent.read.pdf.completed',
-    failed: 'agent.read.pdf.failed',
-    cancelled: 'agent.read.pdf.cancelled'
   },
   word: {
     running: 'agent.read.word.running',
@@ -212,7 +205,7 @@ function getStatusIcon(kind: ChatReadActivityKind) {
   if (kind === 'image') return ImageIcon
   if (kind === 'spreadsheet') return FileSpreadsheet
   if (kind === 'presentation') return Presentation
-  if (kind === 'pdf' || kind === 'word') return FileType
+  if (kind === 'word') return FileType
   return FileText
 }
 

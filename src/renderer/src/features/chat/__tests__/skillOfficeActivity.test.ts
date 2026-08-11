@@ -615,4 +615,101 @@ describe('Skill and Office activity derivation', () => {
       }
     ])
   })
+
+  it('adapts a managed PDF receipt to the existing settled file card projection', () => {
+    const hash = 'b'.repeat(64)
+    const command = toolCall({ id: 'command-pdf', tool: 'command_session' })
+    const currentRun = run({
+      toolCalls: [command],
+      toolResults: [
+        toolResult({
+          callId: command.id,
+          tool: command.tool,
+          result: {
+            status: 'completed',
+            outputs: [
+              {
+                name: 'reports/final.pdf',
+                kind: 'document',
+                readPath: `artifact://sha256/${hash}`,
+                mimeType: 'application/pdf',
+                sizeBytes: 4096,
+                sha256: hash
+              }
+            ]
+          }
+        })
+      ]
+    })
+
+    expect(getOfficeArtifactEntries(currentRun)).toEqual([
+      {
+        artifactKind: 'document',
+        changeKind: 'created',
+        displayName: 'reports/final.pdf',
+        id: `managed:artifact://sha256/${hash}`,
+        managedArtifact: {
+          artifactId: `sha256:${hash}`,
+          format: 'pdf',
+          kind: 'document',
+          mimeType: 'application/pdf',
+          sha256: hash,
+          sizeBytes: 4096,
+          uri: `artifact://sha256/${hash}`
+        },
+        managedReadPath: `artifact://sha256/${hash}`,
+        path: `artifact://sha256/${hash}`,
+        scope: 'external'
+      }
+    ])
+  })
+
+  it('restores a managed PDF card from the original run_command Session snapshot', () => {
+    const hash = 'c'.repeat(64)
+    const command = toolCall({ id: 'command-pdf-restart', tool: 'run_command' })
+    const readPath = `artifact://sha256/${hash}`
+    const restoredRun = run({
+      toolCalls: [command],
+      toolResults: [],
+      commandSessions: {
+        [command.id]: {
+          callId: command.id,
+          status: 'exited',
+          latestSequence: 0,
+          outputTruncated: false,
+          outputs: [
+            {
+              name: 'reports/restored.pdf',
+              kind: 'document',
+              readPath,
+              mimeType: 'application/pdf',
+              sizeBytes: 8192,
+              sha256: hash
+            }
+          ]
+        }
+      }
+    })
+
+    expect(getOfficeArtifactEntries(restoredRun)).toEqual([
+      {
+        artifactKind: 'document',
+        changeKind: 'created',
+        displayName: 'reports/restored.pdf',
+        id: `managed:${readPath}`,
+        managedArtifact: {
+          artifactId: `sha256:${hash}`,
+          format: 'pdf',
+          kind: 'document',
+          mimeType: 'application/pdf',
+          sha256: hash,
+          sizeBytes: 8192,
+          uri: readPath
+        },
+        managedReadPath: readPath,
+        path: readPath,
+        scope: 'external'
+      }
+    ])
+  })
 })

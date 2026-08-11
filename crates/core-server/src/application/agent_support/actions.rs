@@ -280,23 +280,38 @@ pub(crate) fn diff_tool_call(diff: &AgentDiffProposal) -> AgentToolCall {
 }
 
 pub(crate) fn command_tool_call(command: &AgentCommandRequest) -> AgentToolCall {
+    let model_runtime_profile = command.runtime_binding.as_ref().and_then(|binding| {
+        (binding.profile != mycopilot_core::AgentCommandRuntimeProfile::Pdf)
+            .then_some(binding.profile)
+    });
+    let mut args = json!({
+        "command": command.command.clone(),
+        "cwd": command.cwd.clone(),
+        "reason": command.reason.clone(),
+        "observe": command.observe.clone(),
+        "inputs": command.inputs.iter().map(|binding| serde_json::json!({
+            "mountPath": binding.mount_path,
+            "path": mycopilot_core::file_input::model_path_for_agent_file_input_ref(&binding.source),
+        })).collect::<Vec<_>>()
+    });
+    if let Some(profile) = model_runtime_profile {
+        args.as_object_mut()
+            .expect("command tool args are an object")
+            .insert("runtimeProfile".to_string(), json!(profile));
+    }
+    // Retained only when reconstructing a legacy pending action so startup recovery can retire it
+    // explicitly. New frozen bindings do not expose a null or exact runtime authority field.
+    if command.runtime_binding.is_none() {
+        if let Some(runtime) = command.runtime.as_ref() {
+            args.as_object_mut()
+                .expect("command tool args are an object")
+                .insert("runtime".to_string(), json!(runtime));
+        }
+    }
     AgentToolCall {
         id: command.id.clone(),
         tool: "run_command".to_string(),
-        args: json!({
-            "command": command.command.clone(),
-            "cwd": command.cwd.clone(),
-            "reason": command.reason.clone(),
-            "observe": command.observe.clone(),
-            "inputs": command.inputs.iter().map(|binding| serde_json::json!({
-                "mountPath": binding.mount_path,
-                "source": binding.source,
-            })).collect::<Vec<_>>(),
-            "runtimeProfile": command.runtime_binding.as_ref().map(|binding| binding.profile),
-            // Retained only when reconstructing a legacy pending action so startup recovery can
-            // retire it explicitly. New actions never expose exact runtime authority to the model.
-            "runtime": command.runtime_binding.is_none().then(|| command.runtime.clone()).flatten()
-        }),
+        args,
         approval_status: command.approval_status,
         reason: command.reason.clone(),
     }
@@ -733,6 +748,7 @@ pub(crate) fn failed_command_result(
     policy_evaluation: Option<CommandPolicyEvaluation>,
 ) -> AgentCommandExecutionResult {
     AgentCommandExecutionResult {
+        outputs: Vec::new(),
         command: request.command.clone(),
         cwd: request.cwd.clone().unwrap_or_else(|| ".".to_string()),
         exit_code: None,
@@ -776,5 +792,8 @@ pub(crate) fn failed_command_result(
             })
             .collect(),
         runtime: None,
+        managed_outputs: None,
+        authoritative_archive_ref: None,
+        history_open: None,
     }
 }

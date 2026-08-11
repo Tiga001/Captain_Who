@@ -4,6 +4,7 @@ import {
   type ImageGenerationArtifactErrorData,
   type ImageGenerationArtifactReadInput,
   type ImageGenerationArtifactReadOutput,
+  type ManagedArtifactReadIdentity,
   type ImageGenerationCapabilities,
   type ImageGenerationConfiguration,
   type ImageGenerationConfigurationErrorData,
@@ -26,6 +27,7 @@ import {
   expectSafeInteger,
   expectSchemaVersion,
   expectString,
+  hasAsciiControlCharacter,
   invalidProtocolValue,
   optionalNonEmptyString
 } from '../skills/validation'
@@ -35,26 +37,75 @@ export const IMAGE_GENERATION_MODEL_ID_MAX_LENGTH = 512 as const
 export const IMAGE_GENERATION_CREDENTIAL_MAX_LENGTH = 8_192 as const
 export const IMAGE_GENERATION_REVISION_MAX_LENGTH = 512 as const
 export const IMAGE_GENERATION_ERROR_MESSAGE_MAX_LENGTH = 2_048 as const
-export const IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES = 32 * 1024 * 1024
+export const IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES = 128 * 1024 * 1024
+const IMAGE_GENERATION_IMAGE_ARTIFACT_READ_MAX_BYTES = 32 * 1024 * 1024
 const BASE64_PAYLOAD_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u
+
+function parseManagedArtifactReadIdentity(
+  value: unknown,
+  context: string
+): ManagedArtifactReadIdentity {
+  const record = expectRecord(value, context)
+  if (record.kind === 'image') return parseAgentImageGenerationArtifact(value, context)
+  expectOnlyKeys(
+    record,
+    ['artifactId', 'uri', 'kind', 'format', 'mimeType', 'sizeBytes', 'sha256'] as const,
+    context
+  )
+  if (
+    record.kind !== 'document' ||
+    record.format !== 'pdf' ||
+    record.mimeType !== 'application/pdf'
+  ) {
+    throw invalidProtocolValue(context, 'must be a managed PDF document identity')
+  }
+  const sha256 = expectString(record.sha256, `${context}.sha256`)
+  const artifactId = expectString(record.artifactId, `${context}.artifactId`)
+  const uri = expectString(record.uri, `${context}.uri`)
+  const sizeBytes = expectSafeInteger(record.sizeBytes, `${context}.sizeBytes`, 1)
+  if (
+    !SHA256_PATTERN.test(sha256) ||
+    artifactId !== `sha256:${sha256}` ||
+    uri !== `artifact://sha256/${sha256}` ||
+    sizeBytes <= 0
+  ) {
+    throw invalidProtocolValue(context, 'contains a mismatched immutable document identity')
+  }
+  return {
+    artifactId,
+    uri,
+    kind: 'document',
+    format: 'pdf',
+    mimeType: 'application/pdf',
+    sizeBytes,
+    sha256
+  }
+}
 
 export function parseImageGenerationArtifactReadInput(
   value: unknown
 ): ImageGenerationArtifactReadInput {
   const context = 'Image generation Artifact read request'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['schemaVersion', 'artifact'] as const, context)
+  expectOnlyKeys(record, ['schemaVersion', 'artifact', 'conversationId'] as const, context)
   expectSchemaVersion(record, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION, context)
-  const artifact = parseAgentImageGenerationArtifact(record.artifact, `${context}.artifact`)
-  if (artifact.sizeBytes > IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES) {
-    throw invalidProtocolValue(
-      `${context}.artifact.sizeBytes`,
-      `must not exceed ${IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES}`
-    )
+  const artifact = parseManagedArtifactReadIdentity(record.artifact, `${context}.artifact`)
+  const conversationId = optionalNonEmptyString(record.conversationId, `${context}.conversationId`)
+  if (conversationId && (conversationId.length > 512 || hasAsciiControlCharacter(conversationId))) {
+    throw invalidProtocolValue(`${context}.conversationId`, 'must be a bounded safe identifier')
+  }
+  const maximumBytes =
+    artifact.kind === 'image'
+      ? IMAGE_GENERATION_IMAGE_ARTIFACT_READ_MAX_BYTES
+      : IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES
+  if (artifact.sizeBytes > maximumBytes) {
+    throw invalidProtocolValue(`${context}.artifact.sizeBytes`, `must not exceed ${maximumBytes}`)
   }
   return {
     schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
-    artifact
+    artifact,
+    ...(conversationId ? { conversationId } : {})
   }
 }
 
@@ -65,14 +116,18 @@ export function parseImageGenerationArtifactReadOutput(
   const record = expectRecord(value, context)
   expectOnlyKeys(record, ['schemaVersion', 'artifact', 'fileName', 'dataBase64'] as const, context)
   expectSchemaVersion(record, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION, context)
-  const artifact = parseAgentImageGenerationArtifact(record.artifact, `${context}.artifact`)
-  if (artifact.sizeBytes > IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES) {
-    throw invalidProtocolValue(
-      `${context}.artifact.sizeBytes`,
-      `must not exceed ${IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES}`
-    )
+  const artifact = parseManagedArtifactReadIdentity(record.artifact, `${context}.artifact`)
+  const maximumBytes =
+    artifact.kind === 'image'
+      ? IMAGE_GENERATION_IMAGE_ARTIFACT_READ_MAX_BYTES
+      : IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES
+  if (artifact.sizeBytes > maximumBytes) {
+    throw invalidProtocolValue(`${context}.artifact.sizeBytes`, `must not exceed ${maximumBytes}`)
   }
-  const expectedFileName = `generated-image-${artifact.sha256.slice(0, 12)}.${extensionForArtifactFormat(artifact.format)}`
+  const expectedFileName =
+    artifact.kind === 'image'
+      ? `generated-image-${artifact.sha256.slice(0, 12)}.${extensionForArtifactFormat(artifact.format)}`
+      : `artifact-${artifact.sha256.slice(0, 12)}.pdf`
   const fileName = expectString(record.fileName, `${context}.fileName`)
   if (fileName !== expectedFileName) {
     throw invalidProtocolValue(`${context}.fileName`, 'does not match the immutable Artifact')

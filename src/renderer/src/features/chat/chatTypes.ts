@@ -1,5 +1,6 @@
 import type {
   AgentCommandOutputStream,
+  AgentCommandPublishedOutput,
   AgentCommandSessionStatus,
   AgentDiffProposal,
   AgentContextCompactionEventOutcome,
@@ -65,8 +66,7 @@ export interface ChatWebSearchActivity {
   updatedAt: number
 }
 
-export type ChatReadActivityKind =
-  'file' | 'image' | 'pdf' | 'word' | 'presentation' | 'spreadsheet'
+export type ChatReadActivityKind = 'file' | 'image' | 'word' | 'presentation' | 'spreadsheet'
 
 export type ChatFileWritePreview = Omit<
   AgentFileWritePreview,
@@ -130,6 +130,7 @@ export interface ChatCommandSessionView {
   exitCode?: number
   latestSequence: number
   outputTruncated: boolean
+  outputs?: AgentCommandPublishedOutput[]
 }
 
 /**

@@ -185,8 +185,18 @@ impl AgentService {
             .usage_contexts
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        contexts.remove(run_id);
+        let conversation_id = contexts
+            .remove(run_id)
+            .map(|state| state.context.conversation_id);
         drop(contexts);
+        if let Some(conversation_id) = conversation_id {
+            if let Err(error) = self
+                .command_sessions
+                .release_managed_workspace(&conversation_id, run_id)
+            {
+                eprintln!("failed to release managed command workspace: {error}");
+            }
+        }
         self.discard_trace_snapshot(run_id);
     }
 
@@ -336,7 +346,18 @@ impl AgentService {
                 .usage_contexts
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            contexts.remove(run_id);
+            let conversation_id = contexts
+                .remove(run_id)
+                .map(|state| state.context.conversation_id);
+            drop(contexts);
+            if let Some(conversation_id) = conversation_id {
+                if let Err(error) = self
+                    .command_sessions
+                    .release_managed_workspace(&conversation_id, run_id)
+                {
+                    eprintln!("failed to release managed command workspace: {error}");
+                }
+            }
         }
     }
 

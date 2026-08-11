@@ -1099,9 +1099,15 @@ fn image_artifact_read_contract_is_path_free_and_redacts_content_debug() {
     let request: ImageGenerationArtifactReadRequest = serde_json::from_value(serde_json::json!({
         "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
         "artifact": artifact,
+        "conversationId": "conversation-1",
     }))
     .unwrap();
-    assert_eq!(request.artifact.kind, ImageGenerationArtifactKindDto::Image);
+    assert!(matches!(
+        request.artifact,
+        ManagedArtifactReadIdentityDto::Image(ref artifact)
+            if artifact.kind == ImageGenerationArtifactKindDto::Image
+    ));
+    assert_eq!(request.conversation_id.as_deref(), Some("conversation-1"));
 
     let mut unsafe_request = serde_json::to_value(&request).unwrap();
     unsafe_request["artifact"]["managedPath"] = serde_json::json!("/private/object.png");

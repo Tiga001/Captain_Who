@@ -6,12 +6,14 @@ import type {
   ActivatedSkillSummary,
   AgentCommandArtifactKind,
   AgentCommandArtifactScope,
+  AgentManagedDocumentArtifact,
   AgentToolCall,
   AgentToolResult,
   OfficeDocumentKind,
   OfficeOperation
 } from '@mycopilot/protocol'
 import type { ChatAgentRunView } from './chatTypes'
+import { parseManagedCommandOutputs } from './managedCommandOutputs'
 
 export type AgentActivityStatus =
   'waiting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rejected' | 'conflict'
@@ -74,7 +76,10 @@ export interface OfficeActivityGroupIdentity {
 export interface OfficeArtifactEntry {
   artifactKind: AgentCommandArtifactKind
   changeKind: 'created' | 'modified' | 'replaced' | 'renamed'
+  displayName?: string
   id: string
+  managedReadPath?: string
+  managedArtifact?: AgentManagedDocumentArtifact
   path: string
   scope: AgentCommandArtifactScope
 }
@@ -597,14 +602,65 @@ function collectNativeOfficeArtifact(
   })
 }
 
+function collectManagedCommandDocuments(
+  entries: Map<string, OfficeArtifactEntry>,
+  call: AgentToolCall,
+  result: AgentToolResult
+): void {
+  if ((call.tool !== 'run_command' && call.tool !== 'command_session') || !result.ok) return
+  const payload = asRecord(result.result)
+  const execution = asRecord(payload?.execution)
+  const outputs = Array.isArray(execution?.outputs)
+    ? execution.outputs
+    : Array.isArray(payload?.outputs)
+      ? payload.outputs
+      : []
+  collectManagedCommandDocumentsFromOutputs(entries, outputs)
+}
+
+function collectManagedCommandDocumentsFromOutputs(
+  entries: Map<string, OfficeArtifactEntry>,
+  value: unknown
+): void {
+  const outputs = parseManagedCommandOutputs(value) ?? []
+  outputs.forEach((output) => {
+    if (output.kind !== 'document') return
+    const { name, readPath } = output
+    const id = `managed:${readPath}`
+    entries.set(id, {
+      artifactKind: 'document',
+      changeKind: 'created',
+      displayName: name,
+      id,
+      managedReadPath: readPath,
+      managedArtifact: {
+        artifactId: `sha256:${output.sha256}`,
+        uri: readPath,
+        kind: 'document',
+        format: 'pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: output.sizeBytes,
+        sha256: output.sha256
+      },
+      path: readPath,
+      scope: 'external'
+    })
+  })
+}
+
 export function getOfficeArtifactEntries(run: ChatAgentRunView): OfficeArtifactEntry[] {
   const entries = new Map<string, OfficeArtifactEntry>()
 
   run.toolCalls.forEach((call) => {
     const result = run.toolResults.find((candidate) => candidate.callId === call.id)
-    if (!result) return
-    if (call.tool === 'run_command') collectObservedArtifacts(entries, result)
-    if (isOfficeTool(call.tool)) collectNativeOfficeArtifact(entries, call, result)
+    if (result) {
+      if (call.tool === 'run_command') collectObservedArtifacts(entries, result)
+      if (isOfficeTool(call.tool)) collectNativeOfficeArtifact(entries, call, result)
+      collectManagedCommandDocuments(entries, call, result)
+    }
+    if (call.tool === 'run_command') {
+      collectManagedCommandDocumentsFromOutputs(entries, run.commandSessions?.[call.id]?.outputs)
+    }
   })
 
   return [...entries.values()]

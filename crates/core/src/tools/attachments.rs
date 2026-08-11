@@ -31,7 +31,7 @@ impl AgentTool for AttachmentsListTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list".to_string(),
-            description: "List files and images attached to the current conversation only. Use this for attachments shared in this chat. Returns @attachments read paths that can be passed to read_image/read_file/read_pdf/read_word/read_presentation/read_spreadsheet.".to_string(),
+            description: "List files and images attached to the current conversation only. Use this for attachments shared in this chat. Returns exact @attachments read paths: pass images or text to read_image/read_file; for PDF activate bundled:application:pdf and bind the path through run_command.inputs; for Office files activate the matching Skill and use its available reader.".to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -67,7 +67,7 @@ impl AgentTool for AttachmentsListProjectTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list_project".to_string(),
-            description: "List files and images attached to other conversations in the current project, excluding the current conversation. Use this to discover historical project attachments from other chats. Returns @attachments read paths that can be passed to read_image/read_file/read_pdf/read_word/read_presentation/read_spreadsheet.".to_string(),
+            description: "List files and images attached to other conversations in the current project, excluding the current conversation. Use this to discover historical project attachments from other chats. Returns exact @attachments read paths: pass images or text to read_image/read_file; for PDF activate bundled:application:pdf and bind the path through run_command.inputs; for Office files activate the matching Skill and use its available reader.".to_string(),
             input_schema: attachment_list_schema(),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -398,6 +398,17 @@ mod tests {
         AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentRunContext,
         AgentWritePermission,
     };
+
+    #[test]
+    fn tool_descriptions_route_pdf_paths_through_the_bundled_skill() {
+        for definition in [
+            AttachmentsListTool.definition(),
+            AttachmentsListProjectTool.definition(),
+        ] {
+            assert!(definition.description.contains("bundled:application:pdf"));
+            assert!(definition.description.contains("run_command.inputs"));
+        }
+    }
 
     #[test]
     fn cursor_pages_are_stable_without_duplicates_or_skipped_attachments() {

@@ -13,15 +13,16 @@ use crate::storage::{
     context_compaction_repository, conversation_context_adaptation_repository,
     conversation_history_archive_repository, conversation_history_open,
     conversation_model_context_repository, conversation_trace_repository, file_draft_repository,
-    guidance_repository, provider_continuation_repository, turn_diff_repository,
-    world_state_repository,
+    guidance_repository, model_request_observation_repository, provider_continuation_repository,
+    turn_diff_repository, world_state_repository,
 };
 use crate::{
     provider_continuation_store::{
         PreparedProviderContinuationClone, ProviderContinuationForkMapping,
     },
-    AgentGuidanceStatus, ContextCompactionReceiptStage, ContextCompactionReceiptStatus,
-    ConversationModelContextItem, ConversationTurnTrace, ProviderContinuationRef, WorldStateRecord,
+    AgentGuidanceStatus, ContextCompactionReceipt, ContextCompactionReceiptStage,
+    ContextCompactionReceiptStatus, ConversationModelContextItem, ConversationTurnTrace,
+    ModelRequestObservation, ProviderContinuationRef, WorldStateRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
@@ -86,6 +87,15 @@ struct ForkGuidance {
 }
 
 #[derive(Debug)]
+struct ForkProviderTransitionReceipt {
+    source_receipt: ContextCompactionReceipt,
+    source_observation: ModelRequestObservation,
+    target_operation_id: String,
+    target_run_id: String,
+    target_observation_id: String,
+}
+
+#[derive(Debug)]
 pub(crate) struct ConversationForkPlan {
     pub request_id: String,
     pub source_conversation_id: String,
@@ -99,6 +109,7 @@ pub(crate) struct ConversationForkPlan {
     guidances: Vec<ForkGuidance>,
     file_drafts: Vec<AgentFileDraftRecord>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
+    provider_transition_receipts: Vec<ForkProviderTransitionReceipt>,
     world_state_records: Vec<world_state_repository::ConversationWorldStateJournalEntry>,
     pub(crate) provider_continuation_mappings: Vec<ProviderContinuationForkMapping>,
     pub(crate) requires_context_adaptation: bool,
@@ -249,6 +260,11 @@ pub(crate) fn build_fork_plan_at_point(
             cutoff,
         )?,
     };
+    // Provider-transition receipts are part of the visible timeline, not disposable audit noise.
+    // Copy every transition whose summary is visible at the selected fork point so a later fork
+    // of the child conversation retains the same semantic history and UI boundary.
+    let provider_transition_receipts =
+        collect_visible_provider_transition_receipts(connection, &source.id, &summaries)?;
     let summary_covered_runtime_tool_calls = summaries
         .last()
         .map(|version| {
@@ -617,6 +633,7 @@ pub(crate) fn build_fork_plan_at_point(
         guidances,
         file_drafts,
         summaries,
+        provider_transition_receipts,
         world_state_records,
         provider_continuation_mappings,
         requires_context_adaptation,
@@ -719,6 +736,7 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         file_draft_repository::insert_draft(&transaction, draft).map_err(database_error)?;
     }
     let summary_id_map = clone_summary_chain(&transaction, plan)?;
+    clone_provider_transition_receipts(&transaction, plan, &summary_id_map)?;
     clone_world_state_records(&transaction, plan, &summary_id_map)?;
     if plan.requires_context_adaptation {
         conversation_context_adaptation_repository::insert_in_connection(
@@ -1092,6 +1110,57 @@ fn summaries_visible_through_transition_boundary(
     Ok(visible)
 }
 
+fn collect_visible_provider_transition_receipts(
+    connection: &Connection,
+    source_conversation_id: &str,
+    visible_summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
+) -> Result<Vec<ForkProviderTransitionReceipt>, String> {
+    let mut receipts = Vec::new();
+    for version in visible_summaries {
+        let Some(receipt) = context_compaction_receipt_repository::get_applied_provider_transition_receipt_for_summary(
+            connection,
+            source_conversation_id,
+            &version.summary.id,
+        )
+        .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if receipt.conversation_id != source_conversation_id
+            || receipt.assistant_message_id != version.lineage.introduced_by_assistant_message_id
+            || receipt.summary_id.as_deref() != Some(version.summary.id.as_str())
+            || receipt.plan.previous_summary_id != version.summary.previous_summary_id
+            || receipt.plan.covered_through != version.summary.covered_through
+            || receipt.source_revision.as_deref() != Some(version.summary.source_revision.as_str())
+        {
+            return Err(
+                "Provider transition receipt 与可见摘要的身份或覆盖范围不一致。".to_string(),
+            );
+        }
+        let observation_id = receipt
+            .generation_observation_id
+            .as_deref()
+            .ok_or_else(|| "Provider transition receipt 缺少模型请求观测。".to_string())?;
+        let observation =
+            model_request_observation_repository::get_observation(connection, observation_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "Provider transition receipt 引用的模型请求观测不存在。".to_string()
+                })?;
+        receipt
+            .validate_generation_observation(&observation)
+            .map_err(|error| error.to_string())?;
+        receipts.push(ForkProviderTransitionReceipt {
+            source_receipt: receipt,
+            source_observation: observation,
+            target_operation_id: new_id("provider-transition"),
+            target_run_id: new_id("context-compaction-run"),
+            target_observation_id: new_id("model-request-observation"),
+        });
+    }
+    Ok(receipts)
+}
+
 fn world_state_records_visible_at_cutoff(
     connection: &Connection,
     conversation_id: &str,
@@ -1399,6 +1468,109 @@ fn clone_summary_chain(
     )
     .map_err(|error| error.to_string())?;
     Ok(summary_id_map)
+}
+
+fn clone_provider_transition_receipts(
+    connection: &Connection,
+    plan: &ConversationForkPlan,
+    summary_id_map: &HashMap<String, String>,
+) -> Result<(), String> {
+    for copy in &plan.provider_transition_receipts {
+        let source_receipt = &copy.source_receipt;
+        let source_summary_id = source_receipt
+            .summary_id
+            .as_deref()
+            .ok_or_else(|| "Provider transition receipt 缺少摘要。".to_string())?;
+        let target_summary_id = mapped_id(
+            summary_id_map,
+            source_summary_id,
+            "Provider transition 摘要",
+        )?;
+        let target_assistant_message_id = mapped_id(
+            &plan.message_id_map,
+            &source_receipt.assistant_message_id,
+            "Provider transition 所属消息",
+        )?;
+        let target_covered_through =
+            remap_cursor(&source_receipt.plan.covered_through, &plan.message_id_map)?;
+        let target_previous_summary_id = source_receipt
+            .plan
+            .previous_summary_id
+            .as_ref()
+            .map(|summary_id| {
+                mapped_id(
+                    summary_id_map,
+                    summary_id,
+                    "上一版 Provider transition 摘要",
+                )
+            })
+            .transpose()?;
+        let target_source_revision = context_compaction_repository::source_revision_for_cursor(
+            connection,
+            &plan.target.id,
+            &target_covered_through,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut receipt = source_receipt.clone();
+        receipt.operation_id = copy.target_operation_id.clone();
+        receipt.run_id = copy.target_run_id.clone();
+        receipt.conversation_id = plan.target.id.clone();
+        receipt.assistant_message_id = target_assistant_message_id.clone();
+        receipt.plan.context_revision = target_source_revision.clone();
+        receipt.plan.persistent_revision = target_source_revision.clone();
+        receipt.plan.previous_summary_id = target_previous_summary_id;
+        receipt.plan.covered_through = target_covered_through;
+        receipt.source_revision = Some(target_source_revision.clone());
+        receipt.generation_observation_id = Some(copy.target_observation_id.clone());
+        receipt.summary_id = Some(target_summary_id.clone());
+        receipt
+            .result
+            .as_mut()
+            .ok_or_else(|| "Provider transition receipt 缺少应用结果。".to_string())?
+            .summary_id = target_summary_id;
+
+        let mut observation = copy.source_observation.clone();
+        observation.id = copy.target_observation_id.clone();
+        observation.run_id = copy.target_run_id.clone();
+        observation.conversation_id = Some(plan.target.id.clone());
+        observation.assistant_message_id = Some(target_assistant_message_id);
+        observation.operation_id = Some(copy.target_operation_id.clone());
+        if let Some(estimate) = observation.estimate.as_mut() {
+            estimate.context_revision = target_source_revision.clone();
+            estimate.persistent_revision = target_source_revision;
+        }
+        receipt
+            .validate_generation_observation(&observation)
+            .map_err(|error| error.to_string())?;
+        receipt.validate().map_err(|error| error.to_string())?;
+
+        // Use the same receipt state machine as a live transition. The planned row and terminal
+        // update remain inside the fork transaction, so readers can never observe a half-cloned
+        // transition while recursive forks still receive a fully valid operation boundary.
+        let mut planned = receipt.clone();
+        planned.status = ContextCompactionReceiptStatus::InProgress;
+        planned.stage = ContextCompactionReceiptStage::Planned;
+        planned.source_revision = None;
+        planned.generation_observation_id = None;
+        planned.summary_id = None;
+        planned.result = None;
+        planned.error = None;
+        planned.updated_at = planned.started_at;
+        planned.completed_at = None;
+        planned.validate().map_err(|error| error.to_string())?;
+        context_compaction_receipt_repository::record_receipt_in_connection(
+            connection, &planned, None,
+        )
+        .map_err(|error| error.to_string())?;
+        context_compaction_receipt_repository::record_receipt_in_connection(
+            connection,
+            &receipt,
+            Some(&observation),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn clone_world_state_records(
@@ -2049,7 +2221,34 @@ mod tests {
         )
         .unwrap();
         assert!(before_divider.summaries.is_empty());
+        assert!(before_divider.provider_transition_receipts.is_empty());
         assert_eq!(before_divider.target.model_id.as_deref(), Some("model-a"));
+
+        let after_first_divider = build_fork_plan_at_point(
+            &connection,
+            "fork-after-first-divider",
+            &source.id,
+            &ConversationForkPoint::AssistantReply {
+                assistant_message_id: "assistant-b".to_string(),
+            },
+            40,
+        )
+        .unwrap();
+        assert_eq!(after_first_divider.summaries.len(), 1);
+        assert_eq!(after_first_divider.provider_transition_receipts.len(), 1);
+
+        let at_second_divider = build_fork_plan_at_point(
+            &connection,
+            "fork-at-second-divider",
+            &source.id,
+            &ConversationForkPoint::ProviderTransitionBoundary {
+                operation_id: "provider-transition-b-to-c".to_string(),
+            },
+            40,
+        )
+        .unwrap();
+        assert_eq!(at_second_divider.summaries.len(), 2);
+        assert_eq!(at_second_divider.provider_transition_receipts.len(), 2);
 
         let at_first_divider = build_fork_plan_at_point(
             &connection,
@@ -2068,6 +2267,7 @@ mod tests {
         );
         assert_eq!(at_first_divider.target.model_id.as_deref(), Some("model-b"));
         assert_eq!(at_first_divider.target.messages.len(), 2);
+        assert_eq!(at_first_divider.provider_transition_receipts.len(), 1);
 
         commit_fork_plan(&mut connection, &at_first_divider).unwrap();
         let target_chain = context_compaction_repository::list_active_summary_chain(
@@ -2080,12 +2280,81 @@ mod tests {
             target_chain[0].lineage.source_summary_id.as_deref(),
             Some("summary-transition-b")
         );
+        let cloned_receipts =
+            context_compaction_receipt_repository::list_provider_transition_receipts(
+                &connection,
+                &at_first_divider.target.id,
+                None,
+                100,
+            )
+            .unwrap();
+        assert_eq!(cloned_receipts.len(), 1);
+        let cloned_receipt = &cloned_receipts[0];
+        assert_ne!(cloned_receipt.operation_id, "provider-transition-a-to-b");
+        assert_eq!(cloned_receipt.conversation_id, at_first_divider.target.id);
+        assert_eq!(
+            cloned_receipt.assistant_message_id,
+            at_first_divider.message_id_map["assistant-a"]
+        );
+        assert_eq!(
+            cloned_receipt.summary_id.as_deref(),
+            Some(target_chain[0].summary.id.as_str())
+        );
+        assert_eq!(
+            cloned_receipt.plan.covered_through,
+            ContextJournalCursor::message(&at_first_divider.message_id_map["assistant-a"])
+        );
+        let cloned_observation = model_request_observation_repository::get_observation(
+            &connection,
+            cloned_receipt
+                .generation_observation_id
+                .as_deref()
+                .expect("cloned receipt observation"),
+        )
+        .unwrap()
+        .expect("cloned provider transition observation");
+        cloned_receipt
+            .validate_generation_observation(&cloned_observation)
+            .unwrap();
+        let continuation_origin = get_continuation_origin(&connection, &at_first_divider.target.id)
+            .unwrap()
+            .expect("fork continuation origin");
+        assert_eq!(
+            continuation_origin.boundary_message_id,
+            at_first_divider.message_id_map["assistant-a"]
+        );
         assert!(conversation_context_adaptation_repository::get(
             &connection,
             &at_first_divider.target.id,
         )
         .unwrap()
         .is_none());
+
+        let recursive = build_fork_plan_at_point(
+            &connection,
+            "fork-recursive-provider-divider",
+            &at_first_divider.target.id,
+            &ConversationForkPoint::ProviderTransitionBoundary {
+                operation_id: cloned_receipt.operation_id.clone(),
+            },
+            50,
+        )
+        .unwrap();
+        assert_eq!(recursive.summaries.len(), 1);
+        assert_eq!(recursive.provider_transition_receipts.len(), 1);
+        assert_eq!(recursive.target.model_id.as_deref(), Some("model-b"));
+        commit_fork_plan(&mut connection, &recursive).unwrap();
+        assert_eq!(
+            context_compaction_receipt_repository::list_provider_transition_receipts(
+                &connection,
+                &recursive.target.id,
+                None,
+                100,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
 
     #[test]

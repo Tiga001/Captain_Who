@@ -99,7 +99,6 @@ export type AgentToolName =
   | 'attachments_list_project'
   | 'read_file'
   | 'read_image'
-  | 'read_pdf'
   | 'read_word'
   | 'read_presentation'
   | 'read_spreadsheet'
@@ -430,7 +429,7 @@ export const AGENT_COMMAND_SESSION_SCHEMA_VERSION = 1
 export type AgentCommandSessionStatus =
   'starting' | 'running' | 'exited' | 'interrupted' | 'timed_out' | 'failed' | 'outcome_unknown'
 
-/** Bounded Renderer-safe projection; it never contains process handles, environment or output. */
+/** Bounded Renderer-safe projection; it contains no process handles, environment, or raw output. */
 export interface AgentCommandSessionSnapshot {
   schemaVersion: typeof AGENT_COMMAND_SESSION_SCHEMA_VERSION
   sessionId: string
@@ -448,6 +447,7 @@ export interface AgentCommandSessionSnapshot {
   exitCode?: number
   latestSequence: number
   outputTruncated: boolean
+  outputs?: AgentCommandPublishedOutput[]
   archiveRef?: string
 }
 
@@ -719,7 +719,21 @@ export interface AgentTodoState {
 
 export type AgentActionExecutionStatus = 'applied' | 'approved' | 'failed' | 'conflict' | 'rejected'
 
+export type AgentCommandPublishedOutputKind = 'image' | 'document'
+
+export interface AgentCommandPublishedOutput {
+  name: string
+  kind: AgentCommandPublishedOutputKind
+  readPath: string
+  mimeType: string
+  sizeBytes: number
+  sha256: string
+  width?: number
+  height?: number
+}
+
 export interface AgentCommandExecutionResult {
+  outputs?: AgentCommandPublishedOutput[]
   command: string
   cwd: string
   exitCode?: number
@@ -1308,8 +1322,12 @@ export type AgentCommandRuntimeProvider = 'managedArtifact'
 
 export type AgentCommandRuntimeKind = 'node' | 'python'
 
-/** Model-visible selection of an application-owned reproducible artifact environment. */
-export type AgentCommandRuntimeProfile = 'documents' | 'spreadsheets' | 'presentations'
+/**
+ * Host-owned reproducible runtime identity persisted in approvals and evidence.
+ * `pdf` is bound only by the trusted built-in PDF Skill and is intentionally absent from the
+ * model-visible run_command.runtimeProfile enum.
+ */
+export type AgentCommandRuntimeProfile = 'documents' | 'spreadsheets' | 'presentations' | 'pdf'
 
 export interface AgentCommandRuntimePackageRequirement {
   name: string
@@ -1359,6 +1377,21 @@ export interface AgentCommandRuntimeResolution {
   message?: string
 }
 
+export type AgentFileInputRef =
+  | { type: 'attachment'; readPath: string }
+  | { type: 'workspace'; path: string }
+  | { type: 'external'; path: string }
+  | { type: 'generated_artifact'; uri: string; path: string }
+  | { type: 'skill_resource'; uri: string }
+
+export interface AgentFileInputBinding {
+  schemaVersion: 1
+  mountPath: string
+  source: AgentFileInputRef
+  sizeBytes: number
+  sha256: string
+}
+
 export interface AgentCommandRequest {
   id: string
   command: string
@@ -1368,6 +1401,7 @@ export interface AgentCommandRequest {
   riskLevel?: AgentCommandRiskLevel
   reason?: string
   observe?: AgentCommandArtifactObservationRequest
+  inputs?: AgentFileInputBinding[]
   /** @deprecated Only present on legacy pending actions, which the host refuses and reprepares. */
   runtime?: AgentCommandRuntimeRequest
   runtimeBinding?: AgentCommandRuntimeBinding
@@ -1868,6 +1902,7 @@ export type AgentEvent =
       endedAt: number
       latestSequence: number
       outputTruncated: boolean
+      outputs?: AgentCommandPublishedOutput[]
     }
   | {
       type: 'command_interrupted'
@@ -1880,6 +1915,7 @@ export type AgentEvent =
       endedAt: number
       latestSequence: number
       outputTruncated: boolean
+      outputs?: AgentCommandPublishedOutput[]
     }
   | {
       type: 'error'

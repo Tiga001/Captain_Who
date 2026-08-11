@@ -1383,15 +1383,15 @@ fn normalized_content_type(headers: &HeaderMap) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
-struct ValidatedImage {
-    format: ImageArtifactFormat,
-    width: u32,
-    height: u32,
-    size_bytes: u64,
-    sha256: String,
+pub(crate) struct ValidatedImage {
+    pub(crate) format: ImageArtifactFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) size_bytes: u64,
+    pub(crate) sha256: String,
 }
 
-fn validate_staged_image(
+pub(crate) fn validate_staged_image(
     path: &Path,
     claimed_content_type: Option<&str>,
     max_bytes: usize,

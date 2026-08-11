@@ -992,7 +992,8 @@ fn load_authorized_image_input(
         context.attachment_library().cloned(),
         context.skill_resources_optional(),
     )
-    .with_storage(context.storage_optional());
+    .with_storage(context.storage_optional())
+    .with_conversation_id(context.conversation_id_optional());
     let source = agent_file_input_ref_from_model_path(&file_inputs, input_path)
         .map_err(agent_file_input_error)?;
     if matches!(&source, crate::protocol::AgentFileInputRef::External { .. })

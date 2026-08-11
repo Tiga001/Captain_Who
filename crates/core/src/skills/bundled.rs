@@ -19,6 +19,7 @@ use std::sync::Arc;
 pub const APPLICATION_BUNDLED_SKILL_SOURCE_ID: &str = "bundled:application";
 pub const DOCUMENTS_LOCAL_ID: &str = "documents";
 pub const IMAGE_GENERATION_LOCAL_ID: &str = "image-generation";
+pub const PDF_LOCAL_ID: &str = "pdf";
 pub const PRESENTATIONS_LOCAL_ID: &str = "presentations";
 pub const SKILL_INSTALLER_LOCAL_ID: &str = "skill-installer";
 pub const SPREADSHEETS_LOCAL_ID: &str = "spreadsheets";
@@ -42,6 +43,23 @@ const DOCUMENTS_RESOURCES: &[EmbeddedSkillResource] = &[
 
 const IMAGE_GENERATION_PATH: &str = "image-generation/SKILL.md";
 const IMAGE_GENERATION_SOURCE: &str = include_str!("bundled/image-generation/SKILL.md");
+
+const PDF_PATH: &str = "pdf/SKILL.md";
+const PDF_SOURCE: &str = include_str!("bundled/pdf/SKILL.md");
+const PDF_RESOURCES: &[EmbeddedSkillResource] = &[
+    EmbeddedSkillResource {
+        path: "references/creating-and-editing.md",
+        bytes: include_bytes!("bundled/pdf/references/creating-and-editing.md"),
+    },
+    EmbeddedSkillResource {
+        path: "references/forms.md",
+        bytes: include_bytes!("bundled/pdf/references/forms.md"),
+    },
+    EmbeddedSkillResource {
+        path: "references/reading.md",
+        bytes: include_bytes!("bundled/pdf/references/reading.md"),
+    },
+];
 
 const SKILL_INSTALLER_PATH: &str = "skill-installer/SKILL.md";
 const SKILL_INSTALLER_SOURCE: &str = include_str!("bundled/skill-installer/SKILL.md");
@@ -104,6 +122,12 @@ const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[
         relative_path: IMAGE_GENERATION_PATH,
         source_text: IMAGE_GENERATION_SOURCE,
         resources: &[],
+    },
+    EmbeddedSkill {
+        local_id: PDF_LOCAL_ID,
+        relative_path: PDF_PATH,
+        source_text: PDF_SOURCE,
+        resources: PDF_RESOURCES,
     },
     EmbeddedSkill {
         local_id: PRESENTATIONS_LOCAL_ID,
@@ -429,7 +453,8 @@ fn invalid_bundled_source(error: SkillReferenceError) -> SkillRegistrationError 
 mod tests {
     use super::*;
     use crate::skills::model::{
-        SkillErrorCode, SkillResourceKind, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION_V3,
+        SkillErrorCode, SkillResourceKind, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION_V2,
+        SKILL_PACKAGE_FORMAT_VERSION_V3,
     };
     use crate::skills::{
         SkillMaterializationDestination, SkillMaterializationRequest, SkillMaterializationStatus,
@@ -505,7 +530,7 @@ mod tests {
         assert_eq!(source.activation_scope(), SkillActivationScope::Run);
         assert!(catalog.diagnostics().is_empty());
         assert!(!catalog.truncated());
-        assert_eq!(catalog.skills().len(), 5);
+        assert_eq!(catalog.skills().len(), 6);
         assert_eq!(
             catalog
                 .skills()
@@ -515,6 +540,7 @@ mod tests {
             vec![
                 "bundled:application:documents",
                 "bundled:application:image-generation",
+                "bundled:application:pdf",
                 "bundled:application:presentations",
                 "bundled:application:skill-installer",
                 "bundled:application:spreadsheets",
@@ -592,6 +618,109 @@ mod tests {
             SkillProvenance::Bundled { source_id, relative_path }
                 if source_id == source.id() && relative_path == IMAGE_GENERATION_PATH
         ));
+    }
+
+    #[test]
+    fn pdf_skill_is_a_trusted_package_with_progressive_references() {
+        let source = BundledSkillSource::new().unwrap();
+        let descriptor = source
+            .list()
+            .unwrap()
+            .skills()
+            .iter()
+            .find(|skill| skill.id().local_id() == PDF_LOCAL_ID)
+            .unwrap()
+            .clone();
+        let package = source.resolve(&descriptor.selection()).unwrap();
+
+        assert_eq!(descriptor.id().as_str(), "bundled:application:pdf");
+        assert_eq!(descriptor.name(), PDF_LOCAL_ID);
+        assert_eq!(descriptor.source_kind(), SkillSourceKind::Bundled);
+        assert_eq!(descriptor.trust(), SkillTrust::Application);
+        assert_eq!(descriptor.activation_scope(), SkillActivationScope::Run);
+        assert_eq!(
+            descriptor.description(),
+            "Read, search, inspect, create, edit, render, and verify PDF files, including scanned documents, complex layouts, tables, figures, and fillable forms. Use whenever the task involves a .pdf file or PDF output."
+        );
+        assert!(matches!(
+            descriptor.provenance(),
+            SkillProvenance::Bundled { source_id, relative_path }
+                if source_id == source.id() && relative_path == PDF_PATH
+        ));
+
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V2);
+        assert_eq!(package.source_text(), PDF_SOURCE);
+        assert_eq!(package.resources().len(), 3);
+        assert_eq!(
+            package
+                .resources()
+                .entries()
+                .iter()
+                .map(|resource| resource.path())
+                .collect::<Vec<_>>(),
+            vec![
+                "references/creating-and-editing.md",
+                "references/forms.md",
+                "references/reading.md",
+            ]
+        );
+        assert!(package
+            .resources()
+            .entries()
+            .iter()
+            .all(|resource| resource.kind() == SkillResourceKind::Reference));
+
+        let instructions = package.instructions();
+        for required in [
+            "`run_command`",
+            "`read_image`",
+            "`MYCOPILOT_INPUT_ROOT`",
+            "never execute a saved script from the private execution space",
+            "safe relative names there",
+            "only publishable PNG, JPEG, WebP, or PDF",
+            "relative `outputs/...`",
+            "exact `outputs[].readPath`",
+            "`conversation_history`",
+            "references/reading.md",
+            "references/creating-and-editing.md",
+            "references/forms.md",
+        ] {
+            assert!(instructions.contains(required), "missing `{required}`");
+        }
+        for forbidden in ["@scratch", "brew install", "apt-get", "pip install"] {
+            assert!(
+                !package.source_text().contains(forbidden),
+                "model-facing PDF Skill leaked forbidden instruction `{forbidden}`"
+            );
+        }
+
+        let reader = source.open_resource_reader(&package).unwrap().unwrap();
+        for resource in package.resources().entries() {
+            assert_eq!(resource.kind(), SkillResourceKind::Reference);
+            assert_eq!(
+                reader.read(resource).unwrap().len() as u64,
+                resource.byte_length()
+            );
+        }
+        let reading = package
+            .resources()
+            .entries()
+            .iter()
+            .find(|resource| resource.path() == "references/reading.md")
+            .unwrap();
+        let reading = String::from_utf8(reader.read(reading).unwrap()).unwrap();
+        assert!(reading.contains("managed `python -c`"));
+        assert!(reading.contains("Do not use `grep` or `rg`"));
+        let creating = package
+            .resources()
+            .entries()
+            .iter()
+            .find(|resource| resource.path() == "references/creating-and-editing.md")
+            .unwrap();
+        let creating = String::from_utf8(reader.read(creating).unwrap()).unwrap();
+        assert!(creating.contains("Use managed `python -c`"));
+        assert!(creating.contains("invoke the frozen script only below `MYCOPILOT_INPUT_ROOT`"));
+        assert!(creating.contains("Never create and later execute a script"));
     }
 
     #[test]

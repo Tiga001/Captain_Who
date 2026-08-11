@@ -1115,6 +1115,7 @@ fn fork_commit_rechecks_active_commands_before_writing_any_target_state() {
             output_capture_truncated: false,
             archive_ref: None,
             terminal_reason: Some("test settlement"),
+            published_outputs: &[],
             committed_at: 42,
         },
     )
@@ -1248,6 +1249,7 @@ fn fork_test_command_session_create(
             exit_code: None,
             latest_sequence: 0,
             output_truncated: false,
+            outputs: Vec::new(),
             archive_ref: None,
         },
         authorization_source: crate::command::CommandAuthorizationSource::ExplicitUser,
@@ -1294,6 +1296,7 @@ fn settle_fork_test_command_session(
                 output_capture_truncated: false,
                 archive_ref: None,
                 terminal_reason: None,
+                published_outputs: &[],
                 committed_at: i64::try_from(timestamp).unwrap(),
             },
         )

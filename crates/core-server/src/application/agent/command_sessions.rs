@@ -26,6 +26,7 @@ use mycopilot_core::command::{
     CommandSessionId, CommandSessionLifecycleEvent, CommandSessionLifecycleObserver,
     CommandSessionManager, CommandSessionScopeId, CommandSessionSnapshot as CoreSessionSnapshot,
     CommandSessionState, CommandStartOptions, CommandStartOutcome, CommandTerminalResult,
+    ManagedCommandWorkspaceLease,
 };
 use mycopilot_core::storage::agent_command_session_repository::{
     AgentCommandSessionCreate, AgentCommandSessionModelReadRequest,
@@ -68,6 +69,7 @@ struct AgentCommandSessionRegistryInner {
     storage: Arc<StorageService>,
     sessions: Mutex<HashMap<String, Arc<HostCommandSession>>>,
     interaction_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    managed_workspaces: Mutex<HashMap<(String, String), ManagedCommandWorkspaceLease>>,
     admission: Arc<HostCommandSessionAdmission>,
     settlement_scheduler: Arc<CommandSessionSettlementScheduler>,
     initial_yield: Duration,
@@ -339,6 +341,7 @@ impl AgentCommandSessionRegistry {
             storage,
             sessions: Mutex::new(HashMap::new()),
             interaction_locks: Mutex::new(HashMap::new()),
+            managed_workspaces: Mutex::new(HashMap::new()),
             admission,
             settlement_scheduler: CommandSessionSettlementScheduler::start(weak.clone()),
             initial_yield,
@@ -358,6 +361,8 @@ impl AgentCommandSessionRegistry {
         request: StartAgentCommandSession<'_>,
     ) -> Result<AgentCommandSessionLaunch, String> {
         validate_owner(&request.owner)?;
+        let managed_workspace =
+            self.managed_workspace_for_command(&request.owner, request.command)?;
         let admission_lease = self
             .inner
             .admission
@@ -484,6 +489,7 @@ impl AgentCommandSessionRegistry {
                 },
                 request.artifact_runtime,
                 request.file_inputs,
+                managed_workspace,
                 lifecycle_observer,
                 request.cancellation_token,
                 request.cancel_probe,
@@ -554,7 +560,13 @@ impl AgentCommandSessionRegistry {
                             "命令已经结束，但 Host 未能确认唯一的 Archive/Trace/Session 终态；完整输出由后台 Session 继续持有：{error}"
                         ));
                     }
-                    session.clear_archived_execution_spools(&mut terminal.execution);
+                    if let Some(authoritative) = session.terminal() {
+                        // The lifecycle writer owns managed-output publication. Return that same
+                        // authoritative terminal receipt to the synchronous caller so run_command
+                        // and a later command_session read cannot disagree about outputs.
+                        terminal = Box::new(authoritative);
+                    }
+                    session.clear_archived_execution_spools(&mut terminal.execution)?;
                 }
                 Ok(AgentCommandSessionLaunch::Exited(terminal))
             }
@@ -563,7 +575,7 @@ impl AgentCommandSessionRegistry {
                 let mut handoff_guard = self.handoff_guard(snapshot.session_id.to_string());
                 if session.mark_terminal_settlement_ready() == HandoffState::Aborted {
                     let mut terminal = handoff_guard.abort_before_handoff()?;
-                    session.clear_archived_execution_spools(&mut terminal.execution);
+                    session.clear_archived_execution_spools(&mut terminal.execution)?;
                     return Ok(AgentCommandSessionLaunch::Exited(Box::new(terminal)));
                 }
                 if let Some(error) = session.persistence_error() {
@@ -571,7 +583,7 @@ impl AgentCommandSessionRegistry {
                     session.record_persistence_error(format!(
                         "命令已在持久交接前终止，因为 Session 状态无法安全保存：{error}"
                     ));
-                    session.clear_archived_execution_spools(&mut terminal.execution);
+                    session.clear_archived_execution_spools(&mut terminal.execution)?;
                     return Ok(AgentCommandSessionLaunch::Exited(Box::new(terminal)));
                 }
                 session.wait_for_persisted_sequence(
@@ -589,12 +601,52 @@ impl AgentCommandSessionRegistry {
                         session.record_persistence_error(format!(
                             "命令已在持久交接前终止，因为 running 回执无法安全生成：{receipt_error}"
                         ));
-                        session.clear_archived_execution_spools(&mut terminal.execution);
+                        session.clear_archived_execution_spools(&mut terminal.execution)?;
                         Ok(AgentCommandSessionLaunch::Exited(Box::new(terminal)))
                     }
                 }
             }
         }
+    }
+
+    fn managed_workspace_for_command(
+        &self,
+        owner: &CommandSessionOwner,
+        command: &mycopilot_core::AgentCommandRequest,
+    ) -> Result<Option<ManagedCommandWorkspaceLease>, String> {
+        let is_managed_pdf = command.runtime_binding.as_deref().is_some_and(|binding| {
+            binding.profile == mycopilot_core::AgentCommandRuntimeProfile::Pdf
+        });
+        if !is_managed_pdf {
+            return Ok(None);
+        }
+
+        let key = (owner.conversation_id.clone(), owner.origin_run_id.clone());
+        let mut workspaces = lock(&self.inner.managed_workspaces);
+        if let Some(existing) = workspaces.get(&key) {
+            return Ok(Some(existing.clone()));
+        }
+        let workspace = self
+            .inner
+            .storage
+            .acquire_managed_command_workspace(&owner.conversation_id, &owner.origin_run_id)?;
+        workspaces.insert(key, workspace.clone());
+        Ok(Some(workspace))
+    }
+
+    /// Releases the Host's run-level retention. A still-running command or unpublished terminal
+    /// result keeps its own clone, so physical cleanup cannot race process exit or publication.
+    pub(super) fn release_managed_workspace(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<(), String> {
+        self.inner
+            .storage
+            .cleanup_managed_command_workspace(conversation_id, run_id)?;
+        lock(&self.inner.managed_workspaces)
+            .remove(&(conversation_id.to_string(), run_id.to_string()));
+        Ok(())
     }
 
     /// Closes a process whose durable `starting -> running` fence did not commit.
@@ -709,7 +761,7 @@ impl AgentCommandSessionRegistry {
                 // ownership while the same bounded worker keeps reconciling.
                 if settled {
                     if durable_row == DurableRowState::Present {
-                        session.clear_archived_execution_spools(&mut terminal.execution);
+                        session.clear_archived_execution_spools(&mut terminal.execution)?;
                     }
                     return Ok(Box::new(terminal));
                 }
@@ -719,7 +771,7 @@ impl AgentCommandSessionRegistry {
                 ));
             }
             if durable_row == DurableRowState::Present {
-                session.clear_archived_execution_spools(&mut terminal.execution);
+                session.clear_archived_execution_spools(&mut terminal.execution)?;
             }
             return Ok(Box::new(terminal));
         }
@@ -749,7 +801,7 @@ impl AgentCommandSessionRegistry {
             }
             // The Session archive owns the exact body once its ref is authoritative. Do not let
             // the ordinary failed run_command ToolResult materialize the same spool a second time.
-            session.clear_archived_execution_spools(&mut terminal.execution);
+            session.clear_archived_execution_spools(&mut terminal.execution)?;
         } else {
             // No database row can ever satisfy a terminal UPDATE. The caller-owned File Effect
             // guard will be paired with the returned failed ToolResult by the normal action audit.
@@ -1352,7 +1404,13 @@ impl AgentCommandSessionExecutor for AgentCommandSessionRegistry {
         {
             // A retried runtime ToolCall must replay its already-committed transcript cut before
             // any process control. In particular, an `interrupt` retry must not signal twice.
-            return Ok(model_execution_output_from_read(&read));
+            let history_open = terminal_model_history_open(
+                &self.inner.storage,
+                &request.conversation_id,
+                &request.session_id,
+                read.receipt.status,
+            )?;
+            return Ok(model_execution_output_from_read(&read, history_open));
         }
         let record = self
             .inner
@@ -1566,8 +1624,48 @@ impl AgentCommandSessionExecutor for AgentCommandSessionRegistry {
             .read_or_create_agent_command_session_model_read(&receipt_request)
             .map_err(AgentError::new)?
             .ok_or_else(|| AgentError::new("命令 Session 不存在或不属于当前会话。"))?;
-        Ok(model_execution_output_from_read(&read))
+        let history_open = terminal_model_history_open(
+            &self.inner.storage,
+            &request.conversation_id,
+            &request.session_id,
+            read.receipt.status,
+        )?;
+        Ok(model_execution_output_from_read(&read, history_open))
     }
+}
+
+fn terminal_model_history_open(
+    storage: &StorageService,
+    conversation_id: &str,
+    session_id: &str,
+    status: AgentCommandSessionStatus,
+) -> AgentResult<Option<String>> {
+    if !status.is_terminal() {
+        return Ok(None);
+    }
+    let record = storage
+        .load_agent_command_session(conversation_id, session_id)
+        .map_err(AgentError::new)?
+        .ok_or_else(|| AgentError::new("命令 Session 在生成历史恢复位置期间消失。"))?;
+    let Some(archive_ref) = record.snapshot.archive_ref.as_deref() else {
+        // Legacy or outcome-unknown rows may not own an Exact Archive. Preserve compatibility
+        // without inventing a route or exposing an internal identifier.
+        return Ok(None);
+    };
+    storage
+        .conversation_history_archive_open(conversation_id, archive_ref)
+        .map_err(AgentError::new)?
+        .ok_or_else(|| {
+            AgentError::structured(
+                "agent.command_session_history_unavailable",
+                "命令 Session 的完整历史归档不可用。",
+                json!({
+                    "type": "command_session",
+                    "code": "historyUnavailable"
+                }),
+            )
+        })
+        .map(Some)
 }
 
 impl AgentCommandSessionRegistryInner {
@@ -1874,8 +1972,21 @@ impl AgentCommandSessionRegistryInner {
     fn observe_terminal(
         self: &Arc<Self>,
         session: &Arc<HostCommandSession>,
-        terminal: CommandTerminalResult,
+        mut terminal: CommandTerminalResult,
     ) {
+        if let Err(error) = mycopilot_core::command::publish_managed_command_outputs(
+            &self.storage,
+            &mut terminal.execution,
+            &session.owner.conversation_id,
+            &session.owner.origin_run_id,
+            &session.owner.call_id,
+        ) {
+            let message = format!("受管命令输出发布失败：{error}");
+            terminal.execution.error = Some(message.clone());
+            terminal.snapshot.state = CommandSessionState::Failed;
+            terminal.snapshot.exit_code = None;
+            terminal.snapshot.error = Some(message);
+        }
         let (handoff, settlement_ready, durable_row) = {
             let mut state = lock(&session.state);
             let durable_failure = match &state.durable_start {
@@ -2054,6 +2165,7 @@ impl AgentCommandSessionRegistryInner {
             output_capture_truncated: terminal.execution.output_capture.truncated_at_source,
             archive_ref: Some(&archive_ref),
             terminal_reason: terminal.snapshot.error.as_deref(),
+            published_outputs: &terminal.execution.outputs,
             committed_at: now_ms(),
         };
         match self
@@ -2177,6 +2289,7 @@ impl AgentCommandSessionRegistryInner {
                 ended_at: common.6,
                 latest_sequence: common.7,
                 output_truncated: common.8,
+                outputs: terminal.execution.outputs.clone(),
             }
         } else {
             AgentEvent::CommandExited {
@@ -2194,6 +2307,7 @@ impl AgentCommandSessionRegistryInner {
                 ended_at: common.6,
                 latest_sequence: common.7,
                 output_truncated: common.8,
+                outputs: terminal.execution.outputs.clone(),
             }
         };
         let _ = notifications.send(agent_event_notification(event));
@@ -2270,14 +2384,19 @@ impl HostCommandSession {
         lock(&self.state).terminal_settlement_ready
     }
 
-    fn clear_archived_execution_spools(&self, execution: &mut AgentCommandExecutionResult) {
-        if self.terminal_archive_ref().is_some() {
+    fn clear_archived_execution_spools(
+        &self,
+        execution: &mut AgentCommandExecutionResult,
+    ) -> Result<(), String> {
+        if let Some(archive_ref) = self.terminal_archive_ref() {
             // The immutable full-body archive is now authoritative. Keeping only bounded previews
             // in the ordinary ToolResult prevents the same multi-MB stdout/stderr body from being
             // archived a second time by the normal trace pipeline.
+            mycopilot_core::command::bind_authoritative_command_archive(execution, archive_ref)?;
             execution.stdout_spool = Default::default();
             execution.stderr_spool = Default::default();
         }
+        Ok(())
     }
 
     fn session_id(&self) -> Option<CommandSessionId> {

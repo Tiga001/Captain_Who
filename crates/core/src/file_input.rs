@@ -28,6 +28,9 @@ pub const MAX_AGENT_FILE_INPUTS: usize = 16;
 pub const MAX_AGENT_FILE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_AGENT_FILE_INPUT_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS: usize = 240;
+/// Maximum byte size accepted by the stable `read_image` visual delivery path. Managed command
+/// publication shares this bound so every returned image readPath remains directly readable.
+pub(crate) const MAX_AGENT_VISUAL_INPUT_BYTES: u64 = 8 * 1024 * 1024;
 
 const ERROR_INVALID_REQUEST: &str = "agent.fileInput.invalidRequest";
 const ERROR_AUTHORIZATION_DENIED: &str = "agent.fileInput.authorizationDenied";
@@ -108,6 +111,7 @@ pub struct AgentFileInputExecutionContext {
     attachment_library: Option<AgentAttachmentLibraryContext>,
     skill_resources: Option<Arc<SkillResourceSession>>,
     storage: Option<Arc<StorageService>>,
+    conversation_id: Option<String>,
 }
 
 impl AgentFileInputExecutionContext {
@@ -119,6 +123,7 @@ impl AgentFileInputExecutionContext {
             attachment_library,
             skill_resources,
             storage: None,
+            conversation_id: None,
         }
     }
 
@@ -135,6 +140,16 @@ impl AgentFileInputExecutionContext {
 
     pub fn with_storage(mut self, storage: Option<Arc<StorageService>>) -> Self {
         self.storage = storage;
+        self
+    }
+
+    /// Binds generated Artifact lookup to the current trusted conversation identity.
+    ///
+    /// This value is assembled by the Host, never accepted from model input. Legacy
+    /// image-generation Artifacts remain readable through their existing journal; generic
+    /// managed-command Artifacts require a matching conversation grant.
+    pub fn with_conversation_id(mut self, conversation_id: Option<&str>) -> Self {
+        self.conversation_id = conversation_id.map(ToString::to_string);
         self
     }
 }
@@ -157,7 +172,7 @@ pub(crate) fn agent_file_input_ref_from_model_path(
     if model_path.starts_with("image-artifact://sha256/")
         || model_path.starts_with("artifact://sha256/")
     {
-        let digest = artifact_digest(&model_path)?;
+        let (scheme, digest) = artifact_uri_identity(&model_path)?;
         let storage = context.storage.as_ref().ok_or_else(|| {
             AgentFileInputError::new(
                 ERROR_SNAPSHOT_UNAVAILABLE,
@@ -166,22 +181,26 @@ pub(crate) fn agent_file_input_ref_from_model_path(
             )
         })?;
         let artifact_id = format!("sha256:{digest}");
-        let registered = storage
-            .resolve_published_generated_artifact_input(&artifact_id)
-            .map_err(|_| {
-                AgentFileInputError::new(
-                    ERROR_SNAPSHOT_UNAVAILABLE,
-                    "retry",
-                    "无法读取生成物的权威 Artifact 发布记录。",
-                )
-            })?
-            .ok_or_else(|| {
-                AgentFileInputError::new(
-                    ERROR_NOT_FOUND,
-                    "regenerate",
-                    "权威 Artifact 注册表中不存在该已发布生成物。",
-                )
-            })?;
+        let registered = resolve_artifact_for_scheme(
+            storage,
+            &artifact_id,
+            context.conversation_id.as_deref(),
+            scheme,
+        )
+        .map_err(|_| {
+            AgentFileInputError::new(
+                ERROR_SNAPSHOT_UNAVAILABLE,
+                "retry",
+                "无法读取生成物的权威 Artifact 发布记录。",
+            )
+        })?
+        .ok_or_else(|| {
+            AgentFileInputError::new(
+                ERROR_NOT_FOUND,
+                "regenerate",
+                "权威 Artifact 注册表中不存在该已发布生成物。",
+            )
+        })?;
         if registered.sha256 != digest {
             return Err(AgentFileInputError::new(
                 ERROR_INTEGRITY_MISMATCH,
@@ -190,7 +209,7 @@ pub(crate) fn agent_file_input_ref_from_model_path(
             ));
         }
         return Ok(AgentFileInputRef::GeneratedArtifact {
-            uri: format!("image-artifact://sha256/{digest}"),
+            uri: model_path,
             path: registered.path.to_string_lossy().into_owned(),
         });
     }
@@ -226,14 +245,14 @@ pub(crate) fn agent_file_input_ref_matches_model_path(
             model_path == path.trim()
         }
         AgentFileInputRef::GeneratedArtifact { uri, .. } => {
-            artifact_digest(&model_path)? == artifact_digest(uri)?
+            artifact_uri_identity(&model_path)? == artifact_uri_identity(uri)?
         }
         AgentFileInputRef::SkillResource { uri } => model_path == uri.trim(),
     })
 }
 
 /// Returns the one location string that model-facing tools should reuse.
-pub(crate) fn model_path_for_agent_file_input_ref(source: &AgentFileInputRef) -> &str {
+pub fn model_path_for_agent_file_input_ref(source: &AgentFileInputRef) -> &str {
     match source {
         AgentFileInputRef::Attachment { read_path } => read_path,
         AgentFileInputRef::Workspace { path } | AgentFileInputRef::External { path } => path,
@@ -921,7 +940,7 @@ fn read_authorized_source(
             read_regular_file(&path, cancellation, max_bytes)
         }
         AgentFileInputRef::GeneratedArtifact { uri, path } => {
-            let expected = artifact_digest(uri)?;
+            let (scheme, expected) = artifact_uri_identity(uri)?;
             let storage = context.storage.as_ref().ok_or_else(|| {
                 AgentFileInputError::new(
                     ERROR_SNAPSHOT_UNAVAILABLE,
@@ -930,22 +949,26 @@ fn read_authorized_source(
                 )
             })?;
             let artifact_id = format!("sha256:{expected}");
-            let registered = storage
-                .resolve_published_generated_artifact_input(&artifact_id)
-                .map_err(|_| {
-                    AgentFileInputError::new(
-                        ERROR_SNAPSHOT_UNAVAILABLE,
-                        "retry",
-                        "无法读取生成物的权威 Artifact 发布记录。",
-                    )
-                })?
-                .ok_or_else(|| {
-                    AgentFileInputError::new(
-                        ERROR_NOT_FOUND,
-                        "regenerate",
-                        "权威 Artifact 注册表中不存在该已发布生成物。",
-                    )
-                })?;
+            let registered = resolve_artifact_for_scheme(
+                storage,
+                &artifact_id,
+                context.conversation_id.as_deref(),
+                scheme,
+            )
+            .map_err(|_| {
+                AgentFileInputError::new(
+                    ERROR_SNAPSHOT_UNAVAILABLE,
+                    "retry",
+                    "无法读取生成物的权威 Artifact 发布记录。",
+                )
+            })?
+            .ok_or_else(|| {
+                AgentFileInputError::new(
+                    ERROR_NOT_FOUND,
+                    "regenerate",
+                    "权威 Artifact 注册表中不存在该已发布生成物。",
+                )
+            })?;
             if registered.sha256 != expected {
                 return Err(AgentFileInputError::new(
                     ERROR_INTEGRITY_MISMATCH,
@@ -1120,20 +1143,49 @@ fn resolve_generated_artifact_path(value: &str) -> Result<PathBuf, AgentFileInpu
     canonical_regular_path(path)
 }
 
-fn artifact_digest(uri: &str) -> Result<String, AgentFileInputError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactUriScheme {
+    Image,
+    Document,
+}
+
+fn artifact_uri_identity(uri: &str) -> Result<(ArtifactUriScheme, String), AgentFileInputError> {
     let uri = uri.trim();
-    let digest = uri
-        .strip_prefix("image-artifact://sha256/")
-        .or_else(|| uri.strip_prefix("artifact://sha256/"))
-        .filter(|digest| is_lower_hex_sha256(digest))
-        .ok_or_else(|| {
-            AgentFileInputError::new(
-                ERROR_INVALID_REQUEST,
-                "changeRequest",
-                "generated_artifact 输入必须使用内容寻址的 Artifact URI。",
-            )
-        })?;
-    Ok(digest.to_string())
+    let (scheme, digest) = if let Some(digest) = uri.strip_prefix("image-artifact://sha256/") {
+        (ArtifactUriScheme::Image, digest)
+    } else if let Some(digest) = uri.strip_prefix("artifact://sha256/") {
+        (ArtifactUriScheme::Document, digest)
+    } else {
+        return Err(AgentFileInputError::new(
+            ERROR_INVALID_REQUEST,
+            "changeRequest",
+            "generated_artifact 输入必须使用内容寻址的 Artifact URI。",
+        ));
+    };
+    if !is_lower_hex_sha256(digest) {
+        return Err(AgentFileInputError::new(
+            ERROR_INVALID_REQUEST,
+            "changeRequest",
+            "generated_artifact 输入必须使用内容寻址的 Artifact URI。",
+        ));
+    }
+    Ok((scheme, digest.to_string()))
+}
+
+fn resolve_artifact_for_scheme(
+    storage: &StorageService,
+    artifact_id: &str,
+    conversation_id: Option<&str>,
+    scheme: ArtifactUriScheme,
+) -> Result<Option<crate::storage::service::ResolvedGeneratedArtifactInput>, String> {
+    match scheme {
+        ArtifactUriScheme::Image => {
+            storage.resolve_published_generated_artifact_input(artifact_id, conversation_id)
+        }
+        ArtifactUriScheme::Document => {
+            storage.resolve_published_document_artifact_input(artifact_id, conversation_id)
+        }
+    }
 }
 
 fn clean_relative_source_path(value: &str) -> Result<PathBuf, AgentFileInputError> {
@@ -1461,6 +1513,8 @@ mod tests {
         ImageGenerationExecutionTerminalUpdate, StoredImageGenerationArtifactState,
         StoredImageGenerationExecutionStatus,
     };
+    use crate::storage::models::ChatConversationRecord;
+    use crate::storage::service::ManagedArtifactAuthority;
     use crate::{
         AgentAttachmentReference, AgentInputAttachmentKind, AgentPatchPermission,
         AgentWritePermission,
@@ -1567,6 +1621,23 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, bytes).unwrap();
         (storage, path, sha256)
+    }
+
+    fn insert_conversation(storage: &StorageService, conversation_id: &str) {
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: conversation_id.to_string(),
+                project_id: None,
+                model_id: None,
+                title: "artifact authority test".to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
     }
 
     #[test]
@@ -1797,6 +1868,177 @@ mod tests {
             .unwrap_err()
             .code(),
             ERROR_SNAPSHOT_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn artifact_uri_scheme_is_an_authority_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+
+        // Deliberately register the exact same digest in the legacy image journal and the managed
+        // document journal. URI scheme, not the guessable digest, decides which authority applies.
+        let pdf_bytes = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n";
+        let (storage, legacy_path, digest) = publish_generated_artifact(
+            &root,
+            "execution-same-digest",
+            pdf_bytes,
+            &format!("objects/{}.png", sha256_hex(pdf_bytes)),
+        );
+        insert_conversation(&storage, "conversation-1");
+        insert_conversation(&storage, "conversation-2");
+        let document_source = root.join("same-digest.pdf");
+        fs::write(&document_source, pdf_bytes).unwrap();
+        let document = storage
+            .publish_managed_artifact_file(
+                &document_source,
+                ManagedArtifactAuthority {
+                    conversation_id: "conversation-1",
+                    run_id: "run-1",
+                    call_id: "call-1",
+                },
+            )
+            .unwrap();
+        assert_eq!(document.sha256, digest);
+
+        let context = AgentFileInputExecutionContext::default()
+            .with_storage(Some(Arc::clone(&storage)))
+            .with_conversation_id(Some("conversation-1"));
+        let document_ref =
+            agent_file_input_ref_from_model_path(&context, &format!("artifact://sha256/{digest}"))
+                .unwrap();
+        let AgentFileInputRef::GeneratedArtifact { path, .. } = &document_ref else {
+            panic!("expected a generated Artifact reference");
+        };
+        assert_eq!(Path::new(path), document.absolute_path);
+        let frozen_document = vec![AgentFileInputSpec {
+            mount_path: "same-digest.pdf".to_string(),
+            source: document_ref.clone(),
+        }];
+        prepare_agent_file_input_bindings(
+            None,
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &context,
+            &frozen_document,
+            None,
+        )
+        .unwrap();
+
+        let image_ref = agent_file_input_ref_from_model_path(
+            &context,
+            &format!("image-artifact://sha256/{digest}"),
+        )
+        .unwrap();
+        let AgentFileInputRef::GeneratedArtifact { path, .. } = &image_ref else {
+            panic!("expected a generated Artifact reference");
+        };
+        assert_eq!(Path::new(path), legacy_path.canonicalize().unwrap());
+        assert!(!agent_file_input_ref_matches_model_path(
+            &document_ref,
+            &format!("image-artifact://sha256/{digest}")
+        )
+        .unwrap());
+
+        let other_conversation = AgentFileInputExecutionContext::default()
+            .with_storage(Some(Arc::clone(&storage)))
+            .with_conversation_id(Some("conversation-2"));
+        let denied = agent_file_input_ref_from_model_path(
+            &other_conversation,
+            &format!("artifact://sha256/{digest}"),
+        )
+        .unwrap_err();
+        assert_eq!(denied.code(), ERROR_NOT_FOUND);
+        let denied_after_freeze = prepare_agent_file_input_bindings(
+            None,
+            permissions(AgentReadPermission::WorkspaceOnly),
+            &other_conversation,
+            &frozen_document,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(denied_after_freeze.code(), ERROR_NOT_FOUND);
+    }
+
+    #[test]
+    fn managed_artifacts_cannot_cross_uri_schemes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let storage = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        insert_conversation(&storage, "conversation-1");
+        let authority = ManagedArtifactAuthority {
+            conversation_id: "conversation-1",
+            run_id: "run-1",
+            call_id: "call-1",
+        };
+
+        let document_source = root.join("document.pdf");
+        fs::write(&document_source, b"%PDF-1.7\n%%EOF\n").unwrap();
+        let document = storage
+            .publish_managed_artifact_file(&document_source, authority)
+            .unwrap();
+
+        let image_source = root.join("image.png");
+        let mut image_bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut image_bytes, image::ImageFormat::Png)
+            .unwrap();
+        fs::write(&image_source, image_bytes.into_inner()).unwrap();
+        let image = storage
+            .publish_managed_artifact_file(&image_source, authority)
+            .unwrap();
+
+        let context = AgentFileInputExecutionContext::default()
+            .with_storage(Some(storage))
+            .with_conversation_id(Some("conversation-1"));
+        let document_as_image = agent_file_input_ref_from_model_path(
+            &context,
+            &format!("image-artifact://sha256/{}", document.sha256),
+        )
+        .unwrap_err();
+        assert_eq!(document_as_image.code(), ERROR_NOT_FOUND);
+        let forged_document_as_image = vec![AgentFileInputSpec {
+            mount_path: "document.png".to_string(),
+            source: AgentFileInputRef::GeneratedArtifact {
+                uri: format!("image-artifact://sha256/{}", document.sha256),
+                path: document.absolute_path.to_string_lossy().into_owned(),
+            },
+        }];
+        assert_eq!(
+            prepare_agent_file_input_bindings(
+                None,
+                permissions(AgentReadPermission::WorkspaceOnly),
+                &context,
+                &forged_document_as_image,
+                None,
+            )
+            .unwrap_err()
+            .code(),
+            ERROR_NOT_FOUND
+        );
+        let image_as_document = agent_file_input_ref_from_model_path(
+            &context,
+            &format!("artifact://sha256/{}", image.sha256),
+        )
+        .unwrap_err();
+        assert_eq!(image_as_document.code(), ERROR_NOT_FOUND);
+        let forged_image_as_document = vec![AgentFileInputSpec {
+            mount_path: "image.pdf".to_string(),
+            source: AgentFileInputRef::GeneratedArtifact {
+                uri: format!("artifact://sha256/{}", image.sha256),
+                path: image.absolute_path.to_string_lossy().into_owned(),
+            },
+        }];
+        assert_eq!(
+            prepare_agent_file_input_bindings(
+                None,
+                permissions(AgentReadPermission::WorkspaceOnly),
+                &context,
+                &forged_image_as_document,
+                None,
+            )
+            .unwrap_err()
+            .code(),
+            ERROR_NOT_FOUND
         );
     }
 

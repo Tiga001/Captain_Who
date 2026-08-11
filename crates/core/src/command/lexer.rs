@@ -1,11 +1,23 @@
 use super::*;
 
+#[derive(Debug)]
+struct PendingHeredoc {
+    delimiter: String,
+}
+
 pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxError> {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Quote {
         None,
         Single,
         Double,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum SeparatorState {
+        None,
+        Complete,
+        RequiresCommand,
     }
 
     let chars = command.chars().collect::<Vec<_>>();
@@ -19,9 +31,12 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
     let mut token_has_quoted_or_escaped_content = false;
     let mut write_redirection = false;
     let mut input_redirections = Vec::new();
+    let mut segment_has_heredoc = false;
+    let mut pending_heredoc: Option<PendingHeredoc> = None;
+    let mut ignored_policy_ranges = Vec::new();
     let mut quote = Quote::None;
     let mut index = 0;
-    let mut just_saw_separator = false;
+    let mut separator_state = SeparatorState::None;
 
     while index < chars.len() {
         let character = chars[index];
@@ -45,7 +60,12 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                             reason: "命令以未完成的转义字符结尾。",
                         });
                     };
-                    token.push(*next);
+                    // POSIX removes a backslash-newline pair before tokenization, including
+                    // inside double quotes. Mirroring that behavior is security-significant:
+                    // `r\\\nm` must be classified as `rm`, not an unrelated opaque program.
+                    if *next != '\n' {
+                        token.push(*next);
+                    }
                     index += 2;
                 } else if character == '$' && chars.get(index + 1) == Some(&'(') {
                     let (embedded, next) = extract_parenthesized_command(&chars, index + 2)?;
@@ -63,6 +83,34 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                 }
             }
             Quote::None => {
+                if character == '\n' {
+                    push_token(&mut tokens, &mut token);
+                    token_has_quoted_or_escaped_content = false;
+                    // A newline following `|`, `&&`, or `||` is a shell continuation, not the
+                    // beginning of a here-document body or another empty command.
+                    if separator_state == SeparatorState::RequiresCommand {
+                        index += 1;
+                        continue;
+                    }
+                    if !tokens.is_empty() {
+                        segments.push(ShellSegment {
+                            tokens: std::mem::take(&mut tokens),
+                            has_write_redirection: write_redirection,
+                            input_redirections: std::mem::take(&mut input_redirections),
+                            has_heredoc: segment_has_heredoc,
+                        });
+                        write_redirection = false;
+                        segment_has_heredoc = false;
+                    }
+                    separator_state = SeparatorState::None;
+                    index += 1;
+                    if let Some(heredoc) = pending_heredoc.take() {
+                        let (next, ignored) = consume_heredoc_body(&chars, index, &heredoc)?;
+                        ignored_policy_ranges.push(ignored);
+                        index = next;
+                    }
+                    continue;
+                }
                 if character.is_whitespace() {
                     push_token(&mut tokens, &mut token);
                     token_has_quoted_or_escaped_content = false;
@@ -70,7 +118,12 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     continue;
                 }
                 if character == '#' && token.is_empty() && !token_has_quoted_or_escaped_content {
-                    break;
+                    // Shell comments end at the physical newline. Stopping analysis for the
+                    // entire string here would let a later line bypass policy.
+                    while chars.get(index).is_some_and(|character| *character != '\n') {
+                        index += 1;
+                    }
+                    continue;
                 }
                 if character == '\'' {
                     token_has_quoted_or_escaped_content = true;
@@ -92,7 +145,9 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                         });
                     };
                     token_has_quoted_or_escaped_content = true;
-                    token.push(*next);
+                    if *next != '\n' {
+                        token.push(*next);
+                    }
                     index += 2;
                     continue;
                 }
@@ -117,10 +172,34 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                     });
                 }
                 if character == '<' && chars.get(index + 1) == Some(&'<') {
-                    return Err(CommandSyntaxError {
-                        code: "command.unsupported.heredoc",
-                        reason: "run_command 不支持 heredoc 或 here-string。",
-                    });
+                    if chars.get(index + 2) == Some(&'<') {
+                        return Err(CommandSyntaxError {
+                            code: "command.unsupported.here_string",
+                            reason: "run_command 不支持 here-string；请使用普通参数或安全引用的 heredoc。",
+                        });
+                    }
+                    if pending_heredoc.is_some() {
+                        return Err(CommandSyntaxError {
+                            code: "command.unsupported.multiple_heredoc",
+                            reason:
+                                "一个复合命令行最多允许一个 heredoc。请拆成多个 run_command 调用。",
+                        });
+                    }
+                    if token.is_empty()
+                        || token_has_quoted_or_escaped_content
+                        || !token.chars().all(|character| character.is_ascii_digit())
+                    {
+                        push_token(&mut tokens, &mut token);
+                    } else {
+                        // `0<<'EOF'` selects stdin; the IO number is not an argv token.
+                        token.clear();
+                    }
+                    token_has_quoted_or_escaped_content = false;
+                    let (heredoc, next) = read_heredoc_delimiter(&chars, index + 2)?;
+                    pending_heredoc = Some(heredoc);
+                    segment_has_heredoc = true;
+                    index = next;
+                    continue;
                 }
                 if character == '<' && chars.get(index + 1) == Some(&'(')
                     || character == '>' && chars.get(index + 1) == Some(&'(')
@@ -202,21 +281,33 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
                         tokens: std::mem::take(&mut tokens),
                         has_write_redirection: write_redirection,
                         input_redirections: std::mem::take(&mut input_redirections),
+                        has_heredoc: segment_has_heredoc,
                     });
                     write_redirection = false;
-                    just_saw_separator = true;
+                    segment_has_heredoc = false;
                     index += 1;
                     if chars.get(index) == Some(&character) && matches!(character, '|' | '&') {
                         index += 1;
                     }
+                    separator_state = if character == ';' {
+                        SeparatorState::Complete
+                    } else {
+                        SeparatorState::RequiresCommand
+                    };
                     continue;
                 }
 
-                just_saw_separator = false;
+                separator_state = SeparatorState::None;
                 token.push(character);
                 index += 1;
             }
         }
+    }
+    if pending_heredoc.is_some() {
+        return Err(CommandSyntaxError {
+            code: "command.malformed.heredoc_header_newline_missing",
+            reason: "heredoc 声明后缺少正文换行和精确终止符。",
+        });
     }
 
     if quote != Quote::None {
@@ -226,7 +317,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
         });
     }
     push_token(&mut tokens, &mut token);
-    if just_saw_separator && tokens.is_empty() {
+    if separator_state != SeparatorState::None && tokens.is_empty() {
         return Err(CommandSyntaxError {
             code: "command.malformed.trailing_operator",
             reason: "复合命令不能以 shell 运算符结尾。",
@@ -237,6 +328,7 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
             tokens,
             has_write_redirection: write_redirection,
             input_redirections,
+            has_heredoc: segment_has_heredoc,
         });
     }
     if segments.is_empty() {
@@ -249,6 +341,110 @@ pub(super) fn lex_command(command: &str) -> Result<LexedCommand, CommandSyntaxEr
     Ok(LexedCommand {
         segments,
         embedded_commands,
+        ignored_policy_ranges,
+    })
+}
+
+fn read_heredoc_delimiter(
+    chars: &[char],
+    mut index: usize,
+) -> Result<(PendingHeredoc, usize), CommandSyntaxError> {
+    while chars
+        .get(index)
+        .is_some_and(|character| matches!(character, ' ' | '\t'))
+    {
+        index += 1;
+    }
+    let mut delimiter = String::new();
+    let mut quote = None;
+    let mut quoted = false;
+    let mut escaped = false;
+    while let Some(character) = chars.get(index).copied() {
+        if escaped {
+            if character == '\n' {
+                return Err(CommandSyntaxError {
+                    code: "command.malformed.heredoc_delimiter",
+                    reason: "heredoc delimiter 不能跨行。",
+                });
+            }
+            quoted = true;
+            delimiter.push(character);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            } else {
+                delimiter.push(character);
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quoted = true;
+            quote = Some(character);
+            index += 1;
+        } else if character.is_whitespace() || matches!(character, ';' | '|' | '&' | '<' | '>') {
+            break;
+        } else {
+            delimiter.push(character);
+            index += 1;
+        }
+    }
+    if escaped || quote.is_some() || delimiter.is_empty() {
+        return Err(CommandSyntaxError {
+            code: "command.malformed.heredoc_delimiter",
+            reason: "heredoc delimiter 为空、未闭合或格式无效。",
+        });
+    }
+    if !quoted {
+        return Err(CommandSyntaxError {
+            code: "command.unsupported.unquoted_heredoc",
+            reason:
+                "未引用的 heredoc 会执行 shell 展开，无法安全核验；请将 delimiter 写成 <<'NAME'。",
+        });
+    }
+    Ok((PendingHeredoc { delimiter }, index))
+}
+
+fn consume_heredoc_body(
+    chars: &[char],
+    start: usize,
+    heredoc: &PendingHeredoc,
+) -> Result<(usize, std::ops::Range<usize>), CommandSyntaxError> {
+    let mut line_start = start;
+    while line_start <= chars.len() {
+        let mut line_end = line_start;
+        while chars
+            .get(line_end)
+            .is_some_and(|character| *character != '\n')
+        {
+            line_end += 1;
+        }
+        let line = chars[line_start..line_end].iter().collect::<String>();
+        if line == heredoc.delimiter {
+            let next = if line_end < chars.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            return Ok((next, start..next));
+        }
+        if line_end == chars.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    Err(CommandSyntaxError {
+        code: "command.malformed.heredoc_terminator_missing",
+        reason: "heredoc 缺少独占一行且精确匹配的终止符。",
     })
 }
 

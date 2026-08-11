@@ -203,11 +203,20 @@ fn validate_host_output(
     if matches!(
         output.status,
         AgentCommandSessionStatus::Starting | AgentCommandSessionStatus::Running
-    ) && output.exit_code.is_some()
+    ) && (output.exit_code.is_some()
+        || !output.outputs.is_empty()
+        || output.history_open.is_some())
     {
         return Err(invalid_host_output(
-            "Host 为未结束的命令 Session 返回了 exitCode。",
+            "Host 为未结束的命令 Session 返回了终态字段。",
         ));
+    }
+    if output.history_open.as_ref().is_some_and(|open| {
+        !open.starts_with("hist_v1_")
+            || open.len() > 16 * 1024
+            || open.chars().any(char::is_control)
+    }) {
+        return Err(invalid_host_output("Host 返回了无效的历史恢复位置。"));
     }
     Ok(())
 }
@@ -226,7 +235,18 @@ fn invalid_host_output(message: &str) -> AgentError {
 fn model_result(output: AgentCommandSessionExecutionOutput) -> Value {
     let output_bytes = output.output.len();
     let output_hash = format!("{:x}", Sha256::digest(output.output.as_bytes()));
-    json!({
+    let outputs = output
+        .outputs
+        .iter()
+        .map(|item| {
+            json!({
+                "name": item.name,
+                "kind": item.kind,
+                "readPath": item.read_path,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut result = json!({
         "sessionId": output.session_id,
         "status": output.status,
         "output": output.output,
@@ -241,7 +261,30 @@ fn model_result(output: AgentCommandSessionExecutionOutput) -> Value {
             "outputBytes": output_bytes,
             "outputHash": output_hash
         }
-    })
+    });
+    if !outputs.is_empty() {
+        result
+            .as_object_mut()
+            .expect("command_session model result is an object")
+            .insert("outputs".to_string(), Value::Array(outputs));
+    }
+    if let Some(history_open) = output.history_open {
+        let object = result
+            .as_object_mut()
+            .expect("command_session model result is an object");
+        object.insert(
+            "historyOpen".to_string(),
+            Value::String(history_open.clone()),
+        );
+        object.insert(
+            "continueWith".to_string(),
+            json!({
+                "tool": "conversation_history",
+                "args": { "open": history_open }
+            }),
+        );
+    }
+    result
 }
 
 fn trace_result(value: &Value) -> Value {
@@ -256,6 +299,8 @@ fn trace_result(value: &Value) -> Value {
         "latestSequence",
         "outputTruncated",
         "read",
+        "historyOpen",
+        "continueWith",
     ] {
         if let Some(value) = source.get(field) {
             projected.insert(field.to_string(), value.clone());
@@ -309,6 +354,8 @@ mod tests {
             latest_sequence: 6,
             truncated_before: false,
             output_truncated: false,
+            outputs: Vec::new(),
+            history_open: None,
         }
     }
 
@@ -420,6 +467,20 @@ mod tests {
 
             assert_eq!(value["status"], expected);
         }
+    }
+
+    #[test]
+    fn terminal_history_route_is_model_visible_and_running_route_is_rejected() {
+        let history_open = format!("hist_v1_{}", "a".repeat(64));
+        let mut terminal = output(AgentCommandSessionStatus::Exited, "bounded preview");
+        terminal.history_open = Some(history_open.clone());
+        let value = model_result(terminal.clone());
+        assert_eq!(value["historyOpen"], history_open);
+        assert_eq!(value["continueWith"]["tool"], "conversation_history");
+        assert_eq!(value["continueWith"]["args"]["open"], value["historyOpen"]);
+
+        terminal.status = AgentCommandSessionStatus::Running;
+        assert!(validate_host_output(&session_id(), &terminal).is_err());
     }
 
     #[test]

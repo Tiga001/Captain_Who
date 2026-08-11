@@ -84,6 +84,41 @@ describe('RunCommandToolActivity', () => {
     expect(details?.textContent).not.toContain('执行脚本生成预算工作簿')
   })
 
+  it('keeps a long heredoc as one folded, scrollable, preformatted Timeline activity', async () => {
+    const command = [
+      "python3 <<'PY'",
+      ...Array.from({ length: 80 }, (_, index) => `    print('page ${index + 1}')`),
+      'PY',
+      ''
+    ].join('\n')
+    const call: AgentToolCall = {
+      approvalStatus: 'approved',
+      args: { command, reason: '批量检查 PDF 页面' },
+      id: 'multiline-command',
+      tool: 'run_command'
+    }
+    const result: AgentToolResult = {
+      callId: call.id,
+      ok: true,
+      result: { status: 'exited', exitCode: 0, stdout: 'done\n', stderr: '' },
+      tool: 'run_command'
+    }
+    const screen = await render(<RunCommandToolActivity call={call} result={result} />)
+    const disclosure = screen.container.querySelector<HTMLDetailsElement>(
+      '.agent-activity--run-command'
+    )
+
+    expect(disclosure?.open).toBe(false)
+    expect(screen.container.querySelectorAll('.agent-activity--run-command')).toHaveLength(1)
+    await userEvent.click(screen.container.querySelector('summary')!)
+
+    const commandBlock = screen.container.querySelector<HTMLElement>('.run-command-shell__command')
+    expect(commandBlock?.textContent).toBe(`$ ${command}`)
+    expect(window.getComputedStyle(commandBlock!).maxHeight).toBe('260px')
+    expect(window.getComputedStyle(commandBlock!).overflow).toBe('auto')
+    expect(window.getComputedStyle(commandBlock!).whiteSpace).toBe('pre')
+  })
+
   it('renders bounded live output before the final ToolResult arrives', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',

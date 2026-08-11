@@ -445,12 +445,21 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
         archive_result: &raw,
         model_result: &model_result,
         model_tool_result_gate: &gate,
-    });
+    })
+    .expect("archive tool result");
     assert_eq!(metadata.archived_completely, Some(true));
     assert!(metadata.truncated_at_source);
     assert!(metadata.model_projection_truncated);
-    let (observation, checkpoint_observation) =
-        finalize_tool_observations(&gate, &call.id, false, &model_result, &raw, &metadata).unwrap();
+    let (observation, checkpoint_observation) = finalize_tool_observations(
+        &gate,
+        &call.id,
+        false,
+        &model_result,
+        &raw,
+        &metadata,
+        false,
+    )
+    .unwrap();
     let projected: Value = serde_json::from_str(&observation).unwrap();
     let checkpoint_projected: Value = serde_json::from_str(&checkpoint_observation).unwrap();
     for projection in [&projected, &checkpoint_projected] {
@@ -464,8 +473,8 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
             .starts_with("hist_v1_"));
     }
     assert_eq!(
-        projected["historyOpen"],
-        checkpoint_projected["historyOpen"]
+        checkpoint_projected, projected,
+        "persisted model history must replay the exact live Model projection"
     );
     assert!(
         gate.would_truncate(&call.id, false, &model_result),
@@ -614,7 +623,8 @@ fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
         archive_result: &archive_result,
         model_result: &model_result,
         model_tool_result_gate: &gate,
-    });
+    })
+    .expect("archive tool result");
 
     assert_eq!(metadata.archived_completely, Some(true));
     assert!(metadata.model_projection_truncated);
@@ -641,6 +651,269 @@ fn process_spool_is_archived_exactly_and_forces_a_recovery_route() {
         restored.result.unwrap()["stdout"].as_str().unwrap(),
         full_stdout
     );
+}
+
+#[test]
+fn command_session_archive_route_is_reused_without_preview_rearchive() {
+    use crate::command::CommandAuthorizationSource;
+    use crate::protocol::{
+        AgentCommandSessionSnapshot, AgentCommandSessionStatus, AgentToolResult,
+    };
+    use crate::storage::agent_command_session_repository::{
+        AgentCommandSessionCreate, AgentCommandSessionTerminalUpdate,
+        AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+    };
+    use crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput;
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("command-authoritative.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-command-authoritative".to_string(),
+            project_id: None,
+            model_id: None,
+            title: "command archive".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-command-authoritative".to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let session_id = "cmd_1234567890abcdef1234567890abcdef";
+    let call_id = "call-command-authoritative";
+    storage
+        .create_agent_command_session(&AgentCommandSessionCreate {
+            snapshot: AgentCommandSessionSnapshot {
+                schema_version: AGENT_COMMAND_SESSION_SCHEMA_VERSION,
+                session_id: session_id.to_string(),
+                conversation_id: "conversation-command-authoritative".to_string(),
+                assistant_message_id: "assistant-command-authoritative".to_string(),
+                origin_run_id: "run-command-authoritative".to_string(),
+                call_id: call_id.to_string(),
+                project_id: None,
+                command: "emit-large-output".to_string(),
+                cwd: ".".to_string(),
+                command_digest: format!("sha256:{}", "a".repeat(64)),
+                status: AgentCommandSessionStatus::Starting,
+                started_at: 2,
+                ended_at: None,
+                exit_code: None,
+                latest_sequence: 0,
+                output_truncated: false,
+                outputs: Vec::new(),
+                archive_ref: None,
+            },
+            authorization_source: CommandAuthorizationSource::ExplicitUser,
+            approval_provenance: json!({"decision": "approved"}),
+            permission_provenance: json!({"mode": "default"}),
+            created_at: 2,
+        })
+        .unwrap();
+    storage
+        .mark_agent_command_session_running("conversation-command-authoritative", session_id, 3)
+        .unwrap();
+
+    let full_stdout = (0..20_000)
+        .map(|line| format!("authoritative-line-{line:05}\n"))
+        .collect::<String>();
+    let archived_result = AgentToolResult {
+        exact_archive_file: None,
+        call_id: format!("command-session:{session_id}"),
+        tool: "run_command".to_string(),
+        ok: true,
+        result: Some(json!({
+            "status": "exited",
+            "exitCode": 0,
+            "stdout": full_stdout,
+            "stderr": ""
+        })),
+        error: None,
+    };
+    let descriptor = storage
+        .archive_conversation_tool_result(ConversationHistoryArchiveInput {
+            conversation_id: "conversation-command-authoritative".to_string(),
+            assistant_message_id: "assistant-command-authoritative".to_string(),
+            sequence: 9_999,
+            call_id: archived_result.call_id.clone(),
+            tool: "run_command".to_string(),
+            content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+            content: serde_json::to_string(&archived_result).unwrap(),
+            truncated_at_source: false,
+            model_projection_truncated: true,
+            archive_projection_truncated: false,
+            created_at: 4,
+        })
+        .unwrap();
+    storage
+        .settle_agent_command_session(&AgentCommandSessionTerminalUpdate {
+            conversation_id: "conversation-command-authoritative",
+            session_id,
+            status: AgentCommandSessionStatus::Exited,
+            ended_at: 5,
+            exit_code: Some(0),
+            latest_sequence: 0,
+            transcript_truncated: true,
+            output_capture_truncated: false,
+            archive_ref: Some(&descriptor.archive_ref),
+            terminal_reason: None,
+            published_outputs: &[],
+            committed_at: 5,
+        })
+        .unwrap();
+
+    let history_open = crate::storage::conversation_history_open::encode_archive_history_open(
+        &descriptor.archive_ref,
+        0,
+    )
+    .unwrap();
+    let raw = AgentToolResult {
+        exact_archive_file: None,
+        call_id: call_id.to_string(),
+        tool: "run_command".to_string(),
+        ok: true,
+        result: Some(json!({
+            "status": "exited",
+            "exitCode": 0,
+            "stdout": "bounded preview",
+            "stdoutPreviewTruncated": true,
+            "historyOpen": history_open,
+            "continueWith": {
+                "tool": "conversation_history",
+                "args": { "open": history_open }
+            }
+        })),
+        error: None,
+    };
+    let registry = ToolRegistry::defaults_with_search(None);
+    let archive_result = registry.archive_projection(&raw);
+    let model_result = registry.model_projection(&raw);
+    let gate = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    let metadata = super::archive_tool_result(super::ToolResultArchiveRequest {
+        storage: Some(&storage),
+        conversation_id: Some("conversation-command-authoritative"),
+        assistant_message_id: Some("assistant-command-authoritative"),
+        sequence: Some(1),
+        raw_result: &raw,
+        archive_result: &archive_result,
+        model_result: &model_result,
+        model_tool_result_gate: &gate,
+    })
+    .expect("archive tool result");
+    assert_eq!(
+        metadata.archive_ref.as_deref(),
+        Some(descriptor.archive_ref.as_str())
+    );
+    assert_eq!(
+        storage
+            .resolve_authoritative_command_archive_metadata(
+                "conversation-command-authoritative",
+                "assistant-command-authoritative",
+                &raw,
+            )
+            .unwrap(),
+        Some(metadata.clone())
+    );
+    let mut wrong_call = raw.clone();
+    wrong_call.call_id = "different-call".to_string();
+    assert!(storage
+        .resolve_authoritative_command_archive_metadata(
+            "conversation-command-authoritative",
+            "assistant-command-authoritative",
+            &wrong_call,
+        )
+        .unwrap_err()
+        .contains("does not belong"));
+    let mut malformed_route = raw.clone();
+    malformed_route.result.as_mut().unwrap()["historyOpen"] = json!("not-a-history-route");
+    assert!(storage
+        .resolve_authoritative_command_archive_metadata(
+            "conversation-command-authoritative",
+            "assistant-command-authoritative",
+            &malformed_route,
+        )
+        .unwrap_err()
+        .contains("historyOpen is invalid"));
+    let mut nonzero_route = raw.clone();
+    nonzero_route.result.as_mut().unwrap()["historyOpen"] = json!(
+        crate::storage::conversation_history_open::encode_archive_history_open(
+            &descriptor.archive_ref,
+            1,
+        )
+        .unwrap()
+    );
+    assert!(storage
+        .resolve_authoritative_command_archive_metadata(
+            "conversation-command-authoritative",
+            "assistant-command-authoritative",
+            &nonzero_route,
+        )
+        .unwrap_err()
+        .contains("beginning of an Exact Archive"));
+    let mut rejected_durable_route = raw.clone();
+    let rejected_body = rejected_durable_route
+        .result
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    rejected_body.remove("historyOpen");
+    rejected_body.insert("historyOpenInvalid".to_string(), json!(true));
+    assert!(storage
+        .resolve_authoritative_command_archive_metadata(
+            "conversation-command-authoritative",
+            "assistant-command-authoritative",
+            &rejected_durable_route,
+        )
+        .unwrap_err()
+        .contains("refusing fallback archival"));
+    let archive_count: u64 = Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_history_blobs WHERE conversation_id = ?1",
+            ["conversation-command-authoritative"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        archive_count, 1,
+        "bounded preview must not be archived again"
+    );
+
+    let observation =
+        finalize_model_tool_observation(&gate, call_id, false, &model_result, &metadata).unwrap();
+    let projected: Value = serde_json::from_str(&observation).unwrap();
+    let model_open = projected["historyOpen"].as_str().unwrap();
+    let exact = storage
+        .read_conversation_history_archive_page_from_open(
+            "conversation-command-authoritative",
+            model_open,
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert!(exact.content.contains("authoritative-line-19999"));
 }
 
 #[test]
@@ -1215,7 +1488,7 @@ fn steer_attachment_library_updates_run_world_state_without_granting_conversatio
 }
 
 #[test]
-fn attachment_context_extracts_stable_pdf_but_defers_skill_gated_office_files() {
+fn attachment_context_defers_pdf_and_office_files_to_matching_skills() {
     let attachments = vec![
         runtime_binary_attachment(
             "attachment-pdf",
@@ -1279,8 +1552,8 @@ fn attachment_context_extracts_stable_pdf_but_defers_skill_gated_office_files() 
     let library = runtime_attachment_library(&attachments);
     let context = build_attachment_context(&attachments, Some(&library)).unwrap();
 
-    assert!(context.text.contains("Guidance PDF"));
-    for hidden_office_content in [
+    for hidden_content in [
+        "Guidance PDF",
         "Guidance DOCX",
         "Guidance PPTX",
         "Guidance XLSX",
@@ -1289,12 +1562,13 @@ fn attachment_context_extracts_stable_pdf_but_defers_skill_gated_office_files() 
         "Guidance MIME CSV",
     ] {
         assert!(
-            !context.text.contains(hidden_office_content),
-            "skill-gated Office content leaked during attachment preprocessing: {hidden_office_content}\n{}",
+            !context.text.contains(hidden_content),
+            "skill-gated document content leaked during attachment preprocessing: {hidden_content}\n{}",
             context.text
         );
     }
     for attachment_id in [
+        "attachment-pdf",
         "attachment-docx",
         "attachment-pptx",
         "attachment-xlsx",
@@ -1315,8 +1589,11 @@ fn attachment_context_extracts_stable_pdf_but_defers_skill_gated_office_files() 
             .text
             .matches("正文未读取；先激活匹配该文件类型的 Skill")
             .count(),
-        6
+        7
     );
+    assert!(context.text.contains("bundled:application:pdf"));
+    assert!(context.text.contains("run_command.inputs"));
+    assert!(context.text.contains("read_image"));
     for hidden_contract_detail in [
         "read_word",
         "read_presentation",
@@ -1377,6 +1654,30 @@ fn attachment_context_does_not_decode_skill_gated_office_payloads() {
     assert!(context
         .text
         .contains("@attachments/attachment-docx-invalid-payload/document.docx"));
+}
+
+#[test]
+fn attachment_context_routes_pdf_without_decoding_its_payload() {
+    let attachment = AgentInputAttachment {
+        id: "attachment-pdf-invalid-payload".to_string(),
+        kind: AgentInputAttachmentKind::File,
+        name: "manual.pdf".to_string(),
+        mime_type: Some("application/pdf".to_string()),
+        size_bytes: 10,
+        encoding: AgentInputAttachmentEncoding::Base64,
+        data: "not-base64".to_string(),
+        truncated: None,
+    };
+    let library = runtime_attachment_library(std::slice::from_ref(&attachment));
+
+    let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
+
+    assert!(context.text.contains("正文未读取"));
+    assert!(context.text.contains("bundled:application:pdf"));
+    assert!(context.text.contains("run_command.inputs"));
+    assert!(context
+        .text
+        .contains("@attachments/attachment-pdf-invalid-payload/manual.pdf"));
 }
 
 #[test]

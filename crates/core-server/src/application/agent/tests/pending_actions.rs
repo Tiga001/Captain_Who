@@ -594,6 +594,11 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
         "",
     );
     let service = AgentService::new(Arc::clone(&storage));
+    // Exercise the exact 16K-character product ceiling with the largest UTF-8 scalar width.
+    // The command projection itself is 64,000 bytes. Its JSON wrappers add metadata, so every
+    // persistence layer must apply its own documented bound without silently reducing the
+    // product limit or changing the frozen text.
+    let command_text = "😀".repeat(16_000);
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -605,7 +610,7 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
     let action = AgentProposedAction::Command {
         command: AgentCommandRequest {
             id: "managed-runtime-pending".to_string(),
-            command: "python scripts/build.py".to_string(),
+            command: command_text.clone(),
             cwd: Some(".".to_string()),
             timeout_ms: Some(30_000),
             approval_status: AgentApprovalStatus::Required,
@@ -634,6 +639,10 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
             agent_input,
         )
         .unwrap());
+    let durable_pending = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(durable_pending.len(), 1);
+    assert_eq!(command_text.len(), 64_000);
+    assert!(durable_pending[0].action_json.len() > command_text.len());
     drop(service);
 
     let reloaded = AgentService::new(Arc::clone(&storage));
@@ -650,6 +659,7 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
     let AgentProposedAction::Command { command } = &stored.snapshot.action else {
         panic!("persisted action must remain a command");
     };
+    assert_eq!(command.command, command_text);
     let runtime = command
         .runtime
         .as_ref()
@@ -663,6 +673,7 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
     assert_eq!(runtime.required_packages[0].name, "openpyxl");
     assert_eq!(runtime.required_packages[0].version, "3.1.5");
     let resumed_call = tool_call_for_action(&stored.snapshot.action);
+    assert_eq!(resumed_call.args["command"], command_text);
     assert_eq!(resumed_call.args["runtime"]["provider"], "managedArtifact");
     assert_eq!(resumed_call.args["runtime"]["kind"], "python");
     assert_eq!(

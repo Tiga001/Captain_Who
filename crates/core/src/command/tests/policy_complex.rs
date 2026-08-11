@@ -39,6 +39,147 @@ fn every_compound_segment_is_evaluated() {
 }
 
 #[test]
+fn every_multiline_and_continued_segment_is_evaluated() {
+    for command in [
+        "true\npip install openpyxl",
+        "true;\npip install openpyxl",
+        "true &&\npip install openpyxl",
+        "true ||\npip install openpyxl",
+        "printf ok |\npip install openpyxl",
+    ] {
+        let evaluation = evaluate_command_policy(
+            command,
+            AgentCommandSafetyPolicy::Guarded,
+            CommandAuthorizationSource::Automatic,
+        );
+        assert_eq!(
+            evaluation.decision,
+            CommandPolicyDecision::RequireExplicitApproval,
+            "{command}: {:?}",
+            evaluation.findings
+        );
+        assert!(evaluation
+            .findings
+            .iter()
+            .any(|finding| finding.risk == CommandRiskClass::PackageManagement));
+    }
+
+    for command in [
+        "true\nrm -rf /",
+        "true # the next line must still be analyzed\nrm -rf /",
+        "true &&\nrm -rf /",
+        "true ||\nrm -rf /",
+        "printf ok |\nrm -rf /",
+        "r\\\nm -rf /",
+        "r\\\r\nm -rf /",
+    ] {
+        let evaluation = evaluate_command_policy(
+            command,
+            AgentCommandSafetyPolicy::FullAccess,
+            CommandAuthorizationSource::ExplicitUser,
+        );
+        assert_eq!(
+            evaluation.decision,
+            CommandPolicyDecision::Deny,
+            "{command}: {:?}",
+            evaluation.findings
+        );
+        assert!(evaluation
+            .findings
+            .iter()
+            .any(|finding| finding.risk == CommandRiskClass::Catastrophic));
+    }
+
+    let trailing_semicolon = evaluate_command_policy(
+        "true;",
+        AgentCommandSafetyPolicy::FullAccess,
+        CommandAuthorizationSource::ExplicitUser,
+    );
+    assert_eq!(trailing_semicolon.decision, CommandPolicyDecision::Deny);
+    assert!(trailing_semicolon
+        .findings
+        .iter()
+        .any(|finding| finding.code == "command.malformed.trailing_operator"));
+}
+
+#[test]
+fn quoted_heredoc_is_data_but_all_executable_boundaries_remain_visible() {
+    for command in [
+        "python - <<'PY'\nprint('> /dev/disk9')\nprint('rm -rf /')\nPY",
+        "node <<\"JS\"\nconsole.log('sudo whoami')\nJS",
+    ] {
+        let evaluation = evaluate_command_policy(
+            command,
+            AgentCommandSafetyPolicy::Guarded,
+            CommandAuthorizationSource::Automatic,
+        );
+        assert_eq!(
+            evaluation.decision,
+            CommandPolicyDecision::RequireExplicitApproval,
+            "{command}: {:?}",
+            evaluation.findings
+        );
+        assert!(!evaluation
+            .findings
+            .iter()
+            .any(|finding| matches!(finding.risk, CommandRiskClass::Catastrophic)));
+    }
+
+    let followed_by_command = evaluate_command_policy(
+        "python - <<'PY'\nprint('safe data')\nPY\nrm -rf /",
+        AgentCommandSafetyPolicy::FullAccess,
+        CommandAuthorizationSource::ExplicitUser,
+    );
+    assert_eq!(followed_by_command.decision, CommandPolicyDecision::Deny);
+    assert!(followed_by_command
+        .findings
+        .iter()
+        .any(|finding| finding.risk == CommandRiskClass::Catastrophic));
+
+    let pipeline_header = evaluate_command_policy(
+        "python - <<'PY' |\ncat\nprint('safe data')\nPY",
+        AgentCommandSafetyPolicy::Guarded,
+        CommandAuthorizationSource::Automatic,
+    );
+    assert_eq!(
+        pipeline_header.decision,
+        CommandPolicyDecision::RequireExplicitApproval
+    );
+    assert!(pipeline_header
+        .findings
+        .iter()
+        .any(|finding| finding.code == "command.risk.heredoc_interpreter"));
+    assert!(pipeline_header
+        .findings
+        .iter()
+        .any(|finding| finding.program == "cat"));
+}
+
+#[test]
+fn unsafe_or_ambiguous_heredoc_forms_fail_closed() {
+    for command in [
+        "python - <<PY\nprint('unquoted')\nPY",
+        "python - <<< 'print(1)'",
+        "python - <<'A' <<'B'\nA\nB",
+        "python - <<'PY'\nprint('missing exact terminator')\n PY",
+        "sh <<'EOF'\nrm -rf /\nEOF",
+        "env sh <<'EOF'\nrm -rf /\nEOF",
+    ] {
+        let evaluation = evaluate_command_policy(
+            command,
+            AgentCommandSafetyPolicy::FullAccess,
+            CommandAuthorizationSource::ExplicitUser,
+        );
+        assert_eq!(
+            evaluation.decision,
+            CommandPolicyDecision::Deny,
+            "{command}: {:?}",
+            evaluation.findings
+        );
+    }
+}
+
+#[test]
 fn nested_catastrophic_commands_cannot_hide_in_shell_wrappers_or_substitutions() {
     for command in [
         "sh -c 'rm -rf /'",

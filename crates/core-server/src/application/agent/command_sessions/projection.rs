@@ -32,6 +32,7 @@ pub(super) fn host_snapshot(
         exit_code: protocol_exit_code(&snapshot.state, snapshot.exit_code),
         latest_sequence: snapshot.latest_output_sequence,
         output_truncated: snapshot.output_truncated,
+        outputs: Vec::new(),
         archive_ref: None,
     }
 }
@@ -71,6 +72,7 @@ pub(super) fn exit_event_status(state: &CommandSessionState) -> AgentCommandExit
 
 pub(super) fn model_execution_output_from_read(
     read: &AgentCommandSessionModelRead,
+    history_open: Option<String>,
 ) -> AgentCommandSessionExecutionOutput {
     AgentCommandSessionExecutionOutput {
         session_id: read.receipt.session_id.clone(),
@@ -87,6 +89,8 @@ pub(super) fn model_execution_output_from_read(
         latest_sequence: read.receipt.latest_sequence,
         truncated_before: read.receipt.truncated_before,
         output_truncated: read.receipt.output_truncated,
+        outputs: read.outputs.clone(),
+        history_open,
     }
 }
 

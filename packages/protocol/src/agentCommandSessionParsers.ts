@@ -4,6 +4,7 @@ import type {
   AgentCommandSessionListInput,
   AgentCommandSessionListOutput,
   AgentCommandSessionOutputChunk,
+  AgentCommandPublishedOutput,
   AgentCommandSessionSnapshot,
   AgentCommandSessionStatus,
   AgentCommandSessionTranscript,
@@ -21,6 +22,7 @@ import {
   expectRecord,
   expectSafeInteger,
   expectString,
+  hasAsciiControlCharacter,
   invalidProtocolValue,
   optionalNonEmptyString
 } from './skills/validation'
@@ -28,11 +30,17 @@ import {
 const COMMAND_SESSION_ID_PATTERN = /^cmd_[0-9a-f]{32}$/
 const COMMAND_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/
 const MAX_ID_BYTES = 512
-const MAX_COMMAND_BYTES = 8 * 1024
+// Rust accepts at most 16,000 Unicode scalar values. Four UTF-8 bytes per scalar is the exact
+// cross-process upper bound; keep Session list/get and restart recovery lossless at that boundary.
+const MAX_COMMAND_BYTES = 64 * 1024
 const MAX_CWD_BYTES = 16 * 1024
 const MAX_EVENT_OUTPUT_BYTES = 64 * 1024
 const MAX_TRANSCRIPT_BYTES = 1024 * 1024
 const MAX_LISTED_SESSIONS = 512
+const MAX_PUBLISHED_OUTPUTS = 32
+const MAX_PUBLISHED_OUTPUT_NAME_BYTES = 1024
+const MAX_PUBLISHED_OUTPUT_BYTES = 128 * 1024 * 1024
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 
 const SESSION_STATUSES = [
   'starting',
@@ -129,7 +137,8 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
         'exitCode',
         'endedAt',
         'latestSequence',
-        'outputTruncated'
+        'outputTruncated',
+        'outputs'
       ] as const,
       'command_exited event'
     )
@@ -156,7 +165,13 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
         'command_exited event.latestSequence',
         0
       ),
-      outputTruncated: expectBoolean(record.outputTruncated, 'command_exited event.outputTruncated')
+      outputTruncated: expectBoolean(
+        record.outputTruncated,
+        'command_exited event.outputTruncated'
+      ),
+      ...(record.outputs === undefined
+        ? {}
+        : { outputs: parsePublishedOutputs(record.outputs, 'command_exited event.outputs') })
     }
   }
 
@@ -172,7 +187,8 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
       'sessionId',
       'endedAt',
       'latestSequence',
-      'outputTruncated'
+      'outputTruncated',
+      'outputs'
     ] as const,
     'command_interrupted event'
   )
@@ -188,7 +204,10 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
     outputTruncated: expectBoolean(
       record.outputTruncated,
       'command_interrupted event.outputTruncated'
-    )
+    ),
+    ...(record.outputs === undefined
+      ? {}
+      : { outputs: parsePublishedOutputs(record.outputs, 'command_interrupted event.outputs') })
   }
 }
 
@@ -268,6 +287,7 @@ export function parseAgentCommandSessionSnapshot(value: unknown): AgentCommandSe
       'exitCode',
       'latestSequence',
       'outputTruncated',
+      'outputs',
       'archiveRef'
     ] as const,
     context
@@ -292,6 +312,13 @@ export function parseAgentCommandSessionSnapshot(value: unknown): AgentCommandSe
   if (status !== 'exited' && exitCode !== undefined) {
     throw invalidProtocolValue(context, 'exitCode is valid only for exited status')
   }
+  const outputs =
+    record.outputs === undefined
+      ? undefined
+      : parsePublishedOutputs(record.outputs, `${context}.outputs`)
+  if (!statusIsTerminal(status) && outputs && outputs.length > 0) {
+    throw invalidProtocolValue(context, 'published outputs are valid only for terminal status')
+  }
 
   return {
     schemaVersion: AGENT_COMMAND_SESSION_SCHEMA_VERSION,
@@ -312,6 +339,7 @@ export function parseAgentCommandSessionSnapshot(value: unknown): AgentCommandSe
     ...(exitCode === undefined ? {} : { exitCode }),
     latestSequence: expectSafeInteger(record.latestSequence, `${context}.latestSequence`, 0),
     outputTruncated: expectBoolean(record.outputTruncated, `${context}.outputTruncated`),
+    ...(outputs === undefined ? {} : { outputs }),
     ...(record.archiveRef === undefined
       ? {}
       : { archiveRef: boundedId(record.archiveRef, `${context}.archiveRef`) })
@@ -408,6 +436,62 @@ function parseOutputChunk(value: unknown): AgentCommandSessionOutputChunk {
     stream: expectEnum(record.stream, ['stdout', 'stderr'] as const, `${context}.stream`),
     output: boundedString(record.output, `${context}.output`, MAX_EVENT_OUTPUT_BYTES)
   }
+}
+
+function parsePublishedOutputs(value: unknown, context: string): AgentCommandPublishedOutput[] {
+  const values = expectArray(value, context)
+  if (values.length > MAX_PUBLISHED_OUTPUTS) {
+    throw invalidProtocolValue(context, `outputs exceeded ${MAX_PUBLISHED_OUTPUTS} items`)
+  }
+  return values.map((output, index) => parsePublishedOutput(output, `${context}[${index}]`))
+}
+
+function parsePublishedOutput(value: unknown, context: string): AgentCommandPublishedOutput {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['name', 'kind', 'readPath', 'mimeType', 'sizeBytes', 'sha256', 'width', 'height'] as const,
+    context
+  )
+  const name = boundedString(record.name, `${context}.name`, MAX_PUBLISHED_OUTPUT_NAME_BYTES)
+  if (!name.trim() || hasAsciiControlCharacter(name)) {
+    throw invalidProtocolValue(context, 'name must be non-empty and contain no control characters')
+  }
+  const kind = expectEnum(record.kind, ['image', 'document'] as const, `${context}.kind`)
+  const sha256 = boundedString(record.sha256, `${context}.sha256`, 64)
+  if (!SHA256_PATTERN.test(sha256)) {
+    throw invalidProtocolValue(context, 'expected a lowercase SHA-256 digest')
+  }
+  const readPath = boundedString(record.readPath, `${context}.readPath`, 128)
+  const expectedReadPath =
+    kind === 'image' ? `image-artifact://sha256/${sha256}` : `artifact://sha256/${sha256}`
+  if (readPath !== expectedReadPath) {
+    throw invalidProtocolValue(context, 'readPath does not match the published content identity')
+  }
+  const mimeType = boundedString(record.mimeType, `${context}.mimeType`, 128)
+  const sizeBytes = boundedInteger(
+    record.sizeBytes,
+    `${context}.sizeBytes`,
+    1,
+    MAX_PUBLISHED_OUTPUT_BYTES
+  )
+  if (kind === 'document') {
+    if (
+      mimeType !== 'application/pdf' ||
+      record.width !== undefined ||
+      record.height !== undefined
+    ) {
+      throw invalidProtocolValue(context, 'document output must be a PDF without image dimensions')
+    }
+    return { name, kind, readPath, mimeType, sizeBytes, sha256 }
+  }
+
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) {
+    throw invalidProtocolValue(context, 'image output has an unsupported MIME type')
+  }
+  const width = expectSafeInteger(record.width, `${context}.width`, 1)
+  const height = expectSafeInteger(record.height, `${context}.height`, 1)
+  return { name, kind, readPath, mimeType, sizeBytes, sha256, width, height }
 }
 
 function statusIsTerminal(status: AgentCommandSessionStatus): boolean {

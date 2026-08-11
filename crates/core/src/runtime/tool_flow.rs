@@ -117,14 +117,28 @@ pub(super) fn tool_call_bindings_from_response(
         .collect()
 }
 
-/// Repairs a common provider compatibility defect without changing any Tool contract.
+/// Canonicalizes provider Tool arguments before they enter the runtime queue or durable context.
 ///
 /// Tool inputs are JSON objects in every supported provider protocol. Some compatible gateways
 /// serialize that object one additional time and return it as a JSON string. Decode at most two
 /// such layers, and only accept an object at each repair boundary. Arbitrary strings, arrays, and
-/// malformed JSON remain untouched so the Tool's typed validator can reject them normally.
+/// malformed JSON remain untouched so the Tool's typed validator can reject them normally. A
+/// valid `run_command.command` is additionally normalized here so approval, Trace, Checkpoint,
+/// policy, and process launch all receive the same LF representation.
 fn normalize_tool_arguments(tool: &str, value: Value) -> Value {
-    let value = normalize_stringified_object(value);
+    let mut value = normalize_stringified_object(value);
+    if tool == "run_command" {
+        let command = value
+            .as_object()
+            .and_then(|object| object.get("command"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(command) = command {
+            if let Ok(canonical) = crate::command::normalize_command_text(&command) {
+                value["command"] = Value::String(canonical);
+            }
+        }
+    }
     if tool == "image_generation" {
         return normalize_image_generation_request(value);
     }
@@ -684,6 +698,25 @@ mod tests {
 
         assert_eq!(calls[0].args["operation"], "status");
         assert_eq!(calls[0].args["reason"], "Check the engine");
+    }
+
+    #[test]
+    fn run_command_enters_the_runtime_queue_with_canonical_lf_without_trimming() {
+        let calls = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-command-crlf".to_string(),
+                name: "run_command".to_string(),
+                args: json!({
+                    "command": "\r\n  printf one\rprintf two\r\n",
+                    "reason": "Exercise canonical command transport"
+                }),
+            }],
+            "",
+            "run-command-crlf",
+            0,
+        );
+
+        assert_eq!(calls[0].args["command"], "\n  printf one\nprintf two\n");
     }
 
     #[test]

@@ -10,14 +10,17 @@ pub fn agent_event_notification(event: AgentEvent) -> Value {
     })
 }
 
-/// Removes Host-only MCP approval binding material before a value crosses the
+/// Removes Host-only approval binding material before a value crosses the
 /// core-server → Main/Renderer notification boundary.
 ///
 /// The arguments digest is required for durable Host revalidation, but exposing
 /// it would let an untrusted UI consumer brute-force low-entropy scalar
 /// arguments. MCP actions already contain only the empty-object call
 /// projection; this final guard strips the remaining execution-only
-/// fingerprint from every nested action (including `done.proposedActions`).
+/// fingerprint from every nested action (including `done.proposedActions`). Command inputs and
+/// runtime bindings remain authoritative in the backend checkpoint, but the Renderer only needs
+/// the command/reason needed to make an approval decision. Omitting the frozen input bindings also
+/// prevents a Generated Artifact's Host-only object path from crossing the process boundary.
 pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
     match value {
         Value::Array(values) => {
@@ -34,6 +37,13 @@ pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
                     .and_then(Value::as_object_mut)
                 {
                     identity.remove("argumentsDigest");
+                }
+            }
+            if object.get("type").and_then(Value::as_str) == Some("command") {
+                if let Some(command) = object.get_mut("command").and_then(Value::as_object_mut) {
+                    command.remove("inputs");
+                    command.remove("runtime");
+                    command.remove("runtimeBinding");
                 }
             }
             for value in object.values_mut() {

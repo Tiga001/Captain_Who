@@ -6,7 +6,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { ChatMessageItem } from '../../features/chat/components/ChatMessageItem'
 
-const { revealStoredProjectFile } = vi.hoisted(() => ({
+const { readArtifact, revealStoredProjectFile } = vi.hoisted(() => ({
+  readArtifact: vi.fn(),
   revealStoredProjectFile: vi.fn().mockResolvedValue(undefined)
 }))
 const translations: Record<string, string> = {
@@ -50,6 +51,7 @@ const translations: Record<string, string> = {
   'agent.office.files': 'Office 文件',
   'agent.office.reveal': '在文件夹中打开',
   'agent.office.revealUnavailable': '无法定位',
+  'imagePreview.download': '下载',
   'skills.bundled.spreadsheets.name': '电子表格',
   'skills.bundled.spreadsheets.description': '创建、编辑、计算、渲染和验证 Excel 工作簿。'
 }
@@ -68,7 +70,7 @@ vi.mock('../../features/storage/storageClient', () => ({
 }))
 
 vi.mock('../../host/hostClient', () => ({
-  hostClient: {}
+  hostClient: { imageGeneration: { readArtifact } }
 }))
 
 function assistantMessage(overrides: Partial<ChatMessage['agentRun']> = {}): ChatMessage {
@@ -719,6 +721,90 @@ describe('Skill and Office chat timeline', () => {
     expect(
       imageArtifacts.compareDocumentPosition(officeArtifacts) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
+  })
+
+  it('restores the settled file card from the original run_command Session receipt', async () => {
+    const hash = 'c'.repeat(64)
+    const pdfBytes = Uint8Array.from([0x25, 0x50, 0x44, 0x46])
+    readArtifact.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        artifact: {
+          artifactId: `sha256:${hash}`,
+          uri: `artifact://sha256/${hash}`,
+          kind: 'document',
+          format: 'pdf',
+          mimeType: 'application/pdf',
+          sizeBytes: 4096,
+          sha256: hash
+        },
+        fileName: `artifact-${hash.slice(0, 12)}.pdf`,
+        bytes: pdfBytes
+      }
+    })
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:managed-pdf')
+    const revokeObjectUrl = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const message = assistantMessage({
+      toolCalls: [
+        {
+          id: 'session-pdf',
+          tool: 'run_command',
+          approvalStatus: 'not_required',
+          args: { command: 'render-pdf' }
+        }
+      ],
+      toolResults: [],
+      commandSessions: {
+        'session-pdf': {
+          callId: 'session-pdf',
+          status: 'exited',
+          latestSequence: 0,
+          outputTruncated: false,
+          outputs: [
+            {
+              name: 'reports/final.pdf',
+              kind: 'document',
+              readPath: `artifact://sha256/${hash}`,
+              mimeType: 'application/pdf',
+              sizeBytes: 4096,
+              sha256: hash
+            }
+          ]
+        }
+      },
+      timeline: [{ id: 'session-pdf', type: 'tool_call', callId: 'session-pdf' }]
+    })
+    const screen = await render(
+      <ChatMessageItem
+        conversationId="conversation-1"
+        message={message}
+        projectId="project-1"
+        showTokenUsageDetails={false}
+      />
+    )
+
+    await expect.element(screen.getByText('reports/final.pdf')).toBeVisible()
+    expect(screen.container.textContent).not.toContain(`artifact://sha256/${hash}`)
+    await expect.element(screen.getByRole('button', { name: '下载', exact: true })).toBeVisible()
+    await screen.getByRole('button', { name: '下载', exact: true }).click()
+    await expect.poll(() => readArtifact.mock.calls.length).toBe(1)
+    expect(readArtifact).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      conversationId: 'conversation-1',
+      artifact: expect.objectContaining({
+        artifactId: `sha256:${hash}`,
+        uri: `artifact://sha256/${hash}`,
+        kind: 'document'
+      })
+    })
+    expect(createObjectUrl).toHaveBeenCalledTimes(1)
+    expect(revealStoredProjectFile).not.toHaveBeenCalledWith(
+      'project-1',
+      `artifact://sha256/${hash}`
+    )
+    createObjectUrl.mockRestore()
+    revokeObjectUrl.mockRestore()
   })
 
   it('does not render a success file card for a failed observed command', async () => {

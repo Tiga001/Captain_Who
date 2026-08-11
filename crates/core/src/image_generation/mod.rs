@@ -13,6 +13,7 @@ mod provider;
 mod seedream;
 mod types;
 
+pub(crate) use artifact::validate_staged_image;
 pub use artifact::{
     ImageArtifactError, ImageArtifactErrorCode, ImageArtifactFormat, ImageArtifactHostRule,
     ImageArtifactNetworkPolicy, ImageArtifactPublicationStatus, ImageArtifactStoreConfig,

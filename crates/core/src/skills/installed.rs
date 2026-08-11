@@ -1369,7 +1369,7 @@ mod tests {
             .list_with_workspace("workspace", &workspace)
             .unwrap();
 
-        assert_eq!(catalog.skills().len(), 7);
+        assert_eq!(catalog.skills().len(), 8);
         let selection = |kind| {
             catalog
                 .skills()
