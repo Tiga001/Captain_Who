@@ -252,36 +252,6 @@ pub fn roll_up_deleted_usage_for_messages(
     )
 }
 
-pub(super) fn roll_up_orphaned_usage(connection: &Connection) -> rusqlite::Result<()> {
-    let now_ms = connection.query_row(
-        "
-        SELECT COALESCE(MAX(created_at), 0)
-        FROM agent_usage_records
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM messages
-            WHERE messages.id = agent_usage_records.message_id
-              AND messages.conversation_id = agent_usage_records.conversation_id
-        )
-        ",
-        [],
-        |row| row.get(0),
-    )?;
-    roll_up_deleted_usage(
-        connection,
-        "
-        NOT EXISTS (
-            SELECT 1
-            FROM messages
-            WHERE messages.id = agent_usage_records.message_id
-              AND messages.conversation_id = agent_usage_records.conversation_id
-        )
-        ",
-        Vec::new(),
-        now_ms,
-    )
-}
-
 fn roll_up_deleted_usage(
     connection: &Connection,
     usage_filter_sql: &str,
@@ -884,10 +854,13 @@ mod tests {
             .execute(
                 "
                 INSERT INTO models (
-                    id, display_name, supports_image,
+                    id, display_name, supports_image, provider_connection_revision,
+                    provider_protocol_revision,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
                 VALUES ('provider/model-a', 'Current model name', 0,
+                        'provider-connection-v1:test-model-a',
+                        'provider-protocol-v1:test-model-a',
                         '0.03', '0.04', 1, 0, 0, 0)
                 ",
                 [],
@@ -951,10 +924,13 @@ mod tests {
             .execute(
                 "
                 INSERT INTO models (
-                    id, display_name, supports_image,
+                    id, display_name, supports_image, provider_connection_revision,
+                    provider_protocol_revision,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
                 VALUES ('provider/model-a', 'Restored model', 0,
+                        'provider-connection-v1:test-restored-model',
+                        'provider-protocol-v1:test-restored-model',
                         '0.05', '0.06', 1, 0, 3_000, 3_000)
                 ",
                 [],

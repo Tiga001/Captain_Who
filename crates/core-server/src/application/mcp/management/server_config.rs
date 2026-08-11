@@ -66,7 +66,7 @@ impl McpManagementService {
         };
         let entry = self
             .registry
-            .add_persisted(config)
+            .add_persisted(config, None)
             .map_err(|error| self.registry_failure(McpManagementOperationDto::Add, None, error))?;
         self.details_for(entry.config.id, McpManagementOperationDto::Add)
     }

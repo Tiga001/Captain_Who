@@ -487,11 +487,6 @@ impl AgentService {
         let unresolved_command_sessions = storage
             .reconcile_agent_command_sessions_on_startup(now_ms())
             .map_err(|error| format!("failed to reconcile command sessions: {error}"))?;
-        // The Host must validate its versioned, secret-free resume projection before Core's
-        // generic interrupted-action reconciler parses any persisted input. This includes
-        // approved/executing rows, which the reconciler will otherwise make terminal and hide
-        // from the later pending-row loader.
-        retire_unsafe_active_pending_agent_inputs(&storage)?;
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;

@@ -700,9 +700,7 @@ fn fts_phrase(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{
-        conversation_history_archive_repository, conversation_trace_repository, migrations,
-    };
+    use crate::storage::{conversation_trace_repository, migrations};
     use crate::{
         AgentApprovalStatus, ConversationTraceToolResultStatus, ConversationTurnTrace,
         ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
@@ -996,71 +994,6 @@ mod tests {
         assert!(read_record(&connection, "conversation-1", &other)
             .unwrap()
             .is_none());
-    }
-
-    #[test]
-    fn fts_finds_exact_archive_phrase_with_structured_filters() {
-        let mut connection = setup();
-        let archived = conversation_history_archive_repository::store_archive(
-            &mut connection,
-            &conversation_history_archive_repository::ConversationHistoryArchiveInput {
-                conversation_id: "conversation-1".to_string(),
-                assistant_message_id: "assistant-1".to_string(),
-                sequence: 1,
-                call_id: "call-1".to_string(),
-                tool: "read_file".to_string(),
-                content_type: "application/json".to_string(),
-                content: r#"{"content":"压缩后仍可检索的精确短语 exact-archive-needle"}"#
-                    .to_string(),
-                truncated_at_source: false,
-                model_projection_truncated: true,
-                archive_projection_truncated: false,
-                created_at: 2_000,
-            },
-        )
-        .unwrap();
-        connection
-            .execute(
-                "DELETE FROM conversation_history_fts WHERE archive_ref = ?1",
-                [&archived.archive_ref],
-            )
-            .unwrap();
-        migrations::run_migrations(&connection).unwrap();
-        let filter = ConversationHistorySearchFilter {
-            include_archives: true,
-            tool: Some("read_file".to_string()),
-            status: Some("succeeded".to_string()),
-            run_id: Some("run-1".to_string()),
-            created_at_from: Some(1_500),
-            created_at_to: Some(2_500),
-            ..Default::default()
-        };
-
-        let hits = search_records(
-            &connection,
-            "conversation-1",
-            "exact-archive-needle",
-            &filter,
-            20,
-        )
-        .unwrap();
-
-        assert_eq!(hits.len(), 1);
-        assert_eq!(
-            hits[0].reference,
-            ConversationHistoryRecordRef::Archive {
-                archive_ref: archived.archive_ref
-            }
-        );
-        assert!(search_records(
-            &connection,
-            "conversation-2",
-            "exact-archive-needle",
-            &filter,
-            20
-        )
-        .unwrap()
-        .is_empty());
     }
 
     #[test]

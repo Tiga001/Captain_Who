@@ -1,0 +1,1914 @@
+CREATE TABLE mcp_registry_metadata (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            revision_watermark INTEGER NOT NULL CHECK (revision_watermark >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0)
+        );
+CREATE TABLE mcp_registry_servers (
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            server_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            scope_kind TEXT NOT NULL CHECK (scope_kind = 'user'),
+            source_kind TEXT NOT NULL CHECK (source_kind = 'user_manual'),
+            transport_kind TEXT NOT NULL CHECK (transport_kind = 'stdio'),
+            executable TEXT NOT NULL,
+            arguments_json TEXT NOT NULL CHECK (
+                json_valid(arguments_json) AND json_type(arguments_json) = 'array'
+            ),
+            cwd TEXT NOT NULL,
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            trust TEXT NOT NULL CHECK (trust IN ('untrusted', 'user_approved')),
+            approval_mode TEXT NOT NULL CHECK (
+                approval_mode IN ('prompt', 'auto', 'deny')
+            ),
+            connect_timeout_ms INTEGER NOT NULL CHECK (
+                connect_timeout_ms BETWEEN 1 AND 10000
+            ),
+            request_timeout_ms INTEGER NOT NULL CHECK (
+                request_timeout_ms BETWEEN 1 AND 300000
+            ),
+            shutdown_timeout_ms INTEGER NOT NULL CHECK (
+                shutdown_timeout_ms BETWEEN 1 AND 2000
+            ),
+            config_digest TEXT NOT NULL,
+            config_epoch TEXT NOT NULL,
+            registry_revision INTEGER NOT NULL CHECK (registry_revision > 0),
+            launch_spec_digest TEXT NOT NULL,
+            authorized_launch_spec_digest TEXT,
+            authorized_config_epoch TEXT,
+            authorized_config_digest TEXT,
+            authorization_format_version INTEGER,
+            authorization_policy_version INTEGER,
+            authorized_at INTEGER,
+            record_state TEXT NOT NULL DEFAULT 'active' CHECK (
+                record_state IN ('active', 'invalid')
+            ),
+            safe_error_code TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            CHECK (
+                (
+                    authorized_launch_spec_digest IS NULL
+                    AND authorized_config_epoch IS NULL
+                    AND authorized_config_digest IS NULL
+                    AND authorization_format_version IS NULL
+                    AND authorization_policy_version IS NULL
+                    AND authorized_at IS NULL
+                ) OR (
+                    authorized_launch_spec_digest IS NOT NULL
+                    AND authorized_config_epoch IS NOT NULL
+                    AND authorized_config_digest IS NOT NULL
+                    AND authorization_format_version > 0
+                    AND authorization_policy_version > 0
+                    AND authorized_at >= 0
+                )
+            )
+        );
+CREATE INDEX mcp_registry_servers_revision
+            ON mcp_registry_servers(registry_revision, server_id);
+CREATE TABLE mcp_registry_model_namespaces (
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            server_id TEXT PRIMARY KEY,
+            model_namespace TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+CREATE TABLE model_provider_settings (
+            id TEXT PRIMARY KEY CHECK (id = 'default'),
+            api_url TEXT NOT NULL,
+            api_token TEXT NOT NULL,
+            search_mode TEXT NOT NULL,
+            tavily_api_key TEXT NOT NULL,
+            configuration_revision TEXT NOT NULL CHECK (
+                configuration_revision GLOB 'model-settings-v1:?*'
+            ),
+            search_connection_revision TEXT NOT NULL CHECK (
+                search_connection_revision GLOB 'search-connection-v1:?*'
+            ),
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE image_generation_profiles (
+            id TEXT PRIMARY KEY CHECK (
+                typeof(id) = 'text'
+                AND length(CAST(id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            adapter_id TEXT NOT NULL CHECK (adapter_id = 'smartmlSeedream'),
+            endpoint_url TEXT NOT NULL CHECK (
+                length(CAST(endpoint_url AS BLOB)) <= 4096
+            ),
+            model_id TEXT NOT NULL CHECK (
+                length(CAST(model_id AS BLOB)) <= 512
+            ),
+            credential_ref TEXT CHECK (
+                credential_ref IS NULL
+                OR (
+                    typeof(credential_ref) = 'text'
+                    AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            text_to_image INTEGER NOT NULL DEFAULT 1 CHECK (text_to_image = 1),
+            image_to_image INTEGER NOT NULL DEFAULT 0 CHECK (image_to_image IN (0, 1)),
+            default_size_preset TEXT NOT NULL DEFAULT '2K' CHECK (
+                default_size_preset = '2K'
+            ),
+            default_watermark INTEGER NOT NULL DEFAULT 1 CHECK (
+                default_watermark IN (0, 1)
+            ),
+            generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
+        );
+CREATE TABLE image_generation_credential_staging (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            profile_id TEXT NOT NULL CHECK (
+                typeof(profile_id) = 'text'
+                AND length(CAST(profile_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            expected_generation INTEGER NOT NULL CHECK (expected_generation >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+CREATE TABLE image_generation_credential_cleanup (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+CREATE TABLE image_generation_executions (
+            execution_id TEXT PRIMARY KEY CHECK (
+                typeof(execution_id) = 'text'
+                AND length(CAST(execution_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            request_fingerprint TEXT NOT NULL CHECK (
+                length(request_fingerprint) = 71
+                AND substr(request_fingerprint, 1, 7) = 'sha256:'
+                AND substr(request_fingerprint, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            safe_request_json TEXT NOT NULL CHECK (
+                json_valid(safe_request_json)
+                AND
+                length(CAST(safe_request_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            profile_id TEXT NOT NULL CHECK (
+                length(CAST(profile_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            adapter_id TEXT NOT NULL CHECK (
+                length(CAST(adapter_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            profile_revision INTEGER NOT NULL CHECK (profile_revision > 0),
+            model_id TEXT NOT NULL CHECK (
+                length(CAST(model_id AS BLOB)) BETWEEN 1 AND 512
+            ),
+            operation TEXT NOT NULL CHECK (operation IN ('generate', 'edit')),
+            status TEXT NOT NULL CHECK (status IN (
+                'executing',
+                'publishing',
+                'succeeded',
+                'failed',
+                'cancelled',
+                'outcome_indeterminate',
+                'commit_indeterminate'
+            )),
+            remote_outcome_unknown INTEGER NOT NULL DEFAULT 0 CHECK (
+                remote_outcome_unknown IN (0, 1)
+            ),
+            provider_succeeded INTEGER NOT NULL DEFAULT 0 CHECK (
+                provider_succeeded IN (0, 1)
+            ),
+            commit_may_have_succeeded INTEGER NOT NULL DEFAULT 0 CHECK (
+                commit_may_have_succeeded IN (0, 1)
+            ),
+            provider_request_id TEXT CHECK (
+                provider_request_id IS NULL
+                OR length(CAST(provider_request_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            http_status INTEGER CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
+            terminal_result_json TEXT CHECK (
+                terminal_result_json IS NULL
+                OR (
+                    json_valid(terminal_result_json)
+                    AND length(CAST(terminal_result_json AS BLOB)) BETWEEN 2 AND 65536
+                )
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            completed_at INTEGER CHECK (
+                (status IN ('executing', 'publishing') AND completed_at IS NULL AND terminal_result_json IS NULL)
+                OR
+                (status NOT IN ('executing', 'publishing') AND completed_at IS NOT NULL AND terminal_result_json IS NOT NULL)
+            )
+        );
+CREATE INDEX image_generation_executions_status_idx
+            ON image_generation_executions (status, updated_at, execution_id);
+CREATE TABLE image_generation_artifacts (
+            execution_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            artifact_id TEXT NOT NULL CHECK (
+                length(artifact_id) = 71
+                AND substr(artifact_id, 1, 7) = 'sha256:'
+                AND substr(artifact_id, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            state TEXT NOT NULL CHECK (state IN (
+                'candidate', 'published', 'discarded', 'indeterminate'
+            )),
+            storage_relative_path TEXT NOT NULL CHECK (
+                length(CAST(storage_relative_path AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            format TEXT NOT NULL CHECK (format IN ('png', 'jpeg', 'webp')),
+            media_type TEXT NOT NULL CHECK (media_type IN ('image/png', 'image/jpeg', 'image/webp')),
+            width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 16384),
+            height INTEGER NOT NULL CHECK (height BETWEEN 1 AND 16384),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            published_at INTEGER,
+            PRIMARY KEY (execution_id, ordinal),
+            FOREIGN KEY (execution_id) REFERENCES image_generation_executions(execution_id)
+                ON DELETE CASCADE,
+            CHECK (
+                (state = 'published' AND published_at IS NOT NULL)
+                OR (state != 'published' AND published_at IS NULL)
+            )
+        );
+CREATE INDEX image_generation_artifacts_identity_idx
+            ON image_generation_artifacts (artifact_id, state);
+CREATE TABLE managed_artifacts (
+            artifact_id TEXT PRIMARY KEY CHECK (
+                length(artifact_id) = 71
+                AND substr(artifact_id, 1, 7) = 'sha256:'
+                AND substr(artifact_id, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            kind TEXT NOT NULL CHECK (kind IN ('image', 'document')),
+            storage_relative_path TEXT NOT NULL CHECK (
+                length(CAST(storage_relative_path AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            format TEXT NOT NULL CHECK (format IN ('png', 'jpeg', 'webp', 'pdf')),
+            media_type TEXT NOT NULL CHECK (
+                media_type IN ('image/png', 'image/jpeg', 'image/webp', 'application/pdf')
+            ),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            width INTEGER CHECK (width IS NULL OR width BETWEEN 1 AND 16384),
+            height INTEGER CHECK (height IS NULL OR height BETWEEN 1 AND 16384),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            CHECK (
+                (kind = 'image' AND format IN ('png', 'jpeg', 'webp')
+                    AND width IS NOT NULL AND height IS NOT NULL)
+                OR
+                (kind = 'document' AND format = 'pdf'
+                    AND width IS NULL AND height IS NULL)
+            )
+        );
+CREATE TABLE managed_artifact_grants (
+            artifact_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (artifact_id, conversation_id, run_id, call_id),
+            FOREIGN KEY (artifact_id) REFERENCES managed_artifacts(artifact_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                ON DELETE CASCADE
+        );
+CREATE INDEX managed_artifact_grants_conversation_idx
+            ON managed_artifact_grants (conversation_id, artifact_id);
+CREATE TABLE models (
+            id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            api_url_override TEXT,
+            api_token_override TEXT,
+            supports_image INTEGER NOT NULL,
+            context_window_tokens INTEGER,
+            provider_profile_config_json TEXT CHECK (
+                provider_profile_config_json IS NULL
+                OR json_valid(provider_profile_config_json)
+            ),
+            provider_connection_revision TEXT NOT NULL CHECK (
+                provider_connection_revision GLOB 'provider-connection-v1:?*'
+            ),
+            provider_protocol_revision TEXT NOT NULL CHECK (
+                provider_protocol_revision GLOB 'provider-protocol-v1:?*'
+            ),
+            input_price TEXT NOT NULL,
+            cached_input_price TEXT NOT NULL DEFAULT '',
+            output_price TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            path TEXT,
+            created_at INTEGER NOT NULL,
+            pinned_at INTEGER,
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT,
+            model_id TEXT,
+            title TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            pinned_at INTEGER,
+            archived_at INTEGER,
+            unread_at INTEGER
+        );
+CREATE TABLE attachments (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            project_id TEXT,
+            kind TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            mime_type TEXT,
+            size_bytes INTEGER NOT NULL,
+            storage_rel_path TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE TABLE composer_drafts (
+            scope_id TEXT PRIMARY KEY,
+            message TEXT NOT NULL,
+            permission_mode TEXT NOT NULL,
+            permission_mode_version INTEGER NOT NULL DEFAULT 0 CHECK (permission_mode_version >= 0),
+            model_id TEXT,
+            project_id TEXT,
+            attachments_json TEXT NOT NULL CHECK (json_valid(attachments_json)),
+            skills_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(skills_json)),
+            queued_messages_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(queued_messages_json)
+            ),
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE skill_enablement_overrides (
+            skill_id TEXT PRIMARY KEY
+                CHECK (
+                    typeof(skill_id) = 'text'
+                    AND length(CAST(skill_id AS BLOB)) BETWEEN 1 AND 16384
+                ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE ui_preferences (
+            id TEXT PRIMARY KEY CHECK (id = 'default'),
+            sidebar_conversation_sort TEXT NOT NULL,
+            sidebar_project_sort TEXT NOT NULL,
+            sidebar_section_order TEXT NOT NULL,
+            sidebar_project_order_json TEXT NOT NULL DEFAULT '[]' CHECK (
+                json_valid(sidebar_project_order_json)
+            ),
+            translucent_sidebar INTEGER NOT NULL DEFAULT 0 CHECK (
+                translucent_sidebar IN (0, 1)
+            ),
+            translucent_sidebar_transparency INTEGER NOT NULL DEFAULT 54 CHECK (
+                translucent_sidebar_transparency BETWEEN 50 AND 100
+            ),
+            native_font_smoothing INTEGER NOT NULL DEFAULT 0 CHECK (
+                native_font_smoothing IN (0, 1)
+            ),
+            show_token_usage_details INTEGER NOT NULL DEFAULT 1 CHECK (
+                show_token_usage_details IN (0, 1)
+            ),
+            show_context_window_usage INTEGER NOT NULL DEFAULT 1 CHECK (
+                show_context_window_usage IN (0, 1)
+            ),
+            profile_display_name TEXT NOT NULL DEFAULT '',
+            profile_handle TEXT NOT NULL DEFAULT 'USER',
+            profile_avatar_data_url TEXT,
+            custom_read_permission TEXT NOT NULL DEFAULT 'workspace_only',
+            custom_write_permission TEXT NOT NULL DEFAULT 'workspace_only',
+            custom_command_permission TEXT NOT NULL DEFAULT 'require_approval',
+            custom_patch_permission TEXT NOT NULL DEFAULT 'require_approval',
+            full_permission_enabled INTEGER NOT NULL DEFAULT 1 CHECK (
+                full_permission_enabled IN (0, 1)
+            ),
+            custom_permission_enabled INTEGER NOT NULL DEFAULT 1 CHECK (
+                custom_permission_enabled IN (0, 1)
+            ),
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE agent_prompt_preferences (
+            id TEXT PRIMARY KEY CHECK (id = 'default'),
+            work_mode TEXT NOT NULL,
+            tone TEXT NOT NULL,
+            detail_level TEXT NOT NULL,
+            custom_instructions TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE agent_usage_records (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            project_id TEXT,
+            model_id TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            status TEXT,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            output_thinking_tokens INTEGER,
+            total_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            cache_creation_input_tokens INTEGER,
+            billable_request_count INTEGER NOT NULL DEFAULT 0
+                CHECK (billable_request_count >= 0),
+            input_price TEXT,
+            cached_input_price TEXT,
+            output_price TEXT,
+            estimated_cost REAL,
+            UNIQUE(conversation_id, message_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_deleted_usage_daily_rollups (
+            usage_day INTEGER NOT NULL,
+            model_id TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            unpriced_message_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            output_thinking_tokens INTEGER,
+            total_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            cache_creation_input_tokens INTEGER,
+            estimated_cost REAL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (usage_day, model_id, model_name)
+        );
+CREATE TABLE agent_action_audit (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            conversation_id TEXT,
+            assistant_message_id TEXT,
+            action_type TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            decision TEXT,
+            status TEXT NOT NULL,
+            action_json TEXT NOT NULL CHECK (json_valid(action_json)),
+            patch_result_json TEXT CHECK (
+                patch_result_json IS NULL OR json_valid(patch_result_json)
+            ),
+            command_result_json TEXT CHECK (
+                command_result_json IS NULL OR json_valid(command_result_json)
+            ),
+            tool_result_json TEXT CHECK (
+                tool_result_json IS NULL OR json_valid(tool_result_json)
+            ),
+            effective_permissions_json TEXT CHECK (
+                effective_permissions_json IS NULL OR json_valid(effective_permissions_json)
+            ),
+            path_scope TEXT,
+            command_cwd_scope TEXT,
+            blocked_reason TEXT,
+            decision_source TEXT,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            decided_at INTEGER,
+            completed_at INTEGER
+        );
+CREATE TABLE agent_pending_actions (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            conversation_id TEXT,
+            assistant_message_id TEXT,
+            action_type TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            tool_call_id TEXT,
+            status TEXT NOT NULL,
+            target_status TEXT,
+            action_json TEXT NOT NULL CHECK (json_valid(action_json)),
+            agent_input_json TEXT NOT NULL CHECK (json_valid(agent_input_json)),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+CREATE TABLE mcp_approval_payload_envelopes (
+            invocation_id TEXT PRIMARY KEY,
+            action_id TEXT NOT NULL UNIQUE,
+            envelope_version INTEGER NOT NULL,
+            envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json)),
+            aad_digest TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            CHECK (envelope_version > 0),
+            CHECK (expires_at > created_at)
+        );
+CREATE TABLE provider_continuations (
+            continuation_id TEXT PRIMARY KEY CHECK (
+                length(continuation_id) = 61
+                AND substr(continuation_id, 1, 25) = 'provider-continuation-v1:'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            envelope_version INTEGER NOT NULL CHECK (envelope_version = 1),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (
+                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            request_index INTEGER NOT NULL CHECK (request_index >= 0),
+            assistant_turn_id TEXT NOT NULL CHECK (
+                length(assistant_turn_id) = 68
+                AND substr(assistant_turn_id, 1, 4) = 'at1_'
+                AND substr(assistant_turn_id, 5) NOT GLOB '*[^0-9a-f]*'
+            ),
+            assistant_turn_digest TEXT NOT NULL CHECK (
+                length(assistant_turn_digest) = 71
+                AND substr(assistant_turn_digest, 1, 7) = 'sha256:'
+                AND substr(assistant_turn_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            provider_protocol_digest TEXT NOT NULL CHECK (
+                length(provider_protocol_digest) = 71
+                AND substr(provider_protocol_digest, 1, 7) = 'sha256:'
+                AND substr(provider_protocol_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            state TEXT NOT NULL CHECK (state IN ('active', 'superseded', 'released')),
+            superseded_by TEXT,
+            compression TEXT,
+            encryption TEXT,
+            payload_digest TEXT,
+            nonce BLOB,
+            ciphertext BLOB,
+            decoded_bytes INTEGER,
+            compressed_bytes INTEGER,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            released_at INTEGER CHECK (released_at IS NULL OR released_at >= created_at),
+            activated_at INTEGER CHECK (activated_at IS NULL OR activated_at >= created_at),
+            UNIQUE (conversation_id, assistant_message_id, run_id, request_index),
+            CHECK (
+                (
+                    state IN ('active', 'superseded')
+                    AND compression = 'zstd_binary_v1'
+                    AND encryption = 'chacha20_poly1305_v1'
+                    AND payload_digest IS NOT NULL
+                    AND length(payload_digest) = 71
+                    AND substr(payload_digest, 1, 7) = 'sha256:'
+                    AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'
+                    AND nonce IS NOT NULL
+                    AND length(nonce) = 12
+                    AND ciphertext IS NOT NULL
+                    AND length(ciphertext) > 16
+                    AND length(ciphertext) <= 2097152
+                    AND decoded_bytes BETWEEN 1 AND 8388608
+                    AND compressed_bytes BETWEEN 1 AND 2097152
+                    AND length(ciphertext) = compressed_bytes + 16
+                    AND released_at IS NULL
+                ) OR (
+                    state = 'released'
+                    AND superseded_by IS NULL
+                    AND compression = 'zstd_binary_v1'
+                    AND encryption = 'chacha20_poly1305_v1'
+                    AND payload_digest IS NULL
+                    AND nonce IS NULL
+                    AND ciphertext IS NULL
+                    AND decoded_bytes IS NULL
+                    AND compressed_bytes IS NULL
+                    AND released_at IS NOT NULL
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TABLE provider_continuation_tool_calls (
+            continuation_id TEXT NOT NULL,
+            provider_tool_index INTEGER NOT NULL CHECK (provider_tool_index >= 0),
+            runtime_call_id TEXT NOT NULL CHECK (
+                length(CAST(runtime_call_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            PRIMARY KEY (continuation_id, provider_tool_index),
+            UNIQUE (continuation_id, runtime_call_id),
+            FOREIGN KEY (continuation_id)
+                REFERENCES provider_continuations(continuation_id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_file_drafts (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            project_id TEXT,
+            run_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            base_revision TEXT,
+            base_content TEXT NOT NULL,
+            content TEXT NOT NULL,
+            additions INTEGER NOT NULL DEFAULT 0,
+            deletions INTEGER NOT NULL DEFAULT 0,
+            line_count INTEGER NOT NULL DEFAULT 0,
+            byte_count INTEGER NOT NULL DEFAULT 0,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            next_chunk_index INTEGER NOT NULL DEFAULT 0,
+            stats_final INTEGER NOT NULL DEFAULT 0,
+            summary TEXT,
+            final_action_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_file_draft_chunks (
+            draft_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (draft_id, chunk_index),
+            FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_file_draft_operations (
+            draft_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (draft_id, sequence),
+            FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
+        );
+CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            status TEXT,
+            agent_run_json TEXT CHECK (
+                agent_run_json IS NULL OR json_valid(agent_run_json)
+            ),
+            ui_state_json TEXT CHECK (
+                ui_state_json IS NULL OR json_valid(ui_state_json)
+            ),
+            created_at INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_turn_traces (
+            assistant_message_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            terminal_status TEXT NOT NULL CHECK (terminal_status IN ('in_progress', 'completed', 'failed', 'cancelled')),
+            terminal_error TEXT,
+            truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= created_at),
+            CHECK (
+                (terminal_status = 'in_progress' AND terminal_error IS NULL AND completed_at IS NULL)
+                OR (terminal_status != 'in_progress' AND completed_at IS NOT NULL)
+            ),
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_turn_trace_items (
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            item_kind TEXT NOT NULL CHECK (item_kind IN (
+                'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
+                'command_session_lifecycle'
+            )),
+            item_json TEXT NOT NULL CHECK (json_valid(item_json)),
+            PRIMARY KEY (assistant_message_id, sequence),
+            FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_model_context_items (
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            ordinal INTEGER NOT NULL DEFAULT 0 CHECK (ordinal >= 0),
+            content_hash TEXT NOT NULL CHECK (
+                length(content_hash) = 71
+                AND substr(content_hash, 1, 7) = 'sha256:'
+                AND substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes >= 0),
+            compression TEXT NOT NULL CHECK (compression = 'zstd'),
+            payload BLOB NOT NULL,
+            PRIMARY KEY (assistant_message_id, sequence, ordinal),
+            FOREIGN KEY (assistant_message_id)
+                REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_history_blobs (
+            archive_ref TEXT PRIMARY KEY CHECK (
+                typeof(archive_ref) = 'text'
+                AND length(CAST(archive_ref AS BLOB)) BETWEEN 1 AND 256
+            ),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            call_id TEXT NOT NULL CHECK (
+                length(CAST(call_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            tool TEXT NOT NULL CHECK (
+                length(CAST(tool AS BLOB)) BETWEEN 1 AND 256
+            ),
+            content_type TEXT NOT NULL CHECK (
+                length(CAST(content_type AS BLOB)) BETWEEN 1 AND 256
+            ),
+            content_hash TEXT NOT NULL CHECK (
+                length(content_hash) = 71
+                AND substr(content_hash, 1, 7) = 'sha256:'
+                AND substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes >= 0),
+            uncompressed_chars INTEGER NOT NULL CHECK (uncompressed_chars >= 0),
+            chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+            compression TEXT NOT NULL CHECK (compression = 'zstd'),
+            truncated_at_source INTEGER NOT NULL CHECK (truncated_at_source IN (0, 1)),
+            archived_completely INTEGER NOT NULL CHECK (archived_completely IN (0, 1)),
+            model_projection_truncated INTEGER NOT NULL
+                CHECK (model_projection_truncated IN (0, 1)),
+            archive_projection_truncated INTEGER NOT NULL
+                CHECK (archive_projection_truncated IN (0, 1)),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            UNIQUE (conversation_id, assistant_message_id, sequence),
+            UNIQUE (conversation_id, call_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_history_blob_chunks (
+            archive_ref TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+            uncompressed_start_byte INTEGER NOT NULL
+                CHECK (uncompressed_start_byte >= 0),
+            uncompressed_start_char INTEGER NOT NULL
+                CHECK (uncompressed_start_char >= 0),
+            uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes >= 0),
+            uncompressed_chars INTEGER NOT NULL CHECK (uncompressed_chars >= 0),
+            compressed_bytes INTEGER NOT NULL CHECK (compressed_bytes > 0),
+            payload BLOB NOT NULL CHECK (length(payload) = compressed_bytes),
+            PRIMARY KEY (archive_ref, chunk_index),
+            FOREIGN KEY (archive_ref)
+                REFERENCES conversation_history_blobs(archive_ref) ON DELETE CASCADE
+        );
+CREATE INDEX conversation_history_blobs_trace_item_idx
+            ON conversation_history_blobs (
+                conversation_id, assistant_message_id, sequence
+            );
+CREATE TRIGGER validate_conversation_history_blob_message_insert
+        BEFORE INSERT ON conversation_history_blobs
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'history archive message must be an assistant message in the same conversation'
+            );
+        END;
+CREATE TABLE conversation_world_state_epochs (
+            conversation_id TEXT NOT NULL,
+            epoch_id TEXT NOT NULL CHECK (
+                length(CAST(epoch_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            base_summary_id TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (conversation_id, epoch_id),
+            UNIQUE (conversation_id, generation),
+            UNIQUE (base_summary_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (base_summary_id)
+                REFERENCES context_compaction_summaries(id) ON DELETE CASCADE
+        );
+CREATE TRIGGER validate_conversation_world_state_epoch_summary_insert
+        BEFORE INSERT ON conversation_world_state_epochs
+        WHEN NEW.base_summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries
+              WHERE id = NEW.base_summary_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state epoch summary must belong to the same conversation'
+            );
+        END;
+CREATE TRIGGER validate_conversation_world_state_epoch_summary_update
+        BEFORE UPDATE OF conversation_id, base_summary_id
+        ON conversation_world_state_epochs
+        WHEN NEW.base_summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries
+              WHERE id = NEW.base_summary_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state epoch summary must belong to the same conversation'
+            );
+        END;
+CREATE TABLE conversation_world_state_records (
+            journal_position INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            epoch_id TEXT NOT NULL CHECK (
+                length(CAST(epoch_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            record_kind TEXT NOT NULL CHECK (record_kind IN ('full', 'diff')),
+            base_revision TEXT,
+            result_revision TEXT NOT NULL CHECK (
+                length(CAST(result_revision AS BLOB)) BETWEEN 1 AND 256
+            ),
+            effective_before_message_id TEXT,
+            record_json TEXT NOT NULL CHECK (
+                json_valid(record_json) AND length(trim(record_json)) > 0
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            UNIQUE (conversation_id, epoch_id, sequence),
+            CHECK (
+                (record_kind = 'full' AND base_revision IS NULL)
+                OR (
+                    record_kind = 'diff'
+                    AND length(CAST(base_revision AS BLOB)) BETWEEN 1 AND 256
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id, epoch_id)
+                REFERENCES conversation_world_state_epochs(conversation_id, epoch_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (effective_before_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TRIGGER validate_conversation_world_state_anchor_insert
+        BEFORE INSERT ON conversation_world_state_records
+        WHEN NEW.effective_before_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM messages
+              WHERE id = NEW.effective_before_message_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state anchor must be a message in the same conversation'
+            );
+        END;
+CREATE TRIGGER validate_conversation_world_state_anchor_update
+        BEFORE UPDATE OF conversation_id, effective_before_message_id
+        ON conversation_world_state_records
+        WHEN NEW.effective_before_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM messages
+              WHERE id = NEW.effective_before_message_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state anchor must be a message in the same conversation'
+            );
+        END;
+CREATE TRIGGER rewind_conversation_world_state_after_record_delete
+        AFTER DELETE ON conversation_world_state_records
+        BEGIN
+            DELETE FROM conversation_world_state_records
+            WHERE conversation_id = OLD.conversation_id
+              AND epoch_id = OLD.epoch_id
+              AND sequence > OLD.sequence;
+            DELETE FROM conversation_world_state_epochs
+            WHERE conversation_id = OLD.conversation_id
+              AND epoch_id = OLD.epoch_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM conversation_world_state_records
+                  WHERE conversation_id = OLD.conversation_id
+                    AND epoch_id = OLD.epoch_id
+              );
+        END;
+CREATE TABLE agent_run_guidances (
+            guidance_id TEXT PRIMARY KEY CHECK (length(trim(guidance_id)) > 0),
+            client_message_id TEXT NOT NULL CHECK (length(trim(client_message_id)) > 0),
+            run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            status TEXT NOT NULL CHECK (status IN ('queued', 'applied', 'rejected', 'abandoned')),
+            applied_trace_sequence INTEGER CHECK (
+                applied_trace_sequence IS NULL OR applied_trace_sequence >= 0
+            ),
+            terminal_reason TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            UNIQUE (run_id, client_message_id),
+            UNIQUE (assistant_message_id, applied_trace_sequence),
+            CHECK (
+                (status = 'queued' AND applied_trace_sequence IS NULL AND terminal_reason IS NULL)
+                OR (
+                    status = 'applied'
+                    AND applied_trace_sequence IS NOT NULL
+                    AND terminal_reason IS NULL
+                )
+                OR (
+                    status IN ('rejected', 'abandoned')
+                    AND applied_trace_sequence IS NULL
+                    AND length(trim(terminal_reason)) > 0
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_run_guidance_attachments (
+            guidance_id TEXT NOT NULL,
+            attachment_id TEXT NOT NULL UNIQUE,
+            position INTEGER NOT NULL CHECK (position >= 0),
+            PRIMARY KEY (guidance_id, position),
+            FOREIGN KEY (guidance_id) REFERENCES agent_run_guidances(guidance_id) ON DELETE CASCADE,
+            FOREIGN KEY (attachment_id) REFERENCES attachments(id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_turn_diffs (
+            assistant_message_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL,
+            workspace_root TEXT NOT NULL CHECK (length(trim(workspace_root)) > 0),
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_turn_diff_files (
+            assistant_message_id TEXT NOT NULL,
+            path TEXT NOT NULL CHECK (length(trim(path)) > 0),
+            before_kind TEXT NOT NULL CHECK (before_kind IN ('missing', 'text', 'binary', 'too_large')),
+            before_text TEXT,
+            after_kind TEXT NOT NULL CHECK (after_kind IN ('missing', 'text', 'binary', 'too_large')),
+            after_text TEXT,
+            PRIMARY KEY (assistant_message_id, path),
+            CHECK (
+                (before_kind = 'text' AND before_text IS NOT NULL)
+                OR (before_kind != 'text' AND before_text IS NULL)
+            ),
+            CHECK (
+                (after_kind = 'text' AND after_text IS NOT NULL)
+                OR (after_kind != 'text' AND after_text IS NULL)
+            ),
+            FOREIGN KEY (assistant_message_id) REFERENCES agent_turn_diffs(assistant_message_id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_turn_diff_actions (
+            assistant_message_id TEXT NOT NULL,
+            action_id TEXT NOT NULL CHECK (length(trim(action_id)) > 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (assistant_message_id, action_id),
+            FOREIGN KEY (assistant_message_id) REFERENCES agent_turn_diffs(assistant_message_id) ON DELETE CASCADE
+        );
+CREATE TABLE context_compaction_summaries (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            source_revision TEXT NOT NULL,
+            previous_summary_id TEXT,
+            covered_through_kind TEXT NOT NULL CHECK (covered_through_kind IN ('message', 'trace_item')),
+            covered_through_message_id TEXT NOT NULL,
+            covered_through_trace_sequence INTEGER CHECK (covered_through_trace_sequence >= 0),
+            content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            continuity_schema_version INTEGER NOT NULL CHECK (continuity_schema_version > 0),
+            continuity_json TEXT NOT NULL CHECK (
+                json_valid(continuity_json) AND length(trim(continuity_json)) > 0
+            ),
+            generation_kind TEXT NOT NULL CHECK (generation_kind IN ('test', 'model')),
+            generation_model TEXT,
+            source_input_tokens INTEGER NOT NULL CHECK (source_input_tokens > 0),
+            summary_input_tokens INTEGER NOT NULL CHECK (
+                summary_input_tokens > 0
+            ),
+            continuity_input_tokens INTEGER NOT NULL CHECK (continuity_input_tokens > 0),
+            uncovered_tail_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (
+                uncovered_tail_input_tokens >= 0
+            ),
+            replacement_input_tokens INTEGER NOT NULL CHECK (
+                replacement_input_tokens > 0
+                AND replacement_input_tokens < source_input_tokens
+                AND summary_input_tokens <= replacement_input_tokens
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (previous_summary_id) REFERENCES context_compaction_summaries(id) ON DELETE SET NULL,
+            FOREIGN KEY (covered_through_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            CHECK (
+                (covered_through_kind = 'message' AND covered_through_trace_sequence IS NULL)
+                OR (covered_through_kind = 'trace_item' AND covered_through_trace_sequence IS NOT NULL)
+            ),
+            CHECK (
+                (generation_kind = 'test' AND generation_model IS NULL)
+                OR (generation_kind = 'model' AND length(trim(generation_model)) > 0)
+            )
+        );
+CREATE TABLE context_compaction_summary_lineage (
+            summary_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            introduced_by_assistant_message_id TEXT NOT NULL,
+            source_conversation_id TEXT,
+            source_summary_id TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (introduced_by_assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TRIGGER delete_context_compaction_summary_with_lineage
+        AFTER DELETE ON context_compaction_summary_lineage
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summaries WHERE id = OLD.summary_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries WHERE id = OLD.summary_id;
+        END;
+CREATE TRIGGER validate_context_compaction_summary_lineage_insert
+        BEFORE INSERT ON context_compaction_summary_lineage
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.introduced_by_assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'compaction summary owner must be an assistant message in the same conversation');
+        END;
+CREATE TRIGGER validate_context_compaction_summary_lineage_update
+        BEFORE UPDATE OF conversation_id, introduced_by_assistant_message_id
+        ON context_compaction_summary_lineage
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.introduced_by_assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'compaction summary owner must be an assistant message in the same conversation');
+        END;
+CREATE TABLE model_request_observations (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            run_id TEXT NOT NULL,
+            conversation_id TEXT,
+            assistant_message_id TEXT,
+            operation_id TEXT,
+            request_index INTEGER NOT NULL CHECK (request_index > 0),
+            purpose TEXT NOT NULL CHECK (purpose IN ('agent_loop', 'context_compaction')),
+            model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+            api_style TEXT NOT NULL CHECK (api_style IN ('open_ai_compatible', 'anthropic_compatible')),
+            status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'cancelled')),
+            estimated_input_tokens INTEGER,
+            normalized_actual_input_tokens INTEGER,
+            observation_json TEXT NOT NULL CHECK (
+                json_valid(observation_json) AND length(trim(observation_json)) > 0
+            ),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+            CHECK (
+                (conversation_id IS NULL AND assistant_message_id IS NULL)
+                OR (conversation_id IS NOT NULL AND assistant_message_id IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TABLE context_compaction_receipts (
+            operation_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            run_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            request_index INTEGER NOT NULL CHECK (request_index > 0),
+            attempt_index INTEGER NOT NULL CHECK (attempt_index > 0),
+            model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+            api_style TEXT NOT NULL CHECK (api_style IN ('open_ai_compatible', 'anthropic_compatible')),
+            status TEXT NOT NULL CHECK (status IN (
+                'in_progress', 'applied', 'refreshed', 'failed', 'cancelled', 'interrupted'
+            )),
+            stage TEXT NOT NULL CHECK (stage IN (
+                'planned', 'preparing', 'generating', 'committing', 'completed'
+            )),
+            generation_observation_id TEXT,
+            summary_id TEXT UNIQUE,
+            receipt_json TEXT NOT NULL CHECK (
+                json_valid(receipt_json) AND length(trim(receipt_json)) > 0
+            ),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= started_at),
+            completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= started_at),
+            UNIQUE(run_id, request_index, attempt_index),
+            CHECK (
+                (status = 'in_progress' AND completed_at IS NULL)
+                OR (status != 'in_progress' AND completed_at IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (generation_observation_id) REFERENCES model_request_observations(id)
+        );
+CREATE TABLE provider_transition_terminal_records (
+            operation_id TEXT PRIMARY KEY CHECK (
+                typeof(operation_id) = 'text'
+                AND length(CAST(operation_id AS BLOB)) BETWEEN 21 AND 1024
+                AND substr(operation_id, 1, 20) = 'provider-transition-'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            conversation_id TEXT NOT NULL CHECK (
+                typeof(conversation_id) = 'text'
+                AND length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 512
+                AND conversation_id = trim(conversation_id)
+            ),
+            target_model_id TEXT NOT NULL CHECK (
+                typeof(target_model_id) = 'text'
+                AND length(CAST(target_model_id AS BLOB)) BETWEEN 1 AND 512
+                AND target_model_id = trim(target_model_id)
+            ),
+            source_model_display_name TEXT CHECK (
+                source_model_display_name IS NULL OR (
+                    length(CAST(source_model_display_name AS BLOB)) BETWEEN 1 AND 512
+                    AND source_model_display_name = trim(source_model_display_name)
+                )
+            ),
+            target_model_display_name TEXT CHECK (
+                target_model_display_name IS NULL OR (
+                    length(CAST(target_model_display_name AS BLOB)) BETWEEN 1 AND 512
+                    AND target_model_display_name = trim(target_model_display_name)
+                )
+            ),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+            conversation_updated_at INTEGER NOT NULL CHECK (
+                conversation_updated_at >= started_at
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_context_compaction_heads (
+            conversation_id TEXT PRIMARY KEY,
+            summary_id TEXT NOT NULL UNIQUE,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_forks (
+            request_id TEXT PRIMARY KEY,
+            target_conversation_id TEXT NOT NULL UNIQUE,
+            source_conversation_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            target_message_id TEXT NOT NULL,
+            source_fork_point_json TEXT NOT NULL CHECK (
+                json_valid(source_fork_point_json)
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TABLE conversation_context_adaptation_requirements (
+            conversation_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            reason TEXT NOT NULL CHECK (
+                reason = 'fork_released_provider_state_requires_compaction'
+            ),
+            source_conversation_id TEXT NOT NULL CHECK (
+                typeof(source_conversation_id) = 'text'
+                AND length(CAST(source_conversation_id AS BLOB)) BETWEEN 1 AND 512
+                AND source_conversation_id = trim(source_conversation_id)
+            ),
+            source_message_id TEXT NOT NULL CHECK (
+                typeof(source_message_id) = 'text'
+                AND length(CAST(source_message_id AS BLOB)) BETWEEN 1 AND 512
+                AND source_message_id = trim(source_message_id)
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            resolved_summary_id TEXT,
+            resolved_at INTEGER CHECK (resolved_at IS NULL OR resolved_at >= created_at),
+            CHECK (
+                (resolved_summary_id IS NULL AND resolved_at IS NULL)
+                OR (
+                    typeof(resolved_summary_id) = 'text'
+                    AND length(CAST(resolved_summary_id AS BLOB)) BETWEEN 1 AND 512
+                    AND resolved_summary_id = trim(resolved_summary_id)
+                    AND resolved_at IS NOT NULL
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE INDEX idx_models_position ON models(position);
+CREATE INDEX idx_projects_updated_at ON projects(updated_at);
+CREATE INDEX idx_conversations_project_id ON conversations(project_id);
+CREATE INDEX idx_conversations_pinned_at ON conversations(pinned_at);
+CREATE INDEX idx_conversations_archived_at ON conversations(archived_at);
+CREATE INDEX idx_conversations_unread_at ON conversations(unread_at);
+CREATE INDEX idx_conversations_updated_at ON conversations(updated_at);
+CREATE INDEX idx_messages_conversation_id ON messages(conversation_id, position);
+CREATE INDEX idx_conversation_world_state_records_conversation
+            ON conversation_world_state_records(conversation_id, journal_position);
+CREATE INDEX idx_conversation_world_state_records_anchor
+            ON conversation_world_state_records(effective_before_message_id);
+CREATE INDEX idx_conversation_world_state_epochs_active
+            ON conversation_world_state_epochs(conversation_id, generation DESC);
+CREATE INDEX idx_agent_run_guidances_run_status ON agent_run_guidances(run_id, status, created_at);
+CREATE INDEX idx_agent_run_guidances_conversation ON agent_run_guidances(conversation_id, created_at);
+CREATE INDEX idx_agent_turn_diffs_conversation_project ON agent_turn_diffs(conversation_id, project_id, updated_at);
+CREATE INDEX idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
+CREATE INDEX idx_context_compaction_summary_lineage_owner ON context_compaction_summary_lineage(conversation_id, introduced_by_assistant_message_id);
+CREATE INDEX idx_context_compaction_summary_lineage_source ON context_compaction_summary_lineage(source_conversation_id, source_summary_id);
+CREATE INDEX idx_model_request_observations_conversation_id ON model_request_observations(conversation_id, completed_at);
+CREATE INDEX idx_model_request_observations_operation_id ON model_request_observations(operation_id);
+CREATE INDEX idx_model_request_observations_profile ON model_request_observations(model, api_style, purpose, completed_at);
+CREATE INDEX idx_context_compaction_receipts_conversation_id ON context_compaction_receipts(conversation_id, started_at);
+CREATE INDEX idx_context_compaction_receipts_run_id ON context_compaction_receipts(run_id, request_index, attempt_index);
+CREATE INDEX idx_context_compaction_receipts_status ON context_compaction_receipts(status, updated_at);
+CREATE INDEX idx_provider_transition_terminal_records_conversation
+            ON provider_transition_terminal_records(conversation_id, started_at DESC, operation_id DESC);
+CREATE INDEX idx_attachments_conversation_id ON attachments(conversation_id, created_at);
+CREATE INDEX idx_attachments_project_id ON attachments(project_id, created_at);
+CREATE INDEX idx_attachments_message_id ON attachments(message_id);
+CREATE INDEX idx_agent_usage_records_created_at ON agent_usage_records(created_at);
+CREATE INDEX idx_agent_usage_records_model_id ON agent_usage_records(model_id);
+CREATE INDEX idx_agent_usage_records_project_id ON agent_usage_records(project_id);
+CREATE INDEX idx_agent_deleted_usage_daily_rollups_usage_day ON agent_deleted_usage_daily_rollups(usage_day);
+CREATE INDEX idx_agent_deleted_usage_daily_rollups_model_id ON agent_deleted_usage_daily_rollups(model_id);
+CREATE INDEX idx_agent_action_audit_run_id ON agent_action_audit(run_id);
+CREATE INDEX idx_agent_action_audit_conversation_id ON agent_action_audit(conversation_id);
+CREATE INDEX idx_agent_action_audit_created_at ON agent_action_audit(created_at);
+CREATE INDEX idx_agent_action_audit_status ON agent_action_audit(status);
+CREATE INDEX idx_agent_pending_actions_status ON agent_pending_actions(status);
+CREATE INDEX idx_agent_pending_actions_run_id ON agent_pending_actions(run_id);
+CREATE INDEX idx_agent_pending_actions_conversation_id ON agent_pending_actions(conversation_id);
+CREATE INDEX idx_mcp_approval_payload_envelopes_expires_at
+            ON mcp_approval_payload_envelopes(expires_at);
+CREATE INDEX idx_mcp_approval_payload_envelopes_action_id
+            ON mcp_approval_payload_envelopes(action_id);
+CREATE INDEX idx_provider_continuations_replay_scope
+            ON provider_continuations(
+                conversation_id, assistant_message_id, run_id, request_index
+            );
+CREATE INDEX idx_provider_continuations_state
+            ON provider_continuations(state, updated_at);
+CREATE INDEX idx_provider_continuation_tool_calls_runtime
+            ON provider_continuation_tool_calls(runtime_call_id, continuation_id);
+CREATE INDEX idx_agent_file_drafts_conversation_status ON agent_file_drafts(conversation_id, status);
+CREATE INDEX idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
+CREATE INDEX idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
+CREATE INDEX idx_composer_drafts_updated_at ON composer_drafts(updated_at);
+CREATE UNIQUE INDEX conversation_trace_command_session_lifecycle_identity
+         ON conversation_turn_trace_items (
+             assistant_message_id,
+             json_extract(item_json, '$.sessionId'),
+             json_extract(item_json, '$.phase')
+         )
+         WHERE item_kind = 'command_session_lifecycle';
+CREATE INDEX idx_conversation_turn_traces_conversation_id
+            ON conversation_turn_traces(conversation_id, updated_at);
+CREATE TRIGGER validate_agent_usage_message_insert
+        BEFORE INSERT ON agent_usage_records
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.message_id
+              AND conversation_id = NEW.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'agent usage message must belong to the same conversation'
+            );
+        END;
+CREATE TRIGGER validate_agent_usage_message_update
+        BEFORE UPDATE OF conversation_id, message_id ON agent_usage_records
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.message_id
+              AND conversation_id = NEW.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'agent usage message must belong to the same conversation'
+            );
+        END;
+CREATE TABLE conversation_goals (
+            conversation_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL UNIQUE,
+            objective TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('active', 'blocked', 'completed', 'cancelled')
+            ),
+            stopped_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+CREATE TRIGGER validate_conversation_goal_source_insert
+        BEFORE INSERT ON conversation_goals
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.source_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'user'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'goal source must be a user message in the same conversation'
+            );
+        END;
+CREATE TRIGGER validate_conversation_goal_source_update
+        BEFORE UPDATE OF conversation_id, source_message_id
+        ON conversation_goals
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.source_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'user'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'goal source must be a user message in the same conversation'
+            );
+        END;
+CREATE TABLE conversation_goal_revisions (
+            conversation_id TEXT NOT NULL,
+            goal_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence > 0),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            actor TEXT CHECK (actor IS NULL OR actor IN ('model', 'user')),
+            event_kind TEXT NOT NULL CHECK (
+                event_kind IN ('initial', 'objective_changed', 'status_changed')
+            ),
+            event_json TEXT NOT NULL CHECK (json_valid(event_json)),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (goal_id, sequence),
+            CHECK (
+                (sequence = 1 AND event_kind = 'initial')
+                OR (sequence > 1 AND event_kind != 'initial' AND actor IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE INDEX conversation_goal_revisions_conversation
+        ON conversation_goal_revisions(conversation_id, created_at, goal_id, sequence);
+CREATE TRIGGER prevent_conversation_goal_revision_update
+        BEFORE UPDATE ON conversation_goal_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'goal revisions are append-only');
+        END;
+CREATE TRIGGER prevent_conversation_goal_revision_delete
+        BEFORE DELETE ON conversation_goal_revisions
+        WHEN EXISTS (
+            SELECT 1 FROM conversations WHERE id = OLD.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'goal revisions are append-only');
+        END;
+CREATE TABLE agent_command_sessions (
+            session_id TEXT PRIMARY KEY CHECK (
+                length(session_id) = 36
+                AND substr(session_id, 1, 4) = 'cmd_'
+                AND substr(session_id, 5) NOT GLOB '*[^0-9A-Fa-f]*'
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            origin_run_id TEXT NOT NULL CHECK (
+                length(CAST(origin_run_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            call_id TEXT NOT NULL CHECK (
+                length(CAST(call_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            project_id TEXT,
+            command_projection TEXT NOT NULL CHECK (
+                length(CAST(command_projection AS BLOB)) BETWEEN 1 AND 65536
+            ),
+            cwd_projection TEXT NOT NULL CHECK (
+                length(CAST(cwd_projection AS BLOB)) BETWEEN 1 AND 8192
+            ),
+            command_digest TEXT NOT NULL CHECK (
+                length(command_digest) = 71
+                AND substr(command_digest, 1, 7) = 'sha256:'
+                AND substr(command_digest, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            authorization_source TEXT NOT NULL CHECK (
+                authorization_source IN ('automatic', 'explicit_user')
+            ),
+            approval_provenance_json TEXT NOT NULL CHECK (
+                json_valid(approval_provenance_json)
+                AND length(CAST(approval_provenance_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            permission_provenance_json TEXT NOT NULL CHECK (
+                json_valid(permission_provenance_json)
+                AND length(CAST(permission_provenance_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'starting', 'running', 'exited', 'interrupted',
+                    'timed_out', 'failed', 'outcome_unknown'
+                )
+            ),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            ended_at INTEGER CHECK (ended_at IS NULL OR ended_at >= started_at),
+            exit_code INTEGER,
+            latest_sequence INTEGER NOT NULL DEFAULT 0 CHECK (latest_sequence >= 0),
+            model_read_sequence INTEGER NOT NULL DEFAULT 0 CHECK (
+                model_read_sequence >= 0 AND model_read_sequence <= latest_sequence
+            ),
+            transcript_truncated INTEGER NOT NULL DEFAULT 0 CHECK (
+                transcript_truncated IN (0, 1)
+            ),
+            output_capture_truncated INTEGER NOT NULL DEFAULT 0 CHECK (
+                output_capture_truncated IN (0, 1)
+            ),
+            archive_ref TEXT,
+            terminal_reason TEXT CHECK (
+                terminal_reason IS NULL
+                OR length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 8192
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            settled_at INTEGER CHECK (
+                settled_at IS NULL OR settled_at >= created_at
+            ),
+            UNIQUE (conversation_id, assistant_message_id, call_id),
+            CHECK (
+                (
+                    status IN ('starting', 'running')
+                    AND ended_at IS NULL
+                    AND exit_code IS NULL
+                    AND settled_at IS NULL
+                ) OR (
+                    status NOT IN ('starting', 'running')
+                    AND ended_at IS NOT NULL
+                    AND settled_at IS NOT NULL
+                )
+            ),
+            CHECK (status = 'exited' OR exit_code IS NULL),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (archive_ref)
+                REFERENCES conversation_history_blobs(archive_ref) ON DELETE SET NULL
+        );
+CREATE TABLE agent_command_session_output_chunks (
+            session_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence > 0),
+            stream TEXT NOT NULL CHECK (stream IN ('stdout', 'stderr')),
+            output TEXT NOT NULL CHECK (
+                length(CAST(output AS BLOB)) BETWEEN 1 AND 65536
+            ),
+            output_bytes INTEGER NOT NULL CHECK (
+                output_bytes = length(CAST(output AS BLOB))
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (session_id, sequence),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_command_session_published_outputs (
+            session_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 32),
+            name TEXT NOT NULL CHECK (
+                length(CAST(name AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            kind TEXT NOT NULL CHECK (kind IN ('image', 'document')),
+            read_path TEXT NOT NULL CHECK (
+                length(CAST(read_path AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            mime_type TEXT NOT NULL CHECK (
+                length(CAST(mime_type AS BLOB)) BETWEEN 1 AND 128
+            ),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            width INTEGER CHECK (width IS NULL OR width BETWEEN 1 AND 16384),
+            height INTEGER CHECK (height IS NULL OR height BETWEEN 1 AND 16384),
+            PRIMARY KEY (session_id, ordinal),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_command_session_model_read_receipts (
+            receipt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (
+                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            call_id TEXT NOT NULL CHECK (
+                length(CAST(call_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            action TEXT NOT NULL CHECK (action IN ('poll', 'interrupt')),
+            max_output_bytes INTEGER NOT NULL CHECK (max_output_bytes > 0),
+            requested_after_sequence INTEGER NOT NULL CHECK (
+                requested_after_sequence >= 0
+            ),
+            first_output_sequence INTEGER CHECK (
+                first_output_sequence IS NULL OR first_output_sequence > 0
+            ),
+            last_output_sequence INTEGER CHECK (
+                last_output_sequence IS NULL OR last_output_sequence > 0
+            ),
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'starting', 'running', 'exited', 'interrupted',
+                    'timed_out', 'failed', 'outcome_unknown'
+                )
+            ),
+            exit_code INTEGER,
+            latest_sequence INTEGER NOT NULL CHECK (latest_sequence >= 0),
+            truncated_before INTEGER NOT NULL CHECK (truncated_before IN (0, 1)),
+            output_truncated INTEGER NOT NULL CHECK (output_truncated IN (0, 1)),
+            output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
+            output_hash TEXT NOT NULL CHECK (
+                length(output_hash) = 64
+                AND output_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            output_payload_compression TEXT NOT NULL CHECK (
+                output_payload_compression = 'zstd_json_v1'
+            ),
+            output_payload BLOB NOT NULL CHECK (
+                length(output_payload) BETWEEN 1 AND 16777216
+            ),
+            output_chunk_count INTEGER NOT NULL CHECK (output_chunk_count >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            UNIQUE (conversation_id, session_id, run_id, call_id),
+            CHECK (
+                (first_output_sequence IS NULL AND last_output_sequence IS NULL)
+                OR (
+                    first_output_sequence IS NOT NULL
+                    AND last_output_sequence IS NOT NULL
+                    AND first_output_sequence > requested_after_sequence
+                    AND first_output_sequence <= last_output_sequence
+                    AND last_output_sequence <= latest_sequence
+                )
+            ),
+            CHECK (status = 'exited' OR exit_code IS NULL),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE
+        );
+CREATE TABLE agent_command_session_lifecycle_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            phase TEXT NOT NULL CHECK (phase IN ('started', 'terminal')),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            event_json TEXT NOT NULL CHECK (
+                json_valid(event_json)
+                AND length(CAST(event_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            archive_ref TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            recorded_at INTEGER NOT NULL CHECK (recorded_at >= 0),
+            trace_sequence INTEGER CHECK (trace_sequence IS NULL OR trace_sequence >= 0),
+            materialized_at INTEGER CHECK (
+                materialized_at IS NULL OR materialized_at >= recorded_at
+            ),
+            UNIQUE (session_id, phase),
+            CHECK (
+                (trace_sequence IS NULL AND materialized_at IS NULL)
+                OR (trace_sequence IS NOT NULL AND materialized_at IS NOT NULL)
+            ),
+            FOREIGN KEY (session_id)
+                REFERENCES agent_command_sessions(session_id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id)
+                REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id)
+                REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (archive_ref)
+                REFERENCES conversation_history_blobs(archive_ref) ON DELETE CASCADE
+        );
+CREATE INDEX agent_command_sessions_conversation_state
+            ON agent_command_sessions(conversation_id, status, updated_at DESC);
+CREATE INDEX agent_command_sessions_project_state
+            ON agent_command_sessions(project_id, status, updated_at DESC);
+CREATE INDEX agent_command_sessions_origin_run
+            ON agent_command_sessions(origin_run_id, started_at);
+CREATE INDEX agent_command_session_model_receipts_retention
+            ON agent_command_session_model_read_receipts(session_id, receipt_id DESC);
+CREATE INDEX agent_command_session_lifecycle_pending
+            ON agent_command_session_lifecycle_events(
+                assistant_message_id, trace_sequence, created_at, event_id
+            );
+CREATE TRIGGER validate_agent_command_session_message_insert
+        BEFORE INSERT ON agent_command_sessions
+        WHEN NOT EXISTS (
+            SELECT 1 FROM messages
+            WHERE id = NEW.assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session message must be an assistant message in the same conversation'
+            );
+        END;
+CREATE TRIGGER validate_agent_command_session_project_insert
+        BEFORE INSERT ON agent_command_sessions
+        WHEN NEW.project_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversations
+              WHERE id = NEW.conversation_id AND project_id = NEW.project_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session project must match its conversation project'
+            );
+        END;
+CREATE TRIGGER prevent_agent_command_session_identity_update
+        BEFORE UPDATE OF
+            session_id, schema_version, conversation_id, assistant_message_id,
+            origin_run_id, call_id, project_id, command_projection, cwd_projection,
+            command_digest, authorization_source, approval_provenance_json,
+            permission_provenance_json, started_at
+        ON agent_command_sessions
+        BEGIN
+            SELECT RAISE(ABORT, 'command session identity and provenance are immutable');
+        END;
+CREATE TRIGGER validate_agent_command_session_archive_insert
+        BEFORE INSERT ON agent_command_sessions
+        WHEN NEW.archive_ref IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_history_blobs
+              WHERE archive_ref = NEW.archive_ref
+                AND conversation_id = NEW.conversation_id
+                AND assistant_message_id = NEW.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session archive must belong to its conversation and assistant message'
+            );
+        END;
+CREATE TRIGGER validate_agent_command_session_archive_update
+        BEFORE UPDATE OF archive_ref ON agent_command_sessions
+        WHEN NEW.archive_ref IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_history_blobs
+              WHERE archive_ref = NEW.archive_ref
+                AND conversation_id = NEW.conversation_id
+                AND assistant_message_id = NEW.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'command session archive must belong to its conversation and assistant message'
+            );
+        END;
+CREATE TRIGGER validate_agent_command_session_output_active
+        BEFORE INSERT ON agent_command_session_output_chunks
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_command_sessions
+            WHERE session_id = NEW.session_id
+              AND status IN ('starting', 'running')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session output cannot append after settlement');
+        END;
+CREATE TRIGGER validate_agent_command_session_model_receipt_owner
+        BEFORE INSERT ON agent_command_session_model_read_receipts
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_command_sessions
+            WHERE session_id = NEW.session_id
+              AND conversation_id = NEW.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session model receipt owner is invalid');
+        END;
+CREATE TRIGGER validate_agent_command_session_lifecycle_owner
+        BEFORE INSERT ON agent_command_session_lifecycle_events
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_command_sessions
+            WHERE session_id = NEW.session_id
+              AND conversation_id = NEW.conversation_id
+              AND assistant_message_id = NEW.assistant_message_id
+              AND call_id = NEW.call_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session lifecycle owner is invalid');
+        END;
+CREATE TRIGGER validate_agent_command_session_lifecycle_archive
+        BEFORE INSERT ON agent_command_session_lifecycle_events
+        WHEN NEW.archive_ref IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_history_blobs
+              WHERE archive_ref = NEW.archive_ref
+                AND conversation_id = NEW.conversation_id
+                AND assistant_message_id = NEW.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'command session lifecycle archive owner is invalid');
+        END;
+CREATE TRIGGER prevent_agent_command_session_lifecycle_rewrite
+        BEFORE UPDATE OF
+            session_id, phase, conversation_id, assistant_message_id,
+            call_id, event_json, archive_ref, created_at, recorded_at
+        ON agent_command_session_lifecycle_events
+        BEGIN
+            SELECT RAISE(ABORT, 'command session lifecycle events are append-only');
+        END;
+CREATE TRIGGER validate_agent_command_session_model_receipt_payload_insert
+         BEFORE INSERT ON agent_command_session_model_read_receipts
+         WHEN NEW.output_payload_compression IS NULL
+           OR NEW.output_payload IS NULL
+           OR NEW.output_chunk_count IS NULL
+         BEGIN
+             SELECT RAISE(ABORT, 'command session model receipt payload is required');
+         END;
+CREATE TRIGGER prevent_agent_command_session_model_receipt_update
+         BEFORE UPDATE ON agent_command_session_model_read_receipts
+         BEGIN
+             SELECT RAISE(ABORT, 'command session model read receipts are immutable');
+         END;
+CREATE VIRTUAL TABLE conversation_history_fts USING fts5(
+            ref_key UNINDEXED,
+            conversation_id UNINDEXED,
+            record_type UNINDEXED,
+            item_kind UNINDEXED,
+            message_id UNINDEXED,
+            assistant_message_id UNINDEXED,
+            sequence UNINDEXED,
+            archive_ref UNINDEXED,
+            call_id UNINDEXED,
+            tool UNINDEXED,
+            status UNINDEXED,
+            run_id UNINDEXED,
+            created_at UNINDEXED,
+            position UNINDEXED,
+            within_message_order UNINDEXED,
+            content,
+            tokenize = 'trigram'
+        );
+CREATE TRIGGER conversation_history_fts_message_insert
+AFTER INSERT ON messages
+BEGIN
+    INSERT INTO conversation_history_fts (
+        ref_key, conversation_id, record_type, item_kind, message_id,
+        assistant_message_id, sequence, archive_ref, call_id, tool,
+        status, run_id, created_at, position, within_message_order, content
+    ) VALUES (
+        'message:' || NEW.id, NEW.conversation_id, 'message', NULL, NEW.id,
+        NULL, NULL, NULL, NULL, NULL, NEW.status, NULL, NEW.created_at,
+        NEW.position, CASE WHEN NEW.role = 'assistant' THEN 9223372036854775807 ELSE 0 END,
+        NEW.content
+    );
+END;
+
+CREATE TRIGGER conversation_history_fts_message_update
+AFTER UPDATE OF conversation_id, role, content, status, created_at, position ON messages
+BEGIN
+    DELETE FROM conversation_history_fts WHERE ref_key = 'message:' || OLD.id;
+    INSERT INTO conversation_history_fts (
+        ref_key, conversation_id, record_type, item_kind, message_id,
+        assistant_message_id, sequence, archive_ref, call_id, tool,
+        status, run_id, created_at, position, within_message_order, content
+    ) VALUES (
+        'message:' || NEW.id, NEW.conversation_id, 'message', NULL, NEW.id,
+        NULL, NULL, NULL, NULL, NULL, NEW.status, NULL, NEW.created_at,
+        NEW.position, CASE WHEN NEW.role = 'assistant' THEN 9223372036854775807 ELSE 0 END,
+        NEW.content
+    );
+END;
+
+CREATE TRIGGER conversation_history_fts_message_delete
+AFTER DELETE ON messages
+BEGIN
+    DELETE FROM conversation_history_fts WHERE ref_key = 'message:' || OLD.id;
+END;
+
+CREATE TRIGGER conversation_history_fts_trace_insert
+AFTER INSERT ON conversation_turn_trace_items
+BEGIN
+    INSERT INTO conversation_history_fts (
+        ref_key, conversation_id, record_type, item_kind, message_id,
+        assistant_message_id, sequence, archive_ref, call_id, tool,
+        status, run_id, created_at, position, within_message_order, content
+    )
+    SELECT
+        'trace:' || NEW.assistant_message_id || ':' || NEW.sequence,
+        trace.conversation_id,
+        'trace_item',
+        NEW.item_kind,
+        NULL,
+        NEW.assistant_message_id,
+        NEW.sequence,
+        json_extract(NEW.item_json, '$.archiveRef'),
+        json_extract(NEW.item_json, '$.callId'),
+        json_extract(NEW.item_json, '$.tool'),
+        COALESCE(
+            json_extract(NEW.item_json, '$.status'),
+            json_extract(NEW.item_json, '$.approvalStatus')
+        ),
+        trace.run_id,
+        COALESCE(json_extract(NEW.item_json, '$.createdAt'), trace.created_at),
+        message.position,
+        NEW.sequence + 1,
+        NEW.item_json
+    FROM conversation_turn_traces AS trace
+    INNER JOIN messages AS message
+        ON message.id = trace.assistant_message_id
+    WHERE trace.assistant_message_id = NEW.assistant_message_id;
+    UPDATE conversation_history_fts
+    SET
+        status = COALESCE(
+            json_extract(NEW.item_json, '$.status'),
+            json_extract(NEW.item_json, '$.approvalStatus')
+        ),
+        run_id = (
+            SELECT run_id FROM conversation_turn_traces
+            WHERE assistant_message_id = NEW.assistant_message_id
+        )
+    WHERE archive_ref = json_extract(NEW.item_json, '$.archiveRef');
+END;
+
+CREATE TRIGGER conversation_history_fts_trace_update
+AFTER UPDATE OF item_kind, item_json ON conversation_turn_trace_items
+BEGIN
+    DELETE FROM conversation_history_fts
+    WHERE ref_key = 'trace:' || OLD.assistant_message_id || ':' || OLD.sequence;
+    INSERT INTO conversation_history_fts (
+        ref_key, conversation_id, record_type, item_kind, message_id,
+        assistant_message_id, sequence, archive_ref, call_id, tool,
+        status, run_id, created_at, position, within_message_order, content
+    )
+    SELECT
+        'trace:' || NEW.assistant_message_id || ':' || NEW.sequence,
+        trace.conversation_id,
+        'trace_item',
+        NEW.item_kind,
+        NULL,
+        NEW.assistant_message_id,
+        NEW.sequence,
+        json_extract(NEW.item_json, '$.archiveRef'),
+        json_extract(NEW.item_json, '$.callId'),
+        json_extract(NEW.item_json, '$.tool'),
+        COALESCE(
+            json_extract(NEW.item_json, '$.status'),
+            json_extract(NEW.item_json, '$.approvalStatus')
+        ),
+        trace.run_id,
+        COALESCE(json_extract(NEW.item_json, '$.createdAt'), trace.created_at),
+        message.position,
+        NEW.sequence + 1,
+        NEW.item_json
+    FROM conversation_turn_traces AS trace
+    INNER JOIN messages AS message
+        ON message.id = trace.assistant_message_id
+    WHERE trace.assistant_message_id = NEW.assistant_message_id;
+    UPDATE conversation_history_fts
+    SET
+        status = COALESCE(
+            json_extract(NEW.item_json, '$.status'),
+            json_extract(NEW.item_json, '$.approvalStatus')
+        ),
+        run_id = (
+            SELECT run_id FROM conversation_turn_traces
+            WHERE assistant_message_id = NEW.assistant_message_id
+        )
+    WHERE archive_ref = json_extract(NEW.item_json, '$.archiveRef');
+END;
+
+CREATE TRIGGER conversation_history_fts_trace_delete
+AFTER DELETE ON conversation_turn_trace_items
+BEGIN
+    DELETE FROM conversation_history_fts
+    WHERE ref_key = 'trace:' || OLD.assistant_message_id || ':' || OLD.sequence;
+END;
+
+CREATE TRIGGER conversation_history_fts_archive_delete
+AFTER DELETE ON conversation_history_blobs
+BEGIN
+    DELETE FROM conversation_history_fts WHERE ref_key = 'archive:' || OLD.archive_ref;
+END;

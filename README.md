@@ -95,12 +95,29 @@ Rust Core 时显式传入该目录。数据库位于数据根的 `storage.sqlite
 附件文件。具体路径由 Electron 按当前操作系统和应用身份解析，业务代码不再分别猜测
 macOS、Windows 或 Linux 的目录。
 
-若权威根与旧版 Core 的默认目录不同，启动阶段只复制 Core 管理的上述数据：受管目录经
-私有 staging、落盘和原子发布，SQLite 通过一致性快照校验后最后提交。目标已有独立数据
-或目录内容冲突时会停止迁移而不是覆盖；旧目录会保留作为回滚副本。
-
 直接运行独立 `core-server` 时仍可通过 `MYCOPILOT_STORAGE_DB` 指定数据库路径；该变量是
 测试和独立诊断接口，Electron 启动的正式应用会使用 Host 传入的数据根覆盖它。
+
+开发期需要重建 SQLite 基线时，先完全退出 MyCopilot，再运行非破坏性预检：
+
+```bash
+pnpm storage:reset-dev
+```
+
+确认预检摘要后，显式执行重建：
+
+```bash
+pnpm storage:reset-dev -- --confirm-reset
+```
+
+命令通过 Electron 解析同一个权威数据根；应用或 Core 仍持有数据库时会拒绝执行。确认
+重建会先在数据根的 `storage-backups/` 中创建权限受限、经过 SQLite 校验的时间戳备份，
+再原子发布 fresh canonical database。模型与搜索配置、UI/Prompt 偏好、Skill 启用状态、
+MCP Server 配置和有效的图片生成 Profile 会通过当前严格写入路径恢复；对话、项目、草稿、
+Usage、审批、Continuation、Compaction、Fork 等会话派生状态不会恢复。附件、已安装 Skill、
+生成图片和凭据目录不会在重建事务中被删除或搬移；与已清理对话绑定的附件记录不会恢复，
+其文件会在应用后续正常启动时按现有孤立附件策略清理。命令只输出路径和计数，不输出 Token
+或配置值。
 
 内置浏览器使用独立的持久会话；“清除浏览数据”会同时清理该会话和站点图标缓存。图标缓存最多保留 256 项和 30 天。
 

@@ -17,6 +17,7 @@ pub(crate) mod conversation_history_open;
 pub mod conversation_history_repository;
 pub mod conversation_model_context_repository;
 pub mod conversation_trace_repository;
+pub mod database_instance_lock;
 mod database_snapshot;
 pub mod file_draft_repository;
 pub mod guidance_repository;
@@ -38,6 +39,7 @@ pub mod turn_diff_repository;
 pub mod usage_repository;
 pub mod world_state_repository;
 
+pub use database_instance_lock::acquire_database_instance_lock;
 pub use database_snapshot::create_verified_sqlite_snapshot;
 pub use provider_transition_repository::{
     ProviderTransitionCompatibleCommitOutcome, ProviderTransitionTerminalRecord,

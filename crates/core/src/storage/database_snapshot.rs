@@ -16,13 +16,16 @@ pub fn create_verified_sqlite_snapshot(source: &Path, target: &Path) -> io::Resu
     let canonical_source = fs::canonicalize(source)?;
     let canonical_target = fs::canonicalize(target)?;
 
-    let open_flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    let source_open_flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let source_connection =
-        Connection::open_with_flags(&canonical_source, open_flags).map_err(|error| {
+    let target_open_flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let source_connection = Connection::open_with_flags(&canonical_source, source_open_flags)
+        .map_err(|error| {
             io::Error::other(format!(
-                "failed to open legacy SQLite database `{}`: {error}",
+                "failed to open SQLite snapshot source `{}`: {error}",
                 source.display()
             ))
         })?;
@@ -30,13 +33,13 @@ pub fn create_verified_sqlite_snapshot(source: &Path, target: &Path) -> io::Resu
         .busy_timeout(Duration::from_secs(5))
         .map_err(sqlite_error)?;
 
-    let mut target_connection = Connection::open_with_flags(&canonical_target, open_flags)
+    let mut target_connection = Connection::open_with_flags(&canonical_target, target_open_flags)
         .map_err(|error| {
-            io::Error::other(format!(
-                "failed to open SQLite migration staging `{}`: {error}",
-                target.display()
-            ))
-        })?;
+        io::Error::other(format!(
+            "failed to open SQLite snapshot staging `{}`: {error}",
+            target.display()
+        ))
+    })?;
     {
         let backup =
             Backup::new(&source_connection, &mut target_connection).map_err(sqlite_error)?;
@@ -57,7 +60,7 @@ pub fn create_verified_sqlite_snapshot(source: &Path, target: &Path) -> io::Resu
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "SQLite migration snapshot `{}` failed quick_check: {}",
+                "SQLite snapshot `{}` failed quick_check: {}",
                 target.display(),
                 quick_check.join("; ")
             ),
@@ -158,6 +161,30 @@ mod tests {
             .query_row("SELECT value FROM evidence", [], |row| row.get(0))
             .unwrap();
         assert_eq!(value, "committed-in-wal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_never_requires_write_access_to_the_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source.sqlite");
+        let target = fixture.path().join("target.sqlite");
+        let connection = Connection::open(&source).unwrap();
+        connection
+            .execute_batch("CREATE TABLE evidence(value TEXT NOT NULL);")
+            .unwrap();
+        drop(connection);
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o400)).unwrap();
+        create_empty_file(&target);
+
+        create_verified_sqlite_snapshot(&source, &target).unwrap();
+
+        assert_eq!(
+            fs::metadata(source).unwrap().permissions().mode() & 0o777,
+            0o400
+        );
     }
 
     #[cfg(unix)]

@@ -4003,7 +4003,7 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
     let mut pending = pending_action("action-interrupted", "conversation-interrupted");
     pending.assistant_message_id = Some("assistant-interrupted".to_string());
     pending.status = "approved".to_string();
-    pending.agent_input_json = "sensitive continuation".to_string();
+    pending.agent_input_json = r#"{"continuation":"sensitive"}"#.to_string();
     service.store_pending_agent_action(pending).unwrap();
 
     let reconciled = service

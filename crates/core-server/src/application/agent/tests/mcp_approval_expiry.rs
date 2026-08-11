@@ -327,7 +327,7 @@ fn expiry_tick_loses_a_durable_status_cas_without_invalidating_or_removing_memor
         1_999_999,
     );
     let durable = storage
-        .list_active_agent_actions_for_startup()
+        .list_recoverable_agent_actions_after_reconciliation()
         .unwrap()
         .into_iter()
         .find(|record| record.action_id == storage_id)
@@ -359,7 +359,7 @@ fn expiry_tick_loses_a_durable_status_cas_without_invalidating_or_removing_memor
     );
     assert_eq!(
         storage
-            .list_active_agent_actions_for_startup()
+            .list_recoverable_agent_actions_after_reconciliation()
             .unwrap()
             .into_iter()
             .find(|record| record.action_id == storage_id)

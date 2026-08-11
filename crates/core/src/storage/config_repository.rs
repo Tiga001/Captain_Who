@@ -428,14 +428,10 @@ pub fn is_provider_connection_revision(value: &str) -> bool {
     is_canonical_v4_revision(value, PROVIDER_CONNECTION_REVISION_PREFIX)
 }
 
-/// Validates the opaque identity carried by `ProviderProtocolKey` and pending-run provenance.
-///
-/// New or changed protocols use `provider-protocol-v1`. The broad `model-settings-v1` form is
-/// retained as a migration seed so continuations created before per-model protocol identities
-/// remain replayable when no effective wire setting changed.
+/// Validates the per-model opaque identity carried by `ProviderProtocolKey` and pending-run
+/// provenance. Global model-settings revisions are deliberately not protocol identities.
 pub fn is_provider_protocol_revision(value: &str) -> bool {
     is_canonical_v4_revision(value, PROVIDER_PROTOCOL_REVISION_PREFIX)
-        || is_model_settings_revision(value)
 }
 
 pub fn is_search_connection_revision(value: &str) -> bool {

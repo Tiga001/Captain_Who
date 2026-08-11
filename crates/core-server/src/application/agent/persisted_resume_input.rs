@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_broad_provider_revision_remains_decodable_for_host_revalidation() {
+    fn broad_model_settings_revision_is_not_a_provider_protocol_identity() {
         let encoded = PersistedAgentResumeInput::from_agent_input(&input())
             .unwrap()
             .encode();
@@ -540,10 +540,9 @@ mod tests {
         legacy["resumeCheckpoint"]["providerProtocolKey"]["providerConfigurationRevision"] =
             Value::String(legacy_revision.clone());
 
-        let restored = PersistedAgentResumeInput::decode(&legacy.to_string()).unwrap();
         assert_eq!(
-            restored.provider_configuration_revision, legacy_revision,
-            "legacy provenance remains readable but is checked against effective state on resume"
+            PersistedAgentResumeInput::decode(&legacy.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
         );
     }
 
@@ -585,7 +584,7 @@ mod tests {
 
         let mut invalid_revision = serde_json::from_str::<Value>(&encoded).unwrap();
         invalid_revision["providerConfigurationRevision"] =
-            Value::String("model-settings-v1:not-a-uuid".to_string());
+            Value::String("provider-protocol-v1:not-a-uuid".to_string());
         assert_eq!(
             PersistedAgentResumeInput::decode(&invalid_revision.to_string()).unwrap_err(),
             PersistedAgentResumeInputError::InvalidShape

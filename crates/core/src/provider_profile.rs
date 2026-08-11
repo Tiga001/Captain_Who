@@ -575,7 +575,7 @@ mod tests {
             ProviderProtocolDialect::OpenAiChatCompletions,
             &config,
             "deepseek-v4-pro",
-            Some("model-settings-v1:test".to_string()),
+            Some("provider-protocol-v1:test".to_string()),
         )
         .unwrap();
         assert_eq!(key.profile, config.profile);
@@ -587,7 +587,7 @@ mod tests {
     fn protocol_key_debug_redacts_model_and_configuration_revision() {
         let config = ProviderProfileConfig::deepseek_v4_default();
         let model_canary = "debug-model-canary";
-        let revision_canary = "model-settings-v1:debug-revision-canary";
+        let revision_canary = "provider-protocol-v1:debug-revision-canary";
         let key = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,
             &config,

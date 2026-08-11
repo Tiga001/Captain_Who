@@ -662,33 +662,6 @@ pub(crate) fn clone_archive_in_connection(
     Ok(())
 }
 
-pub(crate) fn backfill_history_search_index(connection: &Connection) -> rusqlite::Result<()> {
-    let archive_refs = {
-        let mut statement = connection.prepare(
-            "SELECT archive_ref, conversation_id
-             FROM conversation_history_blobs AS archive
-             WHERE NOT EXISTS (
-                SELECT 1 FROM conversation_history_fts
-                WHERE ref_key = 'archive:' || archive.archive_ref
-             )
-             ORDER BY created_at ASC, archive_ref ASC",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    for (archive_ref, conversation_id) in archive_refs {
-        let descriptor = find_archive_by_ref(connection, &conversation_id, &archive_ref)?
-            .ok_or_else(|| invalid_data("history archive disappeared during FTS backfill"))?;
-        let content = read_complete_archive_content(connection, &descriptor)?;
-        index_archive_content(connection, &descriptor, &content)?;
-    }
-    Ok(())
-}
-
 fn index_archive_content(
     connection: &Connection,
     descriptor: &ConversationHistoryArchiveDescriptor,

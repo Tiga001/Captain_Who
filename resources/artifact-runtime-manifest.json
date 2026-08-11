@@ -5,7 +5,7 @@
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "2a760ebb4e2363d973954dad6884e547b9caf7cec323efa3cd4fe3d5d379f6c5"
+      "sha256": "a37770c29d26006add18c14e60b80a327617615313b9c31223965a3c7463e484"
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",

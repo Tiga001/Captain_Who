@@ -363,9 +363,12 @@ mod tests {
         connection
             .execute_batch(
                 "INSERT INTO models (
-                    id, display_name, supports_image, provider_protocol_revision,
+                    id, display_name, supports_image, provider_connection_revision,
+                    provider_protocol_revision,
                     input_price, output_price, enabled, position, created_at, updated_at
-                 ) VALUES ('target-model', 'Target', 0, 'target-revision',
+                 ) VALUES ('target-model', 'Target', 0,
+                           'provider-connection-v1:target-connection',
+                           'provider-protocol-v1:target-revision',
                            '0', '0', 1, 0, 1, 1);
                  INSERT INTO conversations (
                     id, project_id, model_id, title, created_at, updated_at,
@@ -413,7 +416,7 @@ mod tests {
             &terminal,
             Some("source-model"),
             7,
-            "target-revision",
+            "provider-protocol-v1:target-revision",
         )
         .unwrap();
         assert_eq!(
@@ -450,7 +453,7 @@ mod tests {
             &terminal,
             Some("source-model"),
             7,
-            "target-revision",
+            "provider-protocol-v1:target-revision",
         )
         .unwrap();
         assert_eq!(
@@ -506,7 +509,7 @@ mod tests {
             &first,
             Some("source-model"),
             7,
-            "target-revision",
+            "provider-protocol-v1:target-revision",
         )
         .unwrap();
         let rows = list_terminal_records(&connection, "conversation-1", 50).unwrap();

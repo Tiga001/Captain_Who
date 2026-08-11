@@ -1119,32 +1119,11 @@ pub(super) fn mcp_pending_action_binding_matches(
     })
 }
 
-fn retire_unsafe_active_pending_record(
-    storage: &Arc<StorageService>,
-    record: &AgentPendingActionRecord,
-) -> Result<(), String> {
-    let did_retire = storage
-        .retire_unsafe_pending_agent_action(&record.action_id, &record.status, now_ms())
-        .map_err(|_| {
-            format!(
-                "failed to retire unsupported pending action input {}",
-                record.action_id
-            )
-        })?;
-    if !did_retire {
-        return Err(format!(
-            "unsupported pending action input {} changed before it could be retired",
-            record.action_id
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn load_persisted_pending_actions(
     storage: &Arc<StorageService>,
 ) -> Result<HashMap<String, PendingActionRecord>, String> {
     let records = storage
-        .list_active_agent_actions_for_startup()
+        .list_recoverable_agent_actions_after_reconciliation()
         .map_err(|error| format!("failed to load persisted pending actions: {error}"))?;
 
     let mut pending_actions = HashMap::with_capacity(records.len());
@@ -1155,24 +1134,20 @@ pub(super) fn load_persisted_pending_actions(
                 record.action_id
             ));
         }
-        let decoded_input = match PersistedAgentResumeInput::decode(&record.agent_input_json) {
-            Ok(input) => input,
-            Err(_) => {
-                retire_unsafe_active_pending_record(storage, &record)?;
-                continue;
-            }
-        };
+        let decoded_input =
+            PersistedAgentResumeInput::decode(&record.agent_input_json).map_err(|_| {
+                format!(
+                    "persisted pending action {} has an invalid resume projection",
+                    record.action_id
+                )
+            })?;
         let action = match serde_json::from_str::<AgentProposedAction>(&record.action_json) {
             Ok(action) => action,
-            Err(error) if record.action_type != "mcp_tool_call" => {
+            Err(_) => {
                 return Err(format!(
-                    "failed to parse persisted pending action {}: {error}",
+                    "persisted pending action {} has an invalid action projection",
                     record.action_id
                 ));
-            }
-            Err(_) => {
-                retire_unsafe_active_pending_record(storage, &record)?;
-                continue;
             }
         };
         if !mcp_pending_action_binding_matches(
@@ -1181,8 +1156,10 @@ pub(super) fn load_persisted_pending_actions(
             &action,
             &decoded_input.agent_input,
         ) {
-            retire_unsafe_active_pending_record(storage, &record)?;
-            continue;
+            return Err(format!(
+                "persisted pending action {} failed identity validation",
+                record.action_id
+            ));
         }
         let agent_input = restore_agent_input_secrets(storage, decoded_input)?;
         let status = pending_status_from_label(&record.status).ok_or_else(|| {
@@ -1215,46 +1192,6 @@ pub(super) fn load_persisted_pending_actions(
         );
     }
     Ok(pending_actions)
-}
-
-/// Scrubs unsupported active resume formats before generic startup reconciliation can parse them.
-///
-/// This preflight deliberately reads only the version marker/allowlisted DTO and never logs the
-/// raw JSON. Retirement is a status-bound SQLite transaction that clears both the pending action
-/// and matching audit payload, so legacy pending, approved, and executing rows cannot retain
-/// provider credentials or raw external-tool arguments after startup.
-pub(super) fn retire_unsafe_active_pending_agent_inputs(
-    storage: &Arc<StorageService>,
-) -> Result<usize, String> {
-    let records = storage
-        .list_active_agent_actions_for_startup()
-        .map_err(|_| "failed to inspect active pending-action persistence formats".to_string())?;
-    let mut retired = 0_usize;
-    for record in records {
-        let decoded_input = match PersistedAgentResumeInput::decode(&record.agent_input_json) {
-            Ok(input) => input,
-            Err(_) => {
-                retire_unsafe_active_pending_record(storage, &record)?;
-                retired = retired.saturating_add(1);
-                continue;
-            }
-        };
-        let parsed_action = serde_json::from_str::<AgentProposedAction>(&record.action_json);
-        let invalid_mcp_binding = match parsed_action.as_ref() {
-            Ok(action) => !mcp_pending_action_binding_matches(
-                &record.run_id,
-                Some(&record),
-                action,
-                &decoded_input.agent_input,
-            ),
-            Err(_) => record.action_type == "mcp_tool_call",
-        };
-        if invalid_mcp_binding {
-            retire_unsafe_active_pending_record(storage, &record)?;
-            retired = retired.saturating_add(1);
-        }
-    }
-    Ok(retired)
 }
 
 pub(super) fn resolve_pending_action_storage_id(

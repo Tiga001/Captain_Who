@@ -100,18 +100,9 @@ pub(crate) struct CoreServerBootstrap {
 
 impl CoreServerBootstrap {
     pub(crate) fn initialize() -> io::Result<Self> {
-        let database_location = database_location()?;
-        let database_path = absolute_path(database_location.database_path)?;
+        let database_path = absolute_path(database_path()?)?;
         let database_instance_lock = acquire_database_instance_lock(&database_path)?;
         let uses_development_credentials = uses_development_image_generation_credentials();
-        if let Some(legacy_database_path) = database_location.legacy_database_path {
-            let legacy_database_path = absolute_path(legacy_database_path)?;
-            migrate_legacy_storage_if_needed(
-                &legacy_database_path,
-                &database_path,
-                uses_development_credentials,
-            )?;
-        }
         let skill_store_root = skill_store_root(&database_path);
         let storage =
             Arc::new(StorageService::open(&database_path).map_err(|error| {

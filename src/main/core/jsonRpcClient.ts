@@ -244,7 +244,7 @@ export class CoreJsonRpcClient {
     const environment = { ...process.env }
 
     // Electron Host owns this location for both development and packaged applications.
-    // Never allow a parent shell to redirect the Core to a separate legacy database.
+    // Never allow a parent shell to redirect the Core to a separate database.
     // Windows environment keys are case-insensitive even though a copied JavaScript object is
     // not. Remove every casing before installing the single canonical Host capability.
     deleteEnvironmentVariableCaseInsensitively(environment, 'MYCOPILOT_APP_DATA_ROOT')

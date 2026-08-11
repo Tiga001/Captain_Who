@@ -338,10 +338,7 @@ function validateTargetAssetsWith(value, label, validateTarget) {
   exactKeys(assets, targets, label)
   return Object.freeze(
     Object.fromEntries(
-      targets.map((target) => [
-        target,
-        validateTarget(assets[target], `${label}.${target}`)
-      ])
+      targets.map((target) => [target, validateTarget(assets[target], `${label}.${target}`)])
     )
   )
 }
@@ -451,11 +448,7 @@ export function validateArtifactRuntimeManifest(value) {
   }
   const licenseFiles = ripgrep.licenseFiles.map((value, index) => {
     const descriptor = plainObject(value, `manifest.tools.ripgrep.licenseFiles[${index}]`)
-    exactKeys(
-      descriptor,
-      ['source', 'target'],
-      `manifest.tools.ripgrep.licenseFiles[${index}]`
-    )
+    exactKeys(descriptor, ['source', 'target'], `manifest.tools.ripgrep.licenseFiles[${index}]`)
     return Object.freeze({
       source: canonicalRelativePath(
         descriptor.source,
@@ -528,20 +521,15 @@ export function validateArtifactRuntimeManifest(value) {
       }),
       ripgrep: Object.freeze({
         version: ripgrep.version,
-        executable: validateExecutableMap(
-          ripgrep.executable,
-          'manifest.tools.ripgrep.executable'
-        ),
+        executable: validateExecutableMap(ripgrep.executable, 'manifest.tools.ripgrep.executable'),
         assets: validateTargetAssetsWith(
           ripgrep.assets,
           'manifest.tools.ripgrep.assets',
           validateArchivedToolAsset
         ),
         licenseFiles: Object.freeze(licenseFiles),
-        source: validateArtifactRuntimeDownloadUrl(
-          ripgrep.source,
-          'manifest.tools.ripgrep.source'
-        ).href,
+        source: validateArtifactRuntimeDownloadUrl(ripgrep.source, 'manifest.tools.ripgrep.source')
+          .href,
         license: nonEmptyString(ripgrep.license, 'manifest.tools.ripgrep.license')
       })
     })
@@ -2361,7 +2349,9 @@ async function verifyReceipt(outputDirectory, manifest, platform, arch) {
     for (const relative of [ripgrepExecutable]) {
       const metadata = await lstat(join(outputDirectory, ...relative.split('/')))
       if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o111) === 0) {
-        throw new Error(`Published managed tool entry is not an executable regular file: ${relative}`)
+        throw new Error(
+          `Published managed tool entry is not an executable regular file: ${relative}`
+        )
       }
     }
   }
@@ -2412,12 +2402,7 @@ async function buildComponentSource({ manifestPath, manifest, staging, downloadD
     downloadDirectory
   )
   await installPythonDependencies(manifest, pythonExecutable)
-  const ripgrepExecutable = await acquireRipgrep(
-    manifest,
-    ripgrepAsset,
-    staging,
-    downloadDirectory
-  )
+  const ripgrepExecutable = await acquireRipgrep(manifest, ripgrepAsset, staging, downloadDirectory)
   await copyRuntimeSupportFiles(manifestPath, manifest, staging, downloadDirectory)
   await probePreparedRuntimes(
     manifest,

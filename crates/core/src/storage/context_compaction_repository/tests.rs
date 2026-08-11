@@ -1538,9 +1538,11 @@ fn seed_provider_transition_target(connection: &Connection, target_model_id: &st
     connection
         .execute(
             "INSERT INTO models (
-                id, display_name, supports_image, provider_protocol_revision,
+                id, display_name, supports_image, provider_connection_revision,
+                provider_protocol_revision,
                 input_price, output_price, enabled, position, created_at, updated_at
-             ) VALUES (?1, ?1, 0, ?2, '0', '0', 1, 0, 1, 1)",
+             ) VALUES (?1, ?1, 0, 'provider-connection-v1:test-target', ?2,
+                       '0', '0', 1, 0, 1, 1)",
             params![target_model_id, revision],
         )
         .unwrap();
@@ -1611,7 +1613,11 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
             [],
         )
         .unwrap();
-    seed_provider_transition_target(&connection, "target-model", "target-revision");
+    seed_provider_transition_target(
+        &connection,
+        "target-model",
+        "provider-protocol-v1:target-revision",
+    );
     connection
         .execute(
             "INSERT INTO composer_drafts (
@@ -1686,7 +1692,7 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
         Some("source-model"),
         7,
         "target-model",
-        "target-revision",
+        "provider-protocol-v1:target-revision",
     )
     .unwrap();
 
@@ -1864,7 +1870,11 @@ fn provider_transition_releases_every_replayable_turn_before_switching_models() 
             [],
         )
         .unwrap();
-    seed_provider_transition_target(&connection, "target-model", "target-revision");
+    seed_provider_transition_target(
+        &connection,
+        "target-model",
+        "provider-protocol-v1:target-revision",
+    );
     let covered = provider_continuation_record("assistant-2", "run-2", 0, &["call-1"]);
     provider_continuation_repository::store_active_in_connection(&connection, &covered).unwrap();
     let prefix = prepare_prefix(
@@ -1891,7 +1901,7 @@ fn provider_transition_releases_every_replayable_turn_before_switching_models() 
         Some("source-model"),
         7,
         "target-model",
-        "target-revision",
+        "provider-protocol-v1:target-revision",
     )
     .unwrap();
 
@@ -1928,7 +1938,11 @@ fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summ
             [],
         )
         .unwrap();
-    seed_provider_transition_target(&connection, "target-model", "target-revision");
+    seed_provider_transition_target(
+        &connection,
+        "target-model",
+        "provider-protocol-v1:target-revision",
+    );
     let uncovered =
         provider_continuation_record("assistant-1", "run-missing-trace", 0, &["missing-call"]);
     provider_continuation_repository::store_active_in_connection(&connection, &uncovered).unwrap();
@@ -1959,7 +1973,7 @@ fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summ
         Some("source-model"),
         7,
         "target-model",
-        "target-revision",
+        "provider-protocol-v1:target-revision",
     )
     .unwrap_err();
 
@@ -2007,7 +2021,11 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
             [],
         )
         .unwrap();
-    seed_provider_transition_target(&connection, "target-model", "new-revision");
+    seed_provider_transition_target(
+        &connection,
+        "target-model",
+        "provider-protocol-v1:new-revision",
+    );
     connection
         .execute(
             "INSERT INTO composer_drafts (
@@ -2041,7 +2059,7 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
         Some("source-model"),
         7,
         "target-model",
-        "stale-revision",
+        "provider-protocol-v1:stale-revision",
     )
     .unwrap_err();
     assert!(error.is_stale());

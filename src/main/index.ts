@@ -16,8 +16,7 @@ import { TerminalBridge } from './terminal/TerminalBridge'
 import { shouldHideMainWindowOnClose, showExistingMainWindow } from './mainWindowLifecycle'
 
 // Electron is the sole authority for the application data location. Freeze it before
-// app.setName() can affect Electron's path resolution so existing development data stays
-// attached to the same root across this upgrade.
+// app.setName() can affect path resolution so the entire process uses one root.
 const requestedAppDataRoot = resolve(app.getPath('userData'))
 mkdirSync(requestedAppDataRoot, { recursive: true, mode: 0o700 })
 const appDataRoot = realpathSync(requestedAppDataRoot)

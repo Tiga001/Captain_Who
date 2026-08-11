@@ -149,7 +149,7 @@ impl McpToolInvoker for AutoJournalObservingInvoker {
             );
             let saw_executing = self
                 .storage
-                .list_active_agent_actions_for_startup()?
+                .list_recoverable_agent_actions_after_reconciliation()?
                 .into_iter()
                 .any(|row| row.action_id == storage_id && row.status == "executing");
             self.saw_executing_before_invoke
@@ -302,7 +302,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
         .load(std::sync::atomic::Ordering::SeqCst));
     assert!(service.list_pending_actions().is_empty());
     assert!(storage
-        .list_active_agent_actions_for_startup()
+        .list_recoverable_agent_actions_after_reconciliation()
         .unwrap()
         .is_empty());
     while let Ok(notification) = receiver.try_recv() {
@@ -380,7 +380,7 @@ async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_f
         Some("mcp.tool_outcome_unknown")
     );
     assert!(storage
-        .list_active_agent_actions_for_startup()
+        .list_recoverable_agent_actions_after_reconciliation()
         .unwrap()
         .is_empty());
 
@@ -460,7 +460,7 @@ fn startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unk
     assert_eq!(restarted.reconcile_startup_mcp_actions().unwrap(), 2);
     assert!(restarted.list_pending_actions().is_empty());
     assert!(storage
-        .list_active_agent_actions_for_startup()
+        .list_recoverable_agent_actions_after_reconciliation()
         .unwrap()
         .is_empty());
     assert_eq!(
@@ -785,52 +785,6 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
     assert!(durable
         .iter()
         .all(|record| !record.action_json.contains("conflicting_tool")));
-}
-
-#[test]
-fn legacy_pending_row_is_atomically_retired_without_blocking_safe_startup() {
-    const INPUT_CANARY: &str = "LEGACY_PENDING_INPUT_CANARY_DO_NOT_RETAIN";
-    const ACTION_CANARY: &str = "LEGACY_PENDING_ACTION_CANARY_DO_NOT_RETAIN";
-    let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let action = AgentProposedAction::ToolCall {
-        call: AgentToolCall {
-            id: "legacy-call-id".to_string(),
-            tool: "legacy_tool".to_string(),
-            args: json!({ "secret": ACTION_CANARY }),
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        },
-    };
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
-        "apiUrl": "https://example.test/v1/chat/completions",
-        "apiToken": INPUT_CANARY,
-        "model": "test-model",
-        "messages": []
-    }))
-    .unwrap();
-    storage
-        .store_pending_agent_action(AgentPendingActionRecord {
-            action_id: "legacy-call-id".to_string(),
-            run_id: "legacy-run".to_string(),
-            conversation_id: None,
-            assistant_message_id: None,
-            action_type: "tool_call".to_string(),
-            tool_name: "legacy_tool".to_string(),
-            tool_call_id: Some("legacy-call-id".to_string()),
-            status: "pending".to_string(),
-            target_status: None,
-            action_json: serialize_json(&action),
-            agent_input_json: serialize_json(&agent_input),
-            created_at: 1,
-            updated_at: 1,
-        })
-        .unwrap();
-
-    let service = AgentService::try_new(Arc::clone(&storage))
-        .expect("legacy row retirement must not block safe application startup");
-    assert!(service.list_pending_actions().is_empty());
-    assert!(storage.list_pending_agent_actions().unwrap().is_empty());
 }
 
 fn test_mcp_pending_action(
@@ -1562,65 +1516,6 @@ fn store_test_mcp_action_for_source(
 }
 
 #[test]
-fn startup_preflight_scrubs_legacy_approved_and_executing_rows_before_core_parsing() {
-    const INPUT_CANARY: &str = "LEGACY_INTERRUPTED_INPUT_CANARY_DO_NOT_RETAIN";
-    const ACTION_CANARY: &str = "LEGACY_INTERRUPTED_ACTION_CANARY_DO_NOT_RETAIN";
-    let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let mut approved_storage_id = None;
-    for status in ["approved", "executing"] {
-        let run_id = format!("legacy-{status}-run");
-        let call_id = format!("legacy-{status}-call");
-        let storage_id = pending_action_storage_id(&run_id, &call_id);
-        storage
-            .store_pending_agent_action(AgentPendingActionRecord {
-                action_id: storage_id.clone(),
-                run_id,
-                conversation_id: None,
-                assistant_message_id: None,
-                action_type: "mcp_tool_call".to_string(),
-                tool_name: "legacy_external_tool".to_string(),
-                tool_call_id: Some(call_id.clone()),
-                status: status.to_string(),
-                target_status: None,
-                action_json: format!(
-                    r#"{{"type":"tool_call","call":{{"id":"{call_id}","args":{{"secret":"{ACTION_CANARY}"}}}}}}"#
-                ),
-                agent_input_json: format!(r#"{{"apiToken":"{INPUT_CANARY}"}}"#),
-                created_at: 1,
-                updated_at: 1,
-            })
-            .unwrap();
-        if status == "approved" {
-            approved_storage_id = Some(storage_id);
-        }
-    }
-    let invocation_id = uuid::Uuid::new_v4().to_string();
-    let now = mycopilot_core::storage::now_ms();
-    storage
-        .store_mcp_approval_envelope(test_mcp_envelope(
-            &invocation_id,
-            approved_storage_id.as_deref().unwrap(),
-            now,
-            now + 60_000,
-        ))
-        .unwrap();
-
-    let service = AgentService::try_new(Arc::clone(&storage)).expect(
-        "Host preflight must retire legacy interrupted rows before generic Core reconciliation",
-    );
-    assert!(service.list_pending_actions().is_empty());
-    assert!(storage
-        .list_active_agent_actions_for_startup()
-        .unwrap()
-        .is_empty());
-    assert!(storage
-        .load_mcp_approval_envelope(&invocation_id)
-        .unwrap()
-        .is_none());
-}
-
-#[test]
 fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelopes() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -1767,7 +1662,7 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         .expect("MCP envelope reconciliation must allow safe Agent startup");
     assert!(restarted.list_pending_actions().is_empty());
     assert!(storage
-        .list_active_agent_actions_for_startup()
+        .list_recoverable_agent_actions_after_reconciliation()
         .unwrap()
         .is_empty());
     assert!(storage
@@ -1814,12 +1709,29 @@ fn mcp_startup_terminalization_rolls_back_when_the_typed_action_is_corrupt() {
             tool_call_id: Some(format!("tc1_{}", "a".repeat(43))),
             status: "executing".to_string(),
             target_status: None,
-            action_json: "{invalid typed MCP action".to_string(),
+            action_json: "{}".to_string(),
             agent_input_json: "{}".to_string(),
             created_at: 1,
             updated_at: 1,
         })
         .unwrap();
+
+    // Simulate on-disk corruption without weakening the canonical write path. Normal writes are
+    // rejected by the schema-level JSON validity constraint.
+    let corruption = rusqlite::Connection::open(&database_path).unwrap();
+    corruption
+        .pragma_update(None, "ignore_check_constraints", 1)
+        .unwrap();
+    corruption
+        .execute(
+            "UPDATE agent_pending_actions SET action_json = ?1 WHERE action_id = ?2",
+            ["{invalid typed MCP action", storage_id],
+        )
+        .unwrap();
+    corruption
+        .pragma_update(None, "ignore_check_constraints", 0)
+        .unwrap();
+    drop(corruption);
 
     let error = storage
         .terminalize_mcp_agent_action_on_startup(
@@ -2599,7 +2511,7 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
 }
 
 #[test]
-fn mcp_pending_identity_mismatch_is_rejected_on_store_and_retired_on_reload() {
+fn mcp_pending_identity_mismatch_is_rejected_on_store_and_fails_closed_on_reload() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     save_test_pending_provider(
@@ -2695,13 +2607,19 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_retired_on_reload() {
         .unwrap();
     drop(service);
 
-    let restarted = AgentService::try_new(Arc::clone(&storage))
-        .expect("tampered MCP pending identity must retire without blocking startup");
-    assert!(restarted.list_pending_actions().is_empty());
-    assert!(storage
-        .list_active_agent_actions_for_startup()
-        .unwrap()
-        .is_empty());
+    let error = match AgentService::try_new(Arc::clone(&storage)) {
+        Ok(_) => panic!("tampered MCP pending identity must fail closed at startup"),
+        Err(error) => error,
+    };
+    assert!(error.contains("failed identity validation"));
+    assert_eq!(
+        storage
+            .list_recoverable_agent_actions_after_reconciliation()
+            .unwrap()
+            .len(),
+        1,
+        "fail-closed validation must not rewrite the corrupt record"
+    );
 }
 
 #[test]
@@ -3235,7 +3153,8 @@ fn pending_resume_rejects_search_credential_replacement() {
 #[test]
 fn startup_reconciliation_failure_prevents_agent_service_startup() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-bad-reconciliation".to_string(),
@@ -3249,7 +3168,7 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
                 created_at: 1,
                 status: Some("pending".to_string()),
                 attachments: Vec::new(),
-                agent_run_json: Some("not-json".to_string()),
+                agent_run_json: Some("{}".to_string()),
                 ui_state_json: None,
             }],
             created_at: 1,
@@ -3259,6 +3178,23 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
             unread_at: None,
         })
         .unwrap();
+
+    // Corrupt the persisted row explicitly so the test continues to cover startup fail-closed
+    // behavior while ordinary repository writes remain protected by the canonical CHECK.
+    let corruption = rusqlite::Connection::open(&database_path).unwrap();
+    corruption
+        .pragma_update(None, "ignore_check_constraints", 1)
+        .unwrap();
+    corruption
+        .execute(
+            "UPDATE messages SET agent_run_json = ?1 WHERE id = ?2",
+            ["not-json", "assistant-bad-reconciliation"],
+        )
+        .unwrap();
+    corruption
+        .pragma_update(None, "ignore_check_constraints", 0)
+        .unwrap();
+    drop(corruption);
     let action = AgentProposedAction::ToolCall {
         call: AgentToolCall {
             id: "bad-reconciliation-call".to_string(),
@@ -3277,7 +3213,7 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
     .unwrap();
     freeze_generic_provider_protocol(
         &mut agent_input,
-        format!("model-settings-v1:{}", uuid::Uuid::new_v4()),
+        format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()),
     );
     storage
         .store_pending_agent_action(AgentPendingActionRecord {
@@ -3402,7 +3338,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         "messages": []
     }))
     .unwrap();
-    let provider_configuration_revision = format!("model-settings-v1:{}", uuid::Uuid::new_v4());
+    let provider_configuration_revision = format!("provider-protocol-v1:{}", uuid::Uuid::new_v4());
     let provider_profile_config = crate::test_provider_profile_config();
     let provider_protocol_key = mycopilot_core::ProviderProtocolKey::new(
         mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,

@@ -29,39 +29,33 @@ fn config(id: McpServerId, display_name: &str) -> McpServerConfig {
 }
 
 #[test]
-fn migration_preserves_existing_database_and_uses_explicit_columns() {
+fn standalone_empty_database_installs_the_current_registry_schema_once() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("registry.sqlite");
-    let legacy = Connection::open(&path).unwrap();
-    legacy
-        .execute_batch(
-            "PRAGMA user_version = 73;
-             CREATE TABLE existing_application_data (
-                 id INTEGER PRIMARY KEY,
-                 value TEXT NOT NULL
-             );
-             INSERT INTO existing_application_data(value) VALUES ('preserve-me');",
-        )
-        .unwrap();
-    drop(legacy);
-
     let registry = SqliteMcpRegistry::open(&path).unwrap();
     assert_eq!(registry.current_revision().unwrap(), 0);
     drop(registry);
 
     let inspection = Connection::open(&path).unwrap();
+    let objects = inspection
+        .prepare(
+            "SELECT name FROM sqlite_schema
+             WHERE sql IS NOT NULL AND name GLOB 'mcp_registry_*'
+             ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
     assert_eq!(
-        inspection
-            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        73
-    );
-    assert_eq!(
-        inspection
-            .query_row("SELECT value FROM existing_application_data", [], |row| row
-                .get::<_, String>(0))
-            .unwrap(),
-        "preserve-me"
+        objects,
+        [
+            "mcp_registry_metadata",
+            "mcp_registry_model_namespaces",
+            "mcp_registry_servers",
+            "mcp_registry_servers_revision",
+        ]
     );
     let columns = inspection
         .prepare("PRAGMA table_info(mcp_registry_servers)")
@@ -83,48 +77,205 @@ fn migration_preserves_existing_database_and_uses_explicit_columns() {
                 | "tool_arguments"
         )
     }));
+
+    let before = inspection
+        .prepare(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema
+             WHERE sql IS NOT NULL AND name GLOB 'mcp_registry_*'
+             ORDER BY type, name, tbl_name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    drop(inspection);
+
+    drop(SqliteMcpRegistry::open(&path).unwrap());
+    let reopened = Connection::open(&path).unwrap();
+    let after = reopened
+        .prepare(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema
+             WHERE sql IS NOT NULL AND name GLOB 'mcp_registry_*'
+             ORDER BY type, name, tbl_name",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(after, before);
 }
 
 #[test]
-fn migration_adds_auto_mode_without_changing_v1_identity_or_authorization() {
+fn core_canonical_schema_matches_registry_catalog_without_catalog_mutation() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("storage.sqlite");
+    let _storage = mycopilot_core::storage::service::StorageService::open(&path).unwrap();
+    let before = {
+        let connection = Connection::open(&path).unwrap();
+        let catalog = connection
+            .prepare(
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema
+                 WHERE sql IS NOT NULL AND name GLOB 'mcp_registry_*'
+                 ORDER BY type, name, tbl_name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        catalog
+    };
+
+    let registry = SqliteMcpRegistry::open(&path).unwrap();
+    assert_eq!(registry.current_revision().unwrap(), 0);
+    drop(registry);
+
+    let after = {
+        let connection = Connection::open(&path).unwrap();
+        let catalog = connection
+            .prepare(
+                "SELECT type, name, tbl_name, sql FROM sqlite_schema
+                 WHERE sql IS NOT NULL AND name GLOB 'mcp_registry_*'
+                 ORDER BY type, name, tbl_name",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        catalog
+    };
+    assert_eq!(after, before);
+}
+
+#[test]
+fn nonempty_database_without_the_registry_schema_requires_a_development_reset() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("registry.sqlite");
-    let prompt_id = McpServerId::new();
-    let deny_id = McpServerId::new();
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE existing_application_data (
+                 id INTEGER PRIMARY KEY,
+                 value TEXT NOT NULL
+             );
+             INSERT INTO existing_application_data(value) VALUES ('preserve-me');",
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
+    ));
+    let inspection = Connection::open(&path).unwrap();
+    assert_eq!(
+        inspection
+            .query_row("SELECT value FROM existing_application_data", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "preserve-me"
+    );
+    assert_eq!(
+        inspection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE name GLOB 'mcp_registry_*'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn incompatible_registry_schema_requires_reset_without_quarantine_or_repair() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("registry.sqlite");
     let registry = SqliteMcpRegistry::open(&path).unwrap();
-
-    let prompt = registry
-        .add_persisted(config(prompt_id, "prompt fixture"))
-        .unwrap();
-    let prompt_record = registry.get_persisted(prompt_id).unwrap().unwrap();
-    let file_identity = compute_launch_file_identity_digest(
-        &prompt_record.entry.config,
-        &prompt_record.launch_spec_digest,
-    )
-    .unwrap();
-    registry
-        .authorize_launch(
-            &McpRegistryMutationPrecondition::from_entry(&prompt),
-            &prompt_record.launch_spec_digest,
-            &file_identity,
-            MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
-            1_785_384_000_000,
-        )
-        .unwrap();
-    let authorized = registry.get_persisted(prompt_id).unwrap().unwrap();
-    let enabled = registry
-        .set_enabled(
-            &McpRegistryMutationPrecondition::from_entry(&authorized.entry),
-            true,
-        )
-        .unwrap();
-    let before = registry.get_persisted(prompt_id).unwrap().unwrap();
-
-    let mut deny_config = config(deny_id, "deny fixture");
-    deny_config.approval_mode = McpApprovalMode::Deny;
-    let deny = registry.add_persisted(deny_config).unwrap();
-    let revision_before_restart = registry.current_revision().unwrap();
     drop(registry);
+
+    let incompatible = Connection::open(&path).unwrap();
+    incompatible
+        .execute_batch(
+            "DROP TABLE mcp_registry_servers;
+             CREATE TABLE mcp_registry_servers (
+                 server_id TEXT PRIMARY KEY,
+                 legacy_value TEXT NOT NULL
+             );
+             INSERT INTO mcp_registry_servers(server_id, legacy_value)
+             VALUES ('old-server', 'OLD_MCP_ROW_CANARY');",
+        )
+        .unwrap();
+    drop(incompatible);
+
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
+    ));
+
+    let inspection = Connection::open(&path).unwrap();
+    assert_eq!(
+        inspection
+            .query_row(
+                "SELECT legacy_value FROM mcp_registry_servers
+                 WHERE server_id = 'old-server'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "OLD_MCP_ROW_CANARY"
+    );
+    assert_eq!(
+        inspection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE name GLOB 'mcp_registry_servers_incompatible_*'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn previous_approval_constraint_requires_reset_without_table_rewrite() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("registry.sqlite");
+    drop(SqliteMcpRegistry::open(&path).unwrap());
 
     let connection = Connection::open(&path).unwrap();
     let current_sql = connection
@@ -135,141 +286,110 @@ fn migration_adds_auto_mode_without_changing_v1_identity_or_authorization() {
             |row| row.get::<_, String>(0),
         )
         .unwrap();
-    let legacy_sql = current_sql.replace(
+    let previous_sql = current_sql.replace(
         "approval_mode IN ('prompt', 'auto', 'deny')",
         "approval_mode IN ('prompt', 'deny')",
     );
-    assert_ne!(legacy_sql, current_sql);
-    let columns = REGISTRY_SERVER_COLUMNS.join(", ");
+    assert_ne!(previous_sql, current_sql);
     connection
         .execute_batch(
-            "ALTER TABLE mcp_registry_servers
-                 RENAME TO mcp_registry_servers_auto_source;
-             DROP INDEX mcp_registry_servers_revision;",
+            "DROP INDEX mcp_registry_servers_revision;
+             ALTER TABLE mcp_registry_servers RENAME TO previous_mcp_registry_servers;",
         )
         .unwrap();
-    connection.execute_batch(&legacy_sql).unwrap();
+    connection.execute_batch(&previous_sql).unwrap();
     connection
-        .execute_batch(&format!(
-            "INSERT INTO mcp_registry_servers ({columns})
-             SELECT {columns} FROM mcp_registry_servers_auto_source;
-             DROP TABLE mcp_registry_servers_auto_source;
+        .execute_batch(
+            "DROP TABLE previous_mcp_registry_servers;
              CREATE INDEX mcp_registry_servers_revision
-             ON mcp_registry_servers(registry_revision, server_id);"
-        ))
+             ON mcp_registry_servers(registry_revision, server_id);",
+        )
         .unwrap();
     drop(connection);
 
-    let reopened = SqliteMcpRegistry::open(&path).unwrap();
-    assert_eq!(
-        reopened.current_revision().unwrap(),
-        revision_before_restart
-    );
-    let restored_prompt = reopened.get_persisted(prompt_id).unwrap().unwrap();
-    assert_eq!(restored_prompt.entry.config.id, prompt_id);
-    assert_eq!(
-        restored_prompt.entry.config_epoch,
-        before.entry.config_epoch
-    );
-    assert_eq!(
-        restored_prompt.entry.config_digest,
-        before.entry.config_digest
-    );
-    assert_eq!(restored_prompt.entry.revision, enabled.revision);
-    assert!(restored_prompt.entry.config.enabled);
-    assert_eq!(
-        restored_prompt.entry.config.approval_mode,
-        McpApprovalMode::Prompt
-    );
-    assert_eq!(
-        restored_prompt.launch_authorization,
-        before.launch_authorization
-    );
-    let restored_deny = reopened.get_persisted(deny_id).unwrap().unwrap();
-    assert_eq!(restored_deny.entry.config_epoch, deny.config_epoch);
-    assert_eq!(restored_deny.entry.config_digest, deny.config_digest);
-    assert_eq!(restored_deny.entry.revision, deny.revision);
-    assert_eq!(
-        restored_deny.entry.config.approval_mode,
-        McpApprovalMode::Deny
-    );
-
-    let mut auto_config = restored_prompt.entry.config.clone();
-    auto_config.approval_mode = McpApprovalMode::Auto;
-    let updated = match reopened
-        .update_with_precondition(
-            &McpRegistryMutationPrecondition::from_entry(&restored_prompt.entry),
-            auto_config,
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
+    ));
+    let inspection = Connection::open(&path).unwrap();
+    let unchanged_sql = inspection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'mcp_registry_servers'",
+            [],
+            |row| row.get::<_, String>(0),
         )
-        .unwrap()
-    {
-        McpRegistryMutation::Updated(entry) => entry,
-        other => panic!("approval-mode change must update the record: {other:?}"),
-    };
-    assert_eq!(updated.config.id, prompt_id);
-    assert_eq!(updated.config.approval_mode, McpApprovalMode::Auto);
-    assert_ne!(updated.config_epoch, before.entry.config_epoch);
-    assert_ne!(updated.config_digest, before.entry.config_digest);
-    assert!(updated.revision > revision_before_restart);
-    let persisted_auto = reopened.get_persisted(prompt_id).unwrap().unwrap();
-    assert_eq!(
-        persisted_auto.entry.config.approval_mode,
-        McpApprovalMode::Auto
-    );
-    assert!(persisted_auto.launch_authorization.is_some());
+        .unwrap();
+    assert!(unchanged_sql.contains("approval_mode IN ('prompt', 'deny')"));
+    assert!(!unchanged_sql.contains("'auto'"));
 }
 
 #[test]
-fn migration_quarantines_an_incompatible_same_name_table_without_losing_its_data() {
+fn unknown_registry_metadata_version_requires_reset_without_rewrite() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("registry.sqlite");
-    let registry = SqliteMcpRegistry::open(&path).unwrap();
-    drop(registry);
+    drop(SqliteMcpRegistry::open(&path).unwrap());
 
-    let legacy = Connection::open(&path).unwrap();
-    legacy
-        .execute_batch(
-            "DROP TABLE mcp_registry_servers;
-             CREATE TABLE mcp_registry_servers (
-                 server_id TEXT PRIMARY KEY,
-                 legacy_value TEXT NOT NULL
-             );
-             INSERT INTO mcp_registry_servers(server_id, legacy_value)
-             VALUES ('legacy-server', 'LEGACY_MCP_ROW_CANARY');",
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE mcp_registry_metadata SET schema_version = 99
+             WHERE singleton = 1",
+            [],
         )
         .unwrap();
-    drop(legacy);
+    drop(connection);
 
-    let reopened = SqliteMcpRegistry::open(&path).unwrap();
-    let (revision, records) = reopened.snapshot().unwrap();
-    assert_eq!(revision, 0);
-    assert!(records.is_empty());
-    drop(reopened);
-
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
+    ));
     let inspection = Connection::open(&path).unwrap();
     assert_eq!(
         inspection
             .query_row(
-                "SELECT legacy_value
-                 FROM mcp_registry_servers_incompatible_v1_1
-                 WHERE server_id = 'legacy-server'",
+                "SELECT schema_version FROM mcp_registry_metadata WHERE singleton = 1",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        "LEGACY_MCP_ROW_CANARY"
+        99
     );
-    let current_columns = inspection
-        .prepare("PRAGMA table_info(mcp_registry_servers)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
+}
+
+#[test]
+fn extra_registry_catalog_object_requires_reset_without_removal() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("registry.sqlite");
+    drop(SqliteMcpRegistry::open(&path).unwrap());
+
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE INDEX unexpected_registry_display_name
+             ON mcp_registry_servers(display_name);",
+        )
         .unwrap();
-    assert!(column_names_match(
-        &current_columns,
-        REGISTRY_SERVER_COLUMNS
+    drop(connection);
+
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
     ));
+    let inspection = Connection::open(&path).unwrap();
+    assert!(inspection
+        .query_row(
+            "SELECT 1 FROM sqlite_schema
+             WHERE type = 'index' AND name = 'unexpected_registry_display_name'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -316,55 +436,40 @@ fn registry_restores_identity_and_advances_revision_across_restart() {
 }
 
 #[test]
-fn legacy_database_backfills_model_namespace_without_changing_authorization_identity() {
+fn missing_namespace_table_requires_reset_without_backfill() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("registry.sqlite");
     let id = McpServerId::new();
     let registry = SqliteMcpRegistry::open(&path).unwrap();
-    let added = registry.add(config(id, "Filesystem Test")).unwrap();
-    let persisted = registry.get_persisted(id).unwrap().unwrap();
-    let file_identity_digest =
-        compute_launch_file_identity_digest(&persisted.entry.config, &persisted.launch_spec_digest)
-            .unwrap();
-    registry
-        .authorize_launch(
-            &McpRegistryMutationPrecondition::from_entry(&added),
-            &persisted.launch_spec_digest,
-            &file_identity_digest,
-            MCP_LAUNCH_AUTHORIZATION_POLICY_VERSION,
-            1,
-        )
-        .unwrap();
-    let authorized = registry.get_persisted(id).unwrap().unwrap();
-    let enabled = registry
-        .set_enabled(
-            &McpRegistryMutationPrecondition::from_entry(&authorized.entry),
-            true,
-        )
-        .unwrap();
-    let before = registry.get_persisted(id).unwrap().unwrap();
-    assert_eq!(enabled.model_namespace.as_str(), "filesystem_test");
+    registry.add(config(id, "Filesystem Test")).unwrap();
     drop(registry);
 
-    let legacy = Connection::open(&path).unwrap();
-    legacy
+    let damaged = Connection::open(&path).unwrap();
+    damaged
         .execute_batch("DROP TABLE mcp_registry_model_namespaces;")
         .unwrap();
-    drop(legacy);
+    drop(damaged);
 
-    let reopened = SqliteMcpRegistry::open(&path).unwrap();
-    let after = reopened.get_persisted(id).unwrap().unwrap();
-    assert_eq!(after.entry.model_namespace.as_str(), "filesystem_test");
-    assert_eq!(after.entry.config_digest, before.entry.config_digest);
-    assert_eq!(after.entry.config_epoch, before.entry.config_epoch);
-    assert_eq!(after.entry.revision, before.entry.revision);
-    assert_eq!(after.launch_authorization, before.launch_authorization);
-    assert!(after.entry.config.enabled);
-    assert_eq!(reopened.current_revision().unwrap(), before.entry.revision);
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
+    ));
+    let inspection = Connection::open(&path).unwrap();
+    assert_eq!(
+        inspection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE name = 'mcp_registry_model_namespaces'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
-fn malformed_namespace_storage_class_is_repaired_without_hiding_healthy_servers() {
+fn malformed_namespace_record_is_quarantined_without_reconstructing_history() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("registry.sqlite");
     let damaged_id = McpServerId::new();
@@ -386,20 +491,12 @@ fn malformed_namespace_storage_class_is_repaired_without_hiding_healthy_servers(
     drop(connection);
 
     let reopened = SqliteMcpRegistry::open(&path).unwrap();
-    let records = reopened.list().unwrap();
-    assert_eq!(records.len(), 2);
-    assert_eq!(
-        reopened.get(damaged_id).unwrap().unwrap().model_namespace,
-        McpModelNamespace::from_str("filesystem_test").unwrap()
-    );
-    assert_eq!(
-        reopened.get(healthy_id).unwrap().unwrap().model_namespace,
-        healthy.model_namespace
-    );
+    assert_eq!(reopened.list().unwrap(), vec![healthy]);
+    assert!(reopened.get(damaged_id).unwrap().is_none());
 }
 
 #[test]
-fn noncanonical_namespace_table_is_rebuilt_with_primary_and_unique_constraints() {
+fn noncanonical_namespace_table_requires_reset_without_rebuild() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("registry.sqlite");
     let first_id = McpServerId::new();
@@ -421,135 +518,12 @@ fn noncanonical_namespace_table_is_rebuilt_with_primary_and_unique_constraints()
              );",
         )
         .unwrap();
-    for server_id in [first_id, second_id] {
-        connection
-            .execute(
-                "INSERT INTO mcp_registry_model_namespaces (
-                     schema_version, server_id, model_namespace, created_at
-                 ) VALUES (1, ?1, 'filesystem_test', 1)",
-                [server_id.to_string()],
-            )
-            .unwrap();
-    }
     drop(connection);
 
-    let reopened = SqliteMcpRegistry::open(&path).unwrap();
-    let first = reopened.get(first_id).unwrap().unwrap();
-    let second = reopened.get(second_id).unwrap().unwrap();
-    assert_ne!(first.model_namespace, second.model_namespace);
-    assert!([
-        first.model_namespace.as_str(),
-        second.model_namespace.as_str()
-    ]
-    .contains(&"filesystem_test"));
-    drop(reopened);
-
-    let connection = Connection::open(&path).unwrap();
-    assert!(connection
-        .execute(
-            "INSERT INTO mcp_registry_model_namespaces (
-                 schema_version, server_id, model_namespace, created_at
-             ) VALUES (1, 'duplicate-server', 'filesystem_test', 1)",
-            [],
-        )
-        .is_err());
-    assert!(connection
-        .execute(
-            "INSERT INTO mcp_registry_model_namespaces (
-                 schema_version, server_id, model_namespace, created_at
-             ) VALUES (1, ?1, 'another_namespace', 1)",
-            [first_id.to_string()],
-        )
-        .is_err());
-}
-
-#[test]
-fn structurally_misleading_namespace_tables_are_quarantined_and_rebuilt() {
-    let cases = [
-        (
-            "without-rowid",
-            "CREATE TABLE mcp_registry_model_namespaces (
-                 schema_version INTEGER NOT NULL,
-                 server_id TEXT PRIMARY KEY,
-                 model_namespace TEXT NOT NULL UNIQUE,
-                 created_at INTEGER NOT NULL
-             ) WITHOUT\nROWID;",
-        ),
-        (
-            "compound-primary-key",
-            "CREATE TABLE mcp_registry_model_namespaces (
-                 schema_version INTEGER NOT NULL,
-                 server_id TEXT NOT NULL,
-                 model_namespace TEXT NOT NULL UNIQUE,
-                 created_at INTEGER NOT NULL,
-                 PRIMARY KEY (server_id, created_at)
-             );",
-        ),
-        (
-            "partial-unique-index",
-            "CREATE TABLE mcp_registry_model_namespaces (
-                 schema_version INTEGER NOT NULL,
-                 server_id TEXT PRIMARY KEY,
-                 model_namespace TEXT NOT NULL,
-                 created_at INTEGER NOT NULL
-             );
-             CREATE UNIQUE INDEX misleading_namespace_unique
-             ON mcp_registry_model_namespaces(model_namespace)
-             WHERE created_at < 0;",
-        ),
-        (
-            "expression-unique-index",
-            "CREATE TABLE mcp_registry_model_namespaces (
-                 schema_version INTEGER NOT NULL,
-                 server_id TEXT PRIMARY KEY,
-                 model_namespace TEXT NOT NULL,
-                 created_at INTEGER NOT NULL
-             );
-             CREATE UNIQUE INDEX misleading_namespace_expression_unique
-             ON mcp_registry_model_namespaces(lower(model_namespace));",
-        ),
-    ];
-
-    for (case, replacement_schema) in cases {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join(format!("{case}.sqlite"));
-        let id = McpServerId::new();
-        let registry = SqliteMcpRegistry::open(&path).unwrap();
-        registry.add(config(id, "Filesystem Test")).unwrap();
-        drop(registry);
-
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(&format!(
-                "DROP TABLE mcp_registry_model_namespaces; {replacement_schema}"
-            ))
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO mcp_registry_model_namespaces (
-                     schema_version, server_id, model_namespace, created_at
-                 ) VALUES (1, ?1, 'filesystem_test', 1)",
-                [id.to_string()],
-            )
-            .unwrap();
-        drop(connection);
-
-        let reopened = SqliteMcpRegistry::open(&path)
-            .unwrap_or_else(|error| panic!("{case} namespace table should be rebuilt: {error:?}"));
-        let restored = reopened.get(id).unwrap().unwrap();
-        assert_eq!(restored.model_namespace.as_str(), "filesystem_test");
-        drop(reopened);
-
-        let connection = Connection::open(&path).unwrap();
-        assert!(connection
-            .execute(
-                "INSERT INTO mcp_registry_model_namespaces (
-                     schema_version, server_id, model_namespace, created_at
-                 ) VALUES (1, 'another-server', 'filesystem_test', 1)",
-                [],
-            )
-            .is_err());
-    }
+    assert!(matches!(
+        SqliteMcpRegistry::open(&path),
+        Err(McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired)
+    ));
 }
 
 #[test]
@@ -561,7 +535,10 @@ fn snapshot_pairs_records_with_the_same_revision_watermark_under_writes() {
     let writer = std::thread::spawn(move || {
         for index in 0..64 {
             writer_registry
-                .add_persisted(config(McpServerId::new(), &format!("snapshot-{index}")))
+                .add_persisted(
+                    config(McpServerId::new(), &format!("snapshot-{index}")),
+                    None,
+                )
                 .unwrap();
         }
     });
@@ -602,7 +579,7 @@ fn registry_revision_never_exceeds_the_javascript_safe_integer_boundary() {
     let mut changes = registry.subscribe();
     assert_eq!(
         registry
-            .add_persisted(config(McpServerId::new(), "revision-overflow"))
+            .add_persisted(config(McpServerId::new(), "revision-overflow"), None)
             .unwrap_err(),
         McpRegistryPersistenceError::RevisionExhausted
     );

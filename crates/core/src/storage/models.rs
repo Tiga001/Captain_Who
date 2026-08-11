@@ -178,8 +178,7 @@ pub struct ModelSettingsSnapshot {
     /// cannot invalidate an already frozen run.
     pub provider_connection_revisions: BTreeMap<String, String>,
     /// Stable opaque identity of each model's complete provider wire protocol: endpoint/token,
-    /// dialect, wire model id, Profile/version and reasoning policy. Existing databases seed this
-    /// from their broad settings revision so pre-upgrade continuation keys remain valid.
+    /// dialect, wire model id, Profile/version and reasoning policy.
     pub provider_protocol_revisions: BTreeMap<String, String>,
     /// Stable opaque identity of the effective search mode/credential pair.
     pub search_connection_revision: String,

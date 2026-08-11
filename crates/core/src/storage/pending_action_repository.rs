@@ -194,11 +194,11 @@ pub fn list_interrupted_actions(
     records
 }
 
-/// Lists every non-terminal approval row before startup reconciliation mutates it.
+/// Lists the rows that remain recoverable after generic interrupted-action reconciliation.
 ///
-/// Host layers use this narrow preflight view to reject and atomically scrub legacy persistence
-/// formats before the generic reconciler attempts to decode their action or resume payload.
-pub fn list_active_actions(
+/// Ordinary actions may only remain pending. MCP startup recovery additionally owns approved and
+/// executing rows because their external dispatch boundary has distinct terminalization rules.
+pub fn list_recoverable_actions_after_reconciliation(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
     let mut statement = connection.prepare(
@@ -218,7 +218,11 @@ pub fn list_active_actions(
             created_at,
             updated_at
         FROM agent_pending_actions
-        WHERE status IN ('pending', 'approved', 'executing')
+        WHERE status = 'pending'
+           OR (
+                action_type = 'mcp_tool_call'
+                AND status IN ('approved', 'executing')
+              )
         ORDER BY created_at ASC, action_id ASC
         ",
     )?;
@@ -419,52 +423,6 @@ pub fn delete_pending_actions_for_project(
     Ok(())
 }
 
-/// Atomically retires one pre-allowlist pending row without ever decoding or logging its JSON.
-///
-/// Legacy MCP actions may have placed raw arguments in `action_json`, while older resume
-/// persistence could retain provider or search credentials in `agent_input_json`. Both columns
-/// and the matching audit payload are scrubbed in the same transaction before the row becomes
-/// terminal.
-pub fn retire_unsafe_pending_action(
-    connection: &mut Connection,
-    action_id: &str,
-    expected_status: &str,
-    updated_at: i64,
-) -> rusqlite::Result<usize> {
-    let transaction = connection.transaction()?;
-    let affected = transaction.execute(
-        "
-        UPDATE agent_pending_actions
-        SET status = 'failed',
-            target_status = 'failed',
-            action_json = '{}',
-            agent_input_json = '{}',
-            updated_at = ?3
-        WHERE action_id = ?1
-          AND status = ?2
-        ",
-        params![action_id, expected_status, updated_at],
-    )?;
-    if affected == 1 {
-        transaction.execute(
-            "
-            UPDATE agent_action_audit
-            SET status = 'failed',
-                action_json = '{}',
-                patch_result_json = NULL,
-                command_result_json = NULL,
-                tool_result_json = NULL,
-                error = 'Unsafe legacy pending payload was retired.',
-                completed_at = COALESCE(completed_at, ?2)
-            WHERE action_id = ?1
-            ",
-            params![action_id, updated_at],
-        )?;
-    }
-    transaction.commit()?;
-    Ok(affected)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,28 +508,36 @@ mod tests {
     }
 
     #[test]
-    fn startup_preflight_lists_and_scrubs_every_active_legacy_status() {
-        const ACTION_CANARY: &str = "LEGACY_ACTIVE_ACTION_CANARY";
-        const INPUT_CANARY: &str = "LEGACY_ACTIVE_INPUT_CANARY";
-        let mut connection = Connection::open_in_memory().unwrap();
+    fn startup_recovery_query_keeps_pending_and_mcp_owned_interrupted_rows_only() {
+        let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
 
-        for (index, status) in ["pending", "approved", "executing"].into_iter().enumerate() {
-            let action_id = format!("legacy-active-{status}");
+        for (index, (action_type, status)) in [
+            ("tool_call", "pending"),
+            ("tool_call", "approved"),
+            ("tool_call", "executing"),
+            ("mcp_tool_call", "pending"),
+            ("mcp_tool_call", "approved"),
+            ("mcp_tool_call", "executing"),
+            ("mcp_tool_call", "completed"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             store_pending_action(
                 &connection,
                 &AgentPendingActionRecord {
-                    action_id,
-                    run_id: format!("legacy-run-{status}"),
+                    action_id: format!("recovery-{index}"),
+                    run_id: format!("run-{index}"),
                     conversation_id: None,
                     assistant_message_id: None,
-                    action_type: "mcp_tool_call".to_string(),
-                    tool_name: "legacy_external_tool".to_string(),
-                    tool_call_id: Some(format!("legacy-call-{status}")),
+                    action_type: action_type.to_string(),
+                    tool_name: "tool".to_string(),
+                    tool_call_id: Some(format!("call-{index}")),
                     status: status.to_string(),
                     target_status: None,
-                    action_json: format!(r#"{{"secret":"{ACTION_CANARY}-{status}"}}"#),
-                    agent_input_json: format!(r#"{{"apiToken":"{INPUT_CANARY}-{status}"}}"#),
+                    action_json: "{}".to_string(),
+                    agent_input_json: "{}".to_string(),
                     created_at: i64::try_from(index + 1).unwrap(),
                     updated_at: i64::try_from(index + 1).unwrap(),
                 },
@@ -579,30 +545,20 @@ mod tests {
             .unwrap();
         }
 
-        let active = list_active_actions(&connection).unwrap();
-        assert_eq!(active.len(), 3);
-        for record in active {
-            assert_eq!(
-                retire_unsafe_pending_action(
-                    &mut connection,
-                    &record.action_id,
-                    &record.status,
-                    10,
-                )
-                .unwrap(),
-                1
-            );
-            let retired = load_pending_action(&connection, &record.action_id)
-                .unwrap()
-                .unwrap();
-            assert_eq!(retired.status, "failed");
-            assert_eq!(retired.target_status.as_deref(), Some("failed"));
-            assert_eq!(retired.action_json, "{}");
-            assert_eq!(retired.agent_input_json, "{}");
-            assert!(!retired.action_json.contains(ACTION_CANARY));
-            assert!(!retired.agent_input_json.contains(INPUT_CANARY));
-        }
-        assert!(list_active_actions(&connection).unwrap().is_empty());
+        let recoverable = list_recoverable_actions_after_reconciliation(&connection).unwrap();
+        let identities = recoverable
+            .into_iter()
+            .map(|record| (record.action_type, record.status))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            [
+                ("tool_call".to_string(), "pending".to_string()),
+                ("mcp_tool_call".to_string(), "pending".to_string()),
+                ("mcp_tool_call".to_string(), "approved".to_string()),
+                ("mcp_tool_call".to_string(), "executing".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -737,10 +693,11 @@ mod tests {
         ] {
             connection
                 .execute(
-                    "INSERT INTO agent_pending_actions (
+                    r#"INSERT INTO agent_pending_actions (
                         action_id, run_id, action_type, tool_name, status, action_json,
                         agent_input_json, created_at, updated_at
-                     ) VALUES (?1, 'run-1', 'command', 'run_command', ?2, '{}', 'sensitive', 1, 1)",
+                     ) VALUES (?1, 'run-1', 'command', 'run_command', ?2, '{}',
+                               '{"legacy":"sensitive"}', 1, 1)"#,
                     params![action_id, status],
                 )
                 .unwrap();

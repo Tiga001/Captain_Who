@@ -76,6 +76,11 @@ impl McpManagementService {
                 McpManagementRecoveryDto::DoNotRetry,
                 "The persisted MCP server record is invalid and will not be started.",
             ),
+            McpRegistryPersistenceError::DevelopmentStorageSchemaResetRequired => (
+                McpManagementErrorCodeDto::InvalidState,
+                McpManagementRecoveryDto::DoNotRetry,
+                "The development storage schema must be reset.",
+            ),
             McpRegistryPersistenceError::StorageUnavailable
             | McpRegistryPersistenceError::RevisionExhausted => (
                 McpManagementErrorCodeDto::InternalSafeError,

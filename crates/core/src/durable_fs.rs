@@ -14,7 +14,7 @@ pub fn atomic_rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 /// Atomically replaces `target`. Both paths must be on the same filesystem.
-pub(crate) fn atomic_replace(source: &Path, target: &Path) -> io::Result<()> {
+pub fn atomic_replace(source: &Path, target: &Path) -> io::Result<()> {
     atomic_replace_impl(source, target)
 }
 

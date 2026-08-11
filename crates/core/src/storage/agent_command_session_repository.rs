@@ -1263,33 +1263,6 @@ fn prune_transcript_in_connection(
     Ok(true)
 }
 
-/// Converts transcript rows created under the legacy receipt-pinning policy to the bounded
-/// operational projection after receipt payloads have been backfilled successfully.
-pub(crate) fn prune_all_transcripts_for_migration(connection: &Connection) -> rusqlite::Result<()> {
-    let session_ids = {
-        let mut statement = connection.prepare(
-            "SELECT DISTINCT session_id
-             FROM agent_command_session_output_chunks
-             ORDER BY session_id ASC",
-        )?;
-        let session_ids = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        session_ids
-    };
-    for session_id in session_ids {
-        if prune_transcript_in_connection(connection, &session_id)? {
-            connection.execute(
-                "UPDATE agent_command_sessions
-                 SET transcript_truncated = 1
-                 WHERE session_id = ?1",
-                [&session_id],
-            )?;
-        }
-    }
-    Ok(())
-}
-
 fn record_select() -> &'static str {
     "SELECT
          session_id, schema_version, conversation_id, assistant_message_id,

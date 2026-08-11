@@ -1223,29 +1223,6 @@ impl StorageService {
         Ok(requests.len())
     }
 
-    pub fn retire_unsafe_pending_agent_action(
-        &self,
-        action_id: &str,
-        expected_status: &str,
-        updated_at: i64,
-    ) -> Result<bool, String> {
-        let mut connection = self.state.connection()?;
-        let affected = pending_action_repository::retire_unsafe_pending_action(
-            &mut connection,
-            action_id,
-            expected_status,
-            updated_at,
-        )
-        .map_err(storage_error)?;
-        match affected {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(format!(
-                "unsafe pending action retirement touched {affected} rows for actionId={action_id}"
-            )),
-        }
-    }
-
     pub fn list_unsettled_file_effects(&self) -> Result<Vec<AgentUnsettledFileEffect>, String> {
         let connection = self.state.connection()?;
         let candidates = agent_action_audit_repository::list_unsettled_file_effects(&connection)
@@ -1350,15 +1327,13 @@ impl StorageService {
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
     }
 
-    /// Returns pending and interrupted approval rows for Host-owned startup format validation.
-    ///
-    /// Callers must treat the JSON columns as untrusted and avoid logging or deserializing them
-    /// outside an explicit versioned allowlist.
-    pub fn list_active_agent_actions_for_startup(
+    /// Returns the current-format rows owned by pending or MCP-specific startup recovery.
+    pub fn list_recoverable_agent_actions_after_reconciliation(
         &self,
     ) -> Result<Vec<AgentPendingActionRecord>, String> {
         let connection = self.state.connection()?;
-        pending_action_repository::list_active_actions(&connection).map_err(storage_error)
+        pending_action_repository::list_recoverable_actions_after_reconciliation(&connection)
+            .map_err(storage_error)
     }
 
     pub fn reconcile_interrupted_pending_agent_actions(

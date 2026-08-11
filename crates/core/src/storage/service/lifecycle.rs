@@ -10,6 +10,24 @@ pub struct StorageService {
 
 impl StorageService {
     pub fn open(database_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_internal(database_path, true)
+    }
+
+    /// Opens the strict storage boundary without touching sibling filesystem stores.
+    ///
+    /// This is intentionally limited to the explicit development reset tool, which operates on
+    /// a staging database while holding the same process-wide database lock as Core Server. It
+    /// must not run ordinary startup pruning before the new database is atomically published.
+    pub fn open_for_development_reset(
+        database_path: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::open_internal(database_path, false)
+    }
+
+    fn open_internal(
+        database_path: &Path,
+        run_startup_maintenance: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let attachment_root = database_path
             .parent()
             .map(|parent| parent.join("attachments"))
@@ -38,30 +56,32 @@ impl StorageService {
             ),
         };
 
-        if let Err(error) = service.prune_stale_managed_command_workspaces() {
-            eprintln!("failed to prune stale managed command workspaces: {error}");
-        }
-
-        match service.state.connection() {
-            Ok(mut connection) => {
-                if let Err(error) =
-                    file_draft_repository::expire_and_prune_drafts(&mut connection, now_ms())
-                {
-                    eprintln!("failed to prune expired file drafts: {error}");
-                }
-                if let Err(error) = service.cleanup_orphan_attachment_files(&connection) {
-                    eprintln!("failed to cleanup orphan attachment files: {error}");
-                }
-                if let Err(error) =
-                    context_compaction_receipt_repository::mark_in_progress_receipts_interrupted(
-                        &mut connection,
-                        now_ms(),
-                    )
-                {
-                    eprintln!("failed to mark interrupted context compactions: {error}");
-                }
+        if run_startup_maintenance {
+            if let Err(error) = service.prune_stale_managed_command_workspaces() {
+                eprintln!("failed to prune stale managed command workspaces: {error}");
             }
-            Err(error) => eprintln!("failed to open storage for startup maintenance: {error}"),
+
+            match service.state.connection() {
+                Ok(mut connection) => {
+                    if let Err(error) =
+                        file_draft_repository::expire_and_prune_drafts(&mut connection, now_ms())
+                    {
+                        eprintln!("failed to prune expired file drafts: {error}");
+                    }
+                    if let Err(error) = service.cleanup_orphan_attachment_files(&connection) {
+                        eprintln!("failed to cleanup orphan attachment files: {error}");
+                    }
+                    if let Err(error) =
+                        context_compaction_receipt_repository::mark_in_progress_receipts_interrupted(
+                            &mut connection,
+                            now_ms(),
+                        )
+                    {
+                        eprintln!("failed to mark interrupted context compactions: {error}");
+                    }
+                }
+                Err(error) => eprintln!("failed to open storage for startup maintenance: {error}"),
+            }
         }
 
         Ok(service)

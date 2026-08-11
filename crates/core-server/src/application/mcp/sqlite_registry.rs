@@ -19,10 +19,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
+#[path = "sqlite_registry/launch_identity.rs"]
 mod launch_identity;
+#[path = "sqlite_registry/reconciliation.rs"]
 mod reconciliation;
+#[path = "sqlite_registry/schema.rs"]
 mod schema;
+#[path = "sqlite_registry/storage.rs"]
 mod storage;
+#[path = "sqlite_registry/validation.rs"]
 mod validation;
 
 pub(crate) use launch_identity::{
@@ -31,13 +36,12 @@ pub(crate) use launch_identity::{
     prepare_launch_file_identity,
 };
 use reconciliation::reconcile_startup;
-use schema::{reconcile_model_namespaces, run_migrations};
+use schema::prepare_schema;
 use storage::*;
 use validation::*;
 
 #[cfg(test)]
-use schema::column_names_match;
-#[cfg(test)]
+#[path = "sqlite_registry/tests.rs"]
 mod tests;
 
 const REGISTRY_SCHEMA_VERSION: i64 = 1;
@@ -105,52 +109,6 @@ const SELECT_COLUMNS: &str = "
         WHERE namespace.server_id = mcp_registry_servers.server_id
     ) AS model_namespace
 ";
-
-const REGISTRY_METADATA_COLUMNS: &[&str] = &[
-    "singleton",
-    "schema_version",
-    "revision_watermark",
-    "updated_at",
-];
-
-const REGISTRY_SERVER_COLUMNS: &[&str] = &[
-    "schema_version",
-    "server_id",
-    "display_name",
-    "scope_kind",
-    "source_kind",
-    "transport_kind",
-    "executable",
-    "arguments_json",
-    "cwd",
-    "enabled",
-    "trust",
-    "approval_mode",
-    "connect_timeout_ms",
-    "request_timeout_ms",
-    "shutdown_timeout_ms",
-    "config_digest",
-    "config_epoch",
-    "registry_revision",
-    "launch_spec_digest",
-    "authorized_launch_spec_digest",
-    "authorized_config_epoch",
-    "authorized_config_digest",
-    "authorization_format_version",
-    "authorization_policy_version",
-    "authorized_at",
-    "record_state",
-    "safe_error_code",
-    "created_at",
-    "updated_at",
-];
-
-const MODEL_NAMESPACE_COLUMNS: &[&str] = &[
-    "schema_version",
-    "server_id",
-    "model_namespace",
-    "created_at",
-];
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -262,6 +220,7 @@ pub(crate) enum McpRegistryPersistenceError {
     CapacityExceeded,
     AuthorizationRequired,
     CorruptRecord,
+    DevelopmentStorageSchemaResetRequired,
     StorageUnavailable,
     RevisionExhausted,
 }
@@ -275,6 +234,9 @@ impl McpRegistryPersistenceError {
             Self::CapacityExceeded => "capacity_exceeded",
             Self::AuthorizationRequired => "authorization_required",
             Self::CorruptRecord => "corrupt_record",
+            Self::DevelopmentStorageSchemaResetRequired => {
+                "development_storage_schema_reset_required"
+            }
             Self::StorageUnavailable => "storage_unavailable",
             Self::RevisionExhausted => "revision_exhausted",
         }
@@ -292,6 +254,9 @@ impl McpRegistryPersistenceError {
             Self::CorruptRecord => {
                 McpError::config("MCP Registry contains an invalid persisted record")
             }
+            Self::DevelopmentStorageSchemaResetRequired => McpError::config(
+                "The development storage schema must be reset before MCP Registry startup",
+            ),
             Self::StorageUnavailable => McpError::protocol("MCP Registry storage is unavailable"),
             Self::RevisionExhausted => McpError::protocol("MCP Registry revision is exhausted"),
         }
@@ -330,10 +295,9 @@ impl SqliteMcpRegistry {
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|_| McpRegistryPersistenceError::StorageUnavailable)?;
-        run_migrations(&mut connection)?;
-        reconcile_model_namespaces(&mut connection)?;
+        prepare_schema(&mut connection)?;
         reconcile_startup(&mut connection)?;
-        reconcile_model_namespaces(&mut connection)?;
+        list_records(&connection)?;
         let (changes, _) = broadcast::channel(REGISTRY_CHANGE_CAPACITY);
         Ok(Self {
             connection: Mutex::new(connection),
@@ -384,6 +348,7 @@ impl SqliteMcpRegistry {
     pub(crate) fn add_persisted(
         &self,
         config: McpServerConfig,
+        preserved_model_namespace: Option<McpModelNamespace>,
     ) -> Result<McpRegistryEntry, McpRegistryPersistenceError> {
         let config = normalize_new_config(config)?;
         let (entry, change) = {
@@ -394,7 +359,7 @@ impl SqliteMcpRegistry {
             if load_record(&transaction, config.id)?.is_some() {
                 return Err(McpRegistryPersistenceError::Conflict);
             }
-            let record = insert_record(&transaction, config)?;
+            let record = insert_record(&transaction, config, preserved_model_namespace)?;
             let change = registry_change(McpRegistryChangeKind::Added, &record.entry);
             transaction
                 .commit()
@@ -656,7 +621,7 @@ impl SqliteMcpRegistry {
 
 impl McpRegistry for SqliteMcpRegistry {
     fn add(&self, config: McpServerConfig) -> Result<McpRegistryEntry, McpError> {
-        self.add_persisted(config)
+        self.add_persisted(config, None)
             .map_err(McpRegistryPersistenceError::into_mcp_error)
     }
 
@@ -671,7 +636,7 @@ impl McpRegistry for SqliteMcpRegistry {
                     update_existing(&transaction, existing, config)?
                 } else {
                     let config = normalize_new_config(config)?;
-                    let record = insert_record(&transaction, config)?;
+                    let record = insert_record(&transaction, config, None)?;
                     let change = registry_change(McpRegistryChangeKind::Added, &record.entry);
                     (McpRegistryMutation::Added(record.entry), Some(change))
                 };
@@ -737,12 +702,22 @@ impl McpRegistry for SqliteMcpRegistry {
 fn insert_record(
     transaction: &Transaction<'_>,
     config: McpServerConfig,
+    preserved_model_namespace: Option<McpModelNamespace>,
 ) -> Result<McpPersistedRegistryRecord, McpRegistryPersistenceError> {
     ensure_registry_capacity(transaction)?;
     let occupied_namespaces = load_model_namespaces(transaction)?;
-    let model_namespace =
-        allocate_model_namespace(&config.display_name, config.id, occupied_namespaces.iter())
-            .map_err(|_| McpRegistryPersistenceError::InvalidConfig)?;
+    let model_namespace = match preserved_model_namespace {
+        Some(namespace) => {
+            if occupied_namespaces.contains(&namespace) {
+                return Err(McpRegistryPersistenceError::Conflict);
+            }
+            namespace
+        }
+        None => {
+            allocate_model_namespace(&config.display_name, config.id, occupied_namespaces.iter())
+                .map_err(|_| McpRegistryPersistenceError::InvalidConfig)?
+        }
+    };
     let revision = next_revision(transaction)?;
     let config_epoch = McpConfigEpoch::new();
     let config_digest =

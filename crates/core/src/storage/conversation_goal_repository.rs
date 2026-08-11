@@ -102,7 +102,7 @@ pub(crate) fn update_goal_status(
         transaction.commit()?;
         return Ok(None);
     };
-    ensure_initial_revision(&transaction, &previous)?;
+    require_initial_revision(&transaction, &previous)?;
     let goal = transaction
         .query_row(
             "UPDATE conversation_goals
@@ -154,7 +154,7 @@ pub(crate) fn update_goal_objective(
         transaction.commit()?;
         return Ok(None);
     };
-    ensure_initial_revision(&transaction, &previous)?;
+    require_initial_revision(&transaction, &previous)?;
     let goal = transaction
         .query_row(
             "UPDATE conversation_goals
@@ -204,7 +204,7 @@ pub(crate) fn list_goal_revisions(
     revisions
 }
 
-fn ensure_initial_revision(
+fn require_initial_revision(
     connection: &Transaction<'_>,
     goal: &ConversationGoal,
 ) -> rusqlite::Result<()> {
@@ -216,16 +216,11 @@ fn ensure_initial_revision(
         [&goal.goal_id],
         |row| row.get::<_, bool>(0),
     )?;
-    if !exists {
-        append_revision(
-            connection,
-            goal,
-            None,
-            &ConversationGoalRevisionEvent::Initial { goal: goal.clone() },
-            goal.created_at,
-        )?;
+    if exists {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::InvalidQuery)
     }
-    Ok(())
 }
 
 fn append_revision(

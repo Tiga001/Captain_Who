@@ -133,9 +133,7 @@ test('pinned ripgrep ZIP extraction reads only exact bounded members and rejects
   assert.throws(
     () =>
       readPinnedZipMembers(
-        storedZip([
-          { name: 'ripgrep/rg.exe', content: 'small', declaredSize: 600 * 1024 * 1024 }
-        ]),
+        storedZip([{ name: 'ripgrep/rg.exe', content: 'small', declaredSize: 600 * 1024 * 1024 }]),
         ['ripgrep/rg.exe']
       ),
     /oversized or truncated/
@@ -553,14 +551,10 @@ test(
       )
     )
     assert.equal(first.receipt.tools.pdfCli.path, 'runtime/pdf-runtime-cli.py')
-    assert.deepEqual(first.receipt.tools.pdfCli.identityFiles, [
-      'runtime/pdf-runtime-cli.py'
-    ])
+    assert.deepEqual(first.receipt.tools.pdfCli.identityFiles, ['runtime/pdf-runtime-cli.py'])
     assert.equal(first.receipt.tools.ripgrep.version, '15.1.0')
     assert.ok(first.receipt.tools.ripgrep.identityFiles.includes('dependencies/tools/rg'))
-    assert.ok(
-      first.receipt.tools.ripgrep.identityFiles.includes('legal/ripgrep/LICENSE-MIT')
-    )
+    assert.ok(first.receipt.tools.ripgrep.identityFiles.includes('legal/ripgrep/LICENSE-MIT'))
     const supplyChainEvidencePath = 'dependencies/node/node-package-evidence.json'
     const supplyChainReceiptFile = first.receipt.files.find(
       ({ path }) => path === supplyChainEvidencePath
