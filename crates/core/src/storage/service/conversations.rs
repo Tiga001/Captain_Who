@@ -115,42 +115,15 @@ impl StorageService {
         }))
     }
 
-    pub fn fork_conversation(
-        &self,
-        input: ForkConversationInput,
-    ) -> Result<ChatConversationRecord, String> {
-        self.fork_conversation_with_domain_error(input, None)
-            .map_err(|error| error.to_string())
-    }
-
-    fn fork_conversation_with_domain_error(
-        &self,
-        input: ForkConversationInput,
-        provider_continuation_vault: Option<&ProviderContinuationVault>,
-    ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
-        let point = ConversationForkPoint::AssistantReply {
-            assistant_message_id: input.through_assistant_message_id,
-        };
-        self.fork_conversation_at_point_with_domain_error(
-            input.request_id,
-            input.source_conversation_id,
-            point,
-            provider_continuation_vault,
-        )
-    }
-
     fn fork_conversation_request_with_domain_error(
         &self,
         input: ForkConversationRequest,
         provider_continuation_vault: Option<&ProviderContinuationVault>,
     ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
-        let point = input.resolve_point().map_err(|message| {
-            conversation_fork_repository::ConversationForkError::Other(message)
-        })?;
         self.fork_conversation_at_point_with_domain_error(
             input.request_id,
             input.source_conversation_id,
-            point,
+            input.fork_point,
             provider_continuation_vault,
         )
     }
@@ -162,17 +135,19 @@ impl StorageService {
         point: ConversationForkPoint,
         provider_continuation_vault: Option<&ProviderContinuationVault>,
     ) -> Result<ChatConversationRecord, conversation_fork_repository::ConversationForkError> {
+        conversation_fork_repository::validate_fork_point_input(
+            &request_id,
+            &source_conversation_id,
+            &point,
+        )
+        .map_err(conversation_fork_repository::ConversationForkError::Other)?;
         let mut connection = self.state.connection()?;
         if let Some(existing) =
-            conversation_fork_repository::find_existing_fork(&connection, request_id.trim())
+            conversation_fork_repository::find_existing_fork(&connection, &request_id)
                 .map_err(storage_error)?
         {
-            let existing_point = existing.source_fork_point.unwrap_or_else(|| {
-                ConversationForkPoint::AssistantReply {
-                    assistant_message_id: existing.source_message_id.clone(),
-                }
-            });
-            if existing.source_conversation_id != source_conversation_id || existing_point != point
+            if existing.source_conversation_id != source_conversation_id
+                || existing.source_fork_point != point
             {
                 return Err("同一个分叉请求 ID 不能用于不同的历史快照。"
                     .to_string()
@@ -192,8 +167,8 @@ impl StorageService {
 
         let mut plan = conversation_fork_repository::build_fork_plan_at_point(
             &connection,
-            request_id.trim(),
-            source_conversation_id.trim(),
+            &request_id,
+            &source_conversation_id,
             &point,
             now_ms(),
         )?;
@@ -284,26 +259,6 @@ impl StorageService {
         self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
         attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))?;
         Ok(conversation)
-    }
-
-    pub fn fork_conversation_view(
-        &self,
-        input: ForkConversationInput,
-    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
-    {
-        let conversation = self.fork_conversation_with_domain_error(input, None)?;
-        self.decorate_fork_conversation_view(conversation)
-    }
-
-    pub fn fork_conversation_view_with_provider_continuation_vault(
-        &self,
-        input: ForkConversationInput,
-        provider_continuation_vault: &ProviderContinuationVault,
-    ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
-    {
-        let conversation =
-            self.fork_conversation_with_domain_error(input, Some(provider_continuation_vault))?;
-        self.decorate_fork_conversation_view(conversation)
     }
 
     pub fn fork_conversation_request_view(
@@ -717,10 +672,10 @@ fn attach_message_guidance_timelines(
             let guidances =
                 guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
                     .map_err(storage_error)?;
-            let trace = traces.get(&message.id);
-            if trace.is_none() && guidances.is_empty() {
+            if guidances.is_empty() {
                 continue;
             }
+            let trace = traces.get(&message.id);
             message.agent_run_json = Some(project_guidance_timeline(
                 connection,
                 message.agent_run_json.as_deref(),
@@ -740,15 +695,58 @@ fn project_guidance_timeline(
     guidances: &[AgentRunGuidanceRecord],
     fallback_started_at: i64,
 ) -> Result<String, String> {
-    let mut run = existing_run_json
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default();
-    let mcp_trace_anchors = mcp_trace_anchors(&run);
+    let mut run = if let Some(raw) = existing_run_json {
+        let value = serde_json::from_str::<serde_json::Value>(raw)
+            .map_err(|error| format!("current AgentRun projection is invalid JSON: {error}"))?;
+        let run = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "current AgentRun projection must be an object".to_string())?;
+        validate_current_agent_run_projection(&run)?;
+        run
+    } else {
+        let (run_id, status, completed_at) = trace
+            .map(|trace| {
+                let status = match trace.terminal_status {
+                    crate::ConversationTurnTraceTerminalStatus::InProgress => "running",
+                    crate::ConversationTurnTraceTerminalStatus::Completed => "completed",
+                    crate::ConversationTurnTraceTerminalStatus::Failed => "failed",
+                    crate::ConversationTurnTraceTerminalStatus::Cancelled => "cancelled",
+                };
+                (
+                    trace.run_id.as_str(),
+                    status,
+                    (trace.terminal_status
+                        != crate::ConversationTurnTraceTerminalStatus::InProgress)
+                        .then_some(fallback_started_at),
+                )
+            })
+            .or_else(|| {
+                guidances
+                    .first()
+                    .map(|guidance| (guidance.run_id.as_str(), "running", None))
+            })
+            .ok_or_else(|| "guidance projection has no current run identity".to_string())?;
+        let canonical = chat_repository::canonical_agent_run_lifecycle_projection(
+            None,
+            run_id,
+            status,
+            fallback_started_at,
+            fallback_started_at,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        serde_json::from_str::<serde_json::Value>(&canonical)
+            .map_err(|error| format!("decode canonical AgentRun projection: {error}"))?
+            .as_object()
+            .cloned()
+            .expect("canonical AgentRun projection is an object")
+    };
+    let mcp_trace_anchors = mcp_trace_anchors(&run)?;
     let existing_timeline = run
         .remove("timeline")
         .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default();
+        .ok_or_else(|| "current AgentRun timeline must be an array".to_string())?;
     let presentation_only_items = existing_timeline
         .into_iter()
         .filter(|item| {
@@ -907,52 +905,73 @@ fn project_guidance_timeline(
         .map_err(|error| format!("serialize guidance timeline: {error}"))
 }
 
-fn mcp_trace_anchors(run: &serde_json::Map<String, serde_json::Value>) -> HashMap<String, String> {
-    let Some(invocations) = run
+fn validate_current_agent_run_projection(
+    run: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if !run.get("runId").is_some_and(serde_json::Value::is_string)
+        || !run.get("status").is_some_and(serde_json::Value::is_string)
+        || !run.get("startedAt").is_some_and(serde_json::Value::is_i64)
+    {
+        return Err("current AgentRun lifecycle identity is incomplete".to_string());
+    }
+    for field in [
+        "toolDefinitions",
+        "toolCalls",
+        "toolResults",
+        "approvals",
+        "diffs",
+        "fileDrafts",
+        "webSearchActivities",
+        "readActivities",
+        "mcpInvocations",
+        "timeline",
+    ] {
+        if !run.get(field).is_some_and(serde_json::Value::is_array) {
+            return Err(format!("current AgentRun field `{field}` must be an array"));
+        }
+    }
+    if !run
+        .get("messageStreamCheckpoints")
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("current AgentRun messageStreamCheckpoints must be an object".to_string());
+    }
+    Ok(())
+}
+
+fn mcp_trace_anchors(
+    run: &serde_json::Map<String, serde_json::Value>,
+) -> Result<HashMap<String, String>, String> {
+    let invocations = run
         .get("mcpInvocations")
         .and_then(serde_json::Value::as_array)
-    else {
-        return HashMap::new();
-    };
+        .ok_or_else(|| "current AgentRun MCP invocations must be an array".to_string())?;
 
-    let mut invocation_ids_by_call_id = HashMap::<String, HashSet<String>>::new();
-    let mut call_ids_by_invocation_id = HashMap::<String, HashSet<String>>::new();
+    let mut invocation_ids_by_call_id = HashMap::<String, String>::new();
+    let mut call_ids_by_invocation_id = HashMap::<String, String>::new();
     for invocation in invocations {
-        let Some(call_id) = invocation
+        let call_id = invocation
             .get("callId")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let Some(invocation_id) = invocation
+            .ok_or_else(|| "current MCP invocation is missing callId".to_string())?;
+        let invocation_id = invocation
             .get("invocationId")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        invocation_ids_by_call_id
-            .entry(call_id.to_string())
-            .or_default()
-            .insert(invocation_id.to_string());
-        call_ids_by_invocation_id
-            .entry(invocation_id.to_string())
-            .or_default()
-            .insert(call_id.to_string());
+            .ok_or_else(|| "current MCP invocation is missing invocationId".to_string())?;
+        if invocation_ids_by_call_id
+            .insert(call_id.to_string(), invocation_id.to_string())
+            .is_some()
+        {
+            return Err("current MCP invocation callId is duplicated".to_string());
+        }
+        if call_ids_by_invocation_id
+            .insert(invocation_id.to_string(), call_id.to_string())
+            .is_some()
+        {
+            return Err("current MCP invocation identity is duplicated".to_string());
+        }
     }
-
-    invocation_ids_by_call_id
-        .into_iter()
-        .filter_map(|(call_id, invocation_ids)| {
-            if invocation_ids.len() != 1 {
-                return None;
-            }
-            let invocation_id = invocation_ids.into_iter().next()?;
-            (call_ids_by_invocation_id
-                .get(&invocation_id)
-                .is_some_and(|call_ids| call_ids.len() == 1))
-            .then_some((call_id, invocation_id))
-        })
-        .collect()
+    Ok(invocation_ids_by_call_id)
 }

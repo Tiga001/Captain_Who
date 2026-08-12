@@ -22,11 +22,6 @@ describe('storage protocol parsers', () => {
       requestId: 'request-2',
       sourceConversationId: 'conversation-1',
       forkPoint: { kind: 'provider_transition_boundary', operationId: 'operation-1' }
-    },
-    {
-      requestId: 'legacy-request',
-      sourceConversationId: 'conversation-1',
-      throughAssistantMessageId: 'assistant-1'
     }
   ] as const)('parses an explicit timeline fork point %#', (request) => {
     expect(parseStorageForkConversationRequest(request)).toEqual(request)
@@ -52,8 +47,17 @@ describe('storage protocol parsers', () => {
     {
       requestId: 'request-1',
       sourceConversationId: 'conversation-1',
-      throughAssistantMessageId: 'assistant-1',
-      forkPoint: { kind: 'assistant_reply', assistantMessageId: 'assistant-1' }
+      throughAssistantMessageId: 'assistant-1'
+    },
+    {
+      requestId: 'request-1',
+      sourceConversationId: 'conversation-1'
+    },
+    {
+      requestId: 'request-1',
+      sourceConversationId: 'conversation-1',
+      forkPoint: { kind: 'assistant_reply', assistantMessageId: 'assistant-1' },
+      extra: true
     }
   ])('rejects an ambiguous or malformed timeline fork point %#', (request) => {
     expect(() => parseStorageForkConversationRequest(request)).toThrow(

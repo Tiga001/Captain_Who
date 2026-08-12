@@ -194,10 +194,12 @@ pub fn list_interrupted_actions(
     records
 }
 
-/// Lists the rows that remain recoverable after generic interrupted-action reconciliation.
+/// Lists every nonterminal row that remains after generic interrupted-action reconciliation.
 ///
-/// Ordinary actions may only remain pending. MCP startup recovery additionally owns approved and
-/// executing rows because their external dispatch boundary has distinct terminalization rules.
+/// Current generic reconciliation normally settles interrupted approved/executing actions first.
+/// Returning every survivor here is deliberate defense in depth: the Host must either restore a
+/// fully validated current record or retire its private projection from independent durable
+/// ToolCall authority. No nonterminal row is silently omitted from startup handling.
 pub fn list_recoverable_actions_after_reconciliation(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
@@ -218,11 +220,7 @@ pub fn list_recoverable_actions_after_reconciliation(
             created_at,
             updated_at
         FROM agent_pending_actions
-        WHERE status = 'pending'
-           OR (
-                action_type = 'mcp_tool_call'
-                AND status IN ('approved', 'executing')
-              )
+        WHERE status IN ('pending', 'approved', 'executing')
         ORDER BY created_at ASC, action_id ASC
         ",
     )?;
@@ -508,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_recovery_query_keeps_pending_and_mcp_owned_interrupted_rows_only() {
+    fn startup_recovery_query_returns_every_nonterminal_survivor() {
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
 
@@ -554,6 +552,8 @@ mod tests {
             identities,
             [
                 ("tool_call".to_string(), "pending".to_string()),
+                ("tool_call".to_string(), "approved".to_string()),
+                ("tool_call".to_string(), "executing".to_string()),
                 ("mcp_tool_call".to_string(), "pending".to_string()),
                 ("mcp_tool_call".to_string(), "approved".to_string()),
                 ("mcp_tool_call".to_string(), "executing".to_string()),

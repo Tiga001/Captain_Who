@@ -64,7 +64,8 @@ function run(overrides: Partial<ChatAgentRunView> = {}): ChatAgentRunView {
         id: 'activate-documents',
         tool: 'skills_activate',
         args: { id: 'bundled:application:documents' },
-        approvalStatus: 'not_required'
+        approvalStatus: 'not_required',
+        reason: null
       }
     ],
     toolResults: [],

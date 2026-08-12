@@ -32,7 +32,8 @@ const commandSessionCall: AgentToolCall = {
   id: 'command-session-call',
   tool: 'command_session',
   args: { sessionId: 'cmd_1234567890abcdef1234567890abcdef', action: 'wait' },
-  approvalStatus: 'not_required'
+  approvalStatus: 'not_required',
+  reason: null
 }
 
 function commandSessionMessage(result?: AgentToolResult): ChatMessage {

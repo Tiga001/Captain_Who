@@ -1,8 +1,7 @@
 use super::*;
 use mycopilot_core::{
     AgentCommandArtifactObservationKind, AgentCommandArtifactObservationRequest,
-    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement,
-    AgentCommandRuntimeProfile, AgentCommandRuntimeProvider, AgentCommandRuntimeRequest,
+    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimeProfile,
     AgentCommandRuntimeResolvedPackage, AgentContextCheckpointItem, AgentContextCheckpointToolCall,
     AgentMcpToolInvocationEvent, AgentRunCheckpoint, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
     AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
@@ -105,73 +104,45 @@ fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
 }
 
 #[test]
-fn command_tool_call_projects_only_the_model_visible_runtime_profile() {
+fn renderer_command_projection_excludes_host_runtime_authority_and_private_input_paths() {
+    let private_artifact_path = "/private/managed-artifacts/objects/secret/manual.pdf";
+    let artifact_uri =
+        "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let request = AgentCommandRequest {
         id: "command-runtime-profile-1".to_string(),
-        command: "node scripts/build.mjs".to_string(),
-        cwd: Some("workspace".to_string()),
+        command: "pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'".to_string(),
+        cwd: None,
         timeout_ms: Some(30_000),
         approval_status: mycopilot_core::AgentApprovalStatus::Required,
         risk_level: None,
-        reason: Some("build a presentation".to_string()),
+        reason: Some("inspect the approved PDF".to_string()),
         observe: None,
-        inputs: Vec::new(),
-        runtime: None,
+        inputs: vec![mycopilot_core::AgentFileInputBinding {
+            schema_version: mycopilot_core::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
+            mount_path: "manual.pdf".to_string(),
+            source: mycopilot_core::AgentFileInputRef::GeneratedArtifact {
+                uri: artifact_uri.to_string(),
+                path: private_artifact_path.to_string(),
+            },
+            size_bytes: 123,
+            sha256: "a".repeat(64),
+        }],
         runtime_binding: Some(Box::new(AgentCommandRuntimeBinding {
             schema_version: AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
-            profile: AgentCommandRuntimeProfile::Presentations,
+            profile: AgentCommandRuntimeProfile::Pdf,
             profile_revision: "artifact-runtime-profile-sha256-v1:test".to_string(),
             provider_id: "mycopilot.artifact-runtime".to_string(),
             bundle_version: "2026.07.3".to_string(),
             bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
-            kind: AgentCommandRuntimeKind::Node,
-            runtime_version: "22.23.1".to_string(),
+            kind: AgentCommandRuntimeKind::Python,
+            runtime_version: "3.12.13".to_string(),
             runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
             resolved_packages: vec![AgentCommandRuntimeResolvedPackage {
-                name: "pptxgenjs".to_string(),
-                version: "4.0.1".to_string(),
+                name: "pypdf".to_string(),
+                version: "5.0.0".to_string(),
             }],
         })),
     };
-
-    let call = command_tool_call(&request);
-    assert_eq!(call.args["runtimeProfile"], "presentations");
-    assert!(call.args["runtime"].is_null());
-    assert!(call.args.get("timeoutMs").is_none());
-    assert_eq!(request.timeout_ms, Some(30_000));
-    let model_args = serde_json::to_string(&call.args).unwrap();
-    assert!(!model_args.contains("pptxgenjs"));
-    assert!(!model_args.contains("4.0.1"));
-    assert!(!model_args.contains("runtimeFingerprint"));
-
-    let mut pdf_request = request;
-    let pdf_binding = pdf_request.runtime_binding.as_mut().unwrap();
-    pdf_binding.profile = AgentCommandRuntimeProfile::Pdf;
-    pdf_binding.kind = AgentCommandRuntimeKind::Python;
-    pdf_request.command = "pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'".to_string();
-    pdf_request.cwd = None;
-    let private_artifact_path = "/private/managed-artifacts/objects/secret/manual.pdf";
-    let artifact_uri =
-        "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    pdf_request.inputs = vec![mycopilot_core::AgentFileInputBinding {
-        schema_version: mycopilot_core::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
-        mount_path: "manual.pdf".to_string(),
-        source: mycopilot_core::AgentFileInputRef::GeneratedArtifact {
-            uri: artifact_uri.to_string(),
-            path: private_artifact_path.to_string(),
-        },
-        size_bytes: 123,
-        sha256: "a".repeat(64),
-    }];
-    let pdf_call = command_tool_call(&pdf_request);
-    assert!(pdf_call.args.get("runtimeProfile").is_none());
-    assert!(pdf_call.args.get("runtime").is_none());
-    assert_eq!(pdf_call.args["inputs"][0]["path"], artifact_uri);
-    assert_eq!(pdf_call.args["inputs"][0]["mountPath"], "manual.pdf");
-    assert!(pdf_call.args["inputs"][0].get("source").is_none());
-    assert!(!serde_json::to_string(&pdf_call)
-        .unwrap()
-        .contains(private_artifact_path));
 
     let renderer_event = agent_event_notification(AgentEvent::Done {
         run_id: "run-pdf".to_string(),
@@ -180,53 +151,19 @@ fn command_tool_call_projects_only_the_model_visible_runtime_profile() {
         content: None,
         usage: None,
         finish_reason: None,
-        proposed_actions: vec![AgentProposedAction::Command {
-            command: pdf_request,
-        }],
+        proposed_actions: vec![AgentProposedAction::Command { command: request }],
     });
     let rendered = serde_json::to_string(&renderer_event).unwrap();
     assert!(!rendered.contains(private_artifact_path));
+    assert!(!rendered.contains(artifact_uri));
     assert!(!rendered.contains("runtimeFingerprint"));
     assert!(!rendered.contains("runtimeBinding"));
     assert!(renderer_event["params"]["proposedActions"][0]["command"]
         .get("inputs")
         .is_none());
-}
-
-#[test]
-fn command_tool_call_keeps_the_frozen_managed_runtime_request() {
-    let request = AgentCommandRequest {
-        id: "command-runtime-1".to_string(),
-        command: "node scripts/build.mjs".to_string(),
-        cwd: Some("workspace".to_string()),
-        timeout_ms: Some(30_000),
-        approval_status: mycopilot_core::AgentApprovalStatus::Required,
-        risk_level: None,
-        reason: Some("build a workbook".to_string()),
-        observe: None,
-        inputs: Vec::new(),
-        runtime: Some(AgentCommandRuntimeRequest {
-            provider: AgentCommandRuntimeProvider::ManagedArtifact,
-            kind: AgentCommandRuntimeKind::Node,
-            required_packages: vec![AgentCommandRuntimePackageRequirement {
-                name: "exceljs".to_string(),
-                version: "4.4.0".to_string(),
-            }],
-        }),
-        runtime_binding: None,
-    };
-
-    let call = command_tool_call(&request);
-
-    assert_eq!(call.args["runtime"]["provider"], "managedArtifact");
-    assert_eq!(call.args["runtime"]["kind"], "node");
     assert_eq!(
-        call.args["runtime"]["requiredPackages"][0]["name"],
-        "exceljs"
-    );
-    assert_eq!(
-        call.args["runtime"]["requiredPackages"][0]["version"],
-        "4.4.0"
+        renderer_event["params"]["proposedActions"][0]["command"]["command"],
+        "pdfinfo '$MYCOPILOT_INPUT_ROOT/manual.pdf'"
     );
 }
 
@@ -265,7 +202,6 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
             additional_roots: Vec::new(),
         }),
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: Some(Box::new(AgentCommandRuntimeBinding {
             schema_version: AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
             profile: AgentCommandRuntimeProfile::Documents,
@@ -283,6 +219,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -299,7 +236,11 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
                 id: command.id.clone(),
                 name: "run_command".to_string(),
                 args: original_args.clone(),
-                provider_identity: None,
+                provider_identity: mycopilot_core::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: command.id.clone(),
+                    runtime_call_id: command.id.clone(),
+                },
             }],
             is_error: false,
             sources: vec!["tool_call".to_string()],
@@ -429,7 +370,6 @@ fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
         reason: None,
         observe: None,
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: None,
     };
     let evaluation = evaluate_command_policy(

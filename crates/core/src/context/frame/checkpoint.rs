@@ -40,26 +40,21 @@ impl ContextItem {
                 "运行检查点不能持久化 Provider raw continuation。",
             ));
         }
-        let provider_identities = message
-            .assistant_turn()
-            .and_then(LlmAssistantTurn::runtime_tool_bindings)
-            .map(|bindings| {
-                bindings
-                    .iter()
-                    .map(|binding| {
-                        (
-                            binding.runtime_call.id.as_str(),
-                            AgentProviderToolCallIdentity {
-                                provider_tool_index: u32::try_from(binding.provider_tool_index)
-                                    .unwrap_or(u32::MAX),
-                                provider_call_id: binding.provider_call_id.clone(),
-                                runtime_call_id: binding.runtime_call.id.clone(),
-                            },
-                        )
-                    })
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let effective_tool_calls = message.tool_calls().cloned().collect::<Vec<_>>();
+        let provider_identities = if effective_tool_calls.is_empty() {
+            BTreeMap::new()
+        } else {
+            message
+                .assistant_turn()
+                .ok_or_else(|| {
+                    AgentError::new("运行检查点中的 Assistant Tool Call 缺少完整 Assistant Turn。")
+                })?
+                .checkpoint_identity()?
+                .tool_call_identities
+                .into_iter()
+                .map(|identity| (identity.runtime_call_id.clone(), identity))
+                .collect::<BTreeMap<_, _>>()
+        };
         Ok(AgentContextCheckpointItem {
             role: message.role().as_str().to_string(),
             content: message.content().to_string(),
@@ -72,15 +67,25 @@ impl ContextItem {
                 })
                 .collect(),
             tool_call_id: message.tool_call_id().map(str::to_string),
-            tool_calls: message
-                .tool_calls()
-                .map(|call| AgentContextCheckpointToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    args: call.args.clone(),
-                    provider_identity: provider_identities.get(call.id.as_str()).cloned(),
+            tool_calls: effective_tool_calls
+                .into_iter()
+                .map(|call| {
+                    let provider_identity = provider_identities
+                        .get(call.id.as_str())
+                        .cloned()
+                        .ok_or_else(|| {
+                            AgentError::new(
+                                "运行检查点中的 Assistant Tool Call 缺少 Provider 身份映射。",
+                            )
+                        })?;
+                    Ok(AgentContextCheckpointToolCall {
+                        id: call.id,
+                        name: call.name,
+                        args: call.args,
+                        provider_identity,
+                    })
                 })
-                .collect(),
+                .collect::<AgentResult<Vec<_>>>()?,
             is_error: message.is_error(),
             sources: self
                 .metadata
@@ -188,14 +193,7 @@ impl ContextItem {
                     let max_provider_index = item
                         .tool_calls
                         .iter()
-                        .enumerate()
-                        .map(|(index, call)| {
-                            call.provider_identity
-                                .as_ref()
-                                .map_or(u32::try_from(index).unwrap_or(u32::MAX), |identity| {
-                                    identity.provider_tool_index
-                                })
-                        })
+                        .map(|call| call.provider_identity.provider_tool_index)
                         .max()
                         .map(|index| usize::try_from(index).unwrap_or(usize::MAX));
                     if max_provider_index
@@ -214,14 +212,8 @@ impl ContextItem {
                         .collect::<Vec<_>>();
                     let mut runtime_bindings = Vec::with_capacity(item.tool_calls.len());
                     let mut previous_provider_index = None;
-                    for (index, call) in item.tool_calls.into_iter().enumerate() {
-                        let provider_identity =
-                            call.provider_identity
-                                .unwrap_or(AgentProviderToolCallIdentity {
-                                    provider_tool_index: u32::try_from(index).unwrap_or(u32::MAX),
-                                    provider_call_id: call.id.clone(),
-                                    runtime_call_id: call.id.clone(),
-                                });
+                    for call in item.tool_calls {
+                        let provider_identity = call.provider_identity;
                         let provider_index = usize::try_from(provider_identity.provider_tool_index)
                             .map_err(|_| {
                                 AgentError::new("运行检查点的 Provider Tool index 无效。")
@@ -252,8 +244,9 @@ impl ContextItem {
                         ));
                         provider_calls[provider_index] = provider_call;
                     }
-                    let turn = LlmAssistantTurn::from_legacy(item.content, provider_calls)
-                        .with_runtime_tool_bindings(runtime_bindings)?;
+                    let turn =
+                        LlmAssistantTurn::from_split_projection(item.content, provider_calls)
+                            .with_runtime_tool_bindings(runtime_bindings)?;
                     LlmMessage::from_assistant_turn(turn)
                 }
             }

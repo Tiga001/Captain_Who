@@ -350,7 +350,7 @@ impl AgentService {
             &full_model_context_logs,
             summary.as_ref(),
             &[],
-        );
+        )?;
         preview_input.context_compaction_summary = summary;
         preview_input.world_state_records =
             load_conversation_world_state(&self.storage, conversation_id)?;
@@ -438,9 +438,10 @@ impl AgentService {
         configuration_revision: &str,
         tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<Option<AgentContextBaseline>, String> {
-        // Persist the complete audit view so a crash after an external side effect starts can be
-        // correlated with its durable execution journal. Model context still receives only the
-        // closed prefix and therefore never sees a half ToolCall/ToolResult exchange.
+        // Persist the complete audit view and the exact staged ToolCall identity so startup can
+        // close an interrupted exchange without decoding a separate resume envelope. Context
+        // rendering still consumes only `committed_snapshot`, so the open exchange never reaches
+        // a model before its ToolResult is durably appended.
         let committed_snapshot = snapshot.committed_prefix();
         let context_trace =
             committed_snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
@@ -471,23 +472,13 @@ impl AgentService {
         let model_context_changed = previous_trace.is_none()
             || previous_activity_items != next_activity_items
             || previous_model_context_items.len() != committed_snapshot.model_context_items.len();
-        // Only tools with an independently durable, non-replayable execution journal retain an
-        // open call here. Approval-backed tools may enrich their call snapshot before settlement,
-        // so persisting those calls early would violate the trace's append-only contract.
-        let retain_open_call_for_recovery = matches!(
-            snapshot.items.last(),
-            Some(ConversationTurnTraceItem::ToolCall { tool, .. }) if tool == "image_generation"
-        );
-        let audit_trace = if retain_open_call_for_recovery {
-            snapshot.in_progress_audit_trace(run_id, conversation_id, assistant_message_id)
-        } else {
-            context_trace.clone()
-        };
+        let audit_trace =
+            snapshot.in_progress_audit_trace(run_id, conversation_id, assistant_message_id);
         let changed = self
             .storage
             .append_in_progress_conversation_turn_trace_and_apply_guidances(
                 &audit_trace,
-                &committed_snapshot.model_context_items,
+                &snapshot.model_context_items,
                 created_at,
                 now_ms(),
             )?;
@@ -1178,15 +1169,13 @@ impl AgentService {
             &archive_metadata,
         )
         .map_err(|error| error.to_string())?;
-        Ok(
-            conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
-                checkpoint,
-                &continuation.call,
-                &continuation.result,
-                Some(assistant_message_id),
-                &model_observation,
-                archive_metadata,
-            ),
+        conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
+            checkpoint,
+            &continuation.call,
+            &continuation.result,
+            Some(assistant_message_id),
+            &model_observation,
+            archive_metadata,
         )
     }
 
@@ -1353,6 +1342,7 @@ mod provider_capability_tests {
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "test-token",
             "model": "unsupported-compaction-provider",
+            "modelCapabilities": { "imageInput": false },
             "messages": []
         }))
         .unwrap();
@@ -1377,7 +1367,9 @@ mod provider_capability_tests {
                 sequence: 0,
                 call_id: "call-unsupported-compaction".to_string(),
                 tool: "read_file".to_string(),
-                provenance: None,
+                provenance: mycopilot_core::AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 operation: serde_json::json!({ "path": "README.md" }),
                 approval_status: AgentApprovalStatus::Required,
                 truncated: false,

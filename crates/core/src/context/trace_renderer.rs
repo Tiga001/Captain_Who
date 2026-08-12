@@ -3,9 +3,9 @@ use super::{
     ContextSource,
 };
 use crate::conversation_trace::{
-    render_tool_observation, render_user_guidance_content, validate_model_context_prefix,
-    ConversationModelContextItem, ConversationTraceToolResultStatus, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    render_tool_observation, render_user_guidance_content, ConversationModelContextItem,
+    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus,
 };
 use crate::llm::{validate_model_tool_call_id, LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentError, AgentResult, AgentToolResult};
@@ -23,14 +23,19 @@ impl ConversationTraceRenderer {
         trace: &ConversationTurnTrace,
         model_context_items: &[ConversationModelContextItem],
     ) -> AgentResult<RenderedConversationTrace> {
-        if model_context_items.is_empty() {
-            return Self::render(trace);
-        }
         trace
             .validate()
             .map_err(|error| AgentError::new(format!("ConversationTurnTrace 无效：{error}")))?;
-        validate_model_context_prefix(trace, model_context_items)
+        let model_context_items = trace
+            .committed_model_context_prefix(model_context_items)
             .map_err(|error| AgentError::new(format!("模型上下文日志无效：{error}")))?;
+        trace
+            .validate_complete_model_context(model_context_items)
+            .map_err(|error| AgentError::new(format!("模型上下文日志无效：{error}")))?;
+
+        if model_context_items.is_empty() {
+            return Self::render(trace);
+        }
 
         let covered_sequence = model_context_items
             .last()
@@ -319,8 +324,18 @@ mod tests {
         ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use crate::llm::{model_response_tool_call_id, LlmMessageRole};
-    use crate::protocol::{AgentApprovalStatus, AgentContextCheckpointToolCall};
+    use crate::protocol::{
+        AgentApprovalStatus, AgentContextCheckpointToolCall, AgentProviderToolCallIdentity,
+    };
     use crate::AgentCommandSessionStatus;
+
+    fn provider_identity(call_id: &str) -> AgentProviderToolCallIdentity {
+        AgentProviderToolCallIdentity {
+            provider_tool_index: 0,
+            provider_call_id: call_id.to_string(),
+            runtime_call_id: call_id.to_string(),
+        }
+    }
 
     fn trace() -> ConversationTurnTrace {
         let call_id = model_response_tool_call_id("run/with spaces", 0, 0, "provider-call-1");
@@ -342,7 +357,9 @@ mod tests {
                     sequence: 4,
                     call_id: call_id.clone(),
                     tool: "read_file".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "read_file".to_string(),
+                    },
                     operation: json!({ "path": "src/lib.rs" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -410,12 +427,18 @@ mod tests {
     fn run_scoped_todo_exchange_is_not_replayed_into_later_model_context() {
         let mut trace = trace();
         let ConversationTurnTraceItem::ToolCall {
-            tool, operation, ..
+            tool,
+            provenance,
+            operation,
+            ..
         } = &mut trace.items[1]
         else {
             panic!("expected tool call");
         };
         *tool = "todo_update".to_string();
+        *provenance = crate::AgentToolIdentity::Builtin {
+            tool_name: "todo_update".to_string(),
+        };
         *operation = json!({
             "items": [{ "id": "todo-1", "title": "Do not carry me", "status": "pending" }]
         });
@@ -453,7 +476,14 @@ mod tests {
             _ => panic!("expected tool call"),
         };
         match &mut trace.items[1] {
-            ConversationTurnTraceItem::ToolCall { tool, .. } => *tool = "run_command".to_string(),
+            ConversationTurnTraceItem::ToolCall {
+                tool, provenance, ..
+            } => {
+                *tool = "run_command".to_string();
+                *provenance = crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                };
+            }
             _ => unreachable!(),
         }
         match &mut trace.items[2] {
@@ -521,7 +551,7 @@ mod tests {
                         id: call_id.clone(),
                         name: tool.clone(),
                         args: operation.clone(),
-                        provider_identity: None,
+                        provider_identity: provider_identity(call_id),
                     }],
                     is_error: false,
                 },
@@ -576,7 +606,7 @@ mod tests {
                     id: call_id.clone(),
                     name: tool,
                     args,
-                    provider_identity: None,
+                    provider_identity: provider_identity(&call_id),
                 }],
                 is_error: false,
             },
@@ -624,7 +654,9 @@ mod tests {
             sequence: 6,
             call_id: second_call_id.clone(),
             tool: "read_file".to_string(),
-            provenance: None,
+            provenance: crate::AgentToolIdentity::Builtin {
+                tool_name: "read_file".to_string(),
+            },
             operation: json!({ "path": "src/main.rs" }),
             approval_status: AgentApprovalStatus::NotRequired,
             truncated: false,
@@ -661,7 +693,7 @@ mod tests {
                     id: first_call_id.clone(),
                     name: "read_file".to_string(),
                     args: json!({ "path": "src/lib.rs" }),
-                    provider_identity: None,
+                    provider_identity: provider_identity(&first_call_id),
                 }],
                 is_error: false,
             },
@@ -684,7 +716,7 @@ mod tests {
                     id: second_call_id.clone(),
                     name: "read_file".to_string(),
                     args: json!({ "path": "src/main.rs" }),
-                    provider_identity: None,
+                    provider_identity: provider_identity(&second_call_id),
                 }],
                 is_error: false,
             },
@@ -749,10 +781,10 @@ mod tests {
                 content: String::new(),
                 tool_call_id: None,
                 tool_calls: vec![AgentContextCheckpointToolCall {
-                    id: call_id,
+                    id: call_id.clone(),
                     name: tool,
                     args,
-                    provider_identity: None,
+                    provider_identity: provider_identity(&call_id),
                 }],
                 is_error: false,
             },
@@ -769,17 +801,75 @@ mod tests {
     }
 
     #[test]
+    fn staged_in_progress_tool_identity_is_not_rendered_before_its_result() {
+        let mut trace = trace();
+        let ConversationTurnTraceItem::ToolCall {
+            sequence,
+            call_id,
+            tool,
+            operation,
+            ..
+        } = trace.items[1].clone()
+        else {
+            panic!("expected tool call");
+        };
+        trace.items.truncate(2);
+        trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+        trace.terminal_error = None;
+        let staged_items = vec![
+            ConversationModelContextItem {
+                sequence: 3,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: "I will inspect the file.".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: call_id.clone(),
+                    name: tool,
+                    args: operation,
+                    provider_identity: provider_identity(&call_id),
+                }],
+                is_error: false,
+            },
+        ];
+
+        let rendered =
+            ConversationTraceRenderer::render_with_model_context(&trace, &staged_items).unwrap();
+
+        assert_eq!(rendered.activity_items.len(), 1);
+        assert!(rendered.terminal_item.is_none());
+        let messages = ContextFrame::new(rendered.activity_items).to_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].tool_calls().next().is_none());
+    }
+
+    #[test]
     fn preserves_historical_tool_failure_reason_and_error_semantics() {
         let mut trace = trace();
         trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
         trace.terminal_error = Some("read failed".to_string());
         let ConversationTurnTraceItem::ToolCall {
-            tool, operation, ..
+            tool,
+            provenance,
+            operation,
+            ..
         } = &mut trace.items[1]
         else {
             panic!("expected tool call");
         };
         *tool = "run_command".to_string();
+        *provenance = crate::AgentToolIdentity::Builtin {
+            tool_name: "run_command".to_string(),
+        };
         *operation = json!({ "command": "python3 -c 'import openpyxl'" });
         let call_id = match &trace.items[1] {
             ConversationTurnTraceItem::ToolCall { call_id, .. } => call_id.clone(),

@@ -227,7 +227,7 @@ fn skill_mutation_requests_are_strict_camel_case_contracts() {
 
     let uninstall = serde_json::from_value::<SkillsUninstallRequest>(serde_json::json!({
         "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
-        "expectedRevision": "skill-package-sha256-v1:current"
+        "expectedRevision": "skill-installation-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222"
     }))
     .unwrap();
     assert_eq!(
@@ -247,6 +247,20 @@ fn skill_mutation_requests_are_strict_camel_case_contracts() {
         serde_json::from_value::<SkillsUpdateLocalRequest>(serde_json::json!({
             "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
             "directory": "/tmp/local-skill"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<SkillsUninstallRequest>(serde_json::json!({
+            "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d"
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<SkillsUninstallRequest>(serde_json::json!({
+            "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+            "expectedRevision": "skill-installation-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222",
+            "packageRevision": "skill-package-sha256-v1:old"
         }))
         .is_err()
     );
@@ -848,6 +862,13 @@ fn mcp_management_contract_is_strict_and_separates_launch_arguments() {
     let mut with_unknown_approval_mode = request.clone();
     with_unknown_approval_mode["approvalMode"] = serde_json::json!("always");
     assert!(serde_json::from_value::<McpServerCreateInput>(with_unknown_approval_mode).is_err());
+
+    let mut without_approval_mode = request.clone();
+    without_approval_mode
+        .as_object_mut()
+        .unwrap()
+        .remove("approvalMode");
+    assert!(serde_json::from_value::<McpServerCreateInput>(without_approval_mode).is_err());
 
     let mut with_environment = request.clone();
     with_environment["environment"] = serde_json::json!({"TOKEN": "must-not-cross"});

@@ -190,6 +190,16 @@ describe('MCP management cross-language contract', () => {
     ).toThrow(/unexpected value/)
   })
 
+  it('requires approvalMode on create and update requests', () => {
+    const createWithoutApprovalMode: Record<string, unknown> = { ...golden.createInput }
+    const updateWithoutApprovalMode: Record<string, unknown> = { ...golden.updateInput }
+    delete createWithoutApprovalMode.approvalMode
+    delete updateWithoutApprovalMode.approvalMode
+
+    expect(() => parseMcpServerCreateInput(createWithoutApprovalMode)).toThrow(/approvalMode/)
+    expect(() => parseMcpServerUpdateInput(updateWithoutApprovalMode)).toThrow(/approvalMode/)
+  })
+
   it.each(['environment', 'secretRef', 'headers', 'bearer', 'url', 'serverId', 'trust', 'command'])(
     'rejects forbidden create field %s',
     (field) => {

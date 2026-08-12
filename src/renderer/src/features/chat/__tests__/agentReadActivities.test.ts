@@ -22,7 +22,8 @@ function readImageCall(): AgentToolCall {
     id: 'read-image-call',
     tool: 'read_image',
     args: { path: 'preview.png' },
-    approvalStatus: 'not_required'
+    approvalStatus: 'not_required',
+    reason: null
   }
 }
 

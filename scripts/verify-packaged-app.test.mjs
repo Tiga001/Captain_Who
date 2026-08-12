@@ -6,7 +6,11 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 
-import { packagedMacIconPath, verifyPackagedMacIcon } from './verify-packaged-app.mjs'
+import {
+  isMacCodeSigningExplicitlyDisabled,
+  packagedMacIconPath,
+  verifyPackagedMacIcon
+} from './verify-packaged-app.mjs'
 
 function createPackContext(appOutDir) {
   return {
@@ -45,4 +49,26 @@ test('packaged macOS icon verification rejects stale Electron artwork', async ()
     () => verifyPackagedMacIcon(context, sourceIconPath),
     /does not match build\/icon\.icns/
   )
+})
+
+test('macOS signature verification is skipped only for an explicitly null identity', () => {
+  assert.equal(
+    isMacCodeSigningExplicitlyDisabled({
+      packager: { platformSpecificBuildOptions: { identity: null } }
+    }),
+    true
+  )
+  assert.equal(
+    isMacCodeSigningExplicitlyDisabled({
+      packager: { platformSpecificBuildOptions: {} }
+    }),
+    false
+  )
+  assert.equal(
+    isMacCodeSigningExplicitlyDisabled({
+      packager: { platformSpecificBuildOptions: { identity: 'Developer ID Application' } }
+    }),
+    false
+  )
+  assert.equal(isMacCodeSigningExplicitlyDisabled({}), false)
 })

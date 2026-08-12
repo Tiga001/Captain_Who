@@ -11,12 +11,13 @@ import type { ModelSettingsSnapshot } from '../features/storage/storageClient'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import { useFrontendConfig } from './FrontendConfigProvider'
 import {
-  INITIAL_MODELS,
+  INITIAL_MODEL_SAVE_DRAFTS,
   isModelConnectionAvailable,
   modelConfig,
   prepareModelsForGlobalApiUrlChange
 } from './modelConfig'
-import type { ModelConfig, SearchMode } from './modelConfig'
+import type { ModelConfig, ModelConfigSaveDraft, SearchMode } from './modelConfig'
+import type { ModelSettingsSaveDraft } from '../features/storage/storageClient'
 
 interface ModelSettingsContextValue {
   apiUrl: string
@@ -32,7 +33,10 @@ interface ModelSettingsContextValue {
   setSearchMode: (value: SearchMode) => void
   setTavilyApiKey: (value: string) => void
   toggleModel: (modelId: string) => void
-  upsertModel: (model: ModelConfig, previousModelId?: string) => Promise<ModelConfig>
+  upsertModel: (
+    model: ModelConfig | ModelConfigSaveDraft,
+    previousModelId?: string
+  ) => Promise<ModelConfig>
 }
 
 const ModelSettingsContext = createContext<ModelSettingsContextValue | null>(null)
@@ -61,7 +65,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     apiToken: modelConfig.api.defaultToken,
     searchMode: modelConfig.webSearch.defaultMode,
     tavilyApiKey: modelConfig.webSearch.defaultTavilyApiKey,
-    models: INITIAL_MODELS
+    models: []
   }))
   const [providerProfileDescriptors, setProviderProfileDescriptors] = useState<
     ProviderProfileUiDescriptor[]
@@ -83,14 +87,17 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const persistSettings = useCallback(
-    (nextSettings: ModelSettingsSnapshot): Promise<ModelSettingsSnapshot> => {
+    (
+      saveDraft: ModelSettingsSaveDraft,
+      optimisticSettings?: ModelSettingsSnapshot
+    ): Promise<ModelSettingsSnapshot> => {
       const revision = latestSaveRevisionRef.current + 1
       latestSaveRevisionRef.current = revision
-      applySettings(nextSettings)
+      if (optimisticSettings) applySettings(optimisticSettings)
 
       const save = saveQueueRef.current
         .catch(() => undefined)
-        .then(() => saveModelSettings(nextSettings))
+        .then(() => saveModelSettings(saveDraft))
         .then((authoritativeSettings) => {
           lastSuccessfulSettingsRef.current = authoritativeSettings
           if (latestSaveRevisionRef.current === revision) {
@@ -145,13 +152,19 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
           if (storedSettings) {
             lastSuccessfulSettingsRef.current = storedSettings
             applySettings(storedSettings)
+          } else {
+            const bootstrapDraft: ModelSettingsSaveDraft = {
+              apiUrl: modelConfig.api.defaultUrl,
+              apiToken: modelConfig.api.defaultToken,
+              searchMode: modelConfig.webSearch.defaultMode,
+              tavilyApiKey: modelConfig.webSearch.defaultTavilyApiKey,
+              models: INITIAL_MODEL_SAVE_DRAFTS
+            }
+            await persistSettings(bootstrapDraft)
+            if (isCancelled) return
           }
-
           setHydrationStatus('ready')
           markStartupReady()
-          if (!storedSettings) {
-            void persistSettings(settingsRef.current).catch(() => undefined)
-          }
           return
         } catch (error) {
           lastError = error
@@ -185,13 +198,17 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   const updateSettings = useCallback(
     (update: (current: ModelSettingsSnapshot) => ModelSettingsSnapshot): void => {
       if (hydrationStatus !== 'ready') return
-      void persistSettings(update(settingsRef.current)).catch(() => undefined)
+      const nextSettings = update(settingsRef.current)
+      void persistSettings(nextSettings, nextSettings).catch(() => undefined)
     },
     [hydrationStatus, persistSettings]
   )
 
   const upsertModel = useCallback(
-    async (savedModel: ModelConfig, previousModelId?: string): Promise<ModelConfig> => {
+    async (
+      savedModel: ModelConfig | ModelConfigSaveDraft,
+      previousModelId?: string
+    ): Promise<ModelConfig> => {
       if (hydrationStatus !== 'ready') {
         throw new Error('Model settings are not ready')
       }
@@ -202,7 +219,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
           : savedModel
       const currentSettings = settingsRef.current
       const existingIndex = currentSettings.models.findIndex((model) => model.id === targetId)
-      let nextModels: ModelConfig[]
+      let nextModels: Array<ModelConfig | ModelConfigSaveDraft>
 
       if (existingIndex === -1) {
         nextModels = [...currentSettings.models, modelForSave]

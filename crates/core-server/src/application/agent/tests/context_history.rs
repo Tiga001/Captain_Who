@@ -371,7 +371,9 @@ fn compaction_accepts_newly_closed_exchange_but_rejects_unsafe_trace_boundaries(
                 call_id: "read-visible-boundary".to_string(),
                 tool: "read_file".to_string(),
                 operation: json!({ "path": "README.md" }),
-                provenance: None,
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,
             },
@@ -423,6 +425,7 @@ fn production_compaction_services_install_the_current_model_generator() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "apiStyle": "open_ai_compatible",
         "contextWindowTokens": 128000,
         "maxTokens": 4000,
@@ -487,7 +490,8 @@ fn next_turn_loads_backend_trace_and_never_parses_agent_run_json() {
             unread_at: None,
         })
         .unwrap();
-    let trace = completed_trace("conversation-history", "assistant-history");
+    let mut trace = completed_trace("conversation-history", "assistant-history");
+    trace.items.clear();
     storage
         .replace_conversation_turn_trace(&trace, 1, 2)
         .unwrap();
@@ -633,7 +637,7 @@ fn next_turn_loads_active_summary_and_only_the_uncovered_tail() {
 }
 
 #[test]
-fn legacy_messages_without_trace_keep_final_text_and_legacy_errors_stay_excluded() {
+fn terminal_assistant_without_trace_is_rejected_and_current_failed_trace_is_accepted() {
     let conversation = ChatConversationRecord {
         id: "conversation-legacy".to_string(),
         project_id: None,
@@ -668,20 +672,21 @@ fn legacy_messages_without_trace_keep_final_text_and_legacy_errors_stay_excluded
         unread_at: None,
     };
 
-    let history = conversation_history_messages(&conversation, &[], &[]);
-
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].content, "Legacy final answer");
-    assert!(history[0].conversation_turn_trace.is_none());
+    let error = conversation_history_messages(&conversation, &[], &[]).unwrap_err();
+    assert!(error.contains("conversation_history_corrupt"));
+    assert!(!error.contains("Legacy final answer"));
 
     let mut failed_trace = completed_trace("conversation-legacy", "assistant-error");
+    failed_trace.items.clear();
     failed_trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
     failed_trace.terminal_error = Some("permission denied".to_string());
+    let mut current_only = conversation.clone();
+    current_only.messages.remove(0);
     let history_with_trace =
-        conversation_history_messages(&conversation, &[failed_trace.clone()], &[]);
-    assert_eq!(history_with_trace.len(), 2);
+        conversation_history_messages(&current_only, &[failed_trace.clone()], &[]).unwrap();
+    assert_eq!(history_with_trace.len(), 1);
     assert_eq!(
-        history_with_trace[1].conversation_turn_trace.as_ref(),
+        history_with_trace[0].conversation_turn_trace.as_ref(),
         Some(&failed_trace)
     );
 }
@@ -689,6 +694,7 @@ fn legacy_messages_without_trace_keep_final_text_and_legacy_errors_stay_excluded
 #[test]
 fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
     let mut trace = completed_trace("conversation-interrupted", "assistant-interrupted");
+    trace.items.clear();
     trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
     let conversation = ChatConversationRecord {
         id: "conversation-interrupted".to_string(),
@@ -712,7 +718,7 @@ fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
         unread_at: None,
     };
 
-    let history = conversation_history_messages(&conversation, &[trace.clone()], &[]);
+    let history = conversation_history_messages(&conversation, &[trace.clone()], &[]).unwrap();
 
     assert_eq!(history.len(), 1);
     assert!(history[0].content.is_empty());
@@ -722,6 +728,7 @@ fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
 #[test]
 fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace() {
     let trace = completed_trace("conversation-exact-history", "assistant-exact-history");
+    let runtime_call_id = history_call_id();
     let model_items = vec![
         mycopilot_core::ConversationModelContextItem {
             sequence: 0,
@@ -739,14 +746,18 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
             content: String::new(),
             tool_call_id: None,
             tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
-                id: "write-history".to_string(),
+                id: runtime_call_id.clone(),
                 name: "write_file".to_string(),
                 args: json!({
                     "filePath": "src/history.rs",
                     "mode": "create",
                     "content": "EXACT_WRITE_CONTENT"
                 }),
-                provider_identity: None,
+                provider_identity: mycopilot_core::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: "write-history".to_string(),
+                    runtime_call_id: runtime_call_id.clone(),
+                },
             }],
             is_error: false,
         },
@@ -755,7 +766,7 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
             ordinal: 0,
             role: "tool".to_string(),
             content: r#"{"ok":true,"result":{"exact":"EXACT_TOOL_RESULT"}}"#.to_string(),
-            tool_call_id: Some("write-history".to_string()),
+            tool_call_id: Some(runtime_call_id),
             tool_calls: Vec::new(),
             is_error: false,
         },
@@ -786,12 +797,34 @@ fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace(
         items: model_items.clone(),
     }];
 
-    let history =
-        conversation_history_messages_with_model_context(&conversation, &[trace], &logs, None, &[]);
+    let history = conversation_history_messages_with_model_context(
+        &conversation,
+        std::slice::from_ref(&trace),
+        &logs,
+        None,
+        &[],
+    )
+    .unwrap();
 
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].conversation_model_context_items, model_items);
     assert!(history[0].conversation_turn_trace.is_some());
+
+    let incomplete_logs = [mycopilot_core::ConversationModelContextLog {
+        assistant_message_id: "assistant-exact-history".to_string(),
+        items: logs[0].items[..1].to_vec(),
+    }];
+    let error = conversation_history_messages_with_model_context(
+        &conversation,
+        &[trace],
+        &incomplete_logs,
+        None,
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.contains("incomplete model context"));
+    assert!(!error.contains("EXACT_WRITE_CONTENT"));
+    assert!(!error.contains("EXACT_TOOL_RESULT"));
 }
 
 #[test]
@@ -885,7 +918,8 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
     };
 
     let projected =
-        conversation_history_messages_with_compaction(&conversation, &[], Some(&summary), &[]);
+        conversation_history_messages_with_compaction(&conversation, &[], Some(&summary), &[])
+            .unwrap();
 
     assert_eq!(conversation.messages.len(), 3);
     assert_eq!(projected.len(), 1);
@@ -941,7 +975,9 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
                 call_id: "call-1".to_string(),
                 tool: "read_file".to_string(),
                 operation: json!({ "path": "README.md" }),
-                provenance: None,
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,
             },
@@ -997,13 +1033,26 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
         created_at: 3,
     };
 
+    let tail_logs = [mycopilot_core::ConversationModelContextLog {
+        assistant_message_id: "assistant-current".to_string(),
+        items: vec![mycopilot_core::ConversationModelContextItem {
+            sequence: 3,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: "UNCOVERED_TAIL_MARKER".to_string(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        }],
+    }];
     let projected = conversation_history_messages_with_model_context(
         &conversation,
         &[trace],
-        &[],
+        &tail_logs,
         Some(&summary),
         &[],
-    );
+    )
+    .unwrap();
 
     assert_eq!(projected.len(), 2);
     assert_eq!(projected[0].content, "LATEST_USER_MARKER");
@@ -1029,7 +1078,9 @@ fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete
                 api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
-                provider_profile_config: None,
+                provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+                    mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
                 input_price: "0.01".to_string(),
                 cached_input_price: String::new(),
                 output_price: "0.02".to_string(),
@@ -1226,6 +1277,17 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
             archived_at: None,
             unread_at: None,
         })
+        .unwrap();
+    storage
+        .replace_conversation_turn_trace(
+            &mycopilot_core::completed_conversation_trace_without_items(
+                "run-capacity-summary",
+                "conversation-capacity-summary",
+                "assistant-long",
+            ),
+            2,
+            2,
+        )
         .unwrap();
     let service = AgentService::new(storage.clone());
     let snapshot_input = AgentContextWindowSnapshotInput {

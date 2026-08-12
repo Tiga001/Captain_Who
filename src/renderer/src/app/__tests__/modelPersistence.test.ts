@@ -24,6 +24,7 @@ const existingModel: ModelConfig = {
   inputPrice: '0.01',
   cachedInputPrice: '',
   outputPrice: '0.02',
+  providerProfileUpdate: { kind: 'unchanged' },
   enabled: false
 }
 
@@ -36,7 +37,8 @@ const editedValues: ModelFormValues = {
   inputPrice: '0.03',
   cachedInputPrice: '0.005',
   outputPrice: '0.04',
-  supportsImage: true
+  supportsImage: true,
+  providerProfileUpdate: { kind: 'unchanged' }
 }
 
 describe('modelConfigFromForm', () => {

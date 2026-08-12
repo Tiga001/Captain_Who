@@ -351,7 +351,6 @@ fn approved_command(call_id: &str, command: &str) -> AgentCommandRequest {
         reason: Some("managed command session integration test".to_string()),
         observe: None,
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: None,
     }
 }
@@ -403,7 +402,9 @@ fn completed_running_trace(
                 sequence: 0,
                 call_id: call_id.to_string(),
                 tool: "run_command".to_string(),
-                provenance: None,
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
                 operation: json!({"command": command}),
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
@@ -3308,7 +3309,6 @@ fn aspen_pdf_runs_a_five_step_managed_session_workflow() {
             reason: Some("Aspen managed PDF release smoke".to_string()),
             observe: None,
             inputs: inputs.to_vec(),
-            runtime: None,
             runtime_binding: Some(Box::new(binding.clone())),
         };
         let tracker = Arc::new(FileEffectTracker::default());

@@ -1,8 +1,7 @@
 use super::*;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use mycopilot_core::{
-    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement,
-    AgentCommandRuntimeProfile, AgentCommandRuntimeProvider, AgentCommandRuntimeRequest,
+    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimeProfile,
     AgentCommandRuntimeResolvedPackage, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
 };
 use sha2::{Digest, Sha256};
@@ -46,6 +45,7 @@ impl McpToolInvoker for InvalidatingMcpInvoker {
 struct RecoverableApprovalRaceInvoker {
     invalidations: std::sync::atomic::AtomicUsize,
     invocations: std::sync::atomic::AtomicUsize,
+    storage: Option<Arc<StorageService>>,
 }
 
 impl McpToolInvoker for RecoverableApprovalRaceInvoker {
@@ -58,10 +58,15 @@ impl McpToolInvoker for RecoverableApprovalRaceInvoker {
 
     fn invalidate_prepared_approval(
         &self,
-        _identity: &mycopilot_core::AgentMcpToolInvocationIdentity,
+        identity: &mycopilot_core::AgentMcpToolInvocationIdentity,
     ) -> AgentResult<()> {
         self.invalidations
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(storage) = self.storage.as_ref() {
+            storage
+                .delete_mcp_approval_envelope(&identity.invocation_id)
+                .map_err(mycopilot_core::AgentError::from)?;
+        }
         Ok(())
     }
 
@@ -195,30 +200,18 @@ fn auto_mcp_action(
     action
 }
 
-fn auto_mcp_agent_input(storage: &StorageService) -> AgentChatInput {
+fn auto_mcp_agent_input(storage: &StorageService, run_id: &str, action_id: &str) -> AgentChatInput {
     let mut input = serde_json::from_value(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
     freeze_test_pending_provider_configuration(storage, &mut input);
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(storage, run_id, action_id));
     input
-}
-
-fn freeze_generic_provider_protocol(
-    input: &mut AgentChatInput,
-    provider_configuration_revision: String,
-) {
-    let dialect = input
-        .api_style
-        .map(mycopilot_core::ProviderProtocolDialect::from)
-        .unwrap_or_else(|| {
-            mycopilot_core::ProviderProtocolDialect::detect_from_api_url(&input.api_url)
-        });
-    let config = mycopilot_core::ProviderProfileConfig::generic_for_dialect(dialect);
-    freeze_provider_protocol(input, provider_configuration_revision, config);
 }
 
 fn freeze_provider_protocol(
@@ -278,7 +271,7 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
     };
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let context = AutoApprovedActionContext::new(
-        auto_mcp_agent_input(&storage),
+        auto_mcp_agent_input(&storage, run_id, &action_id),
         run_id.to_string(),
         Some("auto-mcp-conversation".to_string()),
         Some("auto-mcp-assistant".to_string()),
@@ -359,7 +352,7 @@ async fn live_auto_mcp_outcome_unknown_is_durable_and_never_collapses_to_plain_f
         unreachable!();
     };
     let context = AutoApprovedActionContext::new(
-        auto_mcp_agent_input(&storage),
+        auto_mcp_agent_input(&storage, run_id, &action_id),
         run_id.to_string(),
         None,
         None,
@@ -433,13 +426,23 @@ fn startup_auto_mcp_journals_never_replay_and_only_executing_becomes_outcome_unk
         let action_id = uuid::Uuid::new_v4().to_string();
         let invocation_id = uuid::Uuid::new_v4().to_string();
         let action = auto_mcp_action(&run_id, &action_id, &invocation_id, now);
+        let conversation_id = format!("auto-mcp-restart-{should_claim}-conversation");
+        let assistant_message_id = format!("auto-mcp-restart-{should_claim}-assistant");
+        seed_durable_mcp_pending_owner(
+            &storage,
+            &conversation_id,
+            &assistant_message_id,
+            &run_id,
+            &action,
+            now,
+        );
         let mut record = service
             .prepare_auto_mcp_action_journal(
                 &run_id,
-                None,
-                None,
+                Some(&conversation_id),
+                Some(&assistant_message_id),
                 action,
-                auto_mcp_agent_input(&storage),
+                auto_mcp_agent_input(&storage, &run_id, &action_id),
             )
             .unwrap();
         if should_claim {
@@ -516,38 +519,80 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         "messages": []
     }))
     .unwrap();
+    let resolved_packages = vec![AgentCommandRuntimeResolvedPackage {
+        name: "pptxgenjs".to_string(),
+        version: "4.0.1".to_string(),
+    }];
+    let profile_revision_material = serde_json::to_vec(&json!({
+        "schemaVersion": AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
+        "profile": AgentCommandRuntimeProfile::Presentations,
+        "kind": AgentCommandRuntimeKind::Node,
+        "packages": resolved_packages,
+    }))
+    .unwrap();
+    let profile_revision = format!(
+        "artifact-runtime-profile-sha256-v1:{:x}",
+        Sha256::digest(profile_revision_material)
+    );
     let binding = AgentCommandRuntimeBinding {
         schema_version: AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
         profile: AgentCommandRuntimeProfile::Presentations,
-        profile_revision: "artifact-runtime-profile-sha256-v1:test".to_string(),
-        provider_id: "mycopilot.artifact-runtime".to_string(),
-        bundle_version: "2026.07.3".to_string(),
+        profile_revision,
+        provider_id: mycopilot_core::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
+        bundle_version: mycopilot_core::artifact_runtime::ARTIFACT_RUNTIME_BUNDLE_VERSION
+            .to_string(),
         bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
         kind: AgentCommandRuntimeKind::Node,
         runtime_version: "22.23.1".to_string(),
         runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
-        resolved_packages: vec![AgentCommandRuntimeResolvedPackage {
-            name: "pptxgenjs".to_string(),
-            version: "4.0.1".to_string(),
-        }],
+        resolved_packages,
     };
     let action = AgentProposedAction::Command {
         command: AgentCommandRequest {
             id: "managed-runtime-profile-pending".to_string(),
-            command: "node scripts/build.mjs".to_string(),
-            cwd: Some(".".to_string()),
+            command: "node scripts/build.mjs --output deck.pptx".to_string(),
+            cwd: None,
             timeout_ms: Some(30_000),
             approval_status: AgentApprovalStatus::Required,
             risk_level: None,
             reason: Some("build an Office artifact".to_string()),
-            observe: None,
+            observe: Some(mycopilot_core::AgentCommandArtifactObservationRequest {
+                kinds: vec![mycopilot_core::AgentCommandArtifactObservationKind::Office],
+                expected_outputs: vec!["deck.pptx".to_string()],
+                additional_roots: Vec::new(),
+            }),
             inputs: Vec::new(),
-            runtime: None,
             runtime_binding: Some(Box::new(binding.clone())),
         },
     };
 
+    let model_call = AgentToolCall {
+        id: "managed-runtime-profile-pending".to_string(),
+        tool: "run_command".to_string(),
+        args: json!({ "command": "node scripts/build.mjs --output deck.pptx" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: Some("build an Office artifact".to_string()),
+    };
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "managed-runtime-profile-run",
+        None,
+        &model_call,
+        AgentToolIdentity::Builtin {
+            tool_name: "run_command".to_string(),
+        },
+    ));
+    let AgentProposedAction::Command { command } = &action else {
+        unreachable!();
+    };
+    mycopilot_core::validate_frozen_agent_command_args(command, &model_call.args).unwrap();
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    assert!(pending_action_binding_matches(
+        "managed-runtime-profile-run",
+        None,
+        &action,
+        &agent_input,
+    ));
     assert!(service
         .store_pending_action(
             "managed-runtime-profile-run",
@@ -575,111 +620,9 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         panic!("persisted action must remain a command")
     };
     assert_eq!(command.runtime_binding.as_deref(), Some(&binding));
-    assert!(command.runtime.is_none());
-    let resumed_call = tool_call_for_action(&stored.snapshot.action);
-    assert_eq!(resumed_call.args["runtimeProfile"], "presentations");
+    let resumed_call = tool_call_for_pending_record(stored).unwrap();
+    assert!(resumed_call.args.get("runtimeProfile").is_none());
     assert!(resumed_call.args["runtime"].is_null());
-}
-
-#[test]
-fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
-    let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    save_test_pending_provider(
-        &storage,
-        "test-model",
-        "https://example.test/v1/chat/completions",
-        "secret",
-        "disabled",
-        "",
-    );
-    let service = AgentService::new(Arc::clone(&storage));
-    // Exercise the exact 16K-character product ceiling with the largest UTF-8 scalar width.
-    // The command projection itself is 64,000 bytes. Its JSON wrappers add metadata, so every
-    // persistence layer must apply its own documented bound without silently reducing the
-    // product limit or changing the frozen text.
-    let command_text = "😀".repeat(16_000);
-    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
-        "apiUrl": "https://example.test/v1/chat/completions",
-        "apiToken": "secret",
-        "model": "test-model",
-        "messages": []
-    }))
-    .unwrap();
-    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
-    let action = AgentProposedAction::Command {
-        command: AgentCommandRequest {
-            id: "managed-runtime-pending".to_string(),
-            command: command_text.clone(),
-            cwd: Some(".".to_string()),
-            timeout_ms: Some(30_000),
-            approval_status: AgentApprovalStatus::Required,
-            risk_level: None,
-            reason: Some("build an Office artifact".to_string()),
-            observe: None,
-            inputs: Vec::new(),
-            runtime: Some(AgentCommandRuntimeRequest {
-                provider: AgentCommandRuntimeProvider::ManagedArtifact,
-                kind: AgentCommandRuntimeKind::Python,
-                required_packages: vec![AgentCommandRuntimePackageRequirement {
-                    name: "openpyxl".to_string(),
-                    version: "3.1.5".to_string(),
-                }],
-            }),
-            runtime_binding: None,
-        },
-    };
-
-    assert!(service
-        .store_pending_action(
-            "managed-runtime-run",
-            "managed-runtime-conversation",
-            "managed-runtime-assistant",
-            action,
-            agent_input,
-        )
-        .unwrap());
-    let durable_pending = storage.list_pending_agent_actions().unwrap();
-    assert_eq!(durable_pending.len(), 1);
-    assert_eq!(command_text.len(), 64_000);
-    assert!(durable_pending[0].action_json.len() > command_text.len());
-    drop(service);
-
-    let reloaded = AgentService::new(Arc::clone(&storage));
-    let pending = reloaded
-        .pending_actions
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let stored = pending
-        .get(&pending_action_storage_id(
-            "managed-runtime-run",
-            "managed-runtime-pending",
-        ))
-        .expect("persisted command action must reload");
-    let AgentProposedAction::Command { command } = &stored.snapshot.action else {
-        panic!("persisted action must remain a command");
-    };
-    assert_eq!(command.command, command_text);
-    let runtime = command
-        .runtime
-        .as_ref()
-        .expect("managed runtime request must survive persistence");
-    assert_eq!(
-        runtime.provider,
-        AgentCommandRuntimeProvider::ManagedArtifact
-    );
-    assert_eq!(runtime.kind, AgentCommandRuntimeKind::Python);
-    assert_eq!(runtime.required_packages.len(), 1);
-    assert_eq!(runtime.required_packages[0].name, "openpyxl");
-    assert_eq!(runtime.required_packages[0].version, "3.1.5");
-    let resumed_call = tool_call_for_action(&stored.snapshot.action);
-    assert_eq!(resumed_call.args["command"], command_text);
-    assert_eq!(resumed_call.args["runtime"]["provider"], "managedArtifact");
-    assert_eq!(resumed_call.args["runtime"]["kind"], "python");
-    assert_eq!(
-        resumed_call.args["runtime"]["requiredPackages"][0]["version"],
-        "3.1.5"
-    );
 }
 
 #[test]
@@ -691,6 +634,7 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -704,6 +648,21 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
         },
     };
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    let AgentProposedAction::ToolCall {
+        call: original_call,
+    } = &original
+    else {
+        unreachable!();
+    };
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-original",
+        None,
+        original_call,
+        AgentToolIdentity::Unregistered {
+            tool_name: original_call.tool.clone(),
+        },
+    ));
     assert!(service
         .store_pending_action(
             "run-original",
@@ -732,13 +691,29 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
             reason: None,
         },
     };
+    let AgentProposedAction::ToolCall {
+        call: cross_run_call,
+    } = &cross_run
+    else {
+        unreachable!();
+    };
+    let mut cross_run_input = agent_input.clone();
+    cross_run_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-second",
+        None,
+        cross_run_call,
+        AgentToolIdentity::Unregistered {
+            tool_name: cross_run_call.tool.clone(),
+        },
+    ));
     assert!(service
         .store_pending_action(
             "run-second",
             "conversation-second",
             "assistant-second",
             cross_run,
-            agent_input.clone(),
+            cross_run_input,
         )
         .unwrap());
     let same_run_collision = AgentProposedAction::ToolCall {
@@ -750,13 +725,29 @@ fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
             reason: None,
         },
     };
+    let AgentProposedAction::ToolCall {
+        call: collision_call,
+    } = &same_run_collision
+    else {
+        unreachable!();
+    };
+    let mut collision_input = agent_input;
+    collision_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-original",
+        None,
+        collision_call,
+        AgentToolIdentity::Unregistered {
+            tool_name: collision_call.tool.clone(),
+        },
+    ));
     let error = service
         .store_pending_action(
             "run-original",
             "conversation-original",
             "assistant-original",
             same_run_collision,
-            agent_input,
+            collision_input,
         )
         .unwrap_err();
     assert!(error.contains("冻结快照冲突"));
@@ -873,9 +864,28 @@ fn test_mcp_resume_checkpoint(
     serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         "runId": run_id,
-        "contextItems": [],
+        "contextItems": [{
+            "role": "assistant",
+            "content": "",
+            "images": [],
+            "toolCalls": [{
+                "id": pending_tool_call_id,
+                "name": "mcp__startup_fixture__echo",
+                "args": {},
+                "providerIdentity": {
+                    "providerToolIndex": 0,
+                    "providerCallId": pending_tool_call_id,
+                    "runtimeCallId": pending_tool_call_id
+                }
+            }],
+            "isError": false,
+            "sources": [],
+            "scope": "conversation",
+            "retention": "durable"
+        }],
         "nextModelRequestIndex": 1,
         "queuedToolCalls": [],
+        "deferredExternalToolCallCount": 0,
         "suppressedNarration": false,
         "extensionSnapshots": [],
         "toolSet": crate::test_tool_set_checkpoint(),
@@ -886,14 +896,276 @@ fn test_mcp_resume_checkpoint(
         "assistantTurnIdentity": crate::test_assistant_turn_identity(&[
             pending_tool_call_id.as_str()
         ]),
+        "providerContinuationRefs": [],
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
         "pendingToolCallId": pending_tool_call_id,
         "conversationTraceItems": [],
+        "conversationModelContextItems": [],
         "nextConversationTraceSequence": 0,
         "conversationTraceTruncated": false
     }))
     .unwrap()
+}
+
+fn test_pending_resume_checkpoint_for_call(
+    storage: &StorageService,
+    run_id: &str,
+    pending_action_id: Option<&str>,
+    call: &AgentToolCall,
+    provenance: AgentToolIdentity,
+) -> AgentRunCheckpoint {
+    let seed = pending_action_id.unwrap_or(call.id.as_str());
+    let mut checkpoint = test_mcp_resume_checkpoint(storage, run_id, seed);
+    let provider_identity = AgentProviderToolCallIdentity {
+        provider_tool_index: 0,
+        provider_call_id: call.id.clone(),
+        runtime_call_id: call.id.clone(),
+    };
+    checkpoint.pending_action_id = pending_action_id.map(ToString::to_string);
+    checkpoint.pending_tool_call_id = call.id.clone();
+    checkpoint.context_items[0].tool_calls = vec![AgentContextCheckpointToolCall {
+        id: call.id.clone(),
+        name: call.tool.clone(),
+        args: call.args.clone(),
+        provider_identity: provider_identity.clone(),
+    }];
+    checkpoint.assistant_turn_identity = crate::test_assistant_turn_identity(&[call.id.as_str()]);
+    checkpoint.conversation_trace_items = vec![ConversationTurnTraceItem::ToolCall {
+        sequence: 0,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        operation: call.args.clone(),
+        provenance,
+        approval_status: call.approval_status,
+        truncated: false,
+    }];
+    checkpoint.conversation_model_context_items = vec![ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![AgentContextCheckpointToolCall {
+            id: call.id.clone(),
+            name: call.tool.clone(),
+            args: call.args.clone(),
+            provider_identity,
+        }],
+        is_error: false,
+    }];
+    checkpoint.next_conversation_trace_sequence = 1;
+    checkpoint
+}
+
+fn seed_durable_pending_owner(
+    storage: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    call: &AgentToolCall,
+    provenance: AgentToolIdentity,
+    created_at: i64,
+) {
+    let agent_run_json = json!({
+        "runId": run_id,
+        "status": "waiting_for_approval",
+        "startedAt": created_at,
+        "toolDefinitions": [],
+        "toolCalls": [],
+        "toolResults": [],
+        "approvals": [],
+        "diffs": [],
+        "fileDrafts": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "mcpInvocations": [],
+        "timeline": [],
+        "messageStreamCheckpoints": {},
+        "state": {
+            "status": "waiting_for_approval",
+            "activeRunId": run_id,
+            "lastError": null,
+            "updatedAt": created_at
+        }
+    })
+    .to_string();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Pending action recovery".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some(agent_run_json),
+                ui_state_json: None,
+            }],
+            created_at,
+            updated_at: created_at,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    append_durable_pending_trace(
+        storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        call,
+        provenance,
+        created_at,
+    );
+}
+
+fn append_durable_pending_trace(
+    storage: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    call: &AgentToolCall,
+    provenance: AgentToolIdentity,
+    created_at: i64,
+) {
+    let provider_identity = AgentProviderToolCallIdentity {
+        provider_tool_index: 0,
+        provider_call_id: call.id.clone(),
+        runtime_call_id: call.id.clone(),
+    };
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            provenance,
+            operation: call.args.clone(),
+            approval_status: call.approval_status,
+            truncated: false,
+        }],
+    };
+    let model_context = vec![ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![AgentContextCheckpointToolCall {
+            id: call.id.clone(),
+            name: call.tool.clone(),
+            args: call.args.clone(),
+            provider_identity,
+        }],
+        is_error: false,
+    }];
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &model_context,
+            created_at,
+            created_at,
+        )
+        .unwrap();
+}
+
+fn seed_durable_mcp_pending_owner(
+    storage: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    action: &AgentProposedAction,
+    created_at: i64,
+) {
+    let AgentProposedAction::McpToolCall { approval } = action else {
+        panic!("test helper requires an MCP action");
+    };
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "MCP pending action recovery".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some(
+                    json!({
+                        "runId": run_id,
+                        "status": "waiting_for_approval",
+                        "startedAt": created_at,
+                        "toolDefinitions": [],
+                        "toolCalls": [],
+                        "toolResults": [],
+                        "approvals": [],
+                        "diffs": [],
+                        "fileDrafts": [],
+                        "webSearchActivities": [],
+                        "readActivities": [],
+                        "mcpInvocations": [{
+                            "actionId": approval.identity.action_id,
+                            "invocationId": approval.identity.invocation_id,
+                            "callId": approval.identity.call_id,
+                            "serverId": approval.identity.provenance.server_id,
+                            "serverDisplayName": approval.summary.server_display_name,
+                            "scope": approval.identity.provenance.scope,
+                            "rawToolName": approval.identity.provenance.raw_tool_name,
+                            "modelToolName": approval.identity.provenance.model_tool_name,
+                            "external": true,
+                            "state": "pending_approval",
+                            "dispatchCertainty": "definitely_not_dispatched",
+                            "outputTruncated": false
+                        }],
+                        "timeline": [{
+                            "id": format!("mcp-invocation-{}", approval.identity.invocation_id),
+                            "type": "mcp_tool_call",
+                            "invocationId": approval.identity.invocation_id
+                        }],
+                        "messageStreamCheckpoints": {},
+                        "state": {
+                            "status": "waiting_for_approval",
+                            "activeRunId": run_id,
+                            "lastError": null,
+                            "updatedAt": created_at
+                        }
+                    })
+                    .to_string(),
+                ),
+                ui_state_json: None,
+            }],
+            created_at,
+            updated_at: created_at,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    append_durable_pending_trace(
+        storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &approval.call,
+        AgentToolIdentity::Mcp {
+            provenance: approval.identity.provenance.clone(),
+        },
+        created_at,
+    );
 }
 
 fn freeze_deepseek_tool_checkpoint(
@@ -1012,7 +1284,7 @@ fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatc
             mode: mycopilot_core::ReasoningMode::Disabled,
             effort: mycopilot_core::ReasoningEffort::ProviderDefault,
         };
-        provider_settings.models[0].provider_profile_config = Some(deepseek_profile);
+        provider_settings.models[0].provider_profile_config = deepseek_profile;
         storage.save_model_settings(provider_settings).unwrap();
         let credentials =
             Arc::new(mycopilot_core::image_generation::InMemoryCredentialStore::default());
@@ -1039,6 +1311,7 @@ fn provider_continuation_preflight_blocks_empty_missing_and_tampered_mcp_dispatc
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "test-token",
             "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
             "messages": []
         }))
         .unwrap();
@@ -1154,17 +1427,29 @@ fn assert_recovered_approved_cancellation() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
     input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
     freeze_test_pending_provider_configuration(&storage, &mut input);
+    let conversation_id = format!("conversation-{run_id}");
+    let assistant_message_id = format!("assistant-{run_id}");
+    let action = test_mcp_pending_action(run_id, &action_id, &invocation_id, now);
+    seed_durable_mcp_pending_owner(
+        &storage,
+        &conversation_id,
+        &assistant_message_id,
+        run_id,
+        &action,
+        now,
+    );
     assert!(service
         .store_pending_action(
             run_id,
-            &format!("conversation-{run_id}"),
-            &format!("assistant-{run_id}"),
-            test_mcp_pending_action(run_id, &action_id, &invocation_id, now),
+            &conversation_id,
+            &assistant_message_id,
+            action,
             input,
         )
         .unwrap());
@@ -1274,17 +1559,27 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
     input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
     freeze_test_pending_provider_configuration(&storage, &mut input);
+    let action = test_mcp_pending_action(run_id, &action_id, &invocation_id, now);
+    seed_durable_mcp_pending_owner(
+        &storage,
+        "recovered-approved-race-conversation",
+        "recovered-approved-race-assistant",
+        run_id,
+        &action,
+        now,
+    );
     assert!(initial
         .store_pending_action(
             run_id,
             "recovered-approved-race-conversation",
             "recovered-approved-race-assistant",
-            test_mcp_pending_action(run_id, &action_id, &invocation_id, now),
+            action,
             input,
         )
         .unwrap());
@@ -1306,7 +1601,14 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
         .unwrap();
     drop(initial);
 
-    let invoker = Arc::new(RecoverableApprovalRaceInvoker::default());
+    // Mirror the production invoker's invalidation boundary: every winning decision deletes the
+    // encrypted payload envelope. A counter-only mock made the approve winner leave the fixture's
+    // separately seeded envelope behind, so the race test passed or timed out depending on which
+    // decision happened to win.
+    let invoker = Arc::new(RecoverableApprovalRaceInvoker {
+        storage: Some(Arc::clone(&storage)),
+        ..RecoverableApprovalRaceInvoker::default()
+    });
     let recovered = (0..3)
         .map(|_| {
             let service =
@@ -1359,18 +1661,36 @@ async fn recovered_approved_mcp_approve_reject_cancel_race_has_one_durable_winne
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let status = storage
+            let lifecycle = storage
                 .list_pending_agent_actions()
                 .unwrap()
                 .into_iter()
                 .find(|record| record.action_id == storage_id)
-                .map(|record| record.status);
-            if status.as_deref().is_none_or(|status| {
-                matches!(status, "completed" | "failed" | "rejected" | "cancelled")
-            }) {
+                .map(|record| (record.status, record.target_status));
+            let terminal = lifecycle.as_ref().is_none_or(|(status, target_status)| {
+                matches!(
+                    status.as_str(),
+                    "completed" | "failed" | "rejected" | "cancelled"
+                ) || target_status.as_deref().is_some_and(|target_status| {
+                    matches!(
+                        target_status,
+                        "completed" | "failed" | "rejected" | "cancelled"
+                    )
+                })
+            });
+            let envelope_released = storage
+                .load_mcp_approval_envelope(&invocation_id)
+                .unwrap()
+                .is_none();
+            if terminal && envelope_released {
                 break;
             }
-            tokio::task::yield_now().await;
+            // An approved MCP call commits its terminal target before the following model
+            // continuation advances the row itself to that target. The target is the durable
+            // recovery boundary this race is proving; do not make the assertion depend on an
+            // unrelated Provider continuation completing. Avoid a tight loop of synchronous
+            // SQLite reads starving the background Runtime task under full-workspace load.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
     .await
@@ -1467,6 +1787,7 @@ fn store_test_mcp_action_for_source(
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -1476,11 +1797,21 @@ fn store_test_mcp_action_for_source(
         &action_id,
     ));
     freeze_test_pending_provider_configuration(&service.storage, &mut input);
+    let conversation_id = format!("conversation-{run_id}");
+    let assistant_message_id = format!("assistant-{run_id}");
+    seed_durable_mcp_pending_owner(
+        &service.storage,
+        &conversation_id,
+        &assistant_message_id,
+        run_id,
+        &action,
+        created_at,
+    );
     assert!(service
         .store_pending_action(
             run_id,
-            &format!("conversation-{run_id}"),
-            &format!("assistant-{run_id}"),
+            &conversation_id,
+            &assistant_message_id,
             action,
             input,
         )
@@ -1532,6 +1863,7 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -1558,55 +1890,28 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
     ));
     let live_action =
         test_mcp_pending_action(live_run_id, &live_action_id, &live_invocation_id, now);
-    let AgentProposedAction::McpToolCall {
-        approval: live_approval,
-    } = &live_action
-    else {
-        unreachable!();
-    };
-    storage
-        .save_conversation(ChatConversationRecord {
-            id: "mcp-envelope-live-conversation".to_string(),
-            project_id: None,
-            model_id: Some("test-model".to_string()),
-            title: "MCP process-only recovery".to_string(),
-            messages: vec![ChatMessageRecord {
-                id: "mcp-envelope-live-assistant".to_string(),
-                role: "assistant".to_string(),
-                content: String::new(),
-                created_at: now,
-                status: Some("pending".to_string()),
-                attachments: Vec::new(),
-                agent_run_json: Some(
-                    json!({
-                        "runId": live_run_id,
-                        "status": "waiting_for_approval",
-                        "mcpInvocations": [{
-                            "actionId": live_action_id,
-                            "invocationId": live_invocation_id,
-                            "callId": live_approval.identity.call_id,
-                            "serverId": live_approval.identity.provenance.server_id,
-                            "serverDisplayName": live_approval.summary.server_display_name,
-                            "scope": live_approval.identity.provenance.scope,
-                            "rawToolName": live_approval.identity.provenance.raw_tool_name,
-                            "modelToolName": live_approval.identity.provenance.model_tool_name,
-                            "external": true,
-                            "state": "pending_approval",
-                            "dispatchCertainty": "definitely_not_dispatched",
-                            "outputTruncated": false
-                        }]
-                    })
-                    .to_string(),
-                ),
-                ui_state_json: None,
-            }],
-            created_at: now,
-            updated_at: now,
-            pinned_at: None,
-            archived_at: None,
-            unread_at: None,
-        })
-        .unwrap();
+    let expired_action = test_mcp_pending_action(
+        expired_run_id,
+        &expired_action_id,
+        &expired_invocation_id,
+        now,
+    );
+    seed_durable_mcp_pending_owner(
+        &storage,
+        "mcp-envelope-live-conversation",
+        "mcp-envelope-live-assistant",
+        live_run_id,
+        &live_action,
+        now,
+    );
+    seed_durable_mcp_pending_owner(
+        &storage,
+        "mcp-envelope-expired-conversation",
+        "mcp-envelope-expired-assistant",
+        expired_run_id,
+        &expired_action,
+        now,
+    );
 
     assert!(service
         .store_pending_action(
@@ -1622,12 +1927,7 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
             expired_run_id,
             "mcp-envelope-expired-conversation",
             "mcp-envelope-expired-assistant",
-            test_mcp_pending_action(
-                expired_run_id,
-                &expired_action_id,
-                &expired_invocation_id,
-                now,
-            ),
+            expired_action,
             expired_agent_input,
         )
         .unwrap());
@@ -1693,27 +1993,78 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
 }
 
 #[test]
-fn mcp_startup_terminalization_rolls_back_when_the_typed_action_is_corrupt() {
+fn mcp_startup_terminalization_uses_durable_identity_when_private_action_is_corrupt() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
-    let storage = StorageService::open(&database_path).unwrap();
-    let storage_id = "corrupt-mcp-terminalization";
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let now = mycopilot_core::storage::now_ms();
+    let run_id = "corrupt-mcp-run";
+    let action_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let storage_id = pending_action_storage_id(run_id, &action_id);
+    let action = test_mcp_pending_action(run_id, &action_id, &invocation_id, now);
+    seed_durable_mcp_pending_owner(
+        &storage,
+        "corrupt-mcp-conversation",
+        "corrupt-mcp-assistant",
+        run_id,
+        &action,
+        now,
+    );
+    let mut input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
+    freeze_test_pending_provider_configuration(&storage, &mut input);
+    assert!(service
+        .store_pending_action(
+            run_id,
+            "corrupt-mcp-conversation",
+            "corrupt-mcp-assistant",
+            action,
+            input,
+        )
+        .unwrap());
+    let row = storage
+        .list_pending_agent_actions()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.action_id == storage_id)
+        .unwrap();
+    let approved_at = row.created_at.saturating_add(1);
+    let executing_at = row.created_at.saturating_add(2);
+    let terminal_at = row.created_at.saturating_add(3);
     storage
-        .store_pending_agent_action(AgentPendingActionRecord {
-            action_id: storage_id.to_string(),
-            run_id: "corrupt-mcp-run".to_string(),
-            conversation_id: None,
-            assistant_message_id: None,
-            action_type: "mcp_tool_call".to_string(),
-            tool_name: "mcp__corrupt__tool".to_string(),
-            tool_call_id: Some(format!("tc1_{}", "a".repeat(43))),
-            status: "executing".to_string(),
-            target_status: None,
-            action_json: "{}".to_string(),
-            agent_input_json: "{}".to_string(),
-            created_at: 1,
-            updated_at: 1,
-        })
+        .transition_pending_agent_action(
+            &storage_id,
+            "pending",
+            "approved",
+            &row.agent_input_json,
+            approved_at,
+        )
+        .unwrap();
+    storage
+        .transition_pending_agent_action(
+            &storage_id,
+            "approved",
+            "executing",
+            &row.agent_input_json,
+            executing_at,
+        )
         .unwrap();
 
     // Simulate on-disk corruption without weakening the canonical write path. Normal writes are
@@ -1725,7 +2076,7 @@ fn mcp_startup_terminalization_rolls_back_when_the_typed_action_is_corrupt() {
     corruption
         .execute(
             "UPDATE agent_pending_actions SET action_json = ?1 WHERE action_id = ?2",
-            ["{invalid typed MCP action", storage_id],
+            ["{invalid typed MCP action", storage_id.as_str()],
         )
         .unwrap();
     corruption
@@ -1733,30 +2084,36 @@ fn mcp_startup_terminalization_rolls_back_when_the_typed_action_is_corrupt() {
         .unwrap();
     drop(corruption);
 
-    let error = storage
+    assert!(storage
         .terminalize_mcp_agent_action_on_startup(
-            storage_id,
+            &storage_id,
             "executing",
             McpStartupActionTerminalOutcome::OutcomeUnknown,
-            2,
+            terminal_at,
         )
-        .unwrap_err();
-    assert!(error.contains("invalid typed action"));
+        .unwrap());
     let (status, action_json): (String, String) = rusqlite::Connection::open(database_path)
         .unwrap()
         .query_row(
             "SELECT status, action_json FROM agent_pending_actions WHERE action_id = ?1",
-            [storage_id],
+            [&storage_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(status, "executing");
-    assert_eq!(action_json, "{invalid typed MCP action");
+    assert_eq!(status, "failed");
+    assert_eq!(action_json, "{}");
+    let terminal = storage
+        .get_conversation_turn_trace("corrupt-mcp-assistant")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        terminal.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
 }
 
 #[test]
 fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing() {
-    const MCP_PROJECTION_CANARY: &str = "MCP_RECOVERY_PROJECTION_CANARY_DO_NOT_RETAIN";
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
@@ -1784,82 +2141,19 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
         let conversation_id = format!("conversation-{label}");
         let assistant_message_id = format!("assistant-{label}");
         let action = test_mcp_pending_action(&run_id, &action_id, &invocation_id, now);
-        let AgentProposedAction::McpToolCall { approval } = &action else {
-            unreachable!();
-        };
-        let mut invocation_projection = json!({
-            "actionId": action_id,
-            "invocationId": invocation_id,
-            "callId": approval.identity.call_id,
-            "serverId": approval.identity.provenance.server_id,
-            "serverDisplayName": approval.summary.server_display_name,
-            "scope": approval.identity.provenance.scope,
-            "rawToolName": approval.identity.provenance.raw_tool_name,
-            "modelToolName": approval.identity.provenance.model_tool_name,
-            "external": true,
-            "state": if status == PendingActionStatus::Executing {
-                "running"
-            } else {
-                "pending_approval"
-            },
-            "dispatchCertainty": if status == PendingActionStatus::Executing {
-                "possibly_dispatched"
-            } else {
-                "definitely_not_dispatched"
-            },
-            "outputTruncated": false
-        });
-        if status == PendingActionStatus::Executing {
-            invocation_projection["rawArguments"] =
-                Value::String(MCP_PROJECTION_CANARY.to_string());
-            invocation_projection["rawResult"] = Value::String(MCP_PROJECTION_CANARY.to_string());
-        }
-        let invocation_projections = if status == PendingActionStatus::Executing {
-            let mut drifted = invocation_projection.clone();
-            drifted["modelToolName"] = Value::String("legacy_drifted_name".to_string());
-            vec![drifted, invocation_projection]
-        } else {
-            vec![invocation_projection]
-        };
-        storage
-            .save_conversation(ChatConversationRecord {
-                id: conversation_id.clone(),
-                project_id: None,
-                model_id: Some("test-model".to_string()),
-                title: format!("MCP {label} recovery"),
-                messages: vec![ChatMessageRecord {
-                    id: assistant_message_id.clone(),
-                    role: "assistant".to_string(),
-                    content: "partial response".to_string(),
-                    created_at: now,
-                    status: Some("pending".to_string()),
-                    attachments: Vec::new(),
-                    agent_run_json: Some(
-                        json!({
-                            "runId": run_id,
-                            "status": "running",
-                            "mcpInvocations": invocation_projections,
-                            "timeline": [{
-                                "id": format!("mcp-invocation-{invocation_id}"),
-                                "type": "mcp_tool_call",
-                                "invocationId": invocation_id
-                            }]
-                        })
-                        .to_string(),
-                    ),
-                    ui_state_json: None,
-                }],
-                created_at: now,
-                updated_at: now,
-                pinned_at: None,
-                archived_at: None,
-                unread_at: None,
-            })
-            .unwrap();
+        seed_durable_mcp_pending_owner(
+            &storage,
+            &conversation_id,
+            &assistant_message_id,
+            &run_id,
+            &action,
+            now,
+        );
         let mut input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "test-token",
             "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
             "messages": []
         }))
         .unwrap();
@@ -1990,8 +2284,6 @@ fn typed_startup_keeps_durable_waiting_and_approved_but_never_replays_executing(
     assert_eq!(invocation["outcome"], "outcome_unknown");
     assert_eq!(invocation["dispatchCertainty"], "possibly_dispatched");
     assert_eq!(invocation["errorCode"], "mcp.tool_outcome_unknown");
-    let persisted_run = serde_json::to_string(&run).unwrap();
-    assert!(!persisted_run.contains(MCP_PROJECTION_CANARY));
     for forbidden in [
         "rawArguments",
         "rawResult",
@@ -2021,9 +2313,10 @@ fn expired_mcp_approval_is_atomically_failed_before_concurrent_approval_can_disp
     );
     let invoker = Arc::new(InvalidatingMcpInvoker::default());
     let invoker_for_service: Arc<dyn McpToolInvoker> = invoker.clone();
+    let now = mycopilot_core::storage::now_ms();
     let service = AgentService::new(Arc::clone(&storage))
         .with_mcp_tool_invoker(invoker_for_service)
-        .with_mcp_approval_clock(|| 61_000);
+        .with_mcp_approval_clock(move || now + 60_000);
     let run_id = "mcp-expired-approval-run";
     let action_id = uuid::Uuid::new_v4().to_string();
     let invocation_id = uuid::Uuid::new_v4().to_string();
@@ -2032,17 +2325,27 @@ fn expired_mcp_approval_is_atomically_failed_before_concurrent_approval_can_disp
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
     input.resume_checkpoint = Some(test_mcp_resume_checkpoint(&storage, run_id, &action_id));
     freeze_test_pending_provider_configuration(&storage, &mut input);
+    let action = test_mcp_pending_action(run_id, &action_id, &invocation_id, now);
+    seed_durable_mcp_pending_owner(
+        &storage,
+        "mcp-expired-conversation",
+        "mcp-expired-assistant",
+        run_id,
+        &action,
+        now,
+    );
     assert!(service
         .store_pending_action(
             run_id,
             "mcp-expired-conversation",
             "mcp-expired-assistant",
-            test_mcp_pending_action(run_id, &action_id, &invocation_id, 1_000),
+            action,
             input,
         )
         .unwrap());
@@ -2069,7 +2372,9 @@ fn expired_mcp_approval_is_atomically_failed_before_concurrent_approval_can_disp
         invoker
             .invalidations
             .load(std::sync::atomic::Ordering::SeqCst),
-        1
+        1,
+        "results={results:?}, rows={:?}",
+        storage.list_pending_agent_actions().unwrap()
     );
     assert!(service.list_pending_actions().is_empty());
 
@@ -2200,24 +2505,44 @@ fn server_source_invalidation_atomically_scrubs_predispatch_and_marks_executing_
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
     freeze_test_pending_provider_configuration(&storage, &mut non_mcp_input);
+    let non_mcp_call = AgentToolCall {
+        id: non_mcp_action_id.to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    non_mcp_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        non_mcp_run_id,
+        None,
+        &non_mcp_call,
+        AgentToolIdentity::Builtin {
+            tool_name: non_mcp_call.tool.clone(),
+        },
+    ));
+    seed_durable_pending_owner(
+        &storage,
+        "server-removal-non-mcp-conversation",
+        "server-removal-non-mcp-assistant",
+        non_mcp_run_id,
+        &non_mcp_call,
+        AgentToolIdentity::Builtin {
+            tool_name: non_mcp_call.tool.clone(),
+        },
+        now,
+    );
     assert!(service
         .store_pending_action(
             non_mcp_run_id,
             "server-removal-non-mcp-conversation",
             "server-removal-non-mcp-assistant",
-            AgentProposedAction::ToolCall {
-                call: AgentToolCall {
-                    id: non_mcp_action_id.to_string(),
-                    tool: "approval_tool".to_string(),
-                    args: json!({}),
-                    approval_status: AgentApprovalStatus::Required,
-                    reason: None,
-                },
-            },
+            AgentProposedAction::ToolCall { call: non_mcp_call },
             non_mcp_input,
         )
         .unwrap());
@@ -2511,7 +2836,7 @@ fn catalog_generation_invalidation_targets_only_prior_generation_of_same_config_
 }
 
 #[test]
-fn mcp_pending_identity_mismatch_is_rejected_on_store_and_fails_closed_on_reload() {
+fn pending_store_rejects_missing_checkpoint_or_exact_context_before_persistence() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     save_test_pending_provider(
@@ -2527,6 +2852,85 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_fails_closed_on_reload
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut base_input);
+    let now = mycopilot_core::storage::now_ms();
+
+    let missing_action_id = uuid::Uuid::new_v4().to_string();
+    let error = service
+        .store_pending_action(
+            "missing-checkpoint-run",
+            "missing-checkpoint-conversation",
+            "missing-checkpoint-assistant",
+            test_mcp_pending_action(
+                "missing-checkpoint-run",
+                &missing_action_id,
+                &uuid::Uuid::new_v4().to_string(),
+                now,
+            ),
+            base_input.clone(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "Pending action frozen Tool Call identity is inconsistent."
+    );
+
+    let empty_context_action_id = uuid::Uuid::new_v4().to_string();
+    let mut empty_context_input = base_input;
+    let mut checkpoint =
+        test_mcp_resume_checkpoint(&storage, "empty-context-run", &empty_context_action_id);
+    checkpoint.context_items.clear();
+    empty_context_input.resume_checkpoint = Some(checkpoint);
+    let error = service
+        .store_pending_action(
+            "empty-context-run",
+            "empty-context-conversation",
+            "empty-context-assistant",
+            test_mcp_pending_action(
+                "empty-context-run",
+                &empty_context_action_id,
+                &uuid::Uuid::new_v4().to_string(),
+                now,
+            ),
+            empty_context_input,
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "Pending action frozen Tool Call identity is inconsistent."
+    );
+
+    assert!(storage.list_pending_agent_actions().unwrap().is_empty());
+    assert!(service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|lock_error| lock_error.into_inner())
+        .is_empty());
+}
+
+#[test]
+fn mcp_pending_identity_mismatch_is_rejected_on_store_and_malformed_resume_is_retired() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
+    let service = AgentService::new(Arc::clone(&storage));
+    let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -2558,13 +2962,35 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_fails_closed_on_reload
         .unwrap_err();
     assert_eq!(
         error,
-        "MCP pending approval frozen identity is inconsistent."
+        "Pending action frozen Tool Call identity is inconsistent."
     );
     assert!(storage.list_pending_agent_actions().unwrap().is_empty());
 
     let persisted_run_id = "mcp-identity-persisted-run";
+    let persisted_conversation_id = "mcp-identity-persisted-conversation";
+    let persisted_assistant_message_id = "mcp-identity-persisted-assistant";
     let persisted_action_id = uuid::Uuid::new_v4().to_string();
     let persisted_invocation_id = uuid::Uuid::new_v4().to_string();
+    let persisted_action = test_mcp_pending_action(
+        persisted_run_id,
+        &persisted_action_id,
+        &persisted_invocation_id,
+        now,
+    );
+    let AgentProposedAction::McpToolCall { approval } = &persisted_action else {
+        unreachable!();
+    };
+    seed_durable_pending_owner(
+        &storage,
+        persisted_conversation_id,
+        persisted_assistant_message_id,
+        persisted_run_id,
+        &approval.call,
+        AgentToolIdentity::Mcp {
+            provenance: approval.identity.provenance.clone(),
+        },
+        now,
+    );
     let mut persisted_input = base_input;
     persisted_input.resume_checkpoint = Some(test_mcp_resume_checkpoint(
         &storage,
@@ -2574,14 +3000,9 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_fails_closed_on_reload
     assert!(service
         .store_pending_action(
             persisted_run_id,
-            "mcp-identity-persisted-conversation",
-            "mcp-identity-persisted-assistant",
-            test_mcp_pending_action(
-                persisted_run_id,
-                &persisted_action_id,
-                &persisted_invocation_id,
-                now,
-            ),
+            persisted_conversation_id,
+            persisted_assistant_message_id,
+            persisted_action,
             persisted_input,
         )
         .unwrap());
@@ -2607,19 +3028,108 @@ fn mcp_pending_identity_mismatch_is_rejected_on_store_and_fails_closed_on_reload
         .unwrap();
     drop(service);
 
-    let error = match AgentService::try_new(Arc::clone(&storage)) {
-        Ok(_) => panic!("tampered MCP pending identity must fail closed at startup"),
-        Err(error) => error,
-    };
-    assert!(error.contains("failed identity validation"));
+    let restarted = AgentService::try_new(Arc::clone(&storage))
+        .expect("malformed private resume state must retire from durable ToolCall identity");
+    assert!(restarted
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|lock_error| lock_error.into_inner())
+        .is_empty());
+    assert!(storage
+        .list_recoverable_agent_actions_after_reconciliation()
+        .unwrap()
+        .is_empty());
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let retired: (String, String, String) = connection
+        .query_row(
+            "SELECT status, action_json, agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(
-        storage
-            .list_recoverable_agent_actions_after_reconciliation()
-            .unwrap()
-            .len(),
-        1,
-        "fail-closed validation must not rewrite the corrupt record"
+        retired,
+        ("failed".to_string(), "{}".to_string(), "{}".to_string())
     );
+}
+
+#[test]
+fn malformed_non_mcp_pending_states_retire_without_restoring_an_executable_action() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let now = mycopilot_core::storage::now_ms();
+    let mut storage_ids = Vec::new();
+
+    for status in ["pending", "approved", "executing"] {
+        let run_id = format!("malformed-{status}-run");
+        let conversation_id = format!("malformed-{status}-conversation");
+        let assistant_message_id = format!("malformed-{status}-assistant");
+        let call = AgentToolCall {
+            id: format!("malformed-{status}-call"),
+            tool: "approval_tool".to_string(),
+            args: json!({}),
+            approval_status: if status == "pending" {
+                AgentApprovalStatus::Required
+            } else {
+                AgentApprovalStatus::Approved
+            },
+            reason: None,
+        };
+        seed_durable_pending_owner(
+            &storage,
+            &conversation_id,
+            &assistant_message_id,
+            &run_id,
+            &call,
+            AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
+            now,
+        );
+        let storage_id = pending_action_storage_id(&run_id, &call.id);
+        storage
+            .store_pending_agent_action(AgentPendingActionRecord {
+                action_id: storage_id.clone(),
+                run_id,
+                conversation_id: Some(conversation_id),
+                assistant_message_id: Some(assistant_message_id),
+                action_type: "tool_call".to_string(),
+                tool_name: call.tool.clone(),
+                tool_call_id: Some(call.id),
+                status: status.to_string(),
+                target_status: None,
+                action_json: json!({ "unsupportedAction": true }).to_string(),
+                agent_input_json: json!({ "unsupportedResume": true }).to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        storage_ids.push(storage_id);
+    }
+
+    let loaded = load_persisted_pending_actions(&storage)
+        .expect("malformed private projections must retire from durable ToolCall identity");
+    assert!(loaded.is_empty());
+    assert!(storage
+        .list_recoverable_agent_actions_after_reconciliation()
+        .unwrap()
+        .is_empty());
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    for storage_id in storage_ids {
+        let retired: (String, String, String) = connection
+            .query_row(
+                "SELECT status, action_json, agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            retired,
+            ("failed".to_string(), "{}".to_string(), "{}".to_string())
+        );
+    }
 }
 
 #[test]
@@ -2647,6 +3157,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -2693,7 +3204,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
         event_validation.is_ok(),
         "fixture approval must satisfy Core validation: {event_validation:?}"
     );
-    assert!(mcp_pending_action_binding_matches(
+    assert!(pending_action_binding_matches(
         run_id,
         Some(&record),
         &action,
@@ -2701,7 +3212,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
     ));
 
     record.tool_call_id = Some("tampered-call".to_string());
-    assert!(!mcp_pending_action_binding_matches(
+    assert!(!pending_action_binding_matches(
         run_id,
         Some(&record),
         &action,
@@ -2709,7 +3220,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
     ));
     record.tool_call_id = Some(test_mcp_call_id(&action_id));
     record.action_id = "tampered-storage-id".to_string();
-    assert!(!mcp_pending_action_binding_matches(
+    assert!(!pending_action_binding_matches(
         run_id,
         Some(&record),
         &action,
@@ -2717,7 +3228,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
     ));
     record.action_id = pending_action_storage_id(run_id, &action_id);
     record.tool_name = "tampered-tool".to_string();
-    assert!(!mcp_pending_action_binding_matches(
+    assert!(!pending_action_binding_matches(
         run_id,
         Some(&record),
         &action,
@@ -2730,7 +3241,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
         _ => unreachable!(),
     };
     record.run_id = "tampered-run".to_string();
-    assert!(!mcp_pending_action_binding_matches(
+    assert!(!pending_action_binding_matches(
         &record.run_id,
         Some(&record),
         &action,
@@ -2742,7 +3253,7 @@ fn mcp_pending_binding_checks_checkpoint_run_storage_call_and_tool_identity() {
         .as_mut()
         .unwrap()
         .pending_tool_call_id = "tampered-call".to_string();
-    assert!(!mcp_pending_action_binding_matches(
+    assert!(!pending_action_binding_matches(
         run_id,
         Some(&record),
         &action,
@@ -2770,6 +3281,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         "apiUrl": format!("https://example.test/v1?authorization={URL_CANARY}"),
         "apiToken": API_TOKEN_CANARY,
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "searchConfig": {
             "mode": "tavily",
             "tavilyApiKey": SEARCH_CANARY
@@ -2780,15 +3292,23 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     let frozen_profile = agent_input.provider_profile_config.clone().unwrap();
     let frozen_key = agent_input.provider_protocol_key.clone().unwrap();
-    let action = AgentProposedAction::ToolCall {
-        call: AgentToolCall {
-            id: "secret-free-resume-call".to_string(),
-            tool: "approval_tool".to_string(),
-            args: json!({}),
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        },
+    let call = AgentToolCall {
+        id: "secret-free-resume-call".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
     };
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "secret-free-resume-run",
+        None,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+    ));
+    let action = AgentProposedAction::ToolCall { call };
     service
         .store_pending_action(
             "secret-free-resume-run",
@@ -2803,7 +3323,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     let row = storage.list_pending_agent_actions().unwrap().remove(0);
     assert!(row
         .agent_input_json
-        .contains("\"resumeInputSchemaVersion\":5"));
+        .contains("\"resumeInputSchemaVersion\":6"));
     for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
         assert!(!row.agent_input_json.contains(forbidden_key));
     }
@@ -2824,7 +3344,9 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
         api_token_override: Some("unrelated-restart-token".to_string()),
         supports_image: false,
         context_window_tokens: Some(64_000),
-        provider_profile_config: None,
+        provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
         input_price: "0".to_string(),
         cached_input_price: String::new(),
         output_price: "0".to_string(),
@@ -2903,6 +3425,22 @@ fn frozen_provider_resume_input_with_profile(
     input.provider_connection_revision =
         Some(snapshot.provider_connection_revisions["test-model"].clone());
     input.search_connection_revision = Some(snapshot.search_connection_revision);
+    let call = AgentToolCall {
+        id: "provider-resume-call".to_string(),
+        tool: "read_file".to_string(),
+        args: json!({ "path": "README.md" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        storage,
+        "provider-resume-run",
+        None,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: call.tool.clone(),
+        },
+    ));
     PersistedAgentResumeInput::decode(
         &PersistedAgentResumeInput::from_agent_input(&input)
             .unwrap()
@@ -2988,7 +3526,9 @@ fn pending_resume_preserves_frozen_protocol_across_unrelated_model_settings_edit
         api_token_override: Some("unrelated-token".to_string()),
         supports_image: false,
         context_window_tokens: Some(64_000),
-        provider_profile_config: None,
+        provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
         input_price: "0".to_string(),
         cached_input_price: String::new(),
         output_price: "0".to_string(),
@@ -3024,7 +3564,7 @@ fn pending_resume_preserves_frozen_generic_profile_when_current_model_selects_de
 
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     settings.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     storage.save_model_settings(settings).unwrap();
 
     let frozen_profile = frozen.agent_input.provider_profile_config.clone().unwrap();
@@ -3044,7 +3584,7 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
 
     let mut settings = storage.load_model_settings().unwrap().unwrap();
     settings.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     storage.save_model_settings(settings).unwrap();
     let deepseek = mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     let frozen = frozen_provider_resume_input_with_profile(
@@ -3063,6 +3603,7 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
         .as_object_mut()
         .unwrap()
         .remove("providerProfileConfig");
+    request["models"][0]["previousModelId"] = json!("test-model");
     request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
     storage
         .save_model_settings_request(
@@ -3075,12 +3616,7 @@ fn pending_resume_preserves_frozen_deepseek_profile_after_host_selects_generic()
 
     let current = storage.load_model_settings().unwrap().unwrap();
     assert_eq!(
-        current.models[0]
-            .provider_profile_config
-            .as_ref()
-            .unwrap()
-            .profile
-            .id,
+        current.models[0].provider_profile_config.profile.id,
         mycopilot_core::ProviderProfileId::GenericOpenAiChat
     );
     let restored = restore_agent_input_secrets(&storage, frozen).unwrap();
@@ -3155,6 +3691,14 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
     let fixture = tempdir().unwrap();
     let database_path = fixture.path().join("storage.sqlite");
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://example.test/v1/chat/completions",
+        "test-token",
+        "disabled",
+        "",
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-bad-reconciliation".to_string(),
@@ -3195,25 +3739,42 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
         .pragma_update(None, "ignore_check_constraints", 0)
         .unwrap();
     drop(corruption);
-    let action = AgentProposedAction::ToolCall {
-        call: AgentToolCall {
-            id: "bad-reconciliation-call".to_string(),
-            tool: "approval_tool".to_string(),
-            args: json!({}),
-            approval_status: AgentApprovalStatus::Required,
-            reason: None,
-        },
+    let call = AgentToolCall {
+        id: "bad-reconciliation-call".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
     };
+    let action = AgentProposedAction::ToolCall { call: call.clone() };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
-        "apiToken": "",
+        "apiToken": "test-token",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
-    freeze_generic_provider_protocol(
-        &mut agent_input,
-        format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()),
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "bad-reconciliation-run",
+        Some("bad-reconciliation-call"),
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: call.tool.clone(),
+        },
+    ));
+    append_durable_pending_trace(
+        &storage,
+        "conversation-bad-reconciliation",
+        "assistant-bad-reconciliation",
+        "bad-reconciliation-run",
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: call.tool.clone(),
+        },
+        1,
     );
     storage
         .store_pending_agent_action(AgentPendingActionRecord {
@@ -3302,7 +3863,20 @@ fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
         }],
     };
     storage
-        .append_in_progress_conversation_turn_trace(&trace, 10, 15)
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &[ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: "Reading the image.".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }],
+            10,
+            15,
+        )
         .unwrap();
 
     let _service = AgentService::new(storage.clone());
@@ -3335,6 +3909,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -3575,6 +4150,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -3598,6 +4174,15 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
         reason: None,
     };
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-missing-transition-row",
+        None,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+    ));
     service
         .store_pending_action(
             "run-missing-transition-row",
@@ -3638,7 +4223,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
 }
 
 #[test]
-fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation() {
+fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     let service = AgentService::new(Arc::clone(&storage));
@@ -3653,6 +4238,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -3669,7 +4255,11 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
                 id: call.id.clone(),
                 name: "tampered_tool".to_string(),
                 args: call.args.clone(),
-                provider_identity: None,
+                provider_identity: mycopilot_core::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: call.id.clone(),
+                    runtime_call_id: call.id.clone(),
+                },
             }],
             is_error: false,
             sources: vec!["tool_call".to_string()],
@@ -3698,7 +4288,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         conversation_trace_truncated: false,
     });
     save_test_pending_provider_for_input(&storage, &mut agent_input);
-    service
+    let error = service
         .store_pending_action(
             "run-invalid-checkpoint",
             "conversation-invalid-checkpoint",
@@ -3706,30 +4296,13 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
             AgentProposedAction::ToolCall { call: call.clone() },
             agent_input,
         )
-        .unwrap();
-
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let approval_error = service
-        .approve_action("run-invalid-checkpoint", &call.id, notifications)
         .unwrap_err();
-    assert!(approval_error.contains("原始 ToolCall 与冻结 action 不一致"));
     assert_eq!(
-        service.list_pending_actions()[0].status,
-        PendingActionStatus::Pending
+        error,
+        "Pending action frozen Tool Call identity is inconsistent."
     );
-
-    let cancellation_error = service
-        .cancel_action("run-invalid-checkpoint", &call.id)
-        .unwrap_err();
-    assert!(cancellation_error.contains("原始 ToolCall 与冻结 action 不一致"));
-    assert_eq!(
-        service.list_pending_actions()[0].status,
-        PendingActionStatus::Pending
-    );
-    let persisted = storage.list_pending_agent_actions().unwrap();
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].status, "pending");
-    assert_eq!(persisted[0].target_status, None);
+    assert!(service.list_pending_actions().is_empty());
+    assert!(storage.list_pending_agent_actions().unwrap().is_empty());
 }
 
 #[test]
@@ -3749,6 +4322,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -3764,41 +4338,18 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
             resources: None,
         }],
     });
-    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-        run_id: "run-cancel-rollback".to_string(),
-        pending_action_id: None,
-        context_items: Vec::new(),
-        next_model_request_index: 1,
-        queued_tool_calls: Vec::new(),
-        deferred_external_tool_call_count: 0,
-        suppressed_narration: false,
-        extension_snapshots: Vec::new(),
-        tool_set: crate::test_tool_set_checkpoint(),
-        run_context: None,
-        model_capabilities: ModelCapabilities::default(),
-        provider_profile_config: crate::test_provider_profile_config(),
-        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
-        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
-        provider_continuation_refs: Vec::new(),
-        run_world_state: crate::test_run_world_state(),
-        pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
-        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
-            sequence: 0,
-            call_id: call.id.clone(),
-            tool: call.tool.clone(),
-            operation: json!({}),
-            provenance: None,
-            approval_status: AgentApprovalStatus::Required,
-            truncated: false,
-        }],
-        next_conversation_trace_sequence: 1,
-        conversation_trace_truncated: false,
-    });
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-cancel-rollback",
+        None,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+    ));
     // These durable owner rows intentionally do not exist, forcing final trace persistence to
     // fail after the action has first transitioned to cancelled.
-    save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
         .store_pending_action(
             "run-cancel-rollback",
@@ -3891,42 +4442,20 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
-    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-        run_id: "run-cancel-usage-failure".to_string(),
-        pending_action_id: None,
-        context_items: Vec::new(),
-        next_model_request_index: 1,
-        queued_tool_calls: Vec::new(),
-        deferred_external_tool_call_count: 0,
-        suppressed_narration: false,
-        extension_snapshots: Vec::new(),
-        tool_set: crate::test_tool_set_checkpoint(),
-        run_context: None,
-        model_capabilities: ModelCapabilities::default(),
-        provider_profile_config: crate::test_provider_profile_config(),
-        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
-        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
-        provider_continuation_refs: Vec::new(),
-        run_world_state: crate::test_run_world_state(),
-        pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
-        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
-            sequence: 0,
-            call_id: call.id.clone(),
-            tool: call.tool.clone(),
-            operation: json!({}),
-            provenance: None,
-            approval_status: AgentApprovalStatus::Required,
-            truncated: false,
-        }],
-        next_conversation_trace_sequence: 1,
-        conversation_trace_truncated: false,
-    });
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-cancel-usage-failure",
+        None,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+    ));
     service
         .store_pending_action(
             "run-cancel-usage-failure",
@@ -4044,49 +4573,46 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         byte_count: 5,
         approval_status: AgentApprovalStatus::Required,
     };
-    let call = tool_call_for_action(&AgentProposedAction::FileWrite {
-        file_write: file_write.clone(),
-    });
+    let call = AgentToolCall {
+        id: file_write.id.clone(),
+        tool: "write_file".to_string(),
+        args: json!({
+            "phase": "finish",
+            "draftId": file_write.draft_id,
+            "summary": file_write.summary,
+        }),
+        approval_status: file_write.approval_status,
+        reason: file_write.summary.clone(),
+    };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
-    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-        run_id: "run-file-write-cancel-failure".to_string(),
-        pending_action_id: None,
-        context_items: Vec::new(),
-        next_model_request_index: 1,
-        queued_tool_calls: Vec::new(),
-        deferred_external_tool_call_count: 0,
-        suppressed_narration: false,
-        extension_snapshots: Vec::new(),
-        tool_set: crate::test_tool_set_checkpoint(),
-        run_context: None,
-        model_capabilities: ModelCapabilities::default(),
-        provider_profile_config: crate::test_provider_profile_config(),
-        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
-        assistant_turn_identity: crate::test_assistant_turn_identity(&[action_id]),
-        provider_continuation_refs: Vec::new(),
-        run_world_state: crate::test_run_world_state(),
-        pending_tool_call_id: action_id.to_string(),
-        conversation_model_context_items: Vec::new(),
-        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
-            sequence: 0,
-            call_id: action_id.to_string(),
-            tool: call.tool.clone(),
-            operation: call.args.clone(),
-            provenance: None,
-            approval_status: AgentApprovalStatus::Required,
-            truncated: false,
-        }],
-        next_conversation_trace_sequence: 1,
-        conversation_trace_truncated: false,
-    });
     save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        "run-file-write-cancel-failure",
+        None,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: call.tool.clone(),
+        },
+    ));
+    append_durable_pending_trace(
+        &storage,
+        "conversation-file-write-cancel-failure",
+        "assistant-file-write-cancel-failure",
+        "run-file-write-cancel-failure",
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: call.tool.clone(),
+        },
+        1,
+    );
     service
         .store_pending_action(
             "run-file-write-cancel-failure",
@@ -4119,20 +4645,33 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
             .status,
         "rejected"
     );
-    assert!(storage
-        .get_conversation_turn_trace("assistant-file-write-cancel-failure")
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace("assistant-file-write-cancel-failure")
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::InProgress
+    );
     let conversation = storage
         .load_conversation("conversation-file-write-cancel-failure")
         .unwrap()
         .unwrap();
     assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+    let reconciled_at = mycopilot_core::storage::now_ms();
     let interrupted = storage
-        .reconcile_interrupted_pending_agent_actions(42)
+        .reconcile_interrupted_pending_agent_actions(reconciled_at)
         .unwrap();
     assert_eq!(interrupted.len(), 1);
     assert_eq!(interrupted[0].status, "executing");
     assert_eq!(interrupted[0].target_status.as_deref(), Some("cancelled"));
     assert!(storage.list_pending_agent_actions().unwrap().is_empty());
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace("assistant-file-write-cancel-failure")
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
 }

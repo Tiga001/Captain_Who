@@ -142,14 +142,12 @@ fn typed_approval_binds_independent_high_entropy_ids_and_a_safe_argument_summary
     assert!(rendered.contains("\"payloadPersistence\":\"process_only\""));
     assert!(!rendered.contains("payloadRef"));
     assert!(!rendered.contains("ciphertext"));
-    let mut legacy = serde_json::to_value(&approval).unwrap();
-    legacy.as_object_mut().unwrap().remove("payloadPersistence");
-    assert_eq!(
-        serde_json::from_value::<AgentMcpToolApproval>(legacy)
-            .unwrap()
-            .payload_persistence,
-        AgentMcpApprovalPayloadPersistence::ProcessOnly
-    );
+    let mut missing_persistence = serde_json::to_value(&approval).unwrap();
+    missing_persistence
+        .as_object_mut()
+        .unwrap()
+        .remove("payloadPersistence");
+    assert!(serde_json::from_value::<AgentMcpToolApproval>(missing_persistence).is_err());
     let prepared = invoker.prepared.lock().unwrap();
     assert_eq!(
         prepared

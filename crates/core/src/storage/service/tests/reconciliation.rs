@@ -1,5 +1,109 @@
 use super::*;
 
+fn current_model_context_for_trace(
+    trace: &ConversationTurnTrace,
+) -> Vec<crate::ConversationModelContextItem> {
+    trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence, content, ..
+            } => Some(crate::ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
+            ConversationTurnTraceItem::UserGuidance {
+                sequence, content, ..
+            } => Some(crate::ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
+            ConversationTurnTraceItem::ToolCall {
+                sequence,
+                call_id,
+                tool,
+                operation,
+                ..
+            } => Some(crate::ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                    id: call_id.clone(),
+                    name: tool.clone(),
+                    args: operation.clone(),
+                    provider_identity: crate::AgentProviderToolCallIdentity {
+                        provider_tool_index: u32::try_from(*sequence).unwrap(),
+                        provider_call_id: call_id.clone(),
+                        runtime_call_id: call_id.clone(),
+                    },
+                }],
+                is_error: false,
+            }),
+            ConversationTurnTraceItem::ToolResult {
+                sequence,
+                call_id,
+                success,
+                observation,
+                ..
+            } => Some(crate::ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: serde_json::to_string(observation).unwrap(),
+                tool_call_id: Some(call_id.clone()),
+                tool_calls: Vec::new(),
+                is_error: !success,
+            }),
+            ConversationTurnTraceItem::CommandSessionLifecycle { .. } => None,
+        })
+        .collect()
+}
+
+trait CurrentManualSettlementTestExt {
+    fn commit_current_manual_settlement(
+        &self,
+        terminal_audit: &AgentActionAuditRecord,
+        expected_pending_status: &str,
+        target_status: &str,
+        trace: &ConversationTurnTrace,
+        committed_at: i64,
+    ) -> Result<AgentPendingActionResultCommitOutcome, String>;
+}
+
+impl CurrentManualSettlementTestExt for StorageService {
+    fn commit_current_manual_settlement(
+        &self,
+        terminal_audit: &AgentActionAuditRecord,
+        expected_pending_status: &str,
+        target_status: &str,
+        trace: &ConversationTurnTrace,
+        committed_at: i64,
+    ) -> Result<AgentPendingActionResultCommitOutcome, String> {
+        self.commit_pending_agent_action_audited_result_trace_with_model_context(
+            terminal_audit,
+            expected_pending_status,
+            target_status,
+            trace,
+            &current_model_context_for_trace(trace),
+            committed_at,
+        )
+    }
+}
+
 fn in_progress_result_trace(
     conversation_id: &str,
     assistant_message_id: &str,
@@ -17,7 +121,9 @@ fn in_progress_result_trace(
                 sequence: 0,
                 call_id: "action-atomic-result".to_string(),
                 tool: "office_spreadsheet".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "office_spreadsheet".to_string(),
+                },
                 operation: serde_json::json!({ "operation": "set" }),
                 approval_status: crate::AgentApprovalStatus::Approved,
                 truncated: false,
@@ -60,7 +166,6 @@ fn manual_command_settlement(
             reason: Some("test atomic settlement".to_string()),
             observe: None,
             inputs: Vec::new(),
-            runtime: None,
             runtime_binding: None,
         },
     };
@@ -127,14 +232,7 @@ fn manual_command_settlement(
         authoritative_archive_ref: None,
         history_open: None,
     };
-    let tool_result = AgentToolResult {
-        exact_archive_file: None,
-        call_id: call_id.to_string(),
-        tool: "run_command".to_string(),
-        ok: true,
-        result: Some(serde_json::to_value(&command_result).unwrap()),
-        error: None,
-    };
+    let tool_result = crate::command::command_tool_result(call_id, &command_result);
     let mut terminal_audit = approved_audit.clone();
     terminal_audit.status = "completed".to_string();
     terminal_audit.command_result_json = Some(serde_json::to_string(&command_result).unwrap());
@@ -164,7 +262,9 @@ fn manual_command_settlement(
                 sequence: 0,
                 call_id: call_id.to_string(),
                 tool: "run_command".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
                 operation: trace_operation,
                 approval_status: crate::AgentApprovalStatus::Approved,
                 truncated: false,
@@ -186,25 +286,6 @@ enum ManualNonCommandFileEffect {
     SkillMaterialization,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum LegacyManualAuditShape {
-    Missing,
-    Preterminal,
-    TamperedTerminal,
-}
-
-impl LegacyManualAuditShape {
-    const ALL: [Self; 3] = [Self::Missing, Self::Preterminal, Self::TamperedTerminal];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Missing => "missing-audit",
-            Self::Preterminal => "preterminal-audit",
-            Self::TamperedTerminal => "tampered-terminal-audit",
-        }
-    }
-}
-
 type CommittedManualFileEffectState = (
     Option<String>,
     String,
@@ -212,23 +293,6 @@ type CommittedManualFileEffectState = (
     Option<String>,
     String,
     String,
-    Option<String>,
-);
-
-type LegacyManualFileEffectSplitState = (
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-);
-
-type UnverifiableLegacyManualFileEffectState = (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
     Option<String>,
 );
 
@@ -292,13 +356,11 @@ impl ManualNonCommandFileEffect {
                             } else {
                                 "budget.xlsx".to_string()
                             }),
-                            parameters: crate::office::OfficeRequestParameters::Typed(
-                                crate::office::OfficeOperationParameters::Create {
-                                    locale: None,
-                                    minimal: false,
-                                    overwrite: false,
-                                },
-                            ),
+                            parameters: crate::office::OfficeOperationParameters::Create {
+                                locale: None,
+                                minimal: false,
+                                overwrite: false,
+                            },
                             output_path: None,
                             destination_path: None,
                             inputs: Vec::new(),
@@ -314,10 +376,6 @@ impl ManualNonCommandFileEffect {
                         ],
                         paths: Vec::new(),
                         input_bindings: Vec::new(),
-                        document_precondition: None,
-                        output_precondition: None,
-                        destination_precondition: None,
-                        resource_preconditions: Vec::new(),
                     },
                     approval_status: crate::AgentApprovalStatus::Required,
                     reason: "create the reviewed workbook".to_string(),
@@ -476,7 +534,9 @@ fn manual_non_command_file_effect_settlement(
                 sequence: 0,
                 call_id: call_id.to_string(),
                 tool: effect.tool_name().to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: effect.tool_name().to_string(),
+                },
                 operation: tool_operation,
                 approval_status: crate::AgentApprovalStatus::Approved,
                 truncated: false,
@@ -637,7 +697,7 @@ fn mcp_rejection_settlement(
                 sequence: 0,
                 call_id: call_id.to_string(),
                 tool: model_tool_name.to_string(),
-                provenance: Some(crate::AgentToolIdentity::Mcp { provenance }),
+                provenance: crate::AgentToolIdentity::Mcp { provenance },
                 operation: serde_json::json!({}),
                 approval_status: crate::AgentApprovalStatus::Required,
                 truncated: false,
@@ -697,57 +757,6 @@ fn assert_manual_file_effect_is_uncommitted(
         .is_none());
 }
 
-fn assert_legacy_manual_file_effect_remains_split(
-    service: &StorageService,
-    storage_id: &str,
-    assistant_message_id: &str,
-    expected_pending_status: &str,
-    terminal_tool_result_json: &str,
-    frozen_action_json: &str,
-) {
-    let connection = service.state.connection().unwrap();
-    let state: LegacyManualFileEffectSplitState = connection
-        .query_row(
-            "
-            SELECT pending.status,
-                   pending.target_status,
-                   audit.status,
-                   audit.command_result_json,
-                   audit.tool_result_json,
-                   audit.action_json
-            FROM agent_pending_actions pending
-            JOIN agent_action_audit audit ON audit.action_id = pending.action_id
-            WHERE pending.action_id = ?1
-            ",
-            [storage_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            },
-        )
-        .unwrap();
-    assert_eq!(state.0, expected_pending_status);
-    assert_eq!(
-        state.1, None,
-        "legacy pending target was partially repaired"
-    );
-    assert_eq!(state.2, "completed");
-    assert_eq!(state.3, None, "non-command result column was populated");
-    assert_eq!(state.4.as_deref(), Some(terminal_tool_result_json));
-    assert_eq!(state.5, frozen_action_json);
-    drop(connection);
-    assert!(service
-        .get_conversation_turn_trace(assistant_message_id)
-        .unwrap()
-        .is_none());
-}
-
 fn save_assistant_conversation(
     service: &StorageService,
     conversation_id: &str,
@@ -770,6 +779,98 @@ fn save_assistant_conversation_in_scope(
     let mut stored = conversation(conversation_id, project_id, assistant_message_id);
     stored.messages[0].role = "assistant".to_string();
     service.save_conversation(stored).unwrap();
+}
+
+/// Seeds the exact durable observer state that every current pending action has before it can
+/// cross an approval/dispatch boundary. Startup reconciliation must consume this trace and model
+/// projection; tests must not manufacture the removed pre-trace storage shape.
+fn seed_current_in_progress_tool_trace(
+    service: &StorageService,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    call_id: &str,
+    tool_name: &str,
+) -> ConversationTurnTrace {
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call_id.to_string(),
+            tool: tool_name.to_string(),
+            provenance: crate::AgentToolIdentity::Builtin {
+                tool_name: tool_name.to_string(),
+            },
+            operation: serde_json::json!({}),
+            approval_status: crate::AgentApprovalStatus::Approved,
+            truncated: false,
+        }],
+    };
+    service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            // The exact Provider/Runtime identity is durably staged for startup recovery. Context
+            // rendering excludes this open exchange until terminalization appends its ToolResult.
+            &current_model_context_for_trace(&trace),
+            1,
+            1,
+        )
+        .unwrap();
+    trace
+}
+
+fn seed_current_terminal_assistant_trace(
+    service: &StorageService,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    status: crate::ConversationTurnTraceTerminalStatus,
+) {
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: status,
+        terminal_error: (status == crate::ConversationTurnTraceTerminalStatus::Failed)
+            .then(|| "The run ended with a safe test failure.".to_string()),
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: "current assistant output".to_string(),
+            truncated: false,
+        }],
+    };
+    service
+        .finalize_chat_message_with_conversation_trace_model_context_and_usage(
+            conversation_id,
+            assistant_message_id,
+            "current assistant output",
+            Some(
+                if status == crate::ConversationTurnTraceTerminalStatus::Completed {
+                    "sent"
+                } else {
+                    "error"
+                },
+            ),
+            if status == crate::ConversationTurnTraceTerminalStatus::Completed {
+                "completed"
+            } else {
+                "failed"
+            },
+            &trace,
+            Some(&current_model_context_for_trace(&trace)),
+            1,
+            40,
+            None,
+        )
+        .unwrap();
 }
 
 fn file_effect_action_type(tool_name: &str) -> &'static str {
@@ -839,7 +940,7 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
 
     assert_eq!(
         service
-            .commit_pending_agent_action_audited_result_trace(
+            .commit_current_manual_settlement(
                 &terminal_audit,
                 "pending",
                 "rejected",
@@ -958,7 +1059,11 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
         .get_conversation_turn_trace(assistant_message_id)
         .unwrap()
         .unwrap();
-    assert_eq!(recovered_trace, expected_trace);
+    assert_eq!(
+        recovered_trace.terminal_status,
+        crate::ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert_eq!(recovered_trace.items, expected_trace.items);
     assert_eq!(
         recovered_trace
             .items
@@ -968,6 +1073,13 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
         1,
         "startup reconciliation must not append or replay the rejected MCP call"
     );
+    let recovered_model_context = service
+        .get_conversation_model_context_log(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    recovered_trace
+        .validate_complete_model_context(&recovered_model_context.items)
+        .unwrap();
 
     assert!(service
         .reconcile_interrupted_pending_agent_actions(43)
@@ -976,10 +1088,79 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
     assert_eq!(
         service
             .get_conversation_turn_trace(assistant_message_id)
-            .unwrap()
-            .as_ref(),
-        Some(&expected_trace)
+            .unwrap(),
+        Some(recovered_trace)
     );
+}
+
+#[test]
+fn malformed_mcp_action_is_scrubbed_from_its_durable_mcp_identity() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let run_id = "run-malformed-mcp";
+    let conversation_id = "conversation-malformed-mcp";
+    let assistant_message_id = "assistant-malformed-mcp";
+    let (mut pending, mut audit, _, mut trace, _) =
+        mcp_rejection_settlement(run_id, conversation_id, assistant_message_id);
+    trace.items.truncate(1);
+    pending.action_json = serde_json::json!({ "unknownMcpAction": true }).to_string();
+    pending.agent_input_json = serde_json::json!({ "unknownMcpResume": true }).to_string();
+    audit.action_json =
+        serde_json::json!({ "privateMcpActionCanary": "PRIVATE_MCP_ACTION_CANARY" }).to_string();
+    save_assistant_conversation(&service, conversation_id, assistant_message_id);
+    service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &current_model_context_for_trace(&trace),
+            10,
+            10,
+        )
+        .unwrap();
+    service.store_pending_agent_action(pending.clone()).unwrap();
+    service.upsert_agent_action_audit(audit).unwrap();
+
+    assert!(service
+        .terminalize_mcp_agent_action_on_startup(
+            &pending.action_id,
+            "pending",
+            McpStartupActionTerminalOutcome::PayloadUnavailable,
+            42,
+        )
+        .unwrap());
+
+    let connection = service.state.connection().unwrap();
+    let scrubbed: (String, String, String, String) = connection
+        .query_row(
+            "SELECT pending.status, pending.action_json, pending.agent_input_json,
+                    audit.action_json
+             FROM agent_pending_actions AS pending
+             JOIN agent_action_audit AS audit ON audit.action_id = pending.action_id
+             WHERE pending.action_id = ?1",
+            [&pending.action_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        scrubbed,
+        (
+            "failed".to_string(),
+            "{}".to_string(),
+            "{}".to_string(),
+            "{}".to_string(),
+        )
+    );
+    drop(connection);
+    let terminal_trace = service
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    let terminal_context = service
+        .get_conversation_model_context_log(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    terminal_trace
+        .validate_complete_model_context(&terminal_context.items)
+        .unwrap();
 }
 
 #[test]
@@ -1031,7 +1212,7 @@ fn mcp_server_tool_error_is_a_completed_authoritative_receipt() {
         .unwrap();
     assert_eq!(
         service
-            .commit_pending_agent_action_audited_result_trace(
+            .commit_current_manual_settlement(
                 &terminal_audit,
                 "executing",
                 "completed",
@@ -1104,13 +1285,7 @@ fn mcp_durable_receipt_rejects_unknown_canary_fields_without_partial_commit() {
     service.store_pending_agent_action(pending).unwrap();
     service.upsert_agent_action_audit(pending_audit).unwrap();
     let error = service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal_audit,
-            "pending",
-            "rejected",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal_audit, "pending", "rejected", &trace, 12)
         .unwrap_err();
     assert!(error.contains("unknown field"), "{error}");
 
@@ -1263,16 +1438,24 @@ fn startup_reconciliation_conservatively_restores_interrupted_manual_file_effect
         cases.iter().enumerate()
     {
         save_assistant_conversation(&service, conversation_id, assistant_message_id);
-        service
-            .store_pending_agent_action(interrupted_file_effect(
-                storage_id,
-                run_id,
-                conversation_id,
-                assistant_message_id,
-                tool_name,
-                index as i64 + 1,
-            ))
-            .unwrap();
+        let trace = seed_current_in_progress_tool_trace(
+            &service,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            &format!("{storage_id}:call"),
+            tool_name,
+        );
+        let mut pending = interrupted_file_effect(
+            storage_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            tool_name,
+            index as i64 + 1,
+        );
+        attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
+        service.store_pending_agent_action(pending).unwrap();
         service
             .upsert_agent_action_audit(file_effect_audit(
                 storage_id,
@@ -1347,9 +1530,18 @@ fn seed_approved_command_with_terminal_session(
         AgentCommandSessionCreate, AgentCommandSessionTerminalUpdate,
         AGENT_COMMAND_SESSION_SCHEMA_VERSION,
     };
-    let (pending, approved, _terminal, _trace) =
+    let (mut pending, approved, _terminal, _trace) =
         manual_command_settlement(storage_id, call_id, conversation_id, assistant_message_id);
     save_assistant_conversation(service, conversation_id, assistant_message_id);
+    let trace = seed_current_in_progress_tool_trace(
+        service,
+        "run-1",
+        conversation_id,
+        assistant_message_id,
+        call_id,
+        "run_command",
+    );
+    attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
     service.store_pending_agent_action(pending).unwrap();
     service.upsert_agent_action_audit(approved).unwrap();
     service
@@ -1550,16 +1742,24 @@ fn unsettled_file_effects_preserve_conversation_scope_without_a_project() {
         "assistant-unscoped-manual",
         None,
     );
-    service
-        .store_pending_agent_action(interrupted_file_effect(
-            "run-unscoped-manual:manual-call",
-            "run-unscoped-manual",
-            "conversation-unscoped-manual",
-            "assistant-unscoped-manual",
-            "skills_run_script",
-            2,
-        ))
-        .unwrap();
+    let trace = seed_current_in_progress_tool_trace(
+        &service,
+        "run-unscoped-manual",
+        "conversation-unscoped-manual",
+        "assistant-unscoped-manual",
+        "run-unscoped-manual:manual-call:call",
+        "skills_run_script",
+    );
+    let mut pending = interrupted_file_effect(
+        "run-unscoped-manual:manual-call",
+        "run-unscoped-manual",
+        "conversation-unscoped-manual",
+        "assistant-unscoped-manual",
+        "skills_run_script",
+        2,
+    );
+    attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
+    service.store_pending_agent_action(pending).unwrap();
     service
         .upsert_agent_action_audit(file_effect_audit(
             "run-unscoped-manual:manual-call",
@@ -1609,7 +1809,7 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
             "conversation-settled-command",
             "assistant-settled-command",
         );
-    attach_manual_file_effect_recovery_checkpoint(&mut command_pending, &command_trace);
+    attach_current_manual_file_effect_checkpoint(&mut command_pending, &command_trace);
     save_assistant_conversation(
         &service,
         "conversation-settled-command",
@@ -1631,7 +1831,11 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
                     ConversationTurnTraceItem::ToolCall { operation, .. } => operation.clone(),
                     _ => panic!("manual settlement must start with a ToolCall"),
                 },
-                provider_identity: None,
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: "settled-command".to_string(),
+                    runtime_call_id: "settled-command".to_string(),
+                },
             }],
             is_error: false,
         },
@@ -1680,18 +1884,12 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
             &conversation_id,
             &assistant_message_id,
         );
-        attach_manual_file_effect_recovery_checkpoint(&mut pending, &trace);
+        attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
         service.upsert_agent_action_audit(approved).unwrap();
         service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
         expected_action_ids.push(storage_id);
     }
@@ -1730,68 +1928,81 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
         .contains("EXACT_APPROVAL_RESULT"));
 }
 
-fn attach_manual_file_effect_recovery_checkpoint(
+fn attach_current_manual_file_effect_checkpoint(
     pending: &mut AgentPendingActionRecord,
     trace: &ConversationTurnTrace,
 ) {
-    let (call_id, tool, operation) = trace
+    let (call_id, tool) = trace
         .items
         .iter()
+        .rev()
         .find_map(|item| match item {
-            ConversationTurnTraceItem::ToolCall {
-                call_id,
-                tool,
-                operation,
-                ..
-            } => Some((call_id.clone(), tool.clone(), operation.clone())),
+            ConversationTurnTraceItem::ToolCall { call_id, tool, .. } => {
+                Some((call_id.clone(), tool.clone()))
+            }
             _ => None,
         })
         .expect("manual file-effect settlement trace has a ToolCall");
-    let checkpoint_call = ConversationTurnTraceItem::ToolCall {
-        sequence: 0,
-        call_id: call_id.clone(),
-        tool,
-        provenance: None,
-        operation,
-        approval_status: crate::AgentApprovalStatus::Required,
-        truncated: false,
+    let provider_identity = crate::AgentProviderToolCallIdentity {
+        provider_tool_index: 0,
+        provider_call_id: call_id.clone(),
+        runtime_call_id: call_id.clone(),
+    };
+    let provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
+        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+    );
+    let provider_protocol_key = crate::ProviderProtocolKey::new(
+        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+        &provider_profile_config,
+        "reconciliation-test",
+        Some("provider-protocol-v1:reconciliation-test".to_string()),
+    )
+    .unwrap();
+    let checkpoint = crate::AgentRunCheckpoint {
+        version: crate::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        run_id: pending.run_id.clone(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        tool_set: crate::AgentRunToolSetCheckpoint {
+            stable_revision: "stable-tool-set-test-v1".to_string(),
+            dynamic_revision: "dynamic-tool-set-test-v1".to_string(),
+            effective_revision: "effective-tool-set-test-v1".to_string(),
+            exposed_tool_names: vec![tool.clone()],
+        },
+        run_context: None,
+        model_capabilities: crate::ModelCapabilities::default(),
+        provider_profile_config,
+        provider_protocol_key,
+        assistant_turn_identity: crate::AgentAssistantTurnCheckpointIdentity {
+            assistant_turn_id: format!("turn:{}", pending.run_id),
+            assistant_turn_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            tool_call_identities: vec![provider_identity.clone()],
+        },
+        provider_continuation_refs: Vec::new(),
+        run_world_state: serde_json::from_value(test_checkpoint_run_world_state()).unwrap(),
+        pending_action_id: None,
+        pending_tool_call_id: call_id.clone(),
+        conversation_trace_items: trace.items.clone(),
+        conversation_model_context_items: current_model_context_for_trace(trace),
+        next_conversation_trace_sequence: trace
+            .items
+            .last()
+            .map(ConversationTurnTraceItem::sequence)
+            .unwrap_or(0)
+            .saturating_add(1),
+        conversation_trace_truncated: trace.truncated,
     };
     pending.agent_input_json = serde_json::json!({
-        "apiUrl": "https://not-used.invalid/v1",
-        "apiToken": "redacted",
-        "model": "reconciliation-test",
-        "messages": [],
-        "resumeCheckpoint": {
-            // Startup reconciliation must inspect this legacy v5 projection without treating it
-            // as a resumable v6 checkpoint. True approval restore remains strict in core-server.
-            "version": 5,
-            "runId": pending.run_id,
-            "contextItems": [],
-            "nextModelRequestIndex": 1,
-            "queuedToolCalls": [],
-            "suppressedNarration": false,
-            "extensionSnapshots": [],
-            "pendingToolCallId": call_id,
-            "conversationTraceItems": [checkpoint_call],
-            "nextConversationTraceSequence": 1,
-            "conversationTraceTruncated": false,
-            "modelVisibleTraceItemCount": 0,
-            "toolSet": test_checkpoint_tool_set(),
-            "runContext": null,
-            "modelCapabilities": { "imageInput": false },
-            "runWorldState": test_checkpoint_run_world_state()
-        }
+        "resumeInputSchemaVersion": 6,
+        "resumeCheckpoint": checkpoint,
     })
     .to_string();
-}
-
-fn test_checkpoint_tool_set() -> serde_json::Value {
-    serde_json::json!({
-        "stableRevision": "stable-tool-set-test-v1",
-        "dynamicRevision": "dynamic-tool-set-test-v1",
-        "effectiveRevision": "effective-tool-set-test-v1",
-        "exposedToolNames": []
-    })
 }
 
 fn test_checkpoint_run_world_state() -> serde_json::Value {
@@ -1836,13 +2047,7 @@ fn every_manual_non_command_file_effect_settles_atomically_and_idempotently() {
         service.upsert_agent_action_audit(approved).unwrap();
 
         let outcome = service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
         assert_eq!(
             outcome,
@@ -1901,13 +2106,7 @@ fn every_manual_non_command_file_effect_settles_atomically_and_idempotently() {
         );
 
         let retry = service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
         assert_eq!(
             retry,
@@ -1942,13 +2141,7 @@ fn every_manual_non_command_trace_failure_rolls_back_audit_and_pending_target() 
         service.upsert_agent_action_audit(approved).unwrap();
 
         let error = service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap_err();
         assert!(
             error.contains("assistant message does not exist"),
@@ -1990,13 +2183,7 @@ fn manual_non_command_settlement_rejects_command_result_json_without_partial_sta
         service.upsert_agent_action_audit(approved).unwrap();
 
         let error = service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap_err();
         assert!(
             error.contains("non-command manual file-effect audit unexpectedly contains"),
@@ -2040,7 +2227,7 @@ fn manual_non_command_settlement_strictly_binds_frozen_action_tool_and_call_iden
         different_action.action_json =
             serde_json::to_string(&effect.frozen_action(&call_id, true)).unwrap();
         let error = service
-            .commit_pending_agent_action_audited_result_trace(
+            .commit_current_manual_settlement(
                 &different_action,
                 "approved",
                 "completed",
@@ -2062,13 +2249,7 @@ fn manual_non_command_settlement_strictly_binds_frozen_action_tool_and_call_iden
         let mut different_tool = terminal.clone();
         different_tool.tool_name = "run_command".to_string();
         let error = service
-            .commit_pending_agent_action_audited_result_trace(
-                &different_tool,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&different_tool, "approved", "completed", &trace, 12)
             .unwrap_err();
         assert!(
             error.contains("audit type does not match the frozen action"),
@@ -2103,7 +2284,7 @@ fn manual_non_command_settlement_strictly_binds_frozen_action_tool_and_call_iden
             }
         }
         let error = service
-            .commit_pending_agent_action_audited_result_trace(
+            .commit_current_manual_settlement(
                 &different_call,
                 "approved",
                 "completed",
@@ -2149,13 +2330,7 @@ fn manual_non_command_terminal_conflict_preserves_first_atomic_settlement() {
         service.store_pending_agent_action(pending).unwrap();
         service.upsert_agent_action_audit(approved).unwrap();
         service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
 
         let mut conflicting = terminal.clone();
@@ -2171,13 +2346,7 @@ fn manual_non_command_terminal_conflict_preserves_first_atomic_settlement() {
         conflicting.tool_result_json =
             Some(serde_json::to_string(&conflicting_tool_result).unwrap());
         let error = service
-            .commit_pending_agent_action_audited_result_trace(
-                &conflicting,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&conflicting, "approved", "completed", &trace, 12)
             .unwrap_err();
         assert!(
             error.contains("different terminal result"),
@@ -2217,13 +2386,7 @@ fn manual_non_command_terminal_conflict_preserves_first_atomic_settlement() {
         );
         assert_eq!(
             service
-                .commit_pending_agent_action_audited_result_trace(
-                    &terminal,
-                    "approved",
-                    "completed",
-                    &trace,
-                    12,
-                )
+                .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12,)
                 .unwrap(),
             AgentPendingActionResultCommitOutcome::Idempotent
         );
@@ -2249,13 +2412,7 @@ fn manual_command_audit_target_and_trace_commit_as_one_idempotent_transaction() 
     service.upsert_agent_action_audit(approved).unwrap();
 
     let outcome = service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
         .unwrap();
     assert_eq!(
         outcome,
@@ -2289,13 +2446,7 @@ fn manual_command_audit_target_and_trace_commit_as_one_idempotent_transaction() 
     drop(connection);
 
     let retry = service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
         .unwrap();
     assert_eq!(retry, AgentPendingActionResultCommitOutcome::Idempotent);
 }
@@ -2411,9 +2562,7 @@ fn failed_managed_pdf_settlement_preserves_opaque_history_route_across_durable_a
     service.upsert_agent_action_audit(approved).unwrap();
     assert_eq!(
         service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal, "approved", "failed", &trace, 12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "failed", &trace, 12,)
             .unwrap(),
         AgentPendingActionResultCommitOutcome::Committed {
             trace_changed: true,
@@ -2424,9 +2573,7 @@ fn failed_managed_pdf_settlement_preserves_opaque_history_route_across_durable_a
     let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
     assert_eq!(
         reopened
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal, "approved", "failed", &trace, 12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "failed", &trace, 12,)
             .unwrap(),
         AgentPendingActionResultCommitOutcome::Idempotent
     );
@@ -2464,6 +2611,10 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
     )
     .unwrap();
     let message = "The command finished, but its final action audit could not be persisted. Inspect the observed artifacts before retrying.";
+    let canonical_execution =
+        crate::command::command_tool_result("audit-wrapper-command", &command_result)
+            .result
+            .unwrap();
     let fallback = AgentToolResult {
         exact_archive_file: None,
         call_id: "audit-wrapper-command".to_string(),
@@ -2477,7 +2628,7 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
             "executionAttempted": true,
             "effectsMayHaveOccurred": true,
             "auditError": "simulated first-commit failure",
-            "execution": command_result,
+            "execution": canonical_execution,
         })),
         error: Some(message.to_string()),
     };
@@ -2500,9 +2651,7 @@ fn manual_command_audit_failure_wrapper_preserves_the_exact_execution_evidence()
     service.store_pending_agent_action(pending).unwrap();
     service.upsert_agent_action_audit(approved).unwrap();
     service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal, "approved", "failed", &trace, 12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "failed", &trace, 12)
         .unwrap();
     service
         .reconcile_interrupted_pending_agent_actions(42)
@@ -2542,13 +2691,7 @@ fn manual_command_settlement_inspection_distinguishes_commit_boundaries() {
     );
 
     service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
         .unwrap();
     assert_eq!(
         service
@@ -2617,13 +2760,7 @@ fn manual_command_trace_failure_rolls_back_audit_and_target() {
     service.upsert_agent_action_audit(approved).unwrap();
 
     let error = service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
         .unwrap_err();
     assert!(error.contains("assistant message does not exist"));
 
@@ -2645,47 +2782,6 @@ fn manual_command_trace_failure_rolls_back_audit_and_target() {
 }
 
 #[test]
-fn manual_command_settlement_repairs_a_compatible_legacy_partial_commit() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let (pending, _approved, terminal, trace) = manual_command_settlement(
-        "run-1:partial-command",
-        "partial-command",
-        "conversation-partial-command",
-        "assistant-partial-command",
-    );
-    save_assistant_conversation(
-        &service,
-        "conversation-partial-command",
-        "assistant-partial-command",
-    );
-    service.store_pending_agent_action(pending).unwrap();
-    // Reproduce a row created by the former split-commit implementation: the exact terminal
-    // audit exists, while target_status and the paired trace were never committed.
-    service.upsert_agent_action_audit(terminal.clone()).unwrap();
-
-    let outcome = service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
-        .unwrap();
-    assert_eq!(
-        outcome,
-        AgentPendingActionResultCommitOutcome::Committed {
-            trace_changed: true
-        }
-    );
-    assert!(service
-        .get_conversation_turn_trace("assistant-partial-command")
-        .unwrap()
-        .is_some());
-}
-
-#[test]
 fn manual_command_terminal_retry_with_different_result_conflicts_without_overwrite() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
@@ -2703,13 +2799,7 @@ fn manual_command_terminal_retry_with_different_result_conflicts_without_overwri
     service.store_pending_agent_action(pending).unwrap();
     service.upsert_agent_action_audit(approved).unwrap();
     service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
         .unwrap();
 
     let mut conflicting = terminal.clone();
@@ -2720,13 +2810,7 @@ fn manual_command_terminal_retry_with_different_result_conflicts_without_overwri
     command_result.stdout = "different output".to_string();
     conflicting.command_result_json = Some(serde_json::to_string(&command_result).unwrap());
     let error = service
-        .commit_pending_agent_action_audited_result_trace(
-            &conflicting,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&conflicting, "approved", "completed", &trace, 12)
         .unwrap_err();
     assert!(error.contains("durable command execution result"));
 
@@ -2760,7 +2844,7 @@ fn concurrent_manual_command_settlement_is_exactly_once_across_storage_instances
     let first_trace = trace.clone();
     let first_thread = std::thread::spawn(move || {
         first_barrier.wait();
-        first.commit_pending_agent_action_audited_result_trace(
+        first.commit_current_manual_settlement(
             &first_terminal,
             "approved",
             "completed",
@@ -2771,13 +2855,7 @@ fn concurrent_manual_command_settlement_is_exactly_once_across_storage_instances
     let second_barrier = std::sync::Arc::clone(&barrier);
     let second_thread = std::thread::spawn(move || {
         second_barrier.wait();
-        second.commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        second.commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
     });
 
     let outcomes = [
@@ -2790,453 +2868,6 @@ fn concurrent_manual_command_settlement_is_exactly_once_across_storage_instances
         })
     );
     assert!(outcomes.contains(&AgentPendingActionResultCommitOutcome::Idempotent));
-}
-
-#[test]
-fn startup_reconciliation_recovers_every_legacy_manual_non_command_split_commit() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-
-    for effect in ManualNonCommandFileEffect::ALL {
-        let label = effect.label();
-        let storage_id = format!("run-legacy-{label}:{label}-call");
-        let call_id = format!("legacy-{label}-call");
-        let run_id = format!("run-legacy-{label}");
-        let conversation_id = format!("conversation-legacy-{label}");
-        let assistant_message_id = format!("assistant-legacy-{label}");
-        let (mut pending, _approved, terminal, expected_trace) =
-            manual_non_command_file_effect_settlement(
-                effect,
-                &storage_id,
-                &call_id,
-                &run_id,
-                &conversation_id,
-                &assistant_message_id,
-            );
-        if matches!(effect, ManualNonCommandFileEffect::SkillMaterialization) {
-            // Older materialization execution persisted `executing` before publishing its audit.
-            pending.status = "executing".to_string();
-        }
-        attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-        let expected_pending_status = pending.status.clone();
-        let frozen_action_json = pending.action_json.clone();
-        let terminal_tool_result_json = terminal.tool_result_json.clone().unwrap();
-        save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
-        service.store_pending_agent_action(pending).unwrap();
-        // Reproduce the former split boundary: the execution receipt is durable, while neither
-        // the pending target nor its paired trace has been published.
-        service.upsert_agent_action_audit(terminal.clone()).unwrap();
-
-        let interrupted = service
-            .reconcile_interrupted_pending_agent_actions(42)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{label} legacy split recovery failed from pending status {expected_pending_status}: {error}"
-                )
-            });
-        assert_eq!(interrupted.len(), 1);
-
-        let connection = service.state.connection().unwrap();
-        let state: LegacyManualFileEffectSplitState = connection
-            .query_row(
-                "
-                SELECT pending.status,
-                       pending.target_status,
-                       audit.status,
-                       audit.command_result_json,
-                       audit.tool_result_json,
-                       audit.action_json
-                FROM agent_pending_actions pending
-                JOIN agent_action_audit audit ON audit.action_id = pending.action_id
-                WHERE pending.action_id = ?1
-                ",
-                [&storage_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(state.0, "completed");
-        assert_eq!(state.1.as_deref(), Some("completed"));
-        assert_eq!(state.2, "completed");
-        assert_eq!(state.3, None, "{label} populated command_result_json");
-        assert_eq!(state.4.as_deref(), Some(terminal_tool_result_json.as_str()));
-        assert_eq!(state.5, frozen_action_json);
-        drop(connection);
-
-        let recovered_trace = service
-            .get_conversation_turn_trace(&assistant_message_id)
-            .unwrap()
-            .unwrap();
-        recovered_trace.validate().unwrap();
-        assert_eq!(recovered_trace, expected_trace);
-        assert!(matches!(
-            recovered_trace.items.last(),
-            Some(ConversationTurnTraceItem::ToolResult {
-                call_id: recovered_call_id,
-                tool,
-                success: true,
-                observation,
-                ..
-            }) if recovered_call_id == &call_id
-                && tool == effect.tool_name()
-                && observation["effect"] == label
-        ));
-
-        // A repaired row is terminal, so a later startup pass neither reconstructs nor appends
-        // the ToolResult a second time.
-        assert!(service
-            .reconcile_interrupted_pending_agent_actions(43)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            service
-                .get_conversation_turn_trace(&assistant_message_id)
-                .unwrap()
-                .as_ref(),
-            Some(&expected_trace)
-        );
-    }
-}
-
-#[test]
-fn startup_reconciliation_repairs_non_command_trace_for_an_exact_preexisting_target() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-
-    for effect in ManualNonCommandFileEffect::ALL {
-        let label = effect.label();
-        let storage_id = format!("run-legacy-target-{label}:{label}-call");
-        let call_id = format!("legacy-target-{label}-call");
-        let run_id = format!("run-legacy-target-{label}");
-        let conversation_id = format!("conversation-legacy-target-{label}");
-        let assistant_message_id = format!("assistant-legacy-target-{label}");
-        let (mut pending, _approved, terminal, expected_trace) =
-            manual_non_command_file_effect_settlement(
-                effect,
-                &storage_id,
-                &call_id,
-                &run_id,
-                &conversation_id,
-                &assistant_message_id,
-            );
-        if matches!(effect, ManualNonCommandFileEffect::SkillMaterialization) {
-            pending.status = "executing".to_string();
-        }
-        pending.target_status = Some("completed".to_string());
-        attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-        save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
-        service.store_pending_agent_action(pending).unwrap();
-        service.upsert_agent_action_audit(terminal).unwrap();
-
-        assert_eq!(
-            service
-                .reconcile_interrupted_pending_agent_actions(42)
-                .unwrap()
-                .len(),
-            1
-        );
-        let connection = service.state.connection().unwrap();
-        let state: (String, Option<String>) = connection
-            .query_row(
-                "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
-                [&storage_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(
-            state,
-            ("completed".to_string(), Some("completed".to_string()))
-        );
-        drop(connection);
-        assert_eq!(
-            service
-                .get_conversation_turn_trace(&assistant_message_id)
-                .unwrap()
-                .as_ref(),
-            Some(&expected_trace),
-            "{label} did not recover its exact paired ToolResult trace"
-        );
-    }
-}
-
-#[test]
-fn startup_reconciliation_rejects_tampered_non_command_checkpoint_without_partial_repair() {
-    for effect in ManualNonCommandFileEffect::ALL {
-        for tamper_tool_identity in [false, true] {
-            let fixture = StorageFixture::new();
-            let service = fixture.service();
-            let label = effect.label();
-            let tamper_label = if tamper_tool_identity { "tool" } else { "args" };
-            let storage_id = format!("run-tampered-{tamper_label}-{label}:{label}-call");
-            let call_id = format!("tampered-{tamper_label}-{label}-call");
-            let run_id = format!("run-tampered-{tamper_label}-{label}");
-            let conversation_id = format!("conversation-tampered-{tamper_label}-{label}");
-            let assistant_message_id = format!("assistant-tampered-{tamper_label}-{label}");
-            let (mut pending, _approved, terminal, mut checkpoint_trace) =
-                manual_non_command_file_effect_settlement(
-                    effect,
-                    &storage_id,
-                    &call_id,
-                    &run_id,
-                    &conversation_id,
-                    &assistant_message_id,
-                );
-            if matches!(effect, ManualNonCommandFileEffect::SkillMaterialization) {
-                pending.status = "executing".to_string();
-            }
-            let checkpoint_call = checkpoint_trace
-                .items
-                .iter_mut()
-                .find_map(|item| match item {
-                    ConversationTurnTraceItem::ToolCall {
-                        tool, operation, ..
-                    } => Some((tool, operation)),
-                    _ => None,
-                })
-                .unwrap();
-            if tamper_tool_identity {
-                *checkpoint_call.0 = "run_command".to_string();
-            } else {
-                *checkpoint_call.1 = serde_json::json!({
-                    "tampered": true,
-                    "originalEffect": label,
-                });
-            }
-            attach_manual_file_effect_recovery_checkpoint(&mut pending, &checkpoint_trace);
-            let expected_pending_status = pending.status.clone();
-            let frozen_action_json = pending.action_json.clone();
-            let terminal_tool_result_json = terminal.tool_result_json.clone().unwrap();
-            save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
-            service.store_pending_agent_action(pending).unwrap();
-            service.upsert_agent_action_audit(terminal).unwrap();
-
-            let error = service
-                .reconcile_interrupted_pending_agent_actions(42)
-                .unwrap_err();
-            let expected_error = if tamper_tool_identity {
-                "冻结 ToolCall 名称不一致"
-            } else {
-                "冻结 ToolCall 参数与 action 不一致"
-            };
-            assert!(
-                error.contains(expected_error),
-                "unexpected {label} {tamper_label} tamper error: {error}"
-            );
-            assert_legacy_manual_file_effect_remains_split(
-                &service,
-                &storage_id,
-                &assistant_message_id,
-                &expected_pending_status,
-                &terminal_tool_result_json,
-                &frozen_action_json,
-            );
-        }
-    }
-}
-
-#[test]
-fn startup_reconciliation_persists_blockers_for_unverifiable_legacy_manual_targets() {
-    for effect in ManualNonCommandFileEffect::ALL {
-        for target_status in ["completed", "cancelled"] {
-            for audit_shape in LegacyManualAuditShape::ALL {
-                let fixture = StorageFixture::new();
-                let service = fixture.service();
-                let label = effect.label();
-                let audit_label = audit_shape.label();
-                let storage_id =
-                    format!("run-unverifiable-{target_status}-{audit_label}-{label}:{label}-call");
-                let call_id = format!("unverifiable-{target_status}-{audit_label}-{label}-call");
-                let run_id = format!("run-unverifiable-{target_status}-{audit_label}-{label}");
-                let conversation_id =
-                    format!("conversation-unverifiable-{target_status}-{audit_label}-{label}");
-                let assistant_message_id =
-                    format!("assistant-unverifiable-{target_status}-{audit_label}-{label}");
-                let (mut pending, approved, terminal, expected_trace) =
-                    manual_non_command_file_effect_settlement(
-                        effect,
-                        &storage_id,
-                        &call_id,
-                        &run_id,
-                        &conversation_id,
-                        &assistant_message_id,
-                    );
-                if matches!(effect, ManualNonCommandFileEffect::SkillMaterialization) {
-                    pending.status = "executing".to_string();
-                }
-                pending.target_status = Some(target_status.to_string());
-                attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-                let expected_audit = match audit_shape {
-                    LegacyManualAuditShape::Missing => None,
-                    LegacyManualAuditShape::Preterminal => Some(approved),
-                    LegacyManualAuditShape::TamperedTerminal => {
-                        let mut tampered = terminal;
-                        tampered.action_json =
-                            serde_json::to_string(&effect.frozen_action(&call_id, true)).unwrap();
-                        Some(tampered)
-                    }
-                };
-                let expected_audit_status =
-                    expected_audit.as_ref().map(|audit| audit.status.clone());
-                let expected_tool_result_json = expected_audit
-                    .as_ref()
-                    .and_then(|audit| audit.tool_result_json.clone());
-                let expected_action_json = expected_audit
-                    .as_ref()
-                    .map(|audit| audit.action_json.clone());
-                save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
-                service.store_pending_agent_action(pending).unwrap();
-                if let Some(audit) = expected_audit {
-                    service.upsert_agent_action_audit(audit).unwrap();
-                }
-
-                let interrupted = service
-                    .reconcile_interrupted_pending_agent_actions(42)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "{label} {target_status} {audit_label} should retire into a durable blocker: {error}"
-                        )
-                    });
-                assert_eq!(interrupted.len(), 1);
-
-                let connection = service.state.connection().unwrap();
-                let state: UnverifiableLegacyManualFileEffectState = connection
-                    .query_row(
-                        "
-                        SELECT pending.status,
-                               pending.target_status,
-                               audit.status,
-                               audit.tool_result_json,
-                               audit.action_json
-                        FROM agent_pending_actions pending
-                        LEFT JOIN agent_action_audit audit
-                               ON audit.action_id = pending.action_id
-                        WHERE pending.action_id = ?1
-                        ",
-                        [&storage_id],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                            ))
-                        },
-                    )
-                    .unwrap();
-                assert_eq!(state.0, target_status);
-                assert_eq!(state.1.as_deref(), Some(target_status));
-                assert_eq!(state.2, expected_audit_status);
-                assert_eq!(state.3, expected_tool_result_json);
-                assert_eq!(state.4, expected_action_json);
-                drop(connection);
-                assert!(service
-                    .get_conversation_turn_trace(&assistant_message_id)
-                    .unwrap()
-                    .is_none());
-                let expected_blockers = vec![AgentUnsettledFileEffect {
-                    project_id: Some("project-1".to_string()),
-                    conversation_id: conversation_id.clone(),
-                    run_id: run_id.clone(),
-                    action_id: storage_id.clone(),
-                }];
-                assert_eq!(
-                    service.list_unsettled_file_effects().unwrap(),
-                    expected_blockers,
-                    "{label} {target_status} {audit_label} lost its durable file-effect blocker"
-                );
-                assert!(service
-                    .reconcile_interrupted_pending_agent_actions(43)
-                    .unwrap()
-                    .is_empty());
-                let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
-                assert_eq!(
-                    reopened.list_unsettled_file_effects().unwrap(),
-                    expected_blockers,
-                    "{label} {target_status} {audit_label} blocker did not survive restart"
-                );
-            }
-        }
-    }
-}
-
-#[test]
-fn startup_reconciliation_persists_command_blockers_for_unverifiable_legacy_targets() {
-    for target_status in ["completed", "cancelled"] {
-        for audit_shape in LegacyManualAuditShape::ALL {
-            let fixture = StorageFixture::new();
-            let service = fixture.service();
-            let audit_label = audit_shape.label();
-            let storage_id = format!("run-command-{target_status}-{audit_label}:command-call");
-            let call_id = format!("command-{target_status}-{audit_label}-call");
-            let conversation_id = format!("conversation-command-{target_status}-{audit_label}");
-            let assistant_message_id = format!("assistant-command-{target_status}-{audit_label}");
-            let (mut pending, approved, terminal, expected_trace) = manual_command_settlement(
-                &storage_id,
-                &call_id,
-                &conversation_id,
-                &assistant_message_id,
-            );
-            pending.target_status = Some(target_status.to_string());
-            attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-            let expected_audit = match audit_shape {
-                LegacyManualAuditShape::Missing => None,
-                LegacyManualAuditShape::Preterminal => Some(approved),
-                LegacyManualAuditShape::TamperedTerminal => {
-                    let mut tampered = terminal;
-                    let mut action =
-                        serde_json::from_str::<AgentProposedAction>(&tampered.action_json).unwrap();
-                    let AgentProposedAction::Command { command } = &mut action else {
-                        unreachable!("command settlement must freeze a command action");
-                    };
-                    command.command = "node another-script.mjs".to_string();
-                    tampered.action_json = serde_json::to_string(&action).unwrap();
-                    Some(tampered)
-                }
-            };
-            save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
-            service.store_pending_agent_action(pending).unwrap();
-            if let Some(audit) = expected_audit {
-                service.upsert_agent_action_audit(audit).unwrap();
-            }
-
-            assert_eq!(
-                service
-                    .reconcile_interrupted_pending_agent_actions(42)
-                    .unwrap()
-                    .len(),
-                1
-            );
-            let expected_blocker = AgentUnsettledFileEffect {
-                project_id: Some("project-1".to_string()),
-                conversation_id: conversation_id.clone(),
-                run_id: "run-1".to_string(),
-                action_id: storage_id.clone(),
-            };
-            assert_eq!(
-                service.list_unsettled_file_effects().unwrap(),
-                vec![expected_blocker.clone()],
-                "command {target_status} {audit_label} lost its durable blocker"
-            );
-            assert!(service
-                .get_conversation_turn_trace(&assistant_message_id)
-                .unwrap()
-                .is_none());
-            let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
-            assert_eq!(
-                reopened.list_unsettled_file_effects().unwrap(),
-                vec![expected_blocker]
-            );
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3259,18 +2890,12 @@ fn assert_tampered_manual_trace_receipt_remains_unsettled(
     let run_id = pending.run_id.clone();
     let conversation_id = pending.conversation_id.clone().unwrap();
     let assistant_message_id = pending.assistant_message_id.clone().unwrap();
-    attach_manual_file_effect_recovery_checkpoint(&mut pending, &trace);
+    attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
     save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
     service.store_pending_agent_action(pending).unwrap();
     service.upsert_agent_action_audit(approved).unwrap();
     service
-        .commit_pending_agent_action_audited_result_trace(
-            &terminal,
-            "approved",
-            "completed",
-            &trace,
-            12,
-        )
+        .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
         .unwrap();
     assert_eq!(
         service
@@ -3445,18 +3070,12 @@ fn tampered_command_trace_arguments_restore_the_durable_blocker() {
             &conversation_id,
             &assistant_message_id,
         );
-        attach_manual_file_effect_recovery_checkpoint(&mut pending, &trace);
+        attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
         service.upsert_agent_action_audit(approved).unwrap();
         service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
         service
             .reconcile_interrupted_pending_agent_actions(42)
@@ -3521,18 +3140,12 @@ fn tampered_command_execution_evidence_restores_the_durable_blocker() {
             &conversation_id,
             &assistant_message_id,
         );
-        attach_manual_file_effect_recovery_checkpoint(&mut pending, &trace);
+        attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
         service.upsert_agent_action_audit(approved).unwrap();
         service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
         service
             .reconcile_interrupted_pending_agent_actions(42)
@@ -3547,11 +3160,11 @@ fn tampered_command_execution_evidence_restores_the_durable_blocker() {
             command_result.artifact_observation = Some(crate::AgentCommandArtifactObservation {
                 schema_version: 1,
                 status: crate::AgentCommandArtifactObservationStatus::Complete,
-                partial: None,
+                partial: false,
                 stop_reasons: Vec::new(),
-                scanned: None,
-                returned: None,
-                omitted: None,
+                scanned: 0,
+                returned: 0,
+                omitted: 0,
                 coverage: crate::AgentCommandArtifactObservationCoverage {
                     workspace_included: true,
                     expected_output_count: 0,
@@ -3612,18 +3225,12 @@ fn command_terminal_outcome_cannot_diverge_from_execution_evidence() {
             &conversation_id,
             &assistant_message_id,
         );
-        attach_manual_file_effect_recovery_checkpoint(&mut pending, &trace);
+        attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
         save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
         service.store_pending_agent_action(pending).unwrap();
         service.upsert_agent_action_audit(approved).unwrap();
         service
-            .commit_pending_agent_action_audited_result_trace(
-                &terminal,
-                "approved",
-                "completed",
-                &trace,
-                12,
-            )
+            .commit_current_manual_settlement(&terminal, "approved", "completed", &trace, 12)
             .unwrap();
         service
             .reconcile_interrupted_pending_agent_actions(42)
@@ -3722,159 +3329,6 @@ fn command_terminal_outcome_cannot_diverge_from_execution_evidence() {
             vec![expected]
         );
     }
-}
-
-#[test]
-fn startup_reconciliation_repairs_legacy_manual_command_target_and_trace_from_terminal_audit() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let (mut pending, _approved, terminal, expected_trace) = manual_command_settlement(
-        "run-1:legacy-recovered-command",
-        "legacy-recovered-command",
-        "conversation-legacy-recovered-command",
-        "assistant-legacy-recovered-command",
-    );
-    attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-    save_assistant_conversation(
-        &service,
-        "conversation-legacy-recovered-command",
-        "assistant-legacy-recovered-command",
-    );
-    let mut usage = agent_usage_record(
-        "conversation-legacy-recovered-command",
-        "assistant-legacy-recovered-command",
-    );
-    usage.status = Some("running".to_string());
-    usage.completed_at = None;
-    service.upsert_agent_usage(usage).unwrap();
-    service.store_pending_agent_action(pending).unwrap();
-    // Former split ordering: the audit commit succeeded, then the process exited before either
-    // target_status or the paired trace was committed.
-    service.upsert_agent_action_audit(terminal).unwrap();
-
-    let interrupted = service
-        .reconcile_interrupted_pending_agent_actions(42)
-        .unwrap();
-    assert_eq!(interrupted.len(), 1);
-
-    let connection = service.state.connection().unwrap();
-    let pending_state: (String, Option<String>) = connection
-        .query_row(
-            "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
-            ["run-1:legacy-recovered-command"],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        pending_state,
-        ("completed".to_string(), Some("completed".to_string()))
-    );
-    let usage_error: Option<String> = connection
-        .query_row(
-            "SELECT error FROM agent_usage_records WHERE run_id = 'run-1'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(usage_error
-        .as_deref()
-        .is_some_and(|error| error.contains("result was recovered")));
-    drop(connection);
-
-    let trace = service
-        .get_conversation_turn_trace("assistant-legacy-recovered-command")
-        .unwrap()
-        .unwrap();
-    trace.validate().unwrap();
-    assert!(matches!(
-        trace.items.last(),
-        Some(ConversationTurnTraceItem::ToolResult {
-            call_id,
-            tool,
-            success: true,
-            observation,
-            ..
-        }) if call_id == "legacy-recovered-command"
-            && tool == "run_command"
-            && observation["stdoutTail"] == "created workbook"
-    ));
-}
-
-#[test]
-fn startup_reconciliation_repairs_missing_trace_when_legacy_target_already_exists() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let (mut pending, _approved, terminal, expected_trace) = manual_command_settlement(
-        "run-1:legacy-target-only-command",
-        "legacy-target-only-command",
-        "conversation-legacy-target-only-command",
-        "assistant-legacy-target-only-command",
-    );
-    pending.target_status = Some("completed".to_string());
-    attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-    save_assistant_conversation(
-        &service,
-        "conversation-legacy-target-only-command",
-        "assistant-legacy-target-only-command",
-    );
-    service.store_pending_agent_action(pending).unwrap();
-    service.upsert_agent_action_audit(terminal).unwrap();
-
-    service
-        .reconcile_interrupted_pending_agent_actions(42)
-        .unwrap();
-
-    let trace = service
-        .get_conversation_turn_trace("assistant-legacy-target-only-command")
-        .unwrap()
-        .unwrap();
-    trace.validate().unwrap();
-    assert!(matches!(
-        trace.items.last(),
-        Some(ConversationTurnTraceItem::ToolResult { call_id, .. })
-            if call_id == "legacy-target-only-command"
-    ));
-}
-
-#[test]
-fn startup_reconciliation_rejects_conflicting_terminal_command_audit_without_partial_repair() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let (mut pending, _approved, mut terminal, expected_trace) = manual_command_settlement(
-        "run-1:legacy-conflicting-command",
-        "legacy-conflicting-command",
-        "conversation-legacy-conflicting-command",
-        "assistant-legacy-conflicting-command",
-    );
-    attach_manual_file_effect_recovery_checkpoint(&mut pending, &expected_trace);
-    save_assistant_conversation(
-        &service,
-        "conversation-legacy-conflicting-command",
-        "assistant-legacy-conflicting-command",
-    );
-    service.store_pending_agent_action(pending).unwrap();
-    terminal.run_id = "another-run".to_string();
-    service.upsert_agent_action_audit(terminal).unwrap();
-
-    let error = service
-        .reconcile_interrupted_pending_agent_actions(42)
-        .unwrap_err();
-    assert!(error.contains("terminal audit 身份冲突"));
-
-    let connection = service.state.connection().unwrap();
-    let pending_state: (String, Option<String>) = connection
-        .query_row(
-            "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
-            ["run-1:legacy-conflicting-command"],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(pending_state, ("approved".to_string(), None));
-    drop(connection);
-    assert!(service
-        .get_conversation_turn_trace("assistant-legacy-conflicting-command")
-        .unwrap()
-        .is_none());
 }
 
 #[test]
@@ -3996,6 +3450,14 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
         .to_string(),
     );
     service.save_conversation(interrupted_conversation).unwrap();
+    let trace = seed_current_in_progress_tool_trace(
+        &service,
+        "run-1",
+        "conversation-interrupted",
+        "assistant-interrupted",
+        "action-interrupted",
+        "run_command",
+    );
     let mut usage = agent_usage_record("conversation-interrupted", "assistant-interrupted");
     usage.status = Some("running".to_string());
     usage.completed_at = None;
@@ -4003,7 +3465,7 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
     let mut pending = pending_action("action-interrupted", "conversation-interrupted");
     pending.assistant_message_id = Some("assistant-interrupted".to_string());
     pending.status = "approved".to_string();
-    pending.agent_input_json = r#"{"continuation":"sensitive"}"#.to_string();
+    attach_current_manual_file_effect_checkpoint(&mut pending, &trace);
     service.store_pending_agent_action(pending).unwrap();
 
     let reconciled = service
@@ -4047,6 +3509,228 @@ fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
 }
 
 #[test]
+fn malformed_current_pending_rows_retire_from_durable_identity_without_dispatch() {
+    for expected_status in ["pending", "approved", "executing"] {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let conversation_id = format!("conversation-malformed-{expected_status}");
+        let assistant_message_id = format!("assistant-malformed-{expected_status}");
+        let action_id = format!("action-malformed-{expected_status}");
+        save_assistant_conversation(&service, &conversation_id, &assistant_message_id);
+        let trace = seed_current_in_progress_tool_trace(
+            &service,
+            "run-1",
+            &conversation_id,
+            &assistant_message_id,
+            &action_id,
+            "run_command",
+        );
+        if expected_status == "executing" {
+            let call = AgentToolCall {
+                id: action_id.clone(),
+                tool: "run_command".to_string(),
+                args: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                reason: None,
+            };
+            let result = AgentToolResult {
+                exact_archive_file: None,
+                call_id: action_id.clone(),
+                tool: "run_command".to_string(),
+                ok: false,
+                result: Some(serde_json::json!({ "outcome": "unknown" })),
+                error: Some("outcome unknown".to_string()),
+            };
+            let mut closed_trace = trace.clone();
+            closed_trace
+                .items
+                .push(crate::conversation_trace::projected_tool_result_trace_item(
+                    1, &call, &result,
+                ));
+            service
+                .append_in_progress_conversation_turn_trace_and_apply_guidances(
+                    &closed_trace,
+                    &current_model_context_for_trace(&closed_trace),
+                    1,
+                    2,
+                )
+                .unwrap();
+        } else {
+            assert!(trace
+                .committed_model_context_prefix(
+                    &service
+                        .get_conversation_model_context_log(&assistant_message_id)
+                        .unwrap()
+                        .unwrap()
+                        .items,
+                )
+                .unwrap()
+                .is_empty());
+        }
+
+        let mut pending = pending_action(&action_id, &conversation_id);
+        pending.assistant_message_id = Some(assistant_message_id.clone());
+        pending.status = expected_status.to_string();
+        pending.action_json = serde_json::json!({ "unknownAction": true }).to_string();
+        pending.agent_input_json = serde_json::json!({ "unknownResume": true }).to_string();
+        service.store_pending_agent_action(pending).unwrap();
+        let mut audit = action_audit(&action_id, &conversation_id);
+        audit.assistant_message_id = Some(assistant_message_id.clone());
+        audit.status = expected_status.to_string();
+        audit.action_json =
+            serde_json::json!({ "privateActionCanary": "PRIVATE_ACTION_CANARY" }).to_string();
+        audit.completed_at = None;
+        service.upsert_agent_action_audit(audit).unwrap();
+        let mut usage = agent_usage_record(&conversation_id, &assistant_message_id);
+        usage.status = Some("running".to_string());
+        usage.completed_at = None;
+        service.upsert_agent_usage(usage).unwrap();
+
+        assert!(service
+            .retire_unsupported_or_malformed_pending_agent_action_on_startup(
+                &action_id,
+                expected_status,
+                42,
+            )
+            .unwrap());
+
+        let connection = service.state.connection().unwrap();
+        let pending_state: (String, Option<String>, String, String) = connection
+            .query_row(
+                "SELECT status, target_status, action_json, agent_input_json
+                 FROM agent_pending_actions WHERE action_id = ?1",
+                [&action_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            pending_state,
+            (
+                "failed".to_string(),
+                Some("failed".to_string()),
+                "{}".to_string(),
+                "{}".to_string(),
+            )
+        );
+        let audit_state: (String, String, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT status, action_json, error, blocked_reason
+                 FROM agent_action_audit WHERE action_id = ?1",
+                [&action_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(audit_state.0, "failed");
+        assert_eq!(audit_state.1, "{}");
+        assert!(!audit_state.1.contains("PRIVATE_ACTION_CANARY"));
+        if expected_status == "executing" {
+            assert_eq!(
+                audit_state.2.as_deref(),
+                Some("agent.pending_action_outcome_unknown")
+            );
+            assert!(audit_state.3.unwrap().contains("outcome is unknown"));
+        } else {
+            assert_eq!(
+                audit_state.2.as_deref(),
+                Some("agent.pending_action_unsupported_or_malformed")
+            );
+            assert!(audit_state.3.unwrap().contains("before dispatch"));
+        }
+        drop(connection);
+
+        let terminal_trace = service
+            .get_conversation_turn_trace(&assistant_message_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            terminal_trace.terminal_status,
+            crate::ConversationTurnTraceTerminalStatus::Failed
+        );
+        let terminal_model_context = service
+            .get_conversation_model_context_log(&assistant_message_id)
+            .unwrap()
+            .unwrap();
+        terminal_trace
+            .validate_complete_model_context(&terminal_model_context.items)
+            .unwrap();
+        assert_eq!(
+            terminal_trace
+                .items
+                .iter()
+                .filter(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn malformed_pending_retirement_fails_before_mutation_without_trace_or_exact_context() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-malformed-boundary";
+    let assistant_message_id = "assistant-malformed-boundary";
+    let action_id = "action-malformed-boundary";
+    save_assistant_conversation(&service, conversation_id, assistant_message_id);
+    let mut pending = pending_action(action_id, conversation_id);
+    pending.assistant_message_id = Some(assistant_message_id.to_string());
+    let private_action =
+        serde_json::json!({ "privateActionCanary": "PRIVATE_ACTION_CANARY" }).to_string();
+    let private_resume =
+        serde_json::json!({ "privateResumeCanary": "PRIVATE_RESUME_CANARY" }).to_string();
+    pending.action_json = private_action.clone();
+    pending.agent_input_json = private_resume.clone();
+    service.store_pending_agent_action(pending).unwrap();
+
+    assert!(service
+        .retire_unsupported_or_malformed_pending_agent_action_on_startup(action_id, "pending", 42)
+        .unwrap_err()
+        .contains("durable ConversationTurnTrace"));
+
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-1".to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: action_id.to_string(),
+            tool: "run_command".to_string(),
+            provenance: crate::AgentToolIdentity::Builtin {
+                tool_name: "run_command".to_string(),
+            },
+            operation: serde_json::json!({}),
+            approval_status: crate::AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+    };
+    service
+        .append_in_progress_conversation_turn_trace(&trace, 1, 1)
+        .unwrap();
+    assert!(service
+        .retire_unsupported_or_malformed_pending_agent_action_on_startup(action_id, "pending", 43)
+        .unwrap_err()
+        .contains("model-context log"));
+
+    let connection = service.state.connection().unwrap();
+    let unchanged: (String, Option<String>, String, String) = connection
+        .query_row(
+            "SELECT status, target_status, action_json, agent_input_json
+             FROM agent_pending_actions WHERE action_id = ?1",
+            [action_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        unchanged,
+        ("pending".to_string(), None, private_action, private_resume,)
+    );
+}
+
+#[test]
 fn startup_reconciliation_preserves_a_durable_terminal_assistant_commit() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
@@ -4067,6 +3751,13 @@ fn startup_reconciliation_preserves_a_durable_terminal_assistant_commit() {
         .to_string(),
     );
     service.save_conversation(conversation).unwrap();
+    seed_current_terminal_assistant_trace(
+        &service,
+        "run-1",
+        "conversation-terminal",
+        "assistant-terminal",
+        crate::ConversationTurnTraceTerminalStatus::Completed,
+    );
     let mut usage = agent_usage_record("conversation-terminal", "assistant-terminal");
     usage.status = Some("running".to_string());
     usage.completed_at = None;
@@ -4129,6 +3820,60 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
     usage.completed_at = None;
     service.upsert_agent_usage(usage).unwrap();
 
+    let nested_trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-1".to_string(),
+        conversation_id: "conversation-nested".to_string(),
+        assistant_message_id: "assistant-nested".to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: "parent-action".to_string(),
+                tool: "run_command".to_string(),
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
+                operation: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: "parent-action".to_string(),
+                tool: "run_command".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({ "status": "completed" }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 2,
+                call_id: "child-call".to_string(),
+                tool: "approval_tool".to_string(),
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "approval_tool".to_string(),
+                },
+                operation: serde_json::json!({}),
+                approval_status: crate::AgentApprovalStatus::Required,
+                truncated: false,
+            },
+        ],
+    };
+    service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &nested_trace,
+            &current_model_context_for_trace(&nested_trace),
+            1,
+            1,
+        )
+        .unwrap();
+
     let mut parent = pending_action("parent-action", "conversation-nested");
     parent.assistant_message_id = Some("assistant-nested".to_string());
     parent.status = "executing".to_string();
@@ -4146,56 +3891,12 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
             "id": "child-call",
             "tool": "approval_tool",
             "args": {},
-            "approvalStatus": "required"
+            "approvalStatus": "required",
+            "reason": null
         }
     })
     .to_string();
-    child.agent_input_json = serde_json::json!({
-        "apiUrl": "https://example.test/v1/chat/completions",
-        "apiToken": "",
-        "model": "test-model",
-        "messages": [],
-        "resumeCheckpoint": {
-            "version": crate::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
-            "runId": "run-1",
-            "contextItems": [],
-            "nextModelRequestIndex": 1,
-            "queuedToolCalls": [],
-            "suppressedNarration": false,
-            "extensionSnapshots": [],
-            "pendingToolCallId": "child-call",
-            "conversationTraceItems": [
-                {
-                    "type": "tool_result",
-                    "sequence": 1,
-                    "callId": "parent-action",
-                    "tool": "run_command",
-                    "status": "succeeded",
-                    "success": true,
-                    "observation": {},
-                    "approvalStatus": "approved",
-                    "truncated": false
-                },
-                {
-                    "type": "tool_call",
-                    "sequence": 2,
-                    "callId": "child-call",
-                    "tool": "approval_tool",
-                    "operation": {},
-                    "approvalStatus": "required",
-                    "truncated": false
-                }
-            ],
-            "nextConversationTraceSequence": 3,
-            "conversationTraceTruncated": false,
-            "modelVisibleTraceItemCount": 0,
-            "toolSet": test_checkpoint_tool_set(),
-            "runContext": null,
-            "modelCapabilities": { "imageInput": false },
-            "runWorldState": test_checkpoint_run_world_state()
-        }
-    })
-    .to_string();
+    attach_current_manual_file_effect_checkpoint(&mut child, &nested_trace);
     service.store_pending_agent_action(child).unwrap();
 
     service
@@ -4272,6 +3973,15 @@ fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
     let mut parent = pending_action("invalid-parent", "conversation-invalid-nested");
     parent.assistant_message_id = Some("assistant-invalid-nested".to_string());
     parent.status = "executing".to_string();
+    let parent_trace = seed_current_in_progress_tool_trace(
+        &service,
+        "run-1",
+        "conversation-invalid-nested",
+        "assistant-invalid-nested",
+        "invalid-parent",
+        "run_command",
+    );
+    attach_current_manual_file_effect_checkpoint(&mut parent, &parent_trace);
     service.store_pending_agent_action(parent).unwrap();
 
     let mut child = pending_action("invalid-child", "conversation-invalid-nested");
@@ -4285,7 +3995,8 @@ fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
             "id": "invalid-child-call",
             "tool": "approval_tool",
             "args": {},
-            "approvalStatus": "required"
+            "approvalStatus": "required",
+            "reason": null
         }
     })
     .to_string();
@@ -4368,6 +4079,13 @@ fn startup_reconciliation_keeps_failed_action_outcome_when_assistant_commit_comp
         .to_string(),
     );
     service.save_conversation(conversation).unwrap();
+    seed_current_terminal_assistant_trace(
+        &service,
+        "run-1",
+        "conversation-failed-action",
+        "assistant-failed-action",
+        crate::ConversationTurnTraceTerminalStatus::Completed,
+    );
     let mut usage = agent_usage_record("conversation-failed-action", "assistant-failed-action");
     usage.status = Some("completed".to_string());
     usage.completed_at = Some(40);

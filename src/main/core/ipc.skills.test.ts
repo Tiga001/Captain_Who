@@ -138,7 +138,8 @@ describe('Skill management IPC registration', () => {
   it('preserves structured uninstall errors returned by CoreServer', async () => {
     const input = {
       skillId: 'installed:user:skill-1',
-      expectedRevision: 'skill-package-sha256-v1:expected'
+      expectedRevision:
+        'skill-installation-sha256-v1:1111111111111111111111111111111111111111111111111111111111111111'
     }
     const data = {
       type: 'skillInstallation',
@@ -149,7 +150,8 @@ describe('Skill management IPC registration', () => {
       commitMayHaveSucceeded: false,
       skillId: input.skillId,
       expectedRevision: input.expectedRevision,
-      actualRevision: 'skill-package-sha256-v1:actual'
+      actualRevision:
+        'skill-installation-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222'
     }
     const uninstallSkill = vi.fn().mockRejectedValue(
       Object.assign(new Error(data.message), {

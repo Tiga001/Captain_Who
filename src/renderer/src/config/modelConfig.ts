@@ -4,7 +4,7 @@ import type {
   StorageProviderProfileUpdate
 } from '@mycopilot/protocol'
 
-export interface ModelConfig {
+interface ModelConfigFields {
   /** Opaque model identifier sent verbatim as the provider API's `model` value. */
   id: string
   /** User-facing label. It never changes provider routing. */
@@ -13,10 +13,8 @@ export interface ModelConfig {
   apiTokenOverride?: string
   supportsImage: boolean
   contextWindowTokens?: number
-  /** Host-authoritative, normalized Provider Profile used for safe presentation only. */
-  providerProfileConfig?: ProviderProfileConfig
   /** One-shot, explicit profile mutation sent to the authoritative Host save boundary. */
-  providerProfileUpdate?: StorageProviderProfileUpdate
+  providerProfileUpdate: StorageProviderProfileUpdate
   /** One-shot previous identity used by Host while saving an edited model rename. */
   previousModelId?: string
   inputPrice: string
@@ -24,6 +22,17 @@ export interface ModelConfig {
   cachedInputPrice: string
   outputPrice: string
   enabled: boolean
+}
+
+/** A model returned by the Host's authoritative current-schema storage boundary. */
+export interface ModelConfig extends ModelConfigFields {
+  /** Host-authoritative, normalized Provider Profile used for safe presentation only. */
+  providerProfileConfig: ProviderProfileConfig
+}
+
+/** A new model that has not yet received its versioned Profile from the Host. */
+export interface ModelConfigSaveDraft extends ModelConfigFields {
+  providerProfileConfig?: never
 }
 
 export type SearchMode = 'auto' | 'disabled' | 'tavily'
@@ -40,7 +49,7 @@ export interface ModelFormValues {
   cachedInputPrice: string
   outputPrice: string
   supportsImage: boolean
-  providerProfileUpdate?: StorageProviderProfileUpdate
+  providerProfileUpdate: StorageProviderProfileUpdate
 }
 
 function hasCompleteConnectionPair(apiUrl: string | undefined, apiToken: string | undefined) {
@@ -82,7 +91,6 @@ function hasRegisteredGenericProfile(
   descriptors: readonly ProviderProfileUiDescriptor[]
 ): boolean {
   const config = model.providerProfileConfig
-  if (!config) return true
   if (config.schemaVersion !== 1) return false
   const profileId = String(config.profile.id)
   if (profileId !== 'generic_openai_chat' && profileId !== 'generic_anthropic_messages') {
@@ -108,7 +116,7 @@ export function prepareModelsForGlobalApiUrlChange(
     if (!inheritsGlobalConnection(model) || !hasRegisteredGenericProfile(model, descriptors)) {
       return model
     }
-    if (model.providerProfileUpdate && model.providerProfileUpdate.kind !== 'unchanged') {
+    if (model.providerProfileUpdate.kind !== 'unchanged') {
       return model
     }
     return {
@@ -138,6 +146,7 @@ export const modelConfig = {
       inputPrice: '0.028',
       cachedInputPrice: '',
       outputPrice: '0.14',
+      providerProfileUpdate: { kind: 'select_generic' },
       enabled: true
     },
     {
@@ -147,6 +156,7 @@ export const modelConfig = {
       inputPrice: '0.0168',
       cachedInputPrice: '',
       outputPrice: '0.084',
+      providerProfileUpdate: { kind: 'select_generic' },
       enabled: true
     },
     {
@@ -156,6 +166,7 @@ export const modelConfig = {
       inputPrice: '0.021',
       cachedInputPrice: '',
       outputPrice: '0.126',
+      providerProfileUpdate: { kind: 'select_generic' },
       enabled: true
     },
     {
@@ -165,6 +176,7 @@ export const modelConfig = {
       inputPrice: '0.012',
       cachedInputPrice: '',
       outputPrice: '0.024',
+      providerProfileUpdate: { kind: 'select_generic' },
       enabled: true
     },
     {
@@ -174,6 +186,7 @@ export const modelConfig = {
       inputPrice: '0.00105',
       cachedInputPrice: '',
       outputPrice: '0.0021',
+      providerProfileUpdate: { kind: 'select_generic' },
       enabled: true
     },
     {
@@ -183,9 +196,15 @@ export const modelConfig = {
       inputPrice: '0.001407',
       cachedInputPrice: '',
       outputPrice: '0.005628',
+      providerProfileUpdate: { kind: 'select_generic' },
       enabled: true
     }
-  ] satisfies ModelConfig[]
+  ] satisfies ModelConfigSaveDraft[]
 } as const
 
-export const INITIAL_MODELS: ModelConfig[] = modelConfig.models.map((model) => ({ ...model }))
+export const INITIAL_MODEL_SAVE_DRAFTS: ModelConfigSaveDraft[] = modelConfig.models.map(
+  (model) => ({
+    ...model,
+    providerProfileUpdate: { kind: 'select_generic' }
+  })
+)

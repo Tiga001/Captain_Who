@@ -130,7 +130,8 @@ describe('Skills IPC bridge', () => {
   it('routes native directory selection and managed uninstall across the transport boundary', async () => {
     const uninstallInput = {
       skillId: 'installed:user:skill-1',
-      expectedRevision: 'skill-package-sha256-v1:current'
+      expectedRevision:
+        'skill-installation-sha256-v1:1111111111111111111111111111111111111111111111111111111111111111'
     } satisfies SkillsUninstallInput
     const uninstallResponse = {
       ok: false,
@@ -146,7 +147,8 @@ describe('Skills IPC bridge', () => {
           commitMayHaveSucceeded: false,
           skillId: uninstallInput.skillId,
           expectedRevision: uninstallInput.expectedRevision,
-          actualRevision: 'skill-package-sha256-v1:new'
+          actualRevision:
+            'skill-installation-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222'
         }
       }
     } satisfies HostInvocationResult<SkillMutationOutput>

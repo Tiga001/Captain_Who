@@ -275,14 +275,14 @@ function projectMcpInvocationEvent(event: AgentMcpToolInvocationEvent): ChatMcpT
     serverDisplayName: event.serverDisplayName,
     rawToolName: event.rawToolName,
     modelToolName: event.modelToolName,
-    displayReason: event.displayReason,
+    displayReason: event.displayReason ?? undefined,
     external: true,
     state: event.state,
     dispatchCertainty: event.dispatchCertainty,
-    outcome: event.outcome,
-    isError: event.isError,
-    errorCode: event.errorCode,
-    durationMs: event.durationMs,
+    outcome: event.outcome ?? undefined,
+    isError: event.isError ?? undefined,
+    errorCode: event.errorCode ?? undefined,
+    durationMs: event.durationMs ?? undefined,
     outputTruncated: event.outputTruncated
   }
 }
@@ -316,7 +316,7 @@ function projectMcpApproval(approval: AgentMcpToolApproval): ChatMcpToolInvocati
     scope: projectMcpScope(approval.identity.provenance.scope),
     rawToolName: approval.summary.rawToolName,
     modelToolName: approval.summary.modelToolName,
-    displayReason: approval.summary.displayReason,
+    displayReason: approval.summary.displayReason ?? undefined,
     external: true,
     state: 'pending_approval',
     dispatchCertainty: 'definitely_not_dispatched',

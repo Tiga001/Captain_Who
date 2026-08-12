@@ -278,6 +278,7 @@ impl ModelToolResultGate {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn would_truncate(
         &self,
         call_id: &str,

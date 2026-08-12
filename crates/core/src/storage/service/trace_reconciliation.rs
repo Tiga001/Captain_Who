@@ -118,16 +118,44 @@ impl StorageService {
                     .max(candidate.created_at)
                     .max(candidate.updated_at)
             });
-            let trace = crate::conversation_trace::terminalize_interrupted_conversation_trace(
-                trace,
+            let model_context_items = conversation_model_context_repository::get_log_for_message(
+                &transaction,
+                &candidate.assistant_message_id,
+            )
+            .map_err(storage_error)?
+            .map(|log| log.items)
+            .unwrap_or_default();
+            let next_sequence = trace
+                .items
+                .last()
+                .map(ConversationTurnTraceItem::sequence)
+                .unwrap_or(0)
+                .saturating_add(1);
+            let terminal = crate::terminal_conversation_trace_from_snapshot(
+                crate::ConversationTraceSnapshot {
+                    items: trace.items,
+                    model_context_items,
+                    next_sequence,
+                    truncated: trace.truncated,
+                },
+                &candidate.run_id,
+                &candidate.conversation_id,
+                &candidate.assistant_message_id,
                 terminal_status,
                 reason,
-            );
+            )?;
             conversation_trace_repository::commit_trace_in_connection(
                 &transaction,
-                &trace,
+                &terminal.trace,
                 candidate.created_at,
                 completed_at,
+            )
+            .map_err(storage_error)?;
+            conversation_model_context_repository::commit_items_in_connection(
+                &transaction,
+                &candidate.conversation_id,
+                &candidate.assistant_message_id,
+                &terminal.model_context_items,
             )
             .map_err(storage_error)?;
             chat_repository::reconcile_message_run_terminal_state(

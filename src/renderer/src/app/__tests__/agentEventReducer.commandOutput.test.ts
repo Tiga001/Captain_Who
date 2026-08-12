@@ -20,7 +20,8 @@ function message(): ChatMessage {
         id: 'command-call',
         tool: 'run_command',
         args: { command: 'printf first' },
-        approvalStatus: 'approved'
+        approvalStatus: 'approved',
+        reason: null
       }
     ],
     toolResults: [],
@@ -387,7 +388,8 @@ describe('command output runtime projection', () => {
         toolCalls: [
           {
             ...message().agentRun!.toolCalls[0],
-            approvalStatus: 'required'
+            approvalStatus: 'required',
+            reason: null
           }
         ]
       }
@@ -418,7 +420,8 @@ describe('command output runtime projection', () => {
         toolCalls: [
           {
             ...message().agentRun!.toolCalls[0],
-            approvalStatus: 'required'
+            approvalStatus: 'required',
+            reason: null
           }
         ],
         approvals: [
@@ -427,7 +430,12 @@ describe('command output runtime projection', () => {
             command: {
               id: 'command-call',
               command: 'printf first',
-              approvalStatus: 'required'
+              cwd: null,
+              timeoutMs: null,
+              approvalStatus: 'required',
+              riskLevel: null,
+              reason: null,
+              observe: null
             }
           }
         ]
@@ -463,7 +471,8 @@ describe('command output runtime projection', () => {
         toolCalls: [
           {
             ...message().agentRun!.toolCalls[0],
-            approvalStatus: 'required'
+            approvalStatus: 'required',
+            reason: null
           }
         ],
         approvals: [
@@ -472,7 +481,12 @@ describe('command output runtime projection', () => {
             command: {
               id: 'command-call',
               command: 'printf first',
-              approvalStatus: 'required'
+              cwd: null,
+              timeoutMs: null,
+              approvalStatus: 'required',
+              riskLevel: null,
+              reason: null,
+              observe: null
             }
           }
         ]
@@ -500,7 +514,12 @@ describe('command output runtime projection', () => {
         command: {
           id: 'command-call',
           command: 'printf first',
-          approvalStatus: 'required'
+          cwd: null,
+          timeoutMs: null,
+          approvalStatus: 'required',
+          riskLevel: null,
+          reason: null,
+          observe: null
         }
       }
     })
@@ -518,7 +537,8 @@ describe('command output runtime projection', () => {
         toolCalls: [
           {
             ...message().agentRun!.toolCalls[0],
-            approvalStatus: 'required'
+            approvalStatus: 'required',
+            reason: null
           }
         ],
         approvals: [
@@ -527,7 +547,12 @@ describe('command output runtime projection', () => {
             command: {
               id: 'command-call',
               command: 'printf first',
-              approvalStatus: 'required'
+              cwd: null,
+              timeoutMs: null,
+              approvalStatus: 'required',
+              riskLevel: null,
+              reason: null,
+              observe: null
             }
           }
         ]
@@ -566,7 +591,8 @@ describe('command output runtime projection', () => {
         toolCalls: [
           {
             ...message().agentRun!.toolCalls[0],
-            approvalStatus: 'required'
+            approvalStatus: 'required',
+            reason: null
           }
         ],
         approvals: [
@@ -575,7 +601,12 @@ describe('command output runtime projection', () => {
             command: {
               id: 'command-call',
               command: 'printf first',
-              approvalStatus: 'required'
+              cwd: null,
+              timeoutMs: null,
+              approvalStatus: 'required',
+              riskLevel: null,
+              reason: null,
+              observe: null
             }
           }
         ]
@@ -617,7 +648,8 @@ describe('command output runtime projection', () => {
         toolCalls: [
           {
             ...message().agentRun!.toolCalls[0],
-            approvalStatus: 'required'
+            approvalStatus: 'required',
+            reason: null
           }
         ]
       }

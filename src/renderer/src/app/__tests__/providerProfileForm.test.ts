@@ -3,6 +3,7 @@ import type { ProviderProfileConfig, ProviderProfileUiDescriptor } from '@mycopi
 import { prepareModelsForGlobalApiUrlChange, type ModelConfig } from '../../config/modelConfig'
 import {
   initialProviderProfileFormState,
+  initialNewProviderProfileFormState,
   selectProviderProfile,
   updateDeepSeekProviderSettings
 } from '../../features/settings/pages/configuration/providerProfileForm'
@@ -44,8 +45,8 @@ function profile(
 }
 
 describe('Provider Profile model form state', () => {
-  it('shows the product Generic option and makes a missing legacy profile explicit on save', () => {
-    const state = initialProviderProfileFormState(undefined, descriptors)
+  it('starts a newly created model with an explicit Generic selection', () => {
+    const state = initialNewProviderProfileFormState()
 
     expect(state.selection).toBe('generic')
     expect(state.update).toEqual({ kind: 'select_generic' })
@@ -90,7 +91,8 @@ describe('Provider Profile model form state', () => {
   it('preserves an unknown future profile ID as unsupported presentation state', () => {
     const future = {
       schemaVersion: 1,
-      profile: { id: 'future_vendor_chat', version: 7 }
+      profile: { id: 'future_vendor_chat', version: 7 },
+      reasoning: { mode: 'provider_default', effort: 'provider_default' }
     } as unknown as ProviderProfileConfig
 
     const state = initialProviderProfileFormState(future, descriptors)
@@ -102,10 +104,7 @@ describe('Provider Profile model form state', () => {
 
   it('normalizes disabled Thinking and emits only the public DeepSeek settings union', () => {
     const state = updateDeepSeekProviderSettings(
-      selectProviderProfile(
-        initialProviderProfileFormState(undefined, descriptors),
-        'deepseek_v4_chat'
-      ),
+      selectProviderProfile(initialNewProviderProfileFormState(), 'deepseek_v4_chat'),
       { mode: 'disabled', effort: 'max' }
     )
 
@@ -145,6 +144,8 @@ describe('global API URL Provider Profile updates', () => {
     inputPrice: '0',
     cachedInputPrice: '',
     outputPrice: '0',
+    providerProfileConfig: profile('generic_openai_chat', 1),
+    providerProfileUpdate: { kind: 'unchanged' },
     enabled: true
   }
 
@@ -154,10 +155,6 @@ describe('global API URL Provider Profile updates', () => {
         ...baseModel,
         id: 'generic',
         providerProfileConfig: profile('generic_openai_chat', 1)
-      },
-      {
-        ...baseModel,
-        id: 'legacy-missing'
       },
       {
         ...baseModel,
@@ -183,14 +180,15 @@ describe('global API URL Provider Profile updates', () => {
     expect(updated.find((model) => model.id === 'generic')?.providerProfileUpdate).toEqual({
       kind: 'select_generic'
     })
-    expect(updated.find((model) => model.id === 'legacy-missing')?.providerProfileUpdate).toEqual({
-      kind: 'select_generic'
+    expect(updated.find((model) => model.id === 'override')?.providerProfileUpdate).toEqual({
+      kind: 'unchanged'
     })
-    expect(updated.find((model) => model.id === 'override')?.providerProfileUpdate).toBeUndefined()
-    expect(updated.find((model) => model.id === 'deepseek')?.providerProfileUpdate).toBeUndefined()
+    expect(updated.find((model) => model.id === 'deepseek')?.providerProfileUpdate).toEqual({
+      kind: 'unchanged'
+    })
     expect(
       updated.find((model) => model.id === 'unsupported-version')?.providerProfileUpdate
-    ).toBeUndefined()
+    ).toEqual({ kind: 'unchanged' })
   })
 
   it('does not overwrite an existing explicit Provider Profile update draft', () => {

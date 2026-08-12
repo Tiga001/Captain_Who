@@ -9,8 +9,6 @@ use crate::{
 use sha2::{Digest, Sha256};
 
 pub const COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH: &str = "artifactRuntime.bindingMismatch";
-pub const COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE: &str =
-    "artifactRuntime.runtimeBindingRequired";
 const ERROR_MISSING_DEPENDENCIES: &str = "artifactRuntime.missingDependencies";
 
 const PROFILE_REVISION_PREFIX: &str = "artifact-runtime-profile-sha256-v1:";

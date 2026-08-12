@@ -167,6 +167,38 @@ impl StorageService {
         completed_at: i64,
         usage: Option<&AgentUsageRecordInsert>,
     ) -> Result<(), String> {
+        self.finalize_chat_message_with_conversation_trace_model_context_and_usage(
+            conversation_id,
+            message_id,
+            content,
+            message_status,
+            run_status,
+            trace,
+            None,
+            trace_created_at,
+            completed_at,
+            usage,
+        )
+    }
+
+    /// Terminal assistant visibility boundary with an optional newly produced exact model log.
+    ///
+    /// When no projection is supplied, the transaction validates the already committed observer
+    /// log. Supplying a projection commits and validates it with the terminal message and trace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_chat_message_with_conversation_trace_model_context_and_usage(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+        trace_created_at: i64,
+        completed_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+    ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         chat_repository::update_message_status_and_content(
@@ -182,6 +214,7 @@ impl StorageService {
             &transaction,
             conversation_id,
             message_id,
+            &trace.run_id,
             message_status,
             run_status,
             completed_at,
@@ -194,6 +227,23 @@ impl StorageService {
             completed_at,
         )
         .map_err(storage_error)?;
+        if let Some(model_context_items) = model_context_items {
+            conversation_model_context_repository::commit_items_in_connection(
+                &transaction,
+                conversation_id,
+                message_id,
+                model_context_items,
+            )
+            .map_err(storage_error)?;
+        }
+        let durable_model_context_items =
+            conversation_model_context_repository::get_log_for_message(&transaction, message_id)
+                .map_err(storage_error)?
+                .map(|log| log.items)
+                .unwrap_or_default();
+        trace
+            .validate_complete_model_context(&durable_model_context_items)
+            .map_err(|error| format!("terminal Assistant model context is incomplete: {error}"))?;
         if let Some(usage) = usage {
             usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
         }
@@ -238,25 +288,6 @@ impl StorageService {
         conversation_model_context_repository::list_logs_for_conversation(
             &connection,
             conversation_id,
-        )
-        .map_err(storage_error)
-    }
-
-    /// Appends an on-demand reconstruction of the uncompressed model projection for one
-    /// historical trace. Existing items remain an immutable prefix, so legacy repair can never
-    /// rewrite model history that was already recorded exactly.
-    pub fn append_reconstructed_conversation_model_context(
-        &self,
-        conversation_id: &str,
-        assistant_message_id: &str,
-        items: &[ConversationModelContextItem],
-    ) -> Result<bool, String> {
-        let connection = self.state.connection()?;
-        conversation_model_context_repository::commit_items_in_connection(
-            &connection,
-            conversation_id,
-            assistant_message_id,
-            items,
         )
         .map_err(storage_error)
     }
@@ -319,6 +350,7 @@ impl StorageService {
         &self,
         conversation_id: &str,
         message_id: &str,
+        run_id: &str,
         message_status: Option<&str>,
         run_status: &str,
         completed_at: i64,
@@ -328,6 +360,7 @@ impl StorageService {
             &connection,
             conversation_id,
             message_id,
+            run_id,
             message_status,
             run_status,
             completed_at,

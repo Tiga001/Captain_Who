@@ -40,9 +40,9 @@ pub use compaction_summary::{
     ContextJournalCursor, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
 };
 pub use continuity::{
-    ContextContinuityEntry, ContextContinuitySnapshot, ContextContinuityText, ContextHistoryRef,
-    ContinuityIndexV2, CONTEXT_CONTINUITY_HARD_MAX_TOKENS, CONTEXT_CONTINUITY_SCHEMA_VERSION,
-    CONTEXT_CONTINUITY_TARGET_TOKENS, CONTEXT_CONTINUITY_V1_SCHEMA_VERSION,
+    ContextContinuitySnapshot, ContextHistoryRef, ContinuityIndexV2,
+    CONTEXT_CONTINUITY_HARD_MAX_TOKENS, CONTEXT_CONTINUITY_SCHEMA_VERSION,
+    CONTEXT_CONTINUITY_TARGET_TOKENS,
 };
 pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextOrigin, ContextRetention,

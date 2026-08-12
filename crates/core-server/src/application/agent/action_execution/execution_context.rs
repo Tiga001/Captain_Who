@@ -1,6 +1,4 @@
 use super::*;
-#[cfg(test)]
-use sha2::Digest;
 
 #[derive(Clone)]
 pub(crate) struct AutoApprovedActionContext {
@@ -37,42 +35,4 @@ impl AutoApprovedActionContext {
         self.notifications = Some(notifications);
         self
     }
-}
-
-/// Bridges bounded process preview chunks to Renderer events without coupling command success to
-/// the UI channel. The authoritative result remains the final paired ToolResult.
-#[cfg(test)]
-pub(crate) fn command_output_observer(
-    run_id: &str,
-    call_id: &str,
-    notifications: &CoreServerNotificationSender,
-) -> ProcessOutputObserver {
-    let run_id = run_id.to_string();
-    let call_id = call_id.to_string();
-    let notifications = notifications.clone();
-    let legacy_session_id = format!(
-        "cmd_{:x}",
-        sha2::Sha256::digest(format!("{run_id}:{call_id}").as_bytes())
-    );
-    let sequence = Arc::new(Mutex::new(0_u64));
-    Arc::new(move |stream, output| {
-        if output.is_empty() {
-            return;
-        }
-        // Keep sequence assignment and enqueue atomic across stdout/stderr reader threads so the
-        // receiver sees the same total order encoded in the event.
-        let mut next_sequence = sequence.lock().unwrap_or_else(|error| error.into_inner());
-        *next_sequence = next_sequence.saturating_add(1);
-        let _ = notifications.send(agent_event_notification(AgentEvent::CommandOutput {
-            run_id: run_id.clone(),
-            conversation_id: format!("legacy:{run_id}"),
-            assistant_message_id: format!("legacy:{run_id}"),
-            project_id: None,
-            call_id: call_id.clone(),
-            session_id: legacy_session_id.clone(),
-            sequence: *next_sequence,
-            stream,
-            output,
-        }));
-    })
 }

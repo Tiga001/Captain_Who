@@ -9,16 +9,7 @@ use super::*;
 pub(crate) fn compile_office_arguments(
     request: &OfficeExecutionRequest,
 ) -> Result<Vec<String>, OfficeEngineError> {
-    let parameters = match &request.parameters {
-        OfficeRequestParameters::Typed(parameters) => parameters,
-        OfficeRequestParameters::Legacy(_) => {
-            return Err(OfficeEngineError::new(
-                OfficeEngineErrorCode::UnsupportedOperation,
-                OfficeEngineRecovery::ChangeRequest,
-                "Legacy OfficeCLI argument snapshots are no longer executable; prepare the operation again with typed fields.",
-            ))
-        }
-    };
+    let parameters = &request.parameters;
     if parameters.operation() != request.operation {
         return Err(invalid_request(
             "Office operation does not match its typed parameter variant.",

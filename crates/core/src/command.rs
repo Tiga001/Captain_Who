@@ -12,10 +12,10 @@ use crate::{
     AgentCommandArtifactScope, AgentCommandArtifactSnapshotCoverage,
     AgentCommandArtifactValidation, AgentCommandArtifactValidationStatus,
     AgentCommandExpectedArtifactOutcome, AgentCommandExpectedArtifactOutcomeKind,
-    AgentCommandOutputStream, AgentCommandRequest, AgentCommandRiskLevel,
-    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimeRequest,
-    AgentCommandRuntimeResolution, AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission,
-    AgentToolResult, AgentWritePermission, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    AgentCommandRequest, AgentCommandRiskLevel, AgentCommandRuntimeBinding,
+    AgentCommandRuntimeKind, AgentCommandRuntimeResolution, AgentCommandSafetyPolicy,
+    AgentPermissions, AgentReadPermission, AgentToolResult, AgentWritePermission,
+    AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -54,7 +53,7 @@ use artifact_observer::CommandArtifactObserver;
 pub(crate) use artifact_observer::{
     MAX_ADDITIONAL_ROOTS, MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
 };
-pub use execution::*;
+pub(crate) use execution::*;
 use lexer::*;
 pub use managed_output_publication::{
     publish_managed_command_outputs, snapshot_managed_command_output_baseline,
@@ -64,13 +63,7 @@ pub use managed_output_publication::{
 pub(crate) use managed_runtime::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
     infer_managed_pdf_command_kind, infer_managed_pdf_workspace_inputs,
-    validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
-    validate_managed_artifact_command_shape,
-};
-pub use managed_runtime::{
-    run_authorized_command_with_artifact_runtime,
-    run_authorized_command_with_artifact_runtime_and_inputs,
-    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer,
+    validate_managed_artifact_builder_output_scope,
 };
 pub use output_capture::{
     join_process_output_capture, materialize_process_tool_result_archive,
@@ -93,7 +86,7 @@ pub(crate) use runtime_profile::{
 };
 pub use runtime_profile::{
     CommandRuntimeProfileError, CommandRuntimeProfileResolver,
-    COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH, COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE,
+    COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH,
 };
 use segment::*;
 pub use session::{

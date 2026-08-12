@@ -10,10 +10,9 @@ use crate::storage::models::{
     AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord, ChatConversationRecord,
     ChatConversationViewRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
     ChatMessageStateRecord, ChatSearchInput, ChatSearchResult, ComposerDraftRecord,
-    ConversationForkPoint, ForkConversationInput, ForkConversationRequest,
-    ImageGenerationProfileRecord, McpApprovalEnvelopeRecord, ModelConfigRecord,
-    ModelSettingsRecord, ModelSettingsSaveRequest, ModelSettingsSnapshot, ProjectRecord,
-    ProviderProfileUpdate, UiPreferencesRecord,
+    ConversationForkPoint, ForkConversationRequest, ImageGenerationProfileRecord,
+    McpApprovalEnvelopeRecord, ModelConfigRecord, ModelSettingsRecord, ModelSettingsSaveRequest,
+    ModelSettingsSnapshot, ProjectRecord, ProviderProfileUpdate, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_command_session_repository,
@@ -31,7 +30,7 @@ use crate::storage::{
     turn_diff_repository, usage_repository, world_state_repository, StorageState,
 };
 use crate::{
-    AgentApiStyle, AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
+    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction, AgentToolCall,
     AgentToolResult, AgentTurnDiffIdentity, AgentTurnDiffRecord, AgentTurnFileChange,
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,

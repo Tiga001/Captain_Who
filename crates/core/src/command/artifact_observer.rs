@@ -372,11 +372,11 @@ impl CommandArtifactObserver {
         AgentCommandArtifactObservation {
             schema_version: AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
             status,
-            partial: Some(partial),
+            partial,
             stop_reasons,
-            scanned: Some(scanned),
-            returned: Some(returned),
-            omitted: Some(changes_omitted),
+            scanned,
+            returned,
+            omitted: changes_omitted,
             coverage,
             changes,
             changes_truncated,
@@ -2574,10 +2574,10 @@ mod tests {
             result.status,
             AgentCommandArtifactObservationStatus::Partial
         );
-        assert_eq!(result.partial, Some(true));
-        assert_eq!(result.scanned, Some(4));
-        assert_eq!(result.returned, Some(result.changes.len() as u64));
-        assert_eq!(result.omitted, Some(result.changes_omitted));
+        assert!(result.partial);
+        assert_eq!(result.scanned, 4);
+        assert_eq!(result.returned, result.changes.len() as u64);
+        assert_eq!(result.omitted, result.changes_omitted);
         assert!(result
             .stop_reasons
             .iter()

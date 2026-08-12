@@ -335,14 +335,17 @@ fn source_resolution_rejects_invalid_resolution_ids_as_invalid_params() {
 }
 
 #[test]
-fn uninstall_rejects_a_malformed_exact_revision_without_legacy_fallback() {
+fn uninstall_rejects_a_malformed_installation_revision() {
     let request = serde_json::from_value::<JsonRpcRequest>(json!({
         "jsonrpc": "2.0",
         "id": 73,
         "method": SKILLS_UNINSTALL_METHOD,
         "params": {
             "skillId": "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b336",
-            "expectedRevision": format!("{SKILL_INSTALLATION_REVISION_PREFIX}malformed")
+            "expectedRevision": format!(
+                "{}malformed",
+                mycopilot_core::skills::SKILL_INSTALLATION_REVISION_PREFIX
+            )
         }
     }))
     .unwrap();
@@ -358,6 +361,52 @@ fn uninstall_rejects_a_malformed_exact_revision_without_legacy_fallback() {
         .as_str()
         .unwrap()
         .contains("installation revision"));
+}
+
+#[test]
+fn uninstall_rejects_package_revision_and_noncanonical_params() {
+    for (id, params) in [
+        (
+            74,
+            json!({
+                "skillId": "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b336",
+                "expectedRevision": format!("skill-package-sha256-v1:{}", "a".repeat(64))
+            }),
+        ),
+        (
+            75,
+            json!({
+                "skillId": "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b336"
+            }),
+        ),
+        (
+            76,
+            json!({
+                "skillId": "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b336",
+                "expectedRevision": format!(
+                    "{}{}",
+                    mycopilot_core::skills::SKILL_INSTALLATION_REVISION_PREFIX,
+                    "a".repeat(64)
+                ),
+                "packageRevision": format!("skill-package-sha256-v1:{}", "a".repeat(64))
+            }),
+        ),
+    ] {
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": SKILLS_UNINSTALL_METHOD,
+            "params": params
+        }))
+        .unwrap();
+
+        let response = match parse_skills_request(request) {
+            Ok(_) => panic!("noncanonical uninstall input must fail closed"),
+            Err(response) => response,
+        };
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"]["code"], -32602);
+    }
 }
 
 #[test]

@@ -257,7 +257,7 @@ impl CommandSessionManager {
         cancellation_token: crate::AgentCancellationToken,
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Result<CommandStartOutcome, CommandSessionStartError> {
-        if request.runtime.is_none() && request.runtime_binding.is_none() {
+        if request.runtime_binding.is_none() {
             if !request.inputs.is_empty() {
                 return Err(CommandExecutionError::from(
                     "run_command.inputs requires a frozen managed runtime binding".to_string(),
@@ -322,10 +322,7 @@ impl CommandSessionManager {
         lifecycle_observer: Option<CommandSessionLifecycleObserver>,
         cancel_probe: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Result<CommandStartOutcome, CommandSessionStartError> {
-        if request.runtime.is_some()
-            || request.runtime_binding.is_some()
-            || !request.inputs.is_empty()
-        {
+        if request.runtime_binding.is_some() || !request.inputs.is_empty() {
             return Err(CommandExecutionError::from(
                 "host-bound runtimes and file inputs require a managed-runtime spawn plan"
                     .to_string(),
@@ -386,6 +383,7 @@ impl CommandSessionManager {
         .map_err(Into::into)
     }
 
+    #[cfg(test)]
     pub(super) fn start_plan(
         &self,
         scope_id: CommandSessionScopeId,

@@ -41,7 +41,9 @@ export function ConfigurationSettingsPage() {
   }
 
   const saveModel = async (values: ModelFormValues) => {
-    const savedModel = modelConfigFromForm(values, editingModel)
+    const savedModel = editingModel
+      ? modelConfigFromForm(values, editingModel)
+      : modelConfigFromForm(values)
 
     await upsertModel(savedModel, editingModel?.id)
     setEditingModel(undefined)

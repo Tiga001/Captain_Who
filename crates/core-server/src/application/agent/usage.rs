@@ -66,8 +66,9 @@ pub(super) fn restore_pending_usage_contexts(
             assistant_message_id,
         )?
         else {
-            // Legacy pending rows and Providers that supplied no usage may lack an authoritative
-            // usage record. Resume them with an explicitly unpriced, empty accumulator derived
+            // Approval persistence and usage persistence commit separately, so a crash between
+            // them can leave no authoritative usage row. Providers may also omit usage. Resume
+            // with an explicitly unpriced, empty accumulator derived
             // only from the frozen owner/protocol; never borrow the current model Profile or
             // prices, which may have changed while approval was pending.
             let state = AgentRunUsageState {

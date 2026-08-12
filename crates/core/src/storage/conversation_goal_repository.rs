@@ -80,7 +80,7 @@ pub(crate) fn create_goal(
         append_revision(
             &transaction,
             goal,
-            Some(actor),
+            actor,
             &ConversationGoalRevisionEvent::Initial { goal: goal.clone() },
             now,
         )?;
@@ -123,7 +123,7 @@ pub(crate) fn update_goal_status(
         append_revision(
             &transaction,
             goal,
-            Some(actor),
+            actor,
             &ConversationGoalRevisionEvent::StatusChanged {
                 previous_status: previous.status,
                 status: goal.status,
@@ -173,7 +173,7 @@ pub(crate) fn update_goal_objective(
         append_revision(
             &transaction,
             goal,
-            Some(actor),
+            actor,
             &ConversationGoalRevisionEvent::ObjectiveChanged {
                 previous_objective: previous.objective,
                 objective: goal.objective.clone(),
@@ -226,7 +226,7 @@ fn require_initial_revision(
 fn append_revision(
     connection: &Transaction<'_>,
     goal: &ConversationGoal,
-    actor: Option<ConversationGoalMutationActor>,
+    actor: ConversationGoalMutationActor,
     event: &ConversationGoalRevisionEvent,
     created_at: i64,
 ) -> rusqlite::Result<()> {
@@ -249,7 +249,7 @@ fn append_revision(
             goal.goal_id,
             sequence,
             i64::from(CONVERSATION_GOAL_REVISION_SCHEMA_VERSION),
-            actor.map(ConversationGoalMutationActor::as_str),
+            actor.as_str(),
             event.kind(),
             event_json,
             created_at,
@@ -259,11 +259,10 @@ fn append_revision(
 }
 
 fn revision_from_row(row: &Row<'_>) -> rusqlite::Result<ConversationGoalRevision> {
-    let actor = match row.get::<_, Option<String>>(4)?.as_deref() {
-        Some("model") => Some(ConversationGoalMutationActor::Model),
-        Some("user") => Some(ConversationGoalMutationActor::User),
-        None => None,
-        Some(value) => {
+    let actor = match row.get::<_, String>(4)?.as_str() {
+        "model" => ConversationGoalMutationActor::Model,
+        "user" => ConversationGoalMutationActor::User,
+        value => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 4,
                 Type::Text,

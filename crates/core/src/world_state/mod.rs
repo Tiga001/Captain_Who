@@ -152,7 +152,7 @@ impl<'de> Deserialize<'de> for WorldStateSectionId {
 /// A section keeps authoritative host state distinct from the value explicitly approved for model
 /// context. A model-visible section must provide a projection; a host-only section must not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldStateSectionEnvelope {
     pub schema_version: u32,
     pub id: WorldStateSectionId,
@@ -403,7 +403,7 @@ pub fn model_capabilities_section(
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldStateSnapshot {
     pub schema_version: u32,
     pub epoch_id: String,
@@ -530,7 +530,7 @@ impl WorldStateSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldStateSectionPrecondition {
     pub revision: String,
     pub visibility: WorldStateVisibility,
@@ -550,7 +550,7 @@ impl WorldStateSectionPrecondition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldStateSectionTombstone {
     pub section_id: WorldStateSectionId,
     pub removed_revision: String,
@@ -573,7 +573,12 @@ impl WorldStateSectionTombstone {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "op",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum WorldStateOperation {
     Add {
         section: WorldStateSectionEnvelope,
@@ -608,7 +613,7 @@ impl WorldStateOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorldStateDiff {
     pub schema_version: u32,
     pub epoch_id: String,
@@ -795,7 +800,12 @@ pub enum WorldStateRecordKind {
 
 /// Serializable durable journal record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "record", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "record",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
 pub enum WorldStateRecord {
     Full(WorldStateSnapshot),
     Diff(WorldStateDiff),
@@ -868,7 +878,7 @@ impl WorldStateRecord {
 /// is effective immediately before that message. The message ID is an opaque backend anchor and is
 /// intentionally not part of the model-visible projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnchoredWorldStateRecord {
     pub record: WorldStateRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]

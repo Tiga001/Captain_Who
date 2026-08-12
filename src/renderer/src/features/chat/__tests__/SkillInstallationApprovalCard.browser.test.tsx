@@ -67,7 +67,8 @@ describe('SkillInstallationApprovalCard', () => {
           id: 'prepare-pending',
           tool: 'skills_prepare_install',
           args: { source: 'https://github.com/example/social' },
-          approvalStatus: 'not_required'
+          approvalStatus: 'not_required',
+          reason: null
         }}
         run={{
           runId: 'run-1',
@@ -144,7 +145,8 @@ describe('SkillInstallationApprovalCard', () => {
           id: 'prepare-install',
           tool: 'skills_prepare_install',
           args: { source: 'https://github.com/example/social' },
-          approvalStatus: 'not_required'
+          approvalStatus: 'not_required',
+          reason: null
         }}
         result={{
           callId: 'prepare-install',
@@ -179,7 +181,8 @@ describe('SkillInstallationApprovalCard', () => {
           id: action.installation.id,
           tool: 'skills_commit_install',
           args: { installRef: action.installation.installRef },
-          approvalStatus: 'approved'
+          approvalStatus: 'approved',
+          reason: null
         }}
         result={{
           callId: action.installation.id,

@@ -377,7 +377,8 @@ describe('McpToolActivity', () => {
       id: 'ordinary-call',
       tool: 'mcp__spoofed__name',
       args: { ordinaryArgument: 'visible-generic-value' },
-      approvalStatus: 'not_required'
+      approvalStatus: 'not_required',
+      reason: null
     }
     const screen = await render(
       <AgentToolActivity call={call} run={run()} showImageGenerationPreview={false} />

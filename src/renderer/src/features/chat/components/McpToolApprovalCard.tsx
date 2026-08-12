@@ -53,12 +53,7 @@ function getMcpApprovalReason(approval: AgentMcpToolApproval, fallback: string):
   // `displayReason`/`reason` are bounded model-authored plain-text fields. They remain untrusted
   // and may contain user-provided sensitive text. Until the Host supplies one, `call.reason` is
   // the only typed fallback; raw arguments are never inspected to synthesize a reason.
-  const summaryReason =
-    'displayReason' in approval.summary
-      ? approval.summary.displayReason
-      : 'reason' in approval.summary
-        ? approval.summary.reason
-        : undefined
+  const summaryReason = approval.summary.displayReason
   const candidate =
     typeof summaryReason === 'string' && summaryReason.trim() ? summaryReason : approval.call.reason
   const safeReason =

@@ -47,7 +47,6 @@ fn persist_settled_manual_command(
             reason: Some("build the reviewed artifact".to_string()),
             observe: None,
             inputs: Vec::new(),
-            runtime: None,
             runtime_binding: None,
         },
     };
@@ -56,7 +55,9 @@ fn persist_settled_manual_command(
         sequence: 0,
         call_id: call_id.to_string(),
         tool: "run_command".to_string(),
-        provenance: None,
+        provenance: crate::AgentToolIdentity::Builtin {
+            tool_name: "run_command".to_string(),
+        },
         operation: serde_json::json!({
             "command": "node build.mjs",
         }),
@@ -179,7 +180,9 @@ fn persist_settled_manual_command(
                 sequence: 0,
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: call.tool.clone(),
+                },
                 operation: call.args.clone(),
                 approval_status: call.approval_status,
                 truncated: false,
@@ -187,12 +190,42 @@ fn persist_settled_manual_command(
             crate::conversation_trace::projected_tool_result_trace_item(1, &call, &tool_result),
         ],
     };
+    let model_context_items = vec![
+        crate::ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: call.id.clone(),
+                name: call.tool.clone(),
+                args: call.args.clone(),
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: call.id.clone(),
+                    runtime_call_id: call.id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: serde_json::to_string(&tool_result).unwrap(),
+            tool_call_id: Some(call.id.clone()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ];
     service
-        .commit_pending_agent_action_audited_result_trace(
+        .commit_pending_agent_action_audited_result_trace_with_model_context(
             &terminal_audit,
             "approved",
             "completed",
             &trace,
+            &model_context_items,
             12,
         )
         .unwrap();

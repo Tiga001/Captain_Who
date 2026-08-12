@@ -52,8 +52,8 @@ export interface DeepSeekV4ChatProviderSettings {
 export type ProviderProfileSettings = DeepSeekV4ChatProviderSettings
 
 /**
- * Explicit profile mutation intent. Omission is equivalent to `unchanged` for older clients.
- * Renderer never submits a profile version, protocol revision, or runtime capability.
+ * Explicit profile mutation intent. Renderer never submits a profile version, protocol revision,
+ * or runtime capability.
  */
 export type StorageProviderProfileUpdate =
   | { kind: 'unchanged' }
@@ -69,12 +69,12 @@ export interface StorageModelConfigRecord {
   id: string
   displayName: string
   /** A model-level connection override is valid only when URL and token are both present. */
-  apiUrlOverride?: string | null
-  apiTokenOverride?: string | null
+  apiUrlOverride: string | null
+  apiTokenOverride: string | null
   supportsImage: boolean
-  contextWindowTokens?: number | null
-  /** Hidden provider wire configuration; settings UIs must preserve it even before exposing it. */
-  providerProfileConfig?: ProviderProfileConfig | null
+  contextWindowTokens: number | null
+  /** Hidden provider wire configuration; settings UIs preserve this Host-owned current value. */
+  providerProfileConfig: ProviderProfileConfig
   inputPrice: string
   /** Empty means cached input inherits inputPrice. */
   cachedInputPrice: string
@@ -96,9 +96,8 @@ export interface StorageModelConfigUpdateRecord extends Omit<
   'providerProfileConfig'
 > {
   /** Previous opaque model identity used to preserve profile state across an explicit rename. */
-  previousModelId?: string
-  /** Missing means preserve the currently saved profile and settings. */
-  providerProfileUpdate?: StorageProviderProfileUpdate
+  previousModelId: string | null
+  providerProfileUpdate: StorageProviderProfileUpdate
 }
 
 /**
@@ -204,23 +203,11 @@ export type StorageConversationForkPoint =
       operationId: string
     }
 
-interface StorageForkConversationRequestBase {
+export interface StorageForkConversationRequest {
   requestId: string
   sourceConversationId: string
+  forkPoint: StorageConversationForkPoint
 }
-
-export type StorageForkConversationRequest = StorageForkConversationRequestBase &
-  (
-    | {
-        forkPoint: StorageConversationForkPoint
-        throughAssistantMessageId?: never
-      }
-    | {
-        /** Legacy wire shape. New clients must send an explicit forkPoint. */
-        throughAssistantMessageId: string
-        forkPoint?: never
-      }
-  )
 
 /** Stable recovery metadata returned when Core rejects a conversation fork. */
 export interface StorageForkConversationErrorData {
@@ -234,16 +221,13 @@ export interface StorageComposerDraftRecord {
   scopeId: string
   message: string
   permissionMode: string
-  /**
-   * Version of the permission-mode semantics under which this choice was made.
-   * Missing/zero values are legacy records and must not grant upgraded privileges.
-   */
-  permissionModeVersion?: number
-  modelId?: string | null
-  projectId?: string | null
+  /** Version of the permission-mode semantics under which this choice was made. */
+  permissionModeVersion: number
+  modelId: string | null
+  projectId: string | null
   attachmentsJson: string
   skillsJson: string
-  queuedMessagesJson?: string
+  queuedMessagesJson: string
   updatedAt: number
 }
 

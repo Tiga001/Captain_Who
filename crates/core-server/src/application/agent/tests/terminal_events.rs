@@ -7,22 +7,210 @@ use mycopilot_core::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+fn terminal_test_checkpoint_item(
+    call: &AgentToolCall,
+) -> mycopilot_core::AgentContextCheckpointItem {
+    mycopilot_core::AgentContextCheckpointItem {
+        role: "assistant".to_string(),
+        content: String::new(),
+        images: Vec::new(),
+        tool_call_id: None,
+        tool_calls: vec![terminal_test_checkpoint_call(call)],
+        is_error: false,
+        sources: vec!["model_response".to_string()],
+        scope: "run".to_string(),
+        retention: "retained".to_string(),
+        group: None,
+        origin: None,
+    }
+}
+
+fn terminal_test_checkpoint_call(call: &AgentToolCall) -> AgentContextCheckpointToolCall {
+    AgentContextCheckpointToolCall {
+        id: call.id.clone(),
+        name: call.tool.clone(),
+        args: call.args.clone(),
+        provider_identity: AgentProviderToolCallIdentity {
+            provider_tool_index: 0,
+            provider_call_id: call.id.clone(),
+            runtime_call_id: call.id.clone(),
+        },
+    }
+}
+
+fn terminal_test_model_context(call: &AgentToolCall) -> ConversationModelContextItem {
+    ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![terminal_test_checkpoint_call(call)],
+        is_error: false,
+    }
+}
+
+fn run_current_command_session(
+    workspace_root: &Path,
+    request: &AgentCommandRequest,
+    permissions: AgentPermissions,
+    authorization_source: CommandAuthorizationSource,
+) -> AgentCommandExecutionResult {
+    let manager = mycopilot_core::command::CommandSessionManager::default();
+    let outcome = manager
+        .start_authorized_command(
+            mycopilot_core::command::CommandSessionScopeId::new(format!(
+                "test-command:{}",
+                request.id
+            ))
+            .unwrap(),
+            Some(workspace_root),
+            request,
+            permissions,
+            authorization_source,
+            mycopilot_core::command::CommandStartOptions::default(),
+            None,
+        )
+        .unwrap();
+    match outcome {
+        mycopilot_core::command::CommandStartOutcome::Exited(terminal) => terminal.execution,
+        mycopilot_core::command::CommandStartOutcome::Running(snapshot) => {
+            manager
+                .wait_terminal_result(&snapshot.session_id, Duration::from_secs(10))
+                .unwrap()
+                .expect("test command Session must become terminal")
+                .execution
+        }
+    }
+}
+
+fn durable_auto_command_context(
+    storage: &StorageService,
+    mut input: AgentChatInput,
+    run_id: &str,
+    assistant_message_id: &str,
+) -> AutoApprovedActionContext {
+    let conversation_id = input
+        .context
+        .as_ref()
+        .and_then(|context| context.conversation_id.clone())
+        .expect("automatic command test input has a conversation identity");
+    let project_id = input
+        .context
+        .as_ref()
+        .and_then(|context| context.project_id.clone());
+    if let Some(project_id) = project_id.as_ref() {
+        let project_path = input
+            .context
+            .as_ref()
+            .and_then(|context| context.workspace.as_ref())
+            .and_then(|workspace| workspace.root_path.clone());
+        storage
+            .save_project(ProjectRecord {
+                id: project_id.clone(),
+                name: "Automatic command Session fixture".to_string(),
+                path: project_path,
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+    }
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.clone(),
+            project_id,
+            model_id: Some("test-model".to_string()),
+            title: "Automatic command Session fixture".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    input
+        .context
+        .as_mut()
+        .expect("automatic command test input has run context")
+        .conversation_id = Some(conversation_id.clone());
+    AutoApprovedActionContext::new(
+        input,
+        run_id.to_string(),
+        Some(conversation_id),
+        Some(assistant_message_id.to_string()),
+        None,
+    )
+}
+
+fn wait_for_terminal_auto_command_session(
+    storage: &StorageService,
+    conversation_id: &str,
+) -> mycopilot_core::storage::agent_command_session_repository::AgentCommandSessionRecord {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(record) = storage
+            .list_agent_command_sessions(conversation_id, 8)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.snapshot.status.is_terminal() && record.settled_at.is_some())
+        {
+            return record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "automatic command Session did not durably settle before the test deadline"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn command_session_archive_content(
+    storage: &StorageService,
+    conversation_id: &str,
+    archive_ref: &str,
+) -> String {
+    let descriptor = storage
+        .find_conversation_history_archive_by_ref(conversation_id, archive_ref)
+        .unwrap()
+        .expect("terminal command Session owns its Exact History archive");
+    storage
+        .read_conversation_history_archive_page(
+            conversation_id,
+            archive_ref,
+            mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            descriptor.total_chars,
+        )
+        .unwrap()
+        .expect("terminal command Session Exact History page")
+        .content
+}
+
 #[test]
-fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources() {
+fn automatic_server_path_requires_explicit_approval_for_guarded_writes() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new(Arc::clone(&storage));
     let input = command_test_input(fixture.path());
 
     let automatic_request = command_request("automatic-command", "mkdir automatic-blocked");
     let automatic_result = service
         .execute_auto_approved_action(
-            AutoApprovedActionContext::new(
+            durable_auto_command_context(
+                &storage,
                 input.clone(),
-                "run-automatic-command".to_string(),
-                None,
-                None,
-                None,
+                "run-automatic-command",
+                "assistant-automatic-command",
             ),
             AgentProposedAction::Command {
                 command: automatic_request,
@@ -37,60 +225,6 @@ fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources()
         .as_deref()
         .is_some_and(|error| error.contains("command.explicit_approval_required")));
     assert!(!fixture.path().join("automatic-blocked").exists());
-
-    let mut full_access_input = input.clone();
-    full_access_input
-        .context
-        .as_mut()
-        .expect("command test context")
-        .permissions
-        .command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
-    let full_access_request =
-        command_request("automatic-full-access", "mkdir automatic-full-access");
-    let full_access_result = service
-        .execute_auto_approved_action(
-            AutoApprovedActionContext::new(
-                full_access_input,
-                "run-automatic-full-access".to_string(),
-                None,
-                None,
-                None,
-            ),
-            AgentProposedAction::Command {
-                command: full_access_request,
-            },
-            AgentCancellationToken::new(),
-        )
-        .unwrap();
-
-    assert!(full_access_result.ok);
-    assert!(fixture.path().join("automatic-full-access").is_dir());
-
-    let explicit_request = command_request("explicit-command", "mkdir explicit-allowed");
-    let record = PendingActionRecord {
-        storage_id: pending_action_storage_id("run-explicit-command", &explicit_request.id),
-        snapshot: PendingAgentActionSnapshot {
-            action_id: explicit_request.id.clone(),
-            action_type: "command".to_string(),
-            tool_name: "run_command".to_string(),
-            tool_call_id: Some(explicit_request.id.clone()),
-            run_id: "run-explicit-command".to_string(),
-            conversation_id: Some("conversation-command-policy".to_string()),
-            assistant_message_id: Some("assistant-command-policy".to_string()),
-            action: AgentProposedAction::Command {
-                command: explicit_request,
-            },
-            created_at: 1,
-            status: PendingActionStatus::Approved,
-        },
-        agent_input: input,
-    };
-    let explicit_result =
-        run_explicitly_approved_command_from_snapshot(&record, AgentCancellationToken::new(), None)
-            .unwrap();
-
-    assert_eq!(explicit_result.exit_code, Some(0));
-    assert!(fixture.path().join("explicit-allowed").is_dir());
 }
 
 #[test]
@@ -635,106 +769,6 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
 }
 
 #[test]
-fn explicitly_approved_command_streams_output_with_the_original_call_identity() {
-    let fixture = tempdir().unwrap();
-    let run_id = "run-live-explicit-command";
-    let call_id = "live-explicit-command";
-    let command = command_request(
-        call_id,
-        "printf 'explicit-stdout\\n'; printf 'explicit-stderr\\n' >&2",
-    );
-    let record = PendingActionRecord {
-        storage_id: pending_action_storage_id(run_id, call_id),
-        snapshot: PendingAgentActionSnapshot {
-            action_id: call_id.to_string(),
-            action_type: "command".to_string(),
-            tool_name: "run_command".to_string(),
-            tool_call_id: Some(call_id.to_string()),
-            run_id: run_id.to_string(),
-            conversation_id: Some("conversation-live-explicit".to_string()),
-            assistant_message_id: Some("assistant-live-explicit".to_string()),
-            action: AgentProposedAction::Command { command },
-            created_at: 1,
-            status: PendingActionStatus::Approved,
-        },
-        agent_input: command_test_input(fixture.path()),
-    };
-    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let output_observer = command_output_observer(run_id, call_id, &notifications);
-
-    let result =
-        run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
-            &record,
-            AgentCancellationToken::new(),
-            None,
-            None,
-            None,
-            Some(output_observer),
-        )
-        .unwrap();
-
-    assert_eq!(result.exit_code, Some(0));
-    let mut events = Vec::new();
-    while let Ok(notification) = receiver.try_recv() {
-        if notification["params"]["type"] == "command_output" {
-            events.push(notification["params"].clone());
-        }
-    }
-    assert!(!events.is_empty());
-    assert!(events.iter().all(|event| event["runId"] == run_id));
-    assert!(events.iter().all(|event| event["callId"] == call_id));
-    let output = events
-        .iter()
-        .filter_map(|event| event["output"].as_str())
-        .collect::<String>();
-    assert!(output.contains("explicit-stdout"));
-    assert!(output.contains("explicit-stderr"));
-}
-
-#[test]
-fn explicit_user_execution_is_bound_to_the_backend_action_snapshot() {
-    let fixture = tempdir().unwrap();
-    let frozen_request = command_request("frozen-command", "mkdir frozen-snapshot");
-    let record = PendingActionRecord {
-        storage_id: pending_action_storage_id("run-frozen-command", &frozen_request.id),
-        snapshot: PendingAgentActionSnapshot {
-            action_id: frozen_request.id.clone(),
-            action_type: "command".to_string(),
-            tool_name: "run_command".to_string(),
-            tool_call_id: Some(frozen_request.id.clone()),
-            run_id: "run-frozen-command".to_string(),
-            conversation_id: Some("conversation-frozen-command".to_string()),
-            assistant_message_id: Some("assistant-frozen-command".to_string()),
-            action: AgentProposedAction::Command {
-                command: frozen_request,
-            },
-            created_at: 1,
-            status: PendingActionStatus::Approved,
-        },
-        agent_input: command_test_input(fixture.path()),
-    };
-    let untrusted_replacement_call = AgentToolCall {
-        id: "frozen-command".to_string(),
-        tool: "run_command".to_string(),
-        args: json!({ "command": "mkdir untrusted-replacement" }),
-        approval_status: AgentApprovalStatus::Approved,
-        reason: None,
-    };
-    assert_eq!(
-        untrusted_replacement_call.args["command"],
-        "mkdir untrusted-replacement"
-    );
-
-    let result =
-        run_explicitly_approved_command_from_snapshot(&record, AgentCancellationToken::new(), None)
-            .unwrap();
-
-    assert_eq!(result.exit_code, Some(0));
-    assert!(fixture.path().join("frozen-snapshot").is_dir());
-    assert!(!fixture.path().join("untrusted-replacement").exists());
-}
-
-#[test]
 fn nonzero_automatic_command_persists_office_artifacts_in_tool_result_audit() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -759,7 +793,12 @@ fn nonzero_automatic_command_persists_office_artifacts_in_tool_result_audit() {
 
     let result = service
         .execute_auto_approved_action(
-            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None),
+            durable_auto_command_context(
+                &storage,
+                input,
+                run_id,
+                "assistant-command-artifact-audit",
+            ),
             AgentProposedAction::Command { command },
             AgentCancellationToken::new(),
         )
@@ -857,7 +896,12 @@ fn automatic_command_final_audit_failure_preserves_and_then_replays_effect_evide
         additional_roots: Vec::new(),
     });
     inject_auto_action_audit_failure(run_id, call_id, "completed");
-    let context = AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None);
+    let context = durable_auto_command_context(
+        &storage,
+        input,
+        run_id,
+        "assistant-command-final-audit-failure",
+    );
     let action = AgentProposedAction::Command {
         command: command.clone(),
     };
@@ -931,7 +975,12 @@ fn automatic_command_reconciles_a_terminal_receipt_after_post_commit_error() {
         additional_roots: Vec::new(),
     });
     inject_auto_action_audit_post_commit_failure(run_id, call_id, "completed");
-    let context = AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None);
+    let context = durable_auto_command_context(
+        &storage,
+        input,
+        run_id,
+        "assistant-command-post-commit-reconciliation",
+    );
     let action = AgentProposedAction::Command {
         command: command.clone(),
     };
@@ -1005,9 +1054,15 @@ fn command_completion_waits_for_a_failed_project_deletion_then_persists_evidence
         additional_roots: Vec::new(),
     });
     let execution_service = service.clone();
+    let execution_context = durable_auto_command_context(
+        &storage,
+        input,
+        run_id,
+        "assistant-project-deletion-barrier",
+    );
     let execution = std::thread::spawn(move || {
         execution_service.execute_auto_approved_action(
-            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None),
+            execution_context,
             AgentProposedAction::Command { command },
             AgentCancellationToken::new(),
         )
@@ -1034,14 +1089,19 @@ fn command_completion_waits_for_a_failed_project_deletion_then_persists_evidence
         "storage deletion must run only after the command effect is durably settled"
     );
     assert!(!service.is_project_deleting(Some("project-deletion-barrier")));
-    let persisted = storage.list_agent_command_results_for_run(run_id).unwrap();
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(
-        persisted[0].artifact_observation.as_ref().unwrap().changes[0].path,
-        "deletion-barrier.csv"
-    );
     let result = execution.join().unwrap().unwrap();
-    assert!(result.ok);
+    assert_eq!(result.call_id, call_id);
+    assert_eq!(result.tool, "run_command");
+    let terminal = wait_for_terminal_auto_command_session(&storage, "conversation-command-policy");
+    let archive_ref = terminal
+        .snapshot
+        .archive_ref
+        .as_deref()
+        .expect("settled command Session has an Exact History reference");
+    let archive =
+        command_session_archive_content(&storage, "conversation-command-policy", archive_ref);
+    assert!(archive.contains("artifactObservation"));
+    assert!(archive.contains("deletion-barrier.csv"));
 }
 
 #[test]
@@ -1058,17 +1118,37 @@ fn project_deletion_timeout_preserves_late_command_observation() {
     let call_id = "command-project-deletion-timeout";
     let mut command = command_request(
         call_id,
-        "printf timeout-evidence > deletion-timeout.csv; sleep 0.6",
+        "printf lifecycle-output; printf timeout-evidence > deletion-timeout.csv; sleep 5",
     );
     command.observe = Some(mycopilot_core::AgentCommandArtifactObservationRequest {
         kinds: vec![mycopilot_core::AgentCommandArtifactObservationKind::Office],
         expected_outputs: vec!["deletion-timeout.csv".to_string()],
         additional_roots: Vec::new(),
     });
+    let persistence_entered = Arc::new(std::sync::Barrier::new(2));
+    let persistence_release = Arc::new(std::sync::Barrier::new(2));
+    let hook_entered = Arc::clone(&persistence_entered);
+    let hook_release = Arc::clone(&persistence_release);
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let observed_hook_calls = Arc::clone(&hook_calls);
+    service
+        .command_sessions
+        .set_before_output_persistence_hook(Arc::new(move |_, _| {
+            if observed_hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                hook_entered.wait();
+                hook_release.wait();
+            }
+        }));
     let execution_service = service.clone();
+    let execution_context = durable_auto_command_context(
+        &storage,
+        input,
+        run_id,
+        "assistant-project-deletion-timeout",
+    );
     let execution = std::thread::spawn(move || {
         execution_service.execute_auto_approved_action(
-            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None),
+            execution_context,
             AgentProposedAction::Command { command },
             AgentCancellationToken::new(),
         )
@@ -1082,32 +1162,36 @@ fn project_deletion_timeout_preserves_late_command_observation() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(artifact_path.exists());
+    persistence_entered.wait();
 
     let deletion_error = service
         .delete_project("project-deletion-timeout")
         .unwrap_err();
     assert!(deletion_error.contains("did not finish execution and durable settlement"));
     assert!(!service.is_project_deleting(Some("project-deletion-timeout")));
-    assert!(
-        !execution.is_finished(),
-        "a drain timeout must refuse deletion instead of pretending the command finished"
-    );
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
 
+    persistence_release.wait();
     let result = execution.join().unwrap().unwrap();
-    assert!(result.ok);
-    let persisted = storage.list_agent_command_results_for_run(run_id).unwrap();
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(
-        persisted[0].artifact_observation.as_ref().unwrap().changes[0].path,
-        "deletion-timeout.csv"
-    );
+    assert_eq!(result.call_id, call_id);
+    assert_eq!(result.tool, "run_command");
+    let terminal = wait_for_terminal_auto_command_session(&storage, "conversation-command-policy");
+    let archive_ref = terminal
+        .snapshot
+        .archive_ref
+        .as_deref()
+        .expect("late terminal settlement has an Exact History reference");
+    let archive =
+        command_session_archive_content(&storage, "conversation-command-policy", archive_ref);
+    assert!(archive.contains("artifactObservation"));
+    assert!(archive.contains("deletion-timeout.csv"));
 }
 
 #[test]
-fn project_deletion_rejects_unsettled_command_effects() {
+fn durable_command_session_receipt_allows_deletion_after_action_audit_is_indeterminate() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let service = AgentService::new(storage);
+    let service = AgentService::new(Arc::clone(&storage));
     let mut input = command_test_input(fixture.path());
     let context = input.context.as_mut().expect("command test context");
     context.project_id = Some("project-unsettled-command".to_string());
@@ -1130,7 +1214,12 @@ fn project_deletion_rejects_unsettled_command_effects() {
 
     let result = service
         .execute_auto_approved_action(
-            AutoApprovedActionContext::new(input, run_id.to_string(), None, None, None),
+            durable_auto_command_context(
+                &storage,
+                input,
+                run_id,
+                "assistant-project-unsettled-command",
+            ),
             AgentProposedAction::Command { command },
             AgentCancellationToken::new(),
         )
@@ -1142,12 +1231,23 @@ fn project_deletion_rejects_unsettled_command_effects() {
         "finalizationIndeterminate"
     );
     assert!(fixture.path().join("unsettled-evidence.csv").exists());
-    let deletion_error = service
-        .delete_project("project-unsettled-command")
-        .unwrap_err();
-    assert!(deletion_error.contains("without a confirmed durable terminal receipt"));
-    assert!(deletion_error.contains(&pending_action_storage_id(run_id, call_id)));
-    assert!(!service.is_project_deleting(Some("project-unsettled-command")));
+    let terminal = wait_for_terminal_auto_command_session(&storage, "conversation-command-policy");
+    let archive_ref = terminal
+        .snapshot
+        .archive_ref
+        .as_deref()
+        .expect("the durable Session owns its terminal Exact History receipt");
+    let archive =
+        command_session_archive_content(&storage, "conversation-command-policy", archive_ref);
+    assert!(archive.contains("artifactObservation"));
+    assert!(archive.contains("unsettled-evidence.csv"));
+
+    service.delete_project("project-unsettled-command").unwrap();
+    assert!(storage
+        .load_projects()
+        .unwrap()
+        .iter()
+        .all(|project| project.id != "project-unsettled-command"));
 }
 
 #[test]
@@ -1695,6 +1795,82 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
     let action = AgentProposedAction::Command {
         command: command_request(call_id, "printf maybe-ran > restart-manual.csv"),
     };
+    let AgentProposedAction::Command { command } = &action else {
+        unreachable!("fixture is a command action")
+    };
+    let call = checkpoint_call_for_command(command);
+    let checkpoint = AgentRunCheckpoint {
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        pending_action_id: None,
+        context_items: vec![terminal_test_checkpoint_item(&call)],
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
+        run_context: None,
+        model_capabilities: ModelCapabilities::default(),
+        provider_profile_config: crate::test_provider_profile_config(),
+        provider_protocol_key: crate::test_provider_protocol_key("test-model"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[call.id.as_str()]),
+        provider_continuation_refs: Vec::new(),
+        run_world_state: crate::test_run_world_state(),
+        pending_tool_call_id: call.id.clone(),
+        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            operation: call.args.clone(),
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
+            approval_status: AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+        conversation_model_context_items: vec![terminal_test_model_context(&call)],
+        next_conversation_trace_sequence: 1,
+        conversation_trace_truncated: false,
+    };
+    let mut agent_input = command_test_input(fixture.path());
+    let context = agent_input.context.as_mut().expect("command context");
+    context.conversation_id = Some("conversation-restart-manual".to_string());
+    context.project_id = Some("project-restart-manual".to_string());
+    context.workspace.as_mut().expect("workspace").project_id =
+        Some("project-restart-manual".to_string());
+    agent_input.resume_checkpoint = Some(checkpoint);
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    let agent_input_json = PersistedAgentResumeInput::from_agent_input(&agent_input)
+        .unwrap()
+        .encode();
+    let durable_trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: "conversation-restart-manual".to_string(),
+        assistant_message_id: "assistant-restart-manual".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: agent_input
+            .resume_checkpoint
+            .as_ref()
+            .unwrap()
+            .conversation_trace_items
+            .clone(),
+    };
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &durable_trace,
+            &agent_input
+                .resume_checkpoint
+                .as_ref()
+                .unwrap()
+                .conversation_model_context_items,
+            1,
+            2,
+        )
+        .unwrap();
     let action_json = serde_json::to_string(&action).unwrap();
     storage
         .store_pending_agent_action(AgentPendingActionRecord {
@@ -1708,7 +1884,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
             status: "approved".to_string(),
             target_status: None,
             action_json: action_json.clone(),
-            agent_input_json: "{}".to_string(),
+            agent_input_json,
             created_at: 1,
             updated_at: 2,
         })
@@ -1821,12 +1997,12 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
             unread_at: None,
         })
         .unwrap();
-    let call = command_tool_call(&command);
+    let call = checkpoint_call_for_command(&command);
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
-        context_items: Vec::new(),
+        context_items: vec![terminal_test_checkpoint_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
         deferred_external_tool_call_count: 0,
@@ -1841,13 +2017,15 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items: vec![terminal_test_model_context(&call)],
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             operation: call.args.clone(),
-            provenance: None,
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
             approval_status: AgentApprovalStatus::Required,
             truncated: false,
         }],
@@ -1891,9 +2069,12 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
             None,
         )
         .unwrap();
-    let mut command_result =
-        run_explicitly_approved_command_from_snapshot(&record, AgentCancellationToken::new(), None)
-            .unwrap();
+    let mut command_result = run_current_command_session(
+        fixture.path(),
+        &command,
+        permissions_from_input(&record.agent_input),
+        CommandAuthorizationSource::ExplicitUser,
+    );
     assert_eq!(command_result.exit_code, Some(0));
     // A Host continuation can carry substantially more output than the model projection. Keep
     // the fixture deterministic while proving the approval boundary archives the exact result.

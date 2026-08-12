@@ -397,7 +397,9 @@ mod tests {
                 "permissions": {
                     "read": "workspace_only",
                     "write": "workspace_only",
-                    "command": "require_approval"
+                    "command": "require_approval",
+                    "commandSafety": "guarded",
+                    "patch": "require_approval"
                 }
             },
             "promptPreferences": {
@@ -442,6 +444,7 @@ mod tests {
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
             "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
             "messages": [{ "role": "user", "content": "hello" }]
         }))
         .unwrap();
@@ -485,6 +488,7 @@ mod tests {
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
             "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
             "messages": [{ "role": "user", "content": "hello" }]
         }))
         .unwrap();

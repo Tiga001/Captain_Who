@@ -107,37 +107,6 @@ pub struct ManagedSkillUninstallRequest {
     expected_revision: SkillInstallationRevision,
 }
 
-/// Compatibility request for callers that only possess a package revision.
-///
-/// Package revisions cannot distinguish an A→B→A lifecycle. This type is
-/// intentionally separate from [`ManagedSkillUninstallRequest`] so new code
-/// cannot accidentally opt into the weaker comparison model.
-#[derive(Debug, Clone)]
-pub struct ManagedSkillLegacyUninstallRequest {
-    installation_id: SkillInstallationId,
-    expected_package_revision: SkillRevision,
-}
-
-impl ManagedSkillLegacyUninstallRequest {
-    pub fn new(
-        installation_id: SkillInstallationId,
-        expected_package_revision: SkillRevision,
-    ) -> Self {
-        Self {
-            installation_id,
-            expected_package_revision,
-        }
-    }
-
-    pub fn installation_id(&self) -> &SkillInstallationId {
-        &self.installation_id
-    }
-
-    pub fn expected_package_revision(&self) -> &SkillRevision {
-        &self.expected_package_revision
-    }
-}
-
 impl ManagedSkillUninstallRequest {
     pub fn new(
         installation_id: SkillInstallationId,
@@ -339,12 +308,6 @@ pub enum ManagedSkillInstallerError {
         expected_revision: SkillInstallationRevision,
         actual_revision: SkillInstallationRevision,
     },
-    /// Compatibility-only conflict from an atomic package-revision CAS.
-    LegacyPackageRevisionConflict {
-        installation_id: SkillInstallationId,
-        expected_revision: SkillRevision,
-        actual_revision: SkillRevision,
-    },
     StoreCorrupt {
         reason: String,
     },
@@ -370,9 +333,7 @@ impl ManagedSkillInstallerError {
             Self::InstallationNotFound { .. } => {
                 ManagedSkillInstallerErrorCode::InstallationNotFound
             }
-            Self::RevisionConflict { .. } | Self::LegacyPackageRevisionConflict { .. } => {
-                ManagedSkillInstallerErrorCode::RevisionConflict
-            }
+            Self::RevisionConflict { .. } => ManagedSkillInstallerErrorCode::RevisionConflict,
             Self::StoreCorrupt { .. } => ManagedSkillInstallerErrorCode::StoreCorrupt,
             Self::Io { .. } => ManagedSkillInstallerErrorCode::Io,
             Self::CommitIndeterminate { .. } => ManagedSkillInstallerErrorCode::CommitIndeterminate,
@@ -416,14 +377,6 @@ impl fmt::Display for ManagedSkillInstallerError {
             } => write!(
                 formatter,
                 "managed Skill installation `{installation_id}` revision conflict: expected `{expected_revision}`, actual `{actual_revision}`"
-            ),
-            Self::LegacyPackageRevisionConflict {
-                installation_id,
-                expected_revision,
-                actual_revision,
-            } => write!(
-                formatter,
-                "managed Skill installation `{installation_id}` package revision conflict: expected `{expected_revision}`, actual `{actual_revision}`"
             ),
             Self::StoreCorrupt { reason } => {
                 write!(formatter, "managed Skill store is corrupt: {reason}")

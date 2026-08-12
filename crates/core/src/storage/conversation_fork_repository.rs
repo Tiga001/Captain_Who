@@ -1,9 +1,6 @@
 use crate::context::{
-    ContextCompactionSummary, ContextContinuityEntry, ContextContinuitySnapshot, ContextHistoryRef,
-    ContextJournalCursor,
+    ContextCompactionSummary, ContextContinuitySnapshot, ContextHistoryRef, ContextJournalCursor,
 };
-#[cfg(test)]
-use crate::storage::models::ForkConversationInput;
 use crate::storage::models::{
     AgentFileDraftRecord, AgentRunGuidanceRecord, AttachmentRecord, ChatConversationRecord,
     ChatMessageRecord, ConversationContinuationOriginRecord, ConversationForkPoint,
@@ -115,6 +112,7 @@ pub(crate) struct ConversationForkPlan {
     pub(crate) requires_context_adaptation: bool,
     adaptation_source_summary_id: Option<String>,
     message_id_map: HashMap<String, String>,
+    #[cfg(test)]
     run_id_map: HashMap<String, String>,
     id_replacements: HashMap<String, String>,
 }
@@ -123,8 +121,7 @@ pub(crate) struct ConversationForkPlan {
 pub(crate) struct ExistingConversationFork {
     pub target_conversation_id: String,
     pub source_conversation_id: String,
-    pub source_message_id: String,
-    pub source_fork_point: Option<ConversationForkPoint>,
+    pub source_fork_point: ConversationForkPoint,
 }
 
 struct ResolvedConversationForkPoint {
@@ -139,23 +136,18 @@ pub(crate) fn find_existing_fork(
 ) -> rusqlite::Result<Option<ExistingConversationFork>> {
     connection
         .query_row(
-            "SELECT target_conversation_id, source_conversation_id, source_message_id,
-                    source_fork_point_json
+            "SELECT target_conversation_id, source_conversation_id, source_fork_point_json
              FROM conversation_forks
              WHERE request_id = ?1",
             [request_id],
             |row| {
-                let fork_point_json = row.get::<_, Option<String>>(3)?;
-                let source_fork_point = fork_point_json
-                    .map(|raw| {
-                        serde_json::from_str::<ConversationForkPoint>(&raw)
-                            .map_err(|_| rusqlite::Error::InvalidQuery)
-                    })
-                    .transpose()?;
+                let fork_point_json = row.get::<_, String>(2)?;
+                let source_fork_point =
+                    serde_json::from_str::<ConversationForkPoint>(&fork_point_json)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
                 Ok(ExistingConversationFork {
                     target_conversation_id: row.get(0)?,
                     source_conversation_id: row.get(1)?,
-                    source_message_id: row.get(2)?,
                     source_fork_point,
                 })
             },
@@ -183,24 +175,6 @@ pub(crate) fn get_continuation_origin(
             },
         )
         .optional()
-}
-
-#[cfg(test)]
-pub(crate) fn build_fork_plan(
-    connection: &Connection,
-    input: &ForkConversationInput,
-    created_at: i64,
-) -> Result<ConversationForkPlan, ConversationForkError> {
-    validate_input(input)?;
-    build_fork_plan_at_point(
-        connection,
-        input.request_id.trim(),
-        input.source_conversation_id.trim(),
-        &ConversationForkPoint::AssistantReply {
-            assistant_message_id: input.through_assistant_message_id.trim().to_string(),
-        },
-        created_at,
-    )
 }
 
 pub(crate) fn build_fork_plan_at_point(
@@ -639,6 +613,7 @@ pub(crate) fn build_fork_plan_at_point(
         requires_context_adaptation,
         adaptation_source_summary_id,
         message_id_map,
+        #[cfg(test)]
         run_id_map,
         id_replacements: replacements,
     })
@@ -960,21 +935,7 @@ fn ensure_no_active_command_sessions(
     })
 }
 
-#[cfg(test)]
-fn validate_input(input: &ForkConversationInput) -> Result<(), String> {
-    for (label, value) in [
-        ("请求 ID", input.request_id.as_str()),
-        ("原任务 ID", input.source_conversation_id.as_str()),
-        ("回复 ID", input.through_assistant_message_id.as_str()),
-    ] {
-        if value.trim().is_empty() || value.chars().count() > 512 {
-            return Err(format!("{label}无效。"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_fork_point_input(
+pub(crate) fn validate_fork_point_input(
     request_id: &str,
     source_conversation_id: &str,
     fork_point: &ConversationForkPoint,
@@ -1407,7 +1368,6 @@ fn clone_summary_chain(
         let continuity = remap_continuity(
             &source.continuity,
             &plan.message_id_map,
-            &plan.run_id_map,
             &plan.id_replacements,
         )?;
         let previous_summary_id = source
@@ -1622,7 +1582,6 @@ fn clone_world_state_records(
 fn remap_continuity(
     source: &ContextContinuitySnapshot,
     message_id_map: &HashMap<String, String>,
-    run_id_map: &HashMap<String, String>,
     replacements: &HashMap<String, String>,
 ) -> Result<ContextContinuitySnapshot, String> {
     let remap_refs = |refs: &[ContextHistoryRef]| {
@@ -1630,82 +1589,6 @@ fn remap_continuity(
             .map(|reference| remap_history_ref(reference, message_id_map, replacements))
             .collect::<Result<Vec<_>, String>>()
     };
-    let entries = source
-        .entries
-        .iter()
-        .map(|entry| match entry {
-            ContextContinuityEntry::UserMessage {
-                cursor,
-                created_at,
-                text,
-                status,
-            } => Ok(ContextContinuityEntry::UserMessage {
-                cursor: remap_cursor(cursor, message_id_map)?,
-                created_at: created_at.clone(),
-                text: text.clone(),
-                status: status.clone(),
-            }),
-            ContextContinuityEntry::AssistantMessage {
-                cursor,
-                created_at,
-                text,
-                status,
-                terminal_status,
-                terminal_error,
-            } => Ok(ContextContinuityEntry::AssistantMessage {
-                cursor: remap_cursor(cursor, message_id_map)?,
-                created_at: created_at.clone(),
-                text: text.clone(),
-                status: status.clone(),
-                terminal_status: *terminal_status,
-                terminal_error: terminal_error.clone(),
-            }),
-            ContextContinuityEntry::AssistantNarration {
-                cursor,
-                run_id,
-                created_at,
-                preview,
-                total_chars,
-                truncated,
-            } => Ok(ContextContinuityEntry::AssistantNarration {
-                cursor: remap_cursor(cursor, message_id_map)?,
-                run_id: mapped_id(run_id_map, run_id, "摘要 trace run")?,
-                created_at: created_at.clone(),
-                preview: preview.clone(),
-                total_chars: *total_chars,
-                truncated: *truncated,
-            }),
-            ContextContinuityEntry::ToolExchange {
-                call_cursor,
-                result_cursor,
-                run_id,
-                created_at,
-                call_id,
-                tool,
-                operation,
-                status,
-                success,
-                outcome,
-                approval_status,
-                error,
-                truncated,
-            } => Ok(ContextContinuityEntry::ToolExchange {
-                call_cursor: remap_cursor(call_cursor, message_id_map)?,
-                result_cursor: remap_cursor(result_cursor, message_id_map)?,
-                run_id: mapped_id(run_id_map, run_id, "摘要 trace run")?,
-                created_at: created_at.clone(),
-                call_id: call_id.clone(),
-                tool: tool.clone(),
-                operation: rewritten_value(operation, replacements),
-                status: *status,
-                success: *success,
-                outcome: rewritten_value(outcome, replacements),
-                approval_status: *approval_status,
-                error: error.clone(),
-                truncated: *truncated,
-            }),
-        })
-        .collect::<Result<Vec<_>, String>>()?;
     let snapshot = ContextContinuitySnapshot {
         schema_version: source.schema_version,
         covered_through: remap_cursor(&source.covered_through, message_id_map)?,
@@ -1715,7 +1598,6 @@ fn remap_continuity(
         important_decision_refs: remap_refs(&source.important_decision_refs)?,
         recent_refs: remap_refs(&source.recent_refs)?,
         archived_counts: source.archived_counts.clone(),
-        entries,
     };
     snapshot.validate().map_err(|error| error.to_string())?;
     Ok(snapshot)
@@ -1779,12 +1661,6 @@ fn rewrite_model_context_items(
             .map_err(|error| format!("复制后的历史模型上下文无效：{error}"))?;
     }
     Ok(())
-}
-
-fn rewritten_value(value: &Value, replacements: &HashMap<String, String>) -> Value {
-    let mut value = value.clone();
-    rewrite_exact_ids(&mut value, replacements);
-    value
 }
 
 fn rewrite_history_open_tokens(
@@ -1902,6 +1778,24 @@ mod tests {
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
 
+    fn build_assistant_reply_fork_plan(
+        connection: &Connection,
+        request_id: &str,
+        source_conversation_id: &str,
+        assistant_message_id: &str,
+        created_at: i64,
+    ) -> Result<ConversationForkPlan, ConversationForkError> {
+        build_fork_plan_at_point(
+            connection,
+            request_id,
+            source_conversation_id,
+            &ConversationForkPoint::AssistantReply {
+                assistant_message_id: assistant_message_id.to_string(),
+            },
+            created_at,
+        )
+    }
+
     #[test]
     fn cloned_agent_usage_is_zero_and_ids_are_rewritten() {
         let replacements = HashMap::from([
@@ -2001,13 +1895,11 @@ mod tests {
             provider_continuation_repository::ProviderContinuationReleaseOutcome::Released
         );
 
-        let plan = build_fork_plan(
+        let plan = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-released-provider-history".to_string(),
-                source_conversation_id: source.id,
-                through_assistant_message_id: "assistant-a".to_string(),
-            },
+            "fork-released-provider-history",
+            &source.id,
+            "assistant-a",
             20,
         )
         .unwrap();
@@ -2020,13 +1912,11 @@ mod tests {
                 .is_some()
         );
 
-        let recursive = build_fork_plan(
+        let recursive = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-released-provider-history-recursive".to_string(),
-                source_conversation_id: plan.target.id.clone(),
-                through_assistant_message_id: plan.message_id_map["assistant-a"].clone(),
-            },
+            "fork-released-provider-history-recursive",
+            &plan.target.id,
+            &plan.message_id_map["assistant-a"],
             21,
         )
         .unwrap();
@@ -2053,7 +1943,9 @@ mod tests {
                     sequence: 0,
                     call_id: "call-source-a".to_string(),
                     tool: "web_fetch".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "web_fetch".to_string(),
+                    },
                     operation: json!({ "url": "https://example.com" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -2124,13 +2016,11 @@ mod tests {
             "released"
         );
 
-        let before_summary = build_fork_plan(
+        let before_summary = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-before-provider-summary".to_string(),
-                source_conversation_id: source.id.clone(),
-                through_assistant_message_id: "assistant-a".to_string(),
-            },
+            "fork-before-provider-summary",
+            &source.id,
+            "assistant-a",
             30,
         )
         .unwrap();
@@ -2138,13 +2028,11 @@ mod tests {
         assert!(before_summary.summaries.is_empty());
         assert!(before_summary.provider_continuation_mappings.is_empty());
 
-        let after_summary = build_fork_plan(
+        let after_summary = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-after-provider-summary".to_string(),
-                source_conversation_id: source.id,
-                through_assistant_message_id: "assistant-b".to_string(),
-            },
+            "fork-after-provider-summary",
+            &source.id,
+            "assistant-b",
             40,
         )
         .unwrap();
@@ -2447,13 +2335,11 @@ mod tests {
         )
         .unwrap();
 
-        let plan = build_fork_plan(
+        let plan = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-at-c".to_string(),
-                source_conversation_id: source.id.clone(),
-                through_assistant_message_id: "assistant-c".to_string(),
-            },
+            "fork-at-c",
+            &source.id,
+            "assistant-c",
             100,
         )
         .unwrap();
@@ -2536,13 +2422,11 @@ mod tests {
             1
         );
 
-        let before_summary = build_fork_plan(
+        let before_summary = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "recursive-before-summary".to_string(),
-                source_conversation_id: plan.target.id.clone(),
-                through_assistant_message_id: plan.message_id_map["assistant-a"].clone(),
-            },
+            "recursive-before-summary",
+            &plan.target.id,
+            &plan.message_id_map["assistant-a"],
             110,
         )
         .unwrap();
@@ -2555,13 +2439,11 @@ mod tests {
         .unwrap()
         .is_none());
 
-        let after_summary = build_fork_plan(
+        let after_summary = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "recursive-after-summary".to_string(),
-                source_conversation_id: plan.target.id.clone(),
-                through_assistant_message_id: plan.message_id_map["assistant-b"].clone(),
-            },
+            "recursive-after-summary",
+            &plan.target.id,
+            &plan.message_id_map["assistant-b"],
             120,
         )
         .unwrap();
@@ -2646,13 +2528,11 @@ mod tests {
         )
         .unwrap();
 
-        let plan = build_fork_plan(
+        let plan = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-world-state-at-c".to_string(),
-                source_conversation_id: source.id.clone(),
-                through_assistant_message_id: "assistant-c".to_string(),
-            },
+            "fork-world-state-at-c",
+            &source.id,
+            "assistant-c",
             100,
         )
         .unwrap();
@@ -2788,13 +2668,11 @@ mod tests {
             Some("summary-world-state-2")
         );
 
-        let early = build_fork_plan(
+        let early = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-before-all-summaries".to_string(),
-                source_conversation_id: source.id.clone(),
-                through_assistant_message_id: "assistant-a".to_string(),
-            },
+            "fork-before-all-summaries",
+            &source.id,
+            "assistant-a",
             100,
         )
         .unwrap();
@@ -2815,13 +2693,11 @@ mod tests {
             initial.revision
         );
 
-        let middle = build_fork_plan(
+        let middle = build_assistant_reply_fork_plan(
             &connection,
-            &ForkConversationInput {
-                request_id: "fork-between-world-state-summaries".to_string(),
-                source_conversation_id: source.id.clone(),
-                through_assistant_message_id: "assistant-c".to_string(),
-            },
+            "fork-between-world-state-summaries",
+            &source.id,
+            "assistant-c",
             110,
         )
         .unwrap();

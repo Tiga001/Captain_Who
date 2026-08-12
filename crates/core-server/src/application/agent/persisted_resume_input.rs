@@ -1,29 +1,34 @@
 use crate::application::agent_support::serialize_json;
 use mycopilot_core::{
-    skills::AgentSkillDiscoverySnapshot, AgentApiStyle, AgentChatInput, AgentChatMessage,
-    AgentInputAttachment, AgentPromptPreferences, AgentRunCheckpoint, AgentRunContext,
-    AgentSearchConfig, AgentSearchMode, AgentSkillActivation, AgentToolContinuation,
+    skills::AgentSkillDiscoverySnapshot, AgentApiStyle, AgentChatInput, AgentPromptPreferences,
+    AgentRunCheckpoint, AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentSkillActivation,
     AnchoredWorldStateRecord, ContextCompactionSummary, ConversationGoal, ModelCapabilities,
     ProviderProfileConfig, ProviderProtocolKey,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 5;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 6;
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// Explicit allowlist for the durable continuation input owned by core-server.
 ///
 /// This is intentionally not `#[serde(flatten)] AgentChatInput`: adding a new runtime field must
-/// not silently make that field durable. The serialized projection remains readable as an
-/// `AgentChatInput` by Core's startup reconciliation, while this Host requires the version marker
-/// and rejects pre-versioned rows during approval restoration.
+/// not silently make that field durable. This current envelope is decoded only by the Host that
+/// owns it; storage treats it as opaque authenticated state and never projects it as Agent input.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PersistedAgentResumeInput {
     resume_input_schema_version: u32,
-    /// Opaque identity of the selected model's effective provider wire protocol. Legacy rows may
-    /// carry the broad settings-save revision; migration seeds the per-model identity from that
-    /// value before later wire changes rotate it independently.
+    /// Opaque current `provider-protocol-v1` identity of the selected model's effective wire
+    /// protocol.
     provider_configuration_revision: String,
     /// Stable identity of the selected model's effective endpoint/token pair. It is random and
     /// contains no credential material.
@@ -40,31 +45,35 @@ pub(super) struct PersistedAgentResumeInput {
     provider_credential_required: bool,
     model: String,
     model_capabilities: ModelCapabilities,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     api_style: Option<AgentApiStyle>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     context_window_tokens: Option<u32>,
     context_window_indicator_enabled: bool,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     max_tokens: Option<u32>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     temperature: Option<f32>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     stream: Option<bool>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     context: Option<AgentRunContext>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     search_config: Option<PersistedAgentSearchConfig>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     prompt_preferences: Option<AgentPromptPreferences>,
-    /// Durable pending rows never carry an already-decided approval.
-    approval_decision: Option<mycopilot_core::AgentApprovalDecision>,
-    /// A tool result is committed separately and never embedded in the frozen approval input.
-    tool_continuation: Option<AgentToolContinuation>,
-    /// Attachment bytes are owned by the attachment library and never duplicated here.
-    attachments: Vec<AgentInputAttachment>,
-    resume_checkpoint: Option<AgentRunCheckpoint>,
+    resume_checkpoint: AgentRunCheckpoint,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     assistant_message_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     context_compaction_summary: Option<ContextCompactionSummary>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     goal: Option<ConversationGoal>,
     world_state_records: Vec<AnchoredWorldStateRecord>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     skill_activation: Option<AgentSkillActivation>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     skill_discovery: Option<AgentSkillDiscoverySnapshot>,
-    /// The checkpoint owns the replay-safe resumed model projection; process-only MCP arguments
-    /// and raw messages are not duplicated.
-    messages: Vec<AgentChatMessage>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -92,7 +101,7 @@ impl std::fmt::Debug for DecodedPersistedAgentResumeInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PersistedAgentResumeInputError {
-    LegacyOrUnsupported,
+    UnsupportedOrMalformed,
     SecretMaterialPresent,
     InvalidShape,
 }
@@ -165,6 +174,16 @@ impl PersistedAgentResumeInput {
                 "pending Agent checkpoint Provider Protocol provenance is inconsistent".to_string(),
             );
         }
+        let resume_checkpoint = input
+            .resume_checkpoint
+            .clone()
+            .ok_or_else(|| "pending Agent input is missing its frozen checkpoint".to_string())?;
+        if resume_checkpoint.version != mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION {
+            return Err("pending Agent checkpoint has an unsupported schema version".to_string());
+        }
+        if resume_checkpoint.context_items.is_empty() {
+            return Err("pending Agent checkpoint is missing its exact context".to_string());
+        }
 
         Ok(Self {
             resume_input_schema_version: PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION,
@@ -199,17 +218,13 @@ impl PersistedAgentResumeInput {
                         .is_some_and(|secret| !secret.trim().is_empty()),
                 }),
             prompt_preferences: input.prompt_preferences.clone(),
-            approval_decision: None,
-            tool_continuation: None,
-            attachments: Vec::new(),
-            resume_checkpoint: input.resume_checkpoint.clone(),
+            resume_checkpoint,
             assistant_message_id: input.assistant_message_id.clone(),
             context_compaction_summary: input.context_compaction_summary.clone(),
             goal: input.goal.clone(),
             world_state_records: input.world_state_records.clone(),
             skill_activation: input.skill_activation.clone(),
             skill_discovery: input.skill_discovery.clone(),
-            messages: Vec::new(),
         })
     }
 
@@ -223,7 +238,7 @@ impl PersistedAgentResumeInput {
         value: &str,
     ) -> Result<DecodedPersistedAgentResumeInput, PersistedAgentResumeInputError> {
         let persisted = serde_json::from_str::<Self>(value)
-            .map_err(|_| PersistedAgentResumeInputError::LegacyOrUnsupported)?;
+            .map_err(|_| PersistedAgentResumeInputError::UnsupportedOrMalformed)?;
         persisted.into_agent_input()
     }
 
@@ -231,7 +246,7 @@ impl PersistedAgentResumeInput {
         self,
     ) -> Result<DecodedPersistedAgentResumeInput, PersistedAgentResumeInputError> {
         if self.resume_input_schema_version != PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION {
-            return Err(PersistedAgentResumeInputError::LegacyOrUnsupported);
+            return Err(PersistedAgentResumeInputError::UnsupportedOrMalformed);
         }
         if !is_sha256_digest(&self.provider_endpoint_digest) {
             return Err(PersistedAgentResumeInputError::SecretMaterialPresent);
@@ -263,12 +278,14 @@ impl PersistedAgentResumeInput {
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
-        if self.approval_decision.is_some()
-            || self.tool_continuation.is_some()
-            || !self.attachments.is_empty()
-            || !self.messages.is_empty()
-            || self.model.trim().is_empty()
+        if self.resume_checkpoint.version != mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION
+            || self.resume_checkpoint.context_items.is_empty()
+            || self.resume_checkpoint.provider_profile_config != self.provider_profile_config
+            || self.resume_checkpoint.provider_protocol_key != self.provider_protocol_key
         {
+            return Err(PersistedAgentResumeInputError::InvalidShape);
+        }
+        if self.model.trim().is_empty() {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
         let search_credential_required = self
@@ -307,7 +324,7 @@ impl PersistedAgentResumeInput {
                 approval_decision: None,
                 tool_continuation: None,
                 attachments: Vec::new(),
-                resume_checkpoint: self.resume_checkpoint,
+                resume_checkpoint: Some(self.resume_checkpoint),
                 assistant_message_id: self.assistant_message_id,
                 context_compaction_summary: self.context_compaction_summary,
                 goal: self.goal,
@@ -358,9 +375,28 @@ mod tests {
         serde_json::from_value(json!({
             "version": mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
             "runId": "run-persisted-resume",
-            "contextItems": [],
+            "contextItems": [{
+                "role": "assistant",
+                "content": "",
+                "images": [],
+                "toolCalls": [{
+                    "id": "call-persisted-resume",
+                    "name": "probe_tool",
+                    "args": {},
+                    "providerIdentity": {
+                        "providerToolIndex": 0,
+                        "providerCallId": "call-persisted-resume",
+                        "runtimeCallId": "call-persisted-resume"
+                    }
+                }],
+                "isError": false,
+                "sources": [],
+                "scope": "conversation",
+                "retention": "durable"
+            }],
             "nextModelRequestIndex": 1,
             "queuedToolCalls": [],
+            "deferredExternalToolCallCount": 0,
             "suppressedNarration": false,
             "extensionSnapshots": [],
             "toolSet": crate::test_tool_set_checkpoint(),
@@ -386,9 +422,11 @@ mod tests {
                     "runtimeCallId": "call-persisted-resume"
                 }]
             },
+            "providerContinuationRefs": [],
             "runWorldState": crate::test_run_world_state(),
             "pendingToolCallId": "call-persisted-resume",
             "conversationTraceItems": [],
+            "conversationModelContextItems": [],
             "nextConversationTraceSequence": 0,
             "conversationTraceTruncated": false
         }))
@@ -400,6 +438,7 @@ mod tests {
             "apiUrl": format!("https://example.test/v1?token={API_URL_CANARY}"),
             "apiToken": API_TOKEN_CANARY,
             "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
             "searchConfig": {
                 "mode": "tavily",
                 "tavilyApiKey": SEARCH_KEY_CANARY
@@ -459,11 +498,20 @@ mod tests {
         assert!(!encoded.contains(API_URL_CANARY));
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
-        assert!(encoded.contains("\"resumeInputSchemaVersion\":5"));
+        assert!(encoded.contains("\"resumeInputSchemaVersion\":6"));
+        let encoded_object = serde_json::from_str::<Value>(&encoded).unwrap();
+        for absent_placeholder in [
+            "approvalDecision",
+            "toolContinuation",
+            "attachments",
+            "messages",
+        ] {
+            assert!(encoded_object.get(absent_placeholder).is_none());
+        }
         for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
             assert!(
                 !encoded.contains(forbidden_key),
-                "credential-bearing compatibility key must not enter the durable wire: {forbidden_key}"
+                "credential-bearing runtime key must not enter the durable wire: {forbidden_key}"
             );
         }
         let restored = PersistedAgentResumeInput::decode(&encoded).unwrap();
@@ -493,6 +541,29 @@ mod tests {
 
     #[test]
     fn incomplete_or_diverged_provider_freeze_fails_without_panicking() {
+        let mut missing_checkpoint = input();
+        missing_checkpoint.resume_checkpoint = None;
+        assert_eq!(
+            PersistedAgentResumeInput::from_agent_input(&missing_checkpoint)
+                .err()
+                .unwrap(),
+            "pending Agent input is missing its frozen checkpoint"
+        );
+
+        let mut empty_context = input();
+        empty_context
+            .resume_checkpoint
+            .as_mut()
+            .unwrap()
+            .context_items
+            .clear();
+        assert_eq!(
+            PersistedAgentResumeInput::from_agent_input(&empty_context)
+                .err()
+                .unwrap(),
+            "pending Agent checkpoint is missing its exact context"
+        );
+
         let mut missing = input();
         missing.provider_protocol_key = None;
         assert!(PersistedAgentResumeInput::from_agent_input(&missing).is_err());
@@ -508,13 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_full_agent_input_and_unknown_fields_fail_closed() {
-        let legacy = serde_json::to_string(&input()).unwrap();
-        assert_eq!(
-            PersistedAgentResumeInput::decode(&legacy).unwrap_err(),
-            PersistedAgentResumeInputError::LegacyOrUnsupported
-        );
-
+    fn unknown_fields_fail_closed() {
         let encoded = PersistedAgentResumeInput::from_agent_input(&input())
             .unwrap()
             .encode();
@@ -523,64 +588,62 @@ mod tests {
             Value::String("must not become durable implicitly".to_string());
         assert_eq!(
             PersistedAgentResumeInput::decode(&value.to_string()).unwrap_err(),
-            PersistedAgentResumeInputError::LegacyOrUnsupported
+            PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
-    }
 
-    #[test]
-    fn broad_model_settings_revision_is_not_a_provider_protocol_identity() {
-        let encoded = PersistedAgentResumeInput::from_agent_input(&input())
-            .unwrap()
-            .encode();
-        let mut legacy = serde_json::from_str::<Value>(&encoded).unwrap();
-        let legacy_revision = format!("model-settings-v1:{}", uuid::Uuid::new_v4());
-        legacy["providerConfigurationRevision"] = Value::String(legacy_revision.clone());
-        legacy["providerProtocolKey"]["providerConfigurationRevision"] =
-            Value::String(legacy_revision.clone());
-        legacy["resumeCheckpoint"]["providerProtocolKey"]["providerConfigurationRevision"] =
-            Value::String(legacy_revision.clone());
-
+        let mut nested = serde_json::from_str::<Value>(&encoded).unwrap();
+        nested["promptPreferences"] = json!({
+            "futureSecretField": "must not be ignored inside a current persisted DTO"
+        });
         assert_eq!(
-            PersistedAgentResumeInput::decode(&legacy.to_string()).unwrap_err(),
-            PersistedAgentResumeInputError::InvalidShape
+            PersistedAgentResumeInput::decode(&nested.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
     }
 
     #[test]
-    fn legacy_versioned_rows_with_connection_or_search_keys_are_rejected() {
+    fn secret_fields_and_unsupported_versions_are_rejected() {
         let encoded = PersistedAgentResumeInput::from_agent_input(&input())
             .unwrap()
             .encode();
         for (key, value) in [
             (
                 "apiUrl",
-                Value::String("https://legacy.invalid".to_string()),
+                Value::String("https://forbidden.invalid".to_string()),
             ),
             ("apiToken", Value::String(API_TOKEN_CANARY.to_string())),
         ] {
-            let mut legacy = serde_json::from_str::<Value>(&encoded).unwrap();
-            legacy[key] = value;
+            let mut malformed = serde_json::from_str::<Value>(&encoded).unwrap();
+            malformed[key] = value;
             assert_eq!(
-                PersistedAgentResumeInput::decode(&legacy.to_string()).unwrap_err(),
-                PersistedAgentResumeInputError::LegacyOrUnsupported
+                PersistedAgentResumeInput::decode(&malformed.to_string()).unwrap_err(),
+                PersistedAgentResumeInputError::UnsupportedOrMalformed
             );
         }
 
-        let mut legacy = serde_json::from_str::<Value>(&encoded).unwrap();
-        legacy["searchConfig"]["tavilyApiKey"] = Value::String(SEARCH_KEY_CANARY.to_string());
+        let mut malformed = serde_json::from_str::<Value>(&encoded).unwrap();
+        malformed["searchConfig"]["tavilyApiKey"] = Value::String(SEARCH_KEY_CANARY.to_string());
         assert_eq!(
-            PersistedAgentResumeInput::decode(&legacy.to_string()).unwrap_err(),
-            PersistedAgentResumeInputError::LegacyOrUnsupported
+            PersistedAgentResumeInput::decode(&malformed.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
 
-        for legacy_version in [1, 2, 3, 4] {
+        for unsupported_version in [0, 5, 7] {
             let mut old_version = serde_json::from_str::<Value>(&encoded).unwrap();
-            old_version["resumeInputSchemaVersion"] = Value::from(legacy_version);
+            old_version["resumeInputSchemaVersion"] = Value::from(unsupported_version);
             assert_eq!(
                 PersistedAgentResumeInput::decode(&old_version.to_string()).unwrap_err(),
-                PersistedAgentResumeInputError::LegacyOrUnsupported
+                PersistedAgentResumeInputError::UnsupportedOrMalformed
             );
         }
+
+        let mut old_checkpoint = serde_json::from_str::<Value>(&encoded).unwrap();
+        old_checkpoint["resumeCheckpoint"]["version"] =
+            Value::from(mycopilot_core::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION - 1);
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&old_checkpoint.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
+        );
 
         let mut invalid_revision = serde_json::from_str::<Value>(&encoded).unwrap();
         invalid_revision["providerConfigurationRevision"] =
@@ -597,6 +660,36 @@ mod tests {
                 PersistedAgentResumeInput::decode(&invalid_connection_revision.to_string())
                     .unwrap_err(),
                 PersistedAgentResumeInputError::InvalidShape
+            );
+        }
+    }
+
+    #[test]
+    fn every_current_nullable_field_must_be_present() {
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input())
+            .unwrap()
+            .encode();
+        for field in [
+            "apiStyle",
+            "contextWindowTokens",
+            "maxTokens",
+            "temperature",
+            "stream",
+            "context",
+            "searchConfig",
+            "promptPreferences",
+            "assistantMessageId",
+            "contextCompactionSummary",
+            "goal",
+            "skillActivation",
+            "skillDiscovery",
+        ] {
+            let mut missing = serde_json::from_str::<Value>(&encoded).unwrap();
+            missing.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                PersistedAgentResumeInput::decode(&missing.to_string()).unwrap_err(),
+                PersistedAgentResumeInputError::UnsupportedOrMalformed,
+                "missing current field {field} must fail closed"
             );
         }
     }

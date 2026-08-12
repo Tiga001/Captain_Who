@@ -1,9 +1,15 @@
-import type { ModelConfig, ModelFormValues } from './configurationTypes'
+import type { ModelConfig, ModelConfigSaveDraft, ModelFormValues } from './configurationTypes'
+
+export function modelConfigFromForm(values: ModelFormValues, editingModel: ModelConfig): ModelConfig
+export function modelConfigFromForm(
+  values: ModelFormValues,
+  editingModel?: undefined
+): ModelConfigSaveDraft
 
 export function modelConfigFromForm(
   values: ModelFormValues,
   editingModel?: ModelConfig
-): ModelConfig {
+): ModelConfig | ModelConfigSaveDraft {
   return {
     id: values.id,
     displayName: values.displayName || values.id,
@@ -16,7 +22,7 @@ export function modelConfigFromForm(
         : undefined,
     // The persisted config is read-only presentation state. Host consumes the explicit update,
     // resolves its version/dialect, and returns the normalized authoritative config.
-    providerProfileConfig: editingModel?.providerProfileConfig,
+    ...(editingModel ? { providerProfileConfig: editingModel.providerProfileConfig } : {}),
     providerProfileUpdate: values.providerProfileUpdate,
     inputPrice: values.inputPrice,
     cachedInputPrice: values.cachedInputPrice,

@@ -213,9 +213,7 @@ pub enum ReasoningEffort {
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReasoningPolicy {
-    #[serde(default)]
     pub mode: ReasoningMode,
-    #[serde(default)]
     pub effort: ReasoningEffort,
 }
 
@@ -267,7 +265,6 @@ impl ReasoningPolicy {
 pub struct ProviderProfileConfig {
     pub schema_version: u32,
     pub profile: ProviderProfileRef,
-    #[serde(default)]
     pub reasoning: ReasoningPolicy,
 }
 
@@ -321,17 +318,6 @@ impl ProviderProfileConfig {
         self.validate()?;
         self.profile.validate_for_dialect(dialect)
     }
-
-    pub fn resolve(
-        explicit: Option<&Self>,
-        dialect: ProviderProtocolDialect,
-    ) -> Result<Self, ProviderProfileValidationError> {
-        let resolved = explicit
-            .cloned()
-            .unwrap_or_else(|| Self::generic_for_dialect(dialect));
-        resolved.validate_for_dialect(dialect)?;
-        Ok(resolved)
-    }
 }
 
 /// Immutable provenance key for provider-owned assistant protocol state.
@@ -344,9 +330,8 @@ pub struct ProviderProtocolKey {
     pub dialect: ProviderProtocolDialect,
     pub profile: ProviderProfileRef,
     pub model_id: String,
-    /// Opaque revision of this model's complete effective wire protocol. The serialized field
-    /// name is retained for checkpoint compatibility with the earlier broad settings revision.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Opaque `provider-protocol-v1` revision of this model's complete effective wire protocol.
+    #[serde(deserialize_with = "crate::protocol::deserialize_required_nullable")]
     pub provider_configuration_revision: Option<String>,
 }
 
@@ -481,16 +466,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn missing_config_resolves_to_dialect_generic_without_wire_overrides() {
-        let openai =
-            ProviderProfileConfig::resolve(None, ProviderProtocolDialect::OpenAiChatCompletions)
-                .unwrap();
+    fn explicit_generic_profiles_match_their_dialect_without_wire_overrides() {
+        let openai = ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        );
+        openai
+            .validate_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions)
+            .unwrap();
         assert_eq!(openai.profile.id, ProviderProfileId::GenericOpenAiChat);
         assert_eq!(openai.reasoning, ReasoningPolicy::provider_default());
 
         let anthropic =
-            ProviderProfileConfig::resolve(None, ProviderProtocolDialect::AnthropicMessages)
-                .unwrap();
+            ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::AnthropicMessages);
+        anthropic
+            .validate_for_dialect(ProviderProtocolDialect::AnthropicMessages)
+            .unwrap();
         assert_eq!(
             anthropic.profile.id,
             ProviderProfileId::GenericAnthropicMessages
@@ -537,6 +527,33 @@ mod tests {
             decoded.validate(),
             Err(ProviderProfileValidationError::UnsupportedProfileVersion { .. })
         ));
+    }
+
+    #[test]
+    fn current_profile_configuration_requires_complete_reasoning_and_rejects_extra_fields() {
+        let current = json!({
+            "schemaVersion": 1,
+            "profile": { "id": "generic_openai_chat", "version": 1 },
+            "reasoning": { "mode": "provider_default", "effort": "provider_default" }
+        });
+        assert!(serde_json::from_value::<ProviderProfileConfig>(current.clone()).is_ok());
+
+        for path in ["reasoning", "mode", "effort"] {
+            let mut incomplete = current.clone();
+            if path == "reasoning" {
+                incomplete.as_object_mut().unwrap().remove(path);
+            } else {
+                incomplete["reasoning"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(path);
+            }
+            assert!(serde_json::from_value::<ProviderProfileConfig>(incomplete).is_err());
+        }
+
+        let mut extra = current;
+        extra["reasoning"]["runtimeCapabilities"] = json!({ "toolReplay": true });
+        assert!(serde_json::from_value::<ProviderProfileConfig>(extra).is_err());
     }
 
     #[test]

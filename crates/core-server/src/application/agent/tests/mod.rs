@@ -2,7 +2,7 @@ use super::*;
 use mycopilot_core::command::CommandSessionManager;
 use mycopilot_core::skills::{
     LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillInstallationId,
-    SkillInstallationOutcome, SkillInstallationService, SkillUninstallRequest,
+    SkillInstallationOutcome, SkillInstallationService, SkillUninstallExactRequest,
 };
 use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentFileDraftRecord, AgentPendingActionRecord, ChatConversationRecord,
@@ -10,14 +10,15 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::{
     AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentCommandSessionListInput,
-    AgentCommandSessionStatus, AgentFileWriteMode, AgentFileWriteProposal, AgentPermissions,
-    AgentSkillActivation, AgentSkillMaterializationRequest, AgentUsageSummaryRange,
+    AgentCommandSessionStatus, AgentContextCheckpointToolCall, AgentFileWriteMode,
+    AgentFileWriteProposal, AgentPermissions, AgentProviderToolCallIdentity, AgentSkillActivation,
+    AgentSkillMaterializationRequest, AgentToolIdentity, AgentUsageSummaryRange,
     AgentWorkspaceContext, AgentWritePermission, ContextCompactionGeneration,
     ContextCompactionPrefix, ContextCompactionSourceItem, ContextCompactionSummary,
-    ContextCompactionSummaryDraft, ContextJournalCursor, ConversationTraceToolResultStatus,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
-    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
-    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    ContextCompactionSummaryDraft, ContextJournalCursor, ConversationModelContextItem,
+    ConversationTraceToolResultStatus, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 use std::fs;
@@ -28,6 +29,7 @@ mod command_sessions;
 mod context_history;
 mod context_runtime;
 mod file_write_permissions;
+mod historical_compatibility_boundary;
 mod image_generation;
 mod managed_command_loop;
 mod mcp_approval_expiry;
@@ -62,6 +64,7 @@ fn command_test_input(workspace: &Path) -> AgentChatInput {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "token",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "messages": []
     }))
@@ -96,12 +99,12 @@ fn command_request(id: &str, command: &str) -> AgentCommandRequest {
         reason: Some("exercise server authorization boundary".to_string()),
         observe: None,
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: None,
     }
 }
 
 fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {
+    let call_id = history_call_id();
     ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: "run-history".to_string(),
@@ -118,19 +121,21 @@ fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> Convers
             },
             ConversationTurnTraceItem::ToolCall {
                 sequence: 1,
-                call_id: "write-history".to_string(),
+                call_id: call_id.clone(),
                 tool: "write_file".to_string(),
                 operation: json!({
                     "filePath": "src/history.rs",
                     "mode": "create"
                 }),
-                provenance: None,
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "write_file".to_string(),
+                },
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
             },
             ConversationTurnTraceItem::ToolResult {
                 sequence: 2,
-                call_id: "write-history".to_string(),
+                call_id,
                 tool: "write_file".to_string(),
                 status: ConversationTraceToolResultStatus::Succeeded,
                 success: true,
@@ -147,6 +152,10 @@ fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> Convers
             },
         ],
     }
+}
+
+fn history_call_id() -> String {
+    format!("tc1_{}", "A".repeat(43))
 }
 
 fn test_compaction_draft(
@@ -185,12 +194,42 @@ fn test_model_settings() -> ModelSettingsRecord {
             api_token_override: None,
             supports_image: false,
             context_window_tokens: Some(128_000),
-            provider_profile_config: None,
+            provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+                mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+            ),
             input_price: "0.01".to_string(),
             cached_input_price: String::new(),
             output_price: "0.02".to_string(),
             enabled: true,
         }],
+    }
+}
+
+fn checkpoint_call_for_command(command: &AgentCommandRequest) -> AgentToolCall {
+    let mut args = json!({
+        "command": command.command,
+        "cwd": command.cwd,
+        "reason": command.reason,
+        "observe": command.observe,
+        "inputs": command.inputs.iter().map(|binding| json!({
+            "mountPath": binding.mount_path,
+            "path": mycopilot_core::file_input::model_path_for_agent_file_input_ref(&binding.source),
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(profile) = command.runtime_binding.as_ref().and_then(|binding| {
+        (binding.profile != mycopilot_core::AgentCommandRuntimeProfile::Pdf)
+            .then_some(binding.profile)
+    }) {
+        args.as_object_mut()
+            .expect("command checkpoint args are an object")
+            .insert("runtimeProfile".to_string(), json!(profile));
+    }
+    AgentToolCall {
+        id: command.id.clone(),
+        tool: "run_command".to_string(),
+        args,
+        approval_status: command.approval_status,
+        reason: command.reason.clone(),
     }
 }
 
@@ -215,7 +254,9 @@ fn save_test_pending_provider(
                 api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
-                provider_profile_config: None,
+                provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+                    mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
                 input_price: "0".to_string(),
                 cached_input_price: String::new(),
                 output_price: "0".to_string(),
@@ -226,6 +267,19 @@ fn save_test_pending_provider(
 }
 
 fn save_test_pending_provider_for_input(storage: &StorageService, input: &mut AgentChatInput) {
+    // Test callers build the same explicit current Profile that the Host model-settings boundary
+    // would have frozen before an Agent run. This is fixture setup, not a production fallback.
+    if input.provider_profile_config.is_none() {
+        let dialect = input
+            .api_style
+            .map(mycopilot_core::ProviderProtocolDialect::from)
+            .unwrap_or_else(|| {
+                mycopilot_core::ProviderProtocolDialect::detect_from_api_url(&input.api_url)
+            });
+        input.provider_profile_config = Some(
+            mycopilot_core::ProviderProfileConfig::generic_for_dialect(dialect),
+        );
+    }
     let (search_mode, tavily_api_key) = input
         .search_config
         .as_ref()
@@ -251,7 +305,10 @@ fn save_test_pending_provider_for_input(storage: &StorageService, input: &mut Ag
                 api_token_override: None,
                 supports_image: input.model_capabilities.image_input,
                 context_window_tokens: input.context_window_tokens.or(Some(128_000)),
-                provider_profile_config: input.provider_profile_config.clone(),
+                provider_profile_config: input
+                    .provider_profile_config
+                    .clone()
+                    .expect("current test input must freeze an explicit Provider Profile"),
                 input_price: "0".to_string(),
                 cached_input_price: String::new(),
                 output_price: "0".to_string(),

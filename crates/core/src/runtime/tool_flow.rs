@@ -12,8 +12,8 @@ use crate::llm::{
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
-    AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall, AgentToolDefinition,
-    AgentToolResult, AgentUsage, ModelCapabilities,
+    AgentRunCheckpoint, AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall,
+    AgentToolDefinition, AgentToolResult, AgentUsage, ModelCapabilities,
 };
 use crate::tools::{AgentToolCancellationSettlement, ToolExecutionContext, ToolRegistry};
 use serde::Deserialize;
@@ -261,10 +261,11 @@ pub(super) async fn execute_host_action_on_blocking_thread(
     executor: AgentHostActionExecutor,
     action: AgentProposedAction,
     expected_call: AgentToolCall,
+    checkpoint: Option<AgentRunCheckpoint>,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<AgentToolResult> {
     let execution_token = cancellation_token.clone();
-    let handle = tokio::task::spawn_blocking(move || executor(action, execution_token));
+    let handle = tokio::task::spawn_blocking(move || executor(action, checkpoint, execution_token));
     // A host action may have crossed its atomic commit boundary when cancellation arrives.
     // Never detach a mutating blocking task and guess its outcome: the cancellation token is
     // delivered to the executor, then we wait for its authoritative committed/cancelled result.
@@ -865,21 +866,22 @@ mod tests {
         let finished = Arc::new(AtomicBool::new(false));
         let executor_started = Arc::clone(&started);
         let executor_finished = Arc::clone(&finished);
-        let executor: AgentHostActionExecutor = Arc::new(move |_action, cancellation| {
-            executor_started.store(true, Ordering::SeqCst);
-            while !cancellation.is_cancelled() {
-                std::thread::yield_now();
-            }
-            executor_finished.store(true, Ordering::SeqCst);
-            Ok(AgentToolResult {
-                exact_archive_file: None,
-                call_id: "write-1".to_string(),
-                tool: "write_file".to_string(),
-                ok: false,
-                result: Some(json!({ "cancelled": true })),
-                error: Some("cancelled before commit".to_string()),
-            })
-        });
+        let executor: AgentHostActionExecutor =
+            Arc::new(move |_action, _checkpoint, cancellation| {
+                executor_started.store(true, Ordering::SeqCst);
+                while !cancellation.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                executor_finished.store(true, Ordering::SeqCst);
+                Ok(AgentToolResult {
+                    exact_archive_file: None,
+                    call_id: "write-1".to_string(),
+                    tool: "write_file".to_string(),
+                    ok: false,
+                    result: Some(json!({ "cancelled": true })),
+                    error: Some("cancelled before commit".to_string()),
+                })
+            });
         let action = AgentProposedAction::ToolCall {
             call: AgentToolCall {
                 id: "write-1".to_string(),
@@ -900,6 +902,7 @@ mod tests {
                 executor,
                 action,
                 expected_call,
+                None,
                 task_cancellation,
             )
             .await
@@ -934,13 +937,15 @@ mod tests {
         let action = AgentProposedAction::ToolCall {
             call: expected_call.clone(),
         };
-        let executor: AgentHostActionExecutor =
-            Arc::new(|_action, _cancellation| Err(AgentError::new("host channel closed")));
+        let executor: AgentHostActionExecutor = Arc::new(|_action, _checkpoint, _cancellation| {
+            Err(AgentError::new("host channel closed"))
+        });
 
         let result = execute_host_action_on_blocking_thread(
             executor,
             action,
             expected_call.clone(),
+            None,
             AgentCancellationToken::new(),
         )
         .await
@@ -967,7 +972,7 @@ mod tests {
         let action = AgentProposedAction::ToolCall {
             call: expected_call.clone(),
         };
-        let executor: AgentHostActionExecutor = Arc::new(|_action, _cancellation| {
+        let executor: AgentHostActionExecutor = Arc::new(|_action, _checkpoint, _cancellation| {
             Ok(AgentToolResult {
                 exact_archive_file: None,
                 call_id: "write-wrong".to_string(),
@@ -982,6 +987,7 @@ mod tests {
             executor,
             action,
             expected_call.clone(),
+            None,
             AgentCancellationToken::new(),
         )
         .await

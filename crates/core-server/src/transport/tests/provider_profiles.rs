@@ -47,7 +47,10 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
                 "tavilyApiKey": "",
                 "models": [{
                     "id": "deepseek-chat",
+                    "previousModelId": null,
                     "displayName": "DeepSeek Chat",
+                    "apiUrlOverride": null,
+                    "apiTokenOverride": null,
                     "supportsImage": false,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {
@@ -59,6 +62,7 @@ fn provider_profile_descriptor_projection_and_authoritative_save_are_strict() {
                         }
                     },
                     "inputPrice": "0",
+                    "cachedInputPrice": "",
                     "outputPrice": "0",
                     "enabled": true
                 }]

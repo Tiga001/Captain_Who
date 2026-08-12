@@ -555,6 +555,11 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
         let content = message.content.trim();
         let trace = message.conversation_turn_trace;
         let model_context_items = message.conversation_model_context_items;
+        if role == "assistant" && trace.is_none() {
+            return Err(AgentError::new(
+                "Assistant 历史消息缺少当前 ConversationTurnTrace。",
+            ));
+        }
         if content.is_empty() && trace.is_none() {
             continue;
         }
@@ -589,11 +594,10 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
 mod tests {
     use super::*;
     use crate::conversation_trace::{
-        ConversationTraceRecorder, ConversationTraceToolResultStatus, ConversationTurnTrace,
-        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        ConversationTraceRecorder, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
-    use crate::llm::{model_response_tool_call_id, LlmMessagePlacement};
+    use crate::llm::{model_response_tool_call_id, LlmMessage, LlmMessagePlacement, LlmToolCall};
     use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};
     use crate::world_state::{
         WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
@@ -655,6 +659,26 @@ mod tests {
             content: content.to_string(),
             created_at: None,
             conversation_turn_trace: None,
+            conversation_model_context_items: Vec::new(),
+        }
+    }
+
+    fn current_assistant_message(id: &str, content: &str) -> AgentChatMessage {
+        AgentChatMessage {
+            message_id: Some(id.to_string()),
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            created_at: None,
+            conversation_turn_trace: Some(ConversationTurnTrace {
+                schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: format!("run-{id}"),
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: id.to_string(),
+                terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+                terminal_error: None,
+                truncated: false,
+                items: Vec::new(),
+            }),
             conversation_model_context_items: Vec::new(),
         }
     }
@@ -741,58 +765,92 @@ mod tests {
     }
 
     fn traced_assistant(content: &str) -> AgentChatMessage {
-        let call_id = model_response_tool_call_id("run-previous", 0, 0, "provider-history-call");
+        let provider_call_id = "provider-history-call";
+        let call_id = model_response_tool_call_id("run-previous", 0, 0, provider_call_id);
+        let call = AgentToolCall {
+            id: call_id.clone(),
+            tool: "write_file".to_string(),
+            args: json!({
+                "filePath": "src/new.rs",
+                "mode": "create"
+            }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call_id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({
+                "filePath": "src/new.rs",
+                "status": "applied",
+                "additions": 4,
+                "deletions": 0
+            })),
+            error: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder
+            .record_narration("I will update the file.")
+            .unwrap();
+        let call_sequence = recorder
+            .record_tool_call_with_identity(
+                &call,
+                crate::AgentToolIdentity::Builtin {
+                    tool_name: call.tool.clone(),
+                },
+            )
+            .unwrap();
+        recorder
+            .record_model_tool_call_message(
+                call_sequence,
+                0,
+                &LlmMessage::assistant(
+                    "",
+                    vec![LlmToolCall {
+                        id: call.id.clone(),
+                        name: call.tool.clone(),
+                        args: call.args.clone(),
+                    }],
+                ),
+                crate::AgentProviderToolCallIdentity {
+                    provider_call_id: provider_call_id.to_string(),
+                    provider_tool_index: 0,
+                    runtime_call_id: call.id.clone(),
+                },
+            )
+            .unwrap();
+        let result_sequence = recorder.record_tool_result(&call, &result).unwrap();
+        recorder
+            .record_model_message(
+                result_sequence,
+                0,
+                &LlmMessage::tool_result(
+                    call.id.clone(),
+                    serde_json::to_string(result.result.as_ref().unwrap()).unwrap(),
+                    false,
+                ),
+            )
+            .unwrap();
+        let snapshot = recorder.snapshot();
+        let trace = recorder.finish(
+            "run-previous",
+            "conversation-1",
+            "assistant-previous",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        trace
+            .validate_complete_model_context(&snapshot.model_context_items)
+            .unwrap();
         AgentChatMessage {
             message_id: Some("assistant-previous".to_string()),
             role: "assistant".to_string(),
             content: content.to_string(),
             created_at: None,
-            conversation_turn_trace: Some(ConversationTurnTrace {
-                schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
-                run_id: "run-previous".to_string(),
-                conversation_id: "conversation-1".to_string(),
-                assistant_message_id: "assistant-previous".to_string(),
-                terminal_status: ConversationTurnTraceTerminalStatus::Completed,
-                terminal_error: None,
-                truncated: false,
-                items: vec![
-                    ConversationTurnTraceItem::AssistantNarration {
-                        sequence: 0,
-                        content: "I will update the file.".to_string(),
-                        truncated: false,
-                    },
-                    ConversationTurnTraceItem::ToolCall {
-                        sequence: 1,
-                        call_id: call_id.clone(),
-                        tool: "write_file".to_string(),
-                        provenance: None,
-                        operation: json!({
-                            "filePath": "src/new.rs",
-                            "mode": "create"
-                        }),
-                        approval_status: AgentApprovalStatus::Approved,
-                        truncated: false,
-                    },
-                    ConversationTurnTraceItem::ToolResult {
-                        sequence: 2,
-                        call_id,
-                        tool: "write_file".to_string(),
-                        status: ConversationTraceToolResultStatus::Succeeded,
-                        success: true,
-                        observation: json!({
-                            "filePath": "src/new.rs",
-                            "status": "applied",
-                            "additions": 4,
-                            "deletions": 0
-                        }),
-                        approval_status: AgentApprovalStatus::Approved,
-                        error: None,
-                        truncated: false,
-                        archive: Default::default(),
-                    },
-                ],
-            }),
-            conversation_model_context_items: Vec::new(),
+            conversation_turn_trace: Some(trace),
+            conversation_model_context_items: snapshot.model_context_items,
         }
     }
 
@@ -806,7 +864,7 @@ mod tests {
             initial_run_world_state: None,
             messages: vec![
                 message("user", "old question"),
-                message("assistant", "old answer"),
+                current_assistant_message("assistant-old", "old answer"),
                 message("user", "current question"),
             ],
             skill_discovery: None,
@@ -822,24 +880,24 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role(), LlmMessageRole::System);
         assert_eq!(messages[1].content(), "old question");
-        assert_eq!(messages[3].role(), LlmMessageRole::User);
-        assert_eq!(messages[3].content(), "current question");
-        assert_eq!(messages[4].content(), "attachment body");
-        assert_eq!(messages[4].images().len(), 1);
+        assert_eq!(messages[4].role(), LlmMessageRole::User);
+        assert_eq!(messages[4].content(), "current question");
+        assert_eq!(messages[5].content(), "attachment body");
+        assert_eq!(messages[5].images().len(), 1);
 
         let manifest = frame.manifest();
         assert_eq!(manifest.entries[0].sources, vec!["backend_system_prompt"]);
         assert_eq!(manifest.entries[1].sources, vec!["conversation_history"]);
-        assert_eq!(manifest.entries[3].sources, vec!["current_turn"]);
-        assert_eq!(manifest.entries[3].scope, "conversation");
-        assert_eq!(manifest.entries[3].retention, "retained");
-        assert_eq!(manifest.entries[4].sources, vec!["input_attachment"]);
-        assert_eq!(manifest.entries[4].scope, "run");
+        assert_eq!(manifest.entries[4].sources, vec!["current_turn"]);
+        assert_eq!(manifest.entries[4].scope, "conversation");
         assert_eq!(manifest.entries[4].retention, "retained");
-        assert_eq!(manifest.entries[4].image_base64_bytes, 3);
+        assert_eq!(manifest.entries[5].sources, vec!["input_attachment"]);
+        assert_eq!(manifest.entries[5].scope, "run");
+        assert_eq!(manifest.entries[5].retention, "retained");
+        assert_eq!(manifest.entries[5].image_base64_bytes, 3);
         let serialized = serde_json::to_string(&manifest).unwrap();
         assert!(!serialized.contains("current question"));
         assert!(!serialized.contains("attachment body"));
@@ -1001,14 +1059,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_messages_without_world_state_keep_the_existing_shape() {
+    fn direct_library_messages_without_a_world_state_ledger_keep_the_current_shape() {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
             initial_run_world_state: None,
-            messages: vec![identified_message("user-legacy", "user", "legacy message")],
+            messages: vec![identified_message(
+                "user-direct-library",
+                "user",
+                "direct library message",
+            )],
             skill_discovery: None,
             skill_activation: None,
             attachments: ContextAttachments::default(),
@@ -1018,7 +1080,7 @@ mod tests {
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role(), LlmMessageRole::System);
-        assert_eq!(messages[1].content(), "legacy message");
+        assert_eq!(messages[1].content(), "direct library message");
         assert!(frame.manifest().entries.iter().all(|entry| !entry
             .sources
             .iter()
@@ -1204,7 +1266,8 @@ mod tests {
     fn renders_timing_on_user_messages_without_decorating_assistant_history() {
         let mut first_user = message("user", "historical question");
         first_user.created_at = Some(0);
-        let mut historical_assistant = message("assistant", "historical answer");
+        let mut historical_assistant =
+            current_assistant_message("assistant-historical", "historical answer");
         historical_assistant.created_at = Some(1_000);
         let mut current_user = message("user", "follow up");
         current_user.created_at = Some(2_000);
@@ -1231,15 +1294,15 @@ mod tests {
         assert!(!messages[2]
             .content()
             .contains("<backend_conversation_timing>"));
-        assert!(messages[3].content().contains(&format!(
+        assert!(messages[4].content().contains(&format!(
             "previous_assistant_message_created_at: {}",
             crate::context::format_message_created_at(1_000).unwrap()
         )));
-        assert!(messages[3].content().contains(&format!(
+        assert!(messages[4].content().contains(&format!(
             "user_message_created_at: {}",
             crate::context::format_message_created_at(2_000).unwrap()
         )));
-        assert!(messages[3].content().ends_with("follow up"));
+        assert!(messages[4].content().ends_with("follow up"));
     }
 
     #[test]
@@ -1252,7 +1315,7 @@ mod tests {
             initial_run_world_state: None,
             messages: vec![
                 message(" user ", " hello "),
-                message("assistant", " "),
+                message("user", " "),
                 message("system", "history rules"),
             ],
             skill_discovery: None,
@@ -1264,6 +1327,26 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].content(), "hello");
         assert_eq!(messages[2].content(), "history rules");
+
+        let missing_trace = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            world_state_records: Vec::new(),
+            goal: None,
+            initial_run_world_state: None,
+            messages: vec![message(
+                "assistant",
+                "ASSISTANT_HISTORY_CANARY_MUST_NOT_ENTER_ERROR",
+            )],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap_err();
+        assert!(missing_trace
+            .to_string()
+            .contains("Assistant 历史消息缺少当前 ConversationTurnTrace"));
+        assert!(!missing_trace.to_string().contains("CANARY"));
 
         let error = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
@@ -1409,14 +1492,8 @@ mod tests {
             frame.manifest().entries[1].sources,
             vec!["conversation_summary"]
         );
-        assert!(!frame
-            .manifest()
-            .entries
-            .iter()
-            .any(|entry| entry.sources == vec!["continuity_index"]));
-
         let persisted = compaction_summary();
-        assert!(persisted.continuity.is_v2());
+        persisted.continuity.validate().unwrap();
         assert!(!persisted.continuity.archived_counts.is_empty());
     }
 
@@ -1430,26 +1507,62 @@ mod tests {
             approval_status: AgentApprovalStatus::Approved,
             reason: None,
         };
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call_id.clone(),
+            tool: "run_command".to_string(),
+            ok: true,
+            result: Some(json!({
+                "status": "running",
+                "sessionId": "cmd_0123456789abcdef0123456789abcdef",
+                "output": "server listening on port 3000",
+                "startedAt": 1_725_000_000_000_i64,
+                "latestSequence": 3,
+                "outputTruncated": false,
+            })),
+            error: None,
+        };
         let mut recorder = ConversationTraceRecorder::default();
-        recorder.record_tool_call(&call);
-        recorder.record_tool_result(
-            &call,
-            &AgentToolResult {
-                exact_archive_file: None,
-                call_id,
-                tool: "run_command".to_string(),
-                ok: true,
-                result: Some(json!({
-                    "status": "running",
-                    "sessionId": "cmd_0123456789abcdef0123456789abcdef",
-                    "output": "server listening on port 3000",
-                    "startedAt": 1_725_000_000_000_i64,
-                    "latestSequence": 3,
-                    "outputTruncated": false,
-                })),
-                error: None,
-            },
-        );
+        let call_sequence = recorder
+            .record_tool_call_with_identity(
+                &call,
+                crate::AgentToolIdentity::Builtin {
+                    tool_name: call.tool.clone(),
+                },
+            )
+            .unwrap();
+        recorder
+            .record_model_tool_call_message(
+                call_sequence,
+                0,
+                &LlmMessage::assistant(
+                    "",
+                    vec![LlmToolCall {
+                        id: call.id.clone(),
+                        name: call.tool.clone(),
+                        args: call.args.clone(),
+                    }],
+                ),
+                crate::AgentProviderToolCallIdentity {
+                    provider_call_id: "provider-command-call".to_string(),
+                    provider_tool_index: 0,
+                    runtime_call_id: call.id.clone(),
+                },
+            )
+            .unwrap();
+        let result_sequence = recorder.record_tool_result(&call, &result).unwrap();
+        recorder
+            .record_model_message(
+                result_sequence,
+                0,
+                &LlmMessage::tool_result(
+                    call.id.clone(),
+                    serde_json::to_string(result.result.as_ref().unwrap()).unwrap(),
+                    false,
+                ),
+            )
+            .unwrap();
+        let snapshot = recorder.snapshot();
         let trace = recorder.finish(
             "run-command",
             "conversation-1",
@@ -1463,9 +1576,7 @@ mod tests {
             content: "The server is running in a managed Session.".to_string(),
             created_at: None,
             conversation_turn_trace: Some(trace),
-            // Simulates reload after only the bounded durable Trace remains available for this
-            // uncovered post-compaction tail.
-            conversation_model_context_items: Vec::new(),
+            conversation_model_context_items: snapshot.model_context_items,
         };
 
         let frame = ContextAssembler::assemble(ContextAssemblyInput {

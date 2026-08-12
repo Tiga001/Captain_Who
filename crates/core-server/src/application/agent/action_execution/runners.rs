@@ -2252,36 +2252,41 @@ impl AgentService {
                     continuation_snapshot,
                 ) {
                     // Settlement already committed the exact Archive pointer and the central-gated
-                    // model observation into this authoritative snapshot. Terminalize that snapshot
-                    // instead of rebuilding the same ToolResult through the legacy ungated helper.
-                    let trace = cancelled_conversation_trace_from_snapshot(
+                    // model observation into this authoritative snapshot.
+                    let terminal = cancelled_conversation_trace_from_snapshot(
                         snapshot,
                         &run_id,
                         conversation_id,
                         assistant_message_id,
                         REASON,
                     );
-                    let mut output = AgentChatOutput {
-                        content: String::new(),
-                        status: AgentRunStatus::Cancelled,
-                        run_id: run_id.clone(),
-                        events: Vec::new(),
-                        tool_definitions: Vec::new(),
-                        todo: None,
-                        usage: None,
-                        finish_reason: Some(REASON.to_string()),
-                        proposed_actions: Vec::new(),
-                        conversation_turn_trace: Some(trace),
-                    };
-                    let persisted = self.persist_final_assistant_output(
-                        conversation_id,
-                        assistant_message_id,
-                        &mut output,
-                    );
-                    if persisted.is_ok() {
-                        cancelled_usage = output.usage.clone();
+                    match terminal {
+                        Err(error) => Err(error),
+                        Ok(terminal) => {
+                            let mut output = AgentChatOutput {
+                                content: String::new(),
+                                status: AgentRunStatus::Cancelled,
+                                run_id: run_id.clone(),
+                                events: Vec::new(),
+                                tool_definitions: Vec::new(),
+                                todo: None,
+                                usage: None,
+                                finish_reason: Some(REASON.to_string()),
+                                proposed_actions: Vec::new(),
+                                conversation_turn_trace: Some(terminal.trace.clone()),
+                            };
+                            let persisted = self.persist_final_assistant_output_with_model_context(
+                                conversation_id,
+                                assistant_message_id,
+                                &mut output,
+                                &terminal.model_context_items,
+                            );
+                            if persisted.is_ok() {
+                                cancelled_usage = output.usage.clone();
+                            }
+                            persisted
+                        }
                     }
-                    persisted
                 } else {
                     Err(
                         "cancelled command is missing its settled conversation trace snapshot"
@@ -2401,19 +2406,25 @@ impl AgentService {
             snapshot,
         ) {
             (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) => {
-                output.conversation_turn_trace = Some(cancelled_conversation_trace_from_snapshot(
+                match cancelled_conversation_trace_from_snapshot(
                     snapshot,
                     run_id,
                     conversation_id,
                     assistant_message_id,
                     REASON,
-                ));
-                self.persist_final_assistant_output(
-                    conversation_id,
-                    assistant_message_id,
-                    &mut output,
-                )
-                .map(|()| self.invalidate_conversation_context_state(conversation_id))
+                ) {
+                    Err(error) => Err(error),
+                    Ok(terminal) => {
+                        output.conversation_turn_trace = Some(terminal.trace);
+                        self.persist_final_assistant_output_with_model_context(
+                            conversation_id,
+                            assistant_message_id,
+                            &mut output,
+                            &terminal.model_context_items,
+                        )
+                        .map(|()| self.invalidate_conversation_context_state(conversation_id))
+                    }
+                }
             }
             _ => Err(
                 "cancelled action continuation is missing its durable conversation trace snapshot"
@@ -2848,53 +2859,79 @@ impl AgentService {
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
                 let message = error.to_string();
-                let conversation_turn_trace = match (
+                let terminal_projection = match (
                     error.conversation_turn_trace().cloned(),
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
-                    (Some(trace), _, _) => Some(trace),
-                    (None, Some(conversation_id), Some(assistant_message_id)) => Some(
-                        self.storage
-                            .get_conversation_turn_trace(assistant_message_id)
-                            .ok()
-                            .flatten()
-                            .filter(|trace| {
-                                trace.run_id == run_id
+                    (Some(trace), _, _) => Ok((trace, None)),
+                    (None, Some(conversation_id), Some(assistant_message_id)) => self
+                        .storage
+                        .get_conversation_turn_trace(assistant_message_id)
+                        .and_then(|trace| match trace {
+                            Some(trace)
+                                if trace.run_id == run_id
                                     && trace.conversation_id == conversation_id
                                     && trace.terminal_status
-                                        == ConversationTurnTraceTerminalStatus::InProgress
-                            })
-                            .map(|trace| {
-                                terminalize_interrupted_conversation_trace(
-                                    trace,
+                                        == ConversationTurnTraceTerminalStatus::InProgress =>
+                            {
+                                let model_context_items = self
+                                    .storage
+                                    .get_conversation_model_context_log(assistant_message_id)?
+                                    .map(|log| log.items)
+                                    .unwrap_or_default();
+                                let next_sequence = trace
+                                    .items
+                                    .last()
+                                    .map(ConversationTurnTraceItem::sequence)
+                                    .unwrap_or(0)
+                                    .saturating_add(1);
+                                let terminal = terminal_conversation_trace_from_snapshot(
+                                    ConversationTraceSnapshot {
+                                        items: trace.items,
+                                        model_context_items,
+                                        next_sequence,
+                                        truncated: trace.truncated,
+                                    },
+                                    &run_id,
+                                    conversation_id,
+                                    assistant_message_id,
                                     ConversationTurnTraceTerminalStatus::Failed,
                                     &message,
-                                )
-                            })
-                            .unwrap_or_else(|| {
+                                )?;
+                                Ok((terminal.trace, Some(terminal.model_context_items)))
+                            }
+                            Some(_) => Err(
+                                "审批续跑的 durable ConversationTurnTrace 身份或状态不一致。"
+                                    .to_string(),
+                            ),
+                            None => Ok((
                                 failed_conversation_trace_without_items(
                                     &run_id,
                                     conversation_id,
                                     assistant_message_id,
                                     &message,
-                                )
-                            }),
-                    ),
-                    _ => None,
+                                ),
+                                Some(Vec::new()),
+                            )),
+                        }),
+                    _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
                 };
                 let persisted = if let (Some(conversation_id), Some(assistant_message_id)) = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
-                    let persisted = self.persist_assistant_error(
-                        conversation_id,
-                        assistant_message_id,
-                        &message,
-                        usage.clone(),
-                        conversation_turn_trace
-                            .as_ref()
-                            .expect("trace exists when conversation and assistant ids exist"),
+                    let persisted = terminal_projection.and_then(
+                        |(conversation_turn_trace, model_context_items)| {
+                            self.persist_assistant_error_with_model_context(
+                                conversation_id,
+                                assistant_message_id,
+                                &message,
+                                usage.clone(),
+                                &conversation_turn_trace,
+                                model_context_items.as_deref(),
+                            )
+                        },
                     );
                     if let Err(error) = &persisted {
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {

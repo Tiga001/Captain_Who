@@ -62,6 +62,17 @@ impl QueuedToolCall {
     pub(super) fn context_group(&self) -> ContextGroup {
         ContextGroup::tool_exchange(self.group_id.clone())
     }
+
+    pub(super) fn provider_identity(&self) -> AgentResult<AgentProviderToolCallIdentity> {
+        validate_provider_tool_call_id(&self.provider_call.id)?;
+        validate_model_tool_call_id(&self.call.id)?;
+        Ok(AgentProviderToolCallIdentity {
+            provider_tool_index: u32::try_from(self.provider_tool_index)
+                .map_err(|_| AgentError::new("Provider tool call index 超出 checkpoint 范围。"))?,
+            provider_call_id: self.provider_call.id.clone(),
+            runtime_call_id: self.call.id.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -107,7 +118,7 @@ impl ToolCallBatch {
                 LlmRuntimeToolCallBinding::new(provider_tool_index, &call, call.clone())
             })
             .collect::<Vec<_>>();
-        let assistant_turn = LlmAssistantTurn::from_legacy(assistant_content, calls)
+        let assistant_turn = LlmAssistantTurn::from_split_projection(assistant_content, calls)
             .with_runtime_tool_bindings(bindings)
             .expect("identity bindings built from the same provider calls");
         Self::from_provider_response(
@@ -118,7 +129,7 @@ impl ToolCallBatch {
             suppressed_narration,
             checkpoint_projection,
         )
-        .expect("legacy test batch is assembled from matching provider/runtime calls")
+        .expect("split-projection test batch has matching provider/runtime calls")
     }
 
     pub(super) fn from_provider_response(
@@ -490,6 +501,7 @@ pub(super) fn create_run_checkpoint(
     provider_protocol_key
         .validate_against_config(provider_profile_config)
         .map_err(|error| AgentError::new(format!("运行检查点的 Provider key 无效：{error}")))?;
+    validate_checkpoint_provider_protocol_revision(provider_protocol_key)?;
     let provider_runtime_capabilities =
         resolve_provider_runtime_capabilities(provider_protocol_key).map_err(|error| {
             AgentError::new(format!("运行检查点的 Provider capabilities 无效：{error}"))
@@ -502,12 +514,14 @@ pub(super) fn create_run_checkpoint(
         &queued_tool_call_ids,
         true,
     )?;
-    let (
-        conversation_trace_items,
-        conversation_model_context_items,
-        next_conversation_trace_sequence,
-        conversation_trace_truncated,
-    ) = conversation_trace.checkpoint();
+    // The checkpoint and the durable in-progress Trace are two views of the same frozen prefix.
+    // Persist the canonical/redacted Trace projection here as well; retaining the private raw
+    // ToolCall operation would make approval resume rewrite an already committed prefix.
+    let trace_snapshot = conversation_trace.snapshot();
+    let conversation_trace_items = trace_snapshot.items;
+    let conversation_model_context_items = trace_snapshot.model_context_items;
+    let next_conversation_trace_sequence = trace_snapshot.next_sequence;
+    let conversation_trace_truncated = trace_snapshot.truncated;
     validate_conversation_trace_tool_call_ids(&conversation_trace_items)?;
     let mut context_items = context.checkpoint_items()?;
     project_mcp_result_context_for_checkpoint(&mut context_items);
@@ -717,6 +731,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
                 "无法恢复运行检查点：Provider protocol key 无效：{error}"
             ))
         })?;
+    validate_checkpoint_provider_protocol_revision(&checkpoint.provider_protocol_key)?;
     let mut continuation_ref_ids = BTreeSet::new();
     for continuation_ref in &checkpoint.provider_continuation_refs {
         continuation_ref.validate().map_err(|error| {
@@ -878,28 +893,25 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         }),
         &queued_tool_call_ids,
     )?;
-    let call_sequence = conversation_trace.record_tool_call(&continuation.call);
-    if let Some(sequence) = call_sequence {
-        conversation_trace.record_model_message(
-            sequence,
-            0,
-            &crate::llm::LlmMessage::assistant("", vec![continuation_call.clone()]),
-        );
-    }
+    conversation_trace
+        .require_recorded_tool_call(&continuation.call)
+        .map_err(AgentError::new)?;
     if let Some(sequence) = conversation_trace.record_tool_result_with_archive(
         &continuation.call,
         &durable_result,
         archive_metadata.clone(),
     ) {
-        conversation_trace.record_model_message(
-            sequence,
-            0,
-            &crate::llm::LlmMessage::tool_result(
-                continuation.call.id.clone(),
-                persisted_model_observation,
-                !continuation.result.ok,
-            ),
-        );
+        conversation_trace
+            .record_model_message(
+                sequence,
+                0,
+                &crate::llm::LlmMessage::tool_result(
+                    continuation.call.id.clone(),
+                    persisted_model_observation,
+                    !continuation.result.ok,
+                ),
+            )
+            .map_err(AgentError::new)?;
     }
 
     Ok(RestoredRunCheckpoint {
@@ -916,6 +928,28 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         provider_protocol_key,
         provider_continuation_refs,
     })
+}
+
+fn validate_checkpoint_provider_protocol_revision(
+    provider_protocol_key: &ProviderProtocolKey,
+) -> AgentResult<()> {
+    let revision = provider_protocol_key
+        .provider_configuration_revision
+        .as_deref()
+        .ok_or_else(|| {
+            AgentError::new("运行检查点必须冻结当前 per-model Provider Protocol revision。")
+        })?;
+    let Some(suffix) = revision.strip_prefix("provider-protocol-v1:") else {
+        return Err(AgentError::new(
+            "运行检查点的 Provider Protocol revision 版本不受支持。",
+        ));
+    };
+    if suffix.trim().is_empty() || suffix.trim() != suffix || suffix.chars().any(char::is_control) {
+        return Err(AgentError::new(
+            "运行检查点的 Provider Protocol revision 无效。",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) const MCP_DURABLE_RESULT_PLACEHOLDER: &str =
@@ -1153,11 +1187,7 @@ fn queued_tool_call_checkpoint(
             id: call.checkpoint_call.id.clone(),
             name: call.checkpoint_call.name.clone(),
             args: call.checkpoint_call.args.clone(),
-            provider_identity: Some(AgentProviderToolCallIdentity {
-                provider_tool_index: u32::try_from(call.provider_tool_index).unwrap_or(u32::MAX),
-                provider_call_id: call.provider_call.id.clone(),
-                runtime_call_id: call.call.id.clone(),
-            }),
+            provider_identity: call.provider_identity()?,
         },
         assistant_content: call.assistant_content.clone(),
         group_id: call.group_id.clone(),
@@ -1268,7 +1298,7 @@ fn restore_queued_tool_calls(
                     AgentError::new("运行检查点中的 queued Tool Call 缺少 Provider 身份映射。")
                 })?;
             if mapping.runtime_call_id != queued.call.id
-                || queued.call.provider_identity.as_ref() != Some(mapping)
+                || &queued.call.provider_identity != mapping
             {
                 return Err(AgentError::new(
                     "运行检查点中的 queued Tool Call 与 Provider 身份映射不一致。",
@@ -1309,7 +1339,10 @@ mod tests {
         ContextSource,
     };
     use crate::llm::{model_response_tool_call_id, LlmMessage, LlmMessageRole};
-    use crate::protocol::{AgentApiStyle, AgentApprovalStatus, AgentToolCall, AgentToolResult};
+    use crate::protocol::{
+        AgentApiStyle, AgentApprovalStatus, AgentMcpServerScope, AgentMcpToolProvenance,
+        AgentToolCall, AgentToolIdentity, AgentToolResult,
+    };
     use crate::tools::ToolRegistry;
     use serde_json::json;
 
@@ -1335,7 +1368,7 @@ mod tests {
             crate::provider_profile::ProviderProtocolDialect::OpenAiChatCompletions,
             &test_provider_profile(),
             "checkpoint-test-model",
-            None,
+            Some("provider-protocol-v1:checkpoint-test".to_string()),
         )
         .unwrap()
     }
@@ -1397,6 +1430,90 @@ mod tests {
         let queued = batch.pop_front().expect("test batch call");
         assert_eq!(queued.call.id, expected_call_id);
         queued
+    }
+
+    fn current_test_tool_identity(tool_name: &str) -> AgentToolIdentity {
+        let registry = ToolRegistry::defaults_with_search(None);
+        if let Some(identity) = registry.identity(tool_name) {
+            return identity.clone();
+        }
+        if tool_name.starts_with("mcp__") {
+            return AgentToolIdentity::Mcp {
+                provenance: AgentMcpToolProvenance {
+                    server_id: "7f4a2d91-24ab-4d24-9eed-63daf26a6c15".to_string(),
+                    scope: AgentMcpServerScope::User,
+                    raw_tool_name: tool_name
+                        .strip_prefix("mcp__fixture__")
+                        .unwrap_or(tool_name)
+                        .to_string(),
+                    model_tool_name: tool_name.to_string(),
+                    config_epoch: "66dcbb6b-92a3-4d4e-9591-f0707e4ca3e3".to_string(),
+                    registry_revision: 3,
+                    config_digest: "a".repeat(64),
+                    catalog_generation: 4,
+                    catalog_digest: "b".repeat(64),
+                    catalog_schema_digest: "c".repeat(64),
+                    schema_digest: "d".repeat(64),
+                    schema_normalizer_version: crate::MCP_INPUT_SCHEMA_NORMALIZER_VERSION,
+                },
+            };
+        }
+        AgentToolIdentity::Unregistered {
+            tool_name: tool_name.to_string(),
+        }
+    }
+
+    fn record_current_test_tool_call(
+        trace: &mut ConversationTraceRecorder,
+        batch: &ToolCallBatch,
+        call: &AgentToolCall,
+    ) -> u64 {
+        let provider_identity = batch
+            .assistant_turn_identity()
+            .unwrap()
+            .tool_call_identities
+            .iter()
+            .find(|identity| identity.runtime_call_id == call.id)
+            .cloned()
+            .expect("current test call has an exact Provider/Runtime identity");
+        let sequence = trace
+            .record_tool_call_with_identity(call, current_test_tool_identity(&call.tool))
+            .expect("current test Tool Call is recorded once");
+        trace
+            .record_model_tool_call_message(
+                sequence,
+                0,
+                &LlmMessage::assistant(
+                    "",
+                    vec![LlmToolCall {
+                        id: call.id.clone(),
+                        name: call.tool.clone(),
+                        args: call.args.clone(),
+                    }],
+                ),
+                provider_identity,
+            )
+            .expect("current test Tool Call has immutable model context");
+        sequence
+    }
+
+    fn current_test_pending_trace(
+        batch: &ToolCallBatch,
+        pending: &LlmToolCall,
+    ) -> ConversationTraceRecorder {
+        let mut trace = ConversationTraceRecorder::default();
+        record_current_test_tool_call(
+            &mut trace,
+            batch,
+            &AgentToolCall {
+                id: pending.id.clone(),
+                tool: pending.name.clone(),
+                args: pending.args.clone(),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        );
+        trace
     }
 
     #[test]
@@ -1651,7 +1768,7 @@ mod tests {
         assert_eq!(batch.queue[0].call.name, "read_file");
         assert_eq!(batch.take_deferred_external_tool_call_count(), None);
 
-        let trace = ConversationTraceRecorder::default();
+        let trace = current_test_pending_trace(&batch, &pending);
         let checkpoint = create_run_checkpoint(
             "checkpoint-validation-run",
             RunCheckpointState {
@@ -1716,7 +1833,7 @@ mod tests {
             )
             .with_group(pending_queued.context_group()),
         )]);
-        let trace = ConversationTraceRecorder::default();
+        let trace = current_test_pending_trace(&batch, &pending);
         let checkpoint = create_run_checkpoint(
             "checkpoint-validation-run",
             RunCheckpointState {
@@ -1757,6 +1874,176 @@ mod tests {
 
     fn restorable_checkpoint_fixture() -> (AgentRunCheckpoint, AgentToolContinuation) {
         restorable_checkpoint_fixture_for_pending_tool("write_file")
+    }
+
+    #[test]
+    fn current_checkpoint_schema_round_trips_and_rejects_missing_or_extra_fields() {
+        let (checkpoint, _) = restorable_checkpoint_fixture();
+        let canonical = serde_json::to_value(&checkpoint).unwrap();
+        let decoded: AgentRunCheckpoint = serde_json::from_value(canonical.clone()).unwrap();
+        assert_eq!(decoded, checkpoint);
+
+        for field in [
+            "deferredExternalToolCallCount",
+            "providerContinuationRefs",
+            "runContext",
+            "conversationTraceItems",
+            "conversationModelContextItems",
+            "nextConversationTraceSequence",
+            "conversationTraceTruncated",
+        ] {
+            let mut missing = canonical.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let error = serde_json::from_value::<AgentRunCheckpoint>(missing).unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "missing {field} must be rejected explicitly: {error}"
+            );
+        }
+
+        assert!(canonical["runContext"].is_null());
+
+        let mut missing_provider_identity = canonical.clone();
+        missing_provider_identity["contextItems"][0]["toolCalls"][0]
+            .as_object_mut()
+            .expect("current Tool Call checkpoint")
+            .remove("providerIdentity");
+        assert!(
+            serde_json::from_value::<AgentRunCheckpoint>(missing_provider_identity).is_err(),
+            "persisted Tool Calls must carry their exact Provider/Runtime identity"
+        );
+
+        for path in [
+            &["modelCapabilities", "imageInput"][..],
+            &["providerProtocolKey", "providerConfigurationRevision"][..],
+        ] {
+            let mut missing = canonical.clone();
+            missing[path[0]]
+                .as_object_mut()
+                .expect("current nested checkpoint object")
+                .remove(path[1]);
+            assert!(
+                serde_json::from_value::<AgentRunCheckpoint>(missing).is_err(),
+                "missing nested checkpoint field {}.{} must fail closed",
+                path[0],
+                path[1]
+            );
+        }
+
+        let mut extra_capability = canonical.clone();
+        extra_capability["modelCapabilities"]
+            .as_object_mut()
+            .unwrap()
+            .insert("providerPolicy".to_string(), json!(true));
+        assert!(serde_json::from_value::<AgentRunCheckpoint>(extra_capability).is_err());
+
+        let mut extra_world_state = canonical.clone();
+        extra_world_state["runWorldState"]
+            .as_object_mut()
+            .unwrap()
+            .insert("legacyEpoch".to_string(), json!(true));
+        assert!(serde_json::from_value::<AgentRunCheckpoint>(extra_world_state).is_err());
+
+        let mut extra_world_section = canonical.clone();
+        extra_world_section["runWorldState"]["sections"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("runtimeCapability".to_string(), json!(true));
+        assert!(serde_json::from_value::<AgentRunCheckpoint>(extra_world_section).is_err());
+
+        let mut checkpoint_with_context = checkpoint.clone();
+        checkpoint_with_context.run_context = Some(crate::protocol::AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(crate::protocol::AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("Current workspace".to_string()),
+                root_path: Some("/current/workspace".to_string()),
+            }),
+            attachment_library: Some(crate::protocol::AgentAttachmentLibraryContext {
+                root_path: None,
+                conversation_id: None,
+                project_id: None,
+                conversation_attachments: Vec::new(),
+                project_attachments: Vec::new(),
+            }),
+            permissions: crate::protocol::AgentPermissions::default(),
+        });
+        let context_json = serde_json::to_value(checkpoint_with_context).unwrap();
+        for field in ["conversationId", "projectId", "workspace", "permissions"] {
+            let mut missing = context_json.clone();
+            missing["runContext"].as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AgentRunCheckpoint>(missing).is_err(),
+                "current runContext field {field} must be explicit"
+            );
+        }
+        for field in ["projectId", "displayName", "rootPath"] {
+            let mut missing = context_json.clone();
+            missing["runContext"]["workspace"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<AgentRunCheckpoint>(missing).is_err(),
+                "current workspace field {field} must be explicit"
+            );
+        }
+        for field in ["conversationAttachments", "projectAttachments"] {
+            let mut missing = context_json.clone();
+            missing["runContext"]["attachmentLibrary"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                serde_json::from_value::<AgentRunCheckpoint>(missing).is_err(),
+                "current attachment library field {field} must be explicit"
+            );
+        }
+        let mut extra_context = context_json;
+        extra_context["runContext"]
+            .as_object_mut()
+            .unwrap()
+            .insert("continuationPolicy".to_string(), json!("forged"));
+        assert!(serde_json::from_value::<AgentRunCheckpoint>(extra_context).is_err());
+
+        let mut missing_queued_field = canonical.clone();
+        missing_queued_field["queuedToolCalls"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("deferredBySkillActivation");
+        assert!(
+            serde_json::from_value::<AgentRunCheckpoint>(missing_queued_field).is_err(),
+            "the current queued Tool Call shape must be complete"
+        );
+
+        let mut extra = canonical;
+        extra
+            .as_object_mut()
+            .unwrap()
+            .insert("legacyCheckpointField".to_string(), json!(true));
+        assert!(
+            serde_json::from_value::<AgentRunCheckpoint>(extra).is_err(),
+            "unknown checkpoint fields must fail closed"
+        );
+    }
+
+    #[test]
+    fn checkpoint_restore_requires_current_provider_protocol_revision_before_dispatch() {
+        let (checkpoint, continuation) = restorable_checkpoint_fixture();
+
+        for revision in [None, Some("model-settings-v1:old".to_string())] {
+            let mut malformed = checkpoint.clone();
+            malformed
+                .provider_protocol_key
+                .provider_configuration_revision = revision;
+            let error = restore_error(restore_run_checkpoint(
+                malformed,
+                "checkpoint-validation-run",
+                &continuation,
+            ));
+            assert!(error.to_string().contains("Provider Protocol revision"));
+        }
     }
 
     #[test]
@@ -2040,6 +2327,41 @@ mod tests {
                 .with_group(batch_group),
             ),
         ]);
+        let first_trace_call = AgentToolCall {
+            id: first.call.id.clone(),
+            tool: first.call.name.clone(),
+            args: first.call.args.clone(),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let pending_trace_call = AgentToolCall {
+            id: pending_queued.call.id.clone(),
+            tool: pending_queued.call.name.clone(),
+            args: pending_queued.call.args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let mut trace = ConversationTraceRecorder::default();
+        record_current_test_tool_call(&mut trace, &batch, &first_trace_call);
+        let first_result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: first_trace_call.id.clone(),
+            tool: first_trace_call.tool.clone(),
+            ok: true,
+            result: Some(json!({})),
+            error: None,
+        };
+        let first_result_sequence = trace
+            .record_tool_result(&first_trace_call, &first_result)
+            .expect("current completed call has one result");
+        trace
+            .record_model_message(
+                first_result_sequence,
+                0,
+                &LlmMessage::tool_result(first_trace_call.id.clone(), "{}", false),
+            )
+            .expect("current completed call result has immutable model context");
+        record_current_test_tool_call(&mut trace, &batch, &pending_trace_call);
         let checkpoint = create_run_checkpoint(
             "checkpoint-validation-run",
             RunCheckpointState {
@@ -2048,7 +2370,7 @@ mod tests {
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
                 pending_tool_call_id: &pending.id,
-                conversation_trace: &ConversationTraceRecorder::default(),
+                conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
                 model_capabilities: ModelCapabilities::default(),
@@ -2066,6 +2388,30 @@ mod tests {
             3
         );
         assert_eq!(checkpoint.context_items[0].tool_calls.len(), 3);
+        assert_eq!(
+            checkpoint.context_items[0].tool_calls[0]
+                .provider_identity
+                .provider_call_id,
+            first.call.id.as_str()
+        );
+        assert_eq!(
+            checkpoint.context_items[0].tool_calls[1]
+                .provider_identity
+                .provider_call_id,
+            pending_queued.call.id.as_str()
+        );
+        assert_eq!(
+            checkpoint.context_items[0].tool_calls[0]
+                .provider_identity
+                .provider_tool_index,
+            0
+        );
+        assert_eq!(
+            checkpoint.context_items[0].tool_calls[1]
+                .provider_identity
+                .provider_tool_index,
+            1
+        );
         assert_eq!(
             checkpoint.context_items[1].tool_call_id.as_deref(),
             Some(first.call.id.as_str())
@@ -2136,7 +2482,7 @@ mod tests {
                 LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
             })
             .collect::<Vec<_>>();
-        let turn = LlmAssistantTurn::from_legacy("", provider_calls);
+        let turn = LlmAssistantTurn::from_split_projection("", provider_calls);
         let mut batch = ToolCallBatch::from_provider_response(
             "checkpoint-validation-run",
             0,
@@ -2205,7 +2551,7 @@ mod tests {
             test_batch_and_context_item("create-invalid-pending", "", vec![pending.clone()], false);
         pop_test_call(&mut batch, &pending.id);
         let context = ContextFrame::new(vec![assistant_item]);
-        let trace = ConversationTraceRecorder::default();
+        let trace = current_test_pending_trace(&batch, &pending);
         let error = create_run_checkpoint(
             "create-invalid-pending",
             RunCheckpointState {
@@ -2388,7 +2734,9 @@ mod tests {
                 sequence: 0,
                 call_id: "legacy/provider/trace".to_string(),
                 tool: "read_file".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 operation: json!({ "path": "old.txt" }),
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,
@@ -2498,7 +2846,7 @@ mod tests {
             ),
             assistant_item,
         ]);
-        let trace = ConversationTraceRecorder::default();
+        let trace = current_test_pending_trace(&batch, &pending);
         let checkpoint = create_run_checkpoint(
             "run-1",
             RunCheckpointState {
@@ -2559,7 +2907,7 @@ mod tests {
             test_batch_and_context_item("run-command", "", vec![pending.clone()], false);
         pop_test_call(&mut batch, &pending.id);
         let context = ContextFrame::new(vec![assistant_item]);
-        let trace = ConversationTraceRecorder::default();
+        let trace = current_test_pending_trace(&batch, &pending);
         let checkpoint = create_run_checkpoint(
             "run-command",
             RunCheckpointState {
@@ -2691,7 +3039,7 @@ mod tests {
         detector.prepare_frame(&mut compacted);
         let compacted_baseline = compacted.share_measured_persistent_baseline().unwrap();
         let active = active.replace_persistent_baseline(compacted_baseline);
-        let conversation_trace = ConversationTraceRecorder::default();
+        let conversation_trace = current_test_pending_trace(&tool_batch, &pending);
         let checkpoint = create_run_checkpoint(
             "run-compacted",
             RunCheckpointState {
@@ -2813,9 +3161,22 @@ mod tests {
             ),
         ]);
         let mut trace = ConversationTraceRecorder::default();
-        trace.record_tool_call(&completed_call);
-        trace.record_tool_result(&completed_call, &completed_result);
-        trace.record_tool_call(&pending_call);
+        record_current_test_tool_call(&mut trace, &tool_batch, &completed_call);
+        let completed_result_sequence = trace
+            .record_tool_result(&completed_call, &completed_result)
+            .expect("current test Tool Result is recorded once");
+        trace
+            .record_model_message(
+                completed_result_sequence,
+                0,
+                &LlmMessage::tool_result(
+                    completed_call.id.clone(),
+                    build_tool_observation_message(&completed_result),
+                    false,
+                ),
+            )
+            .expect("current test Tool Result has immutable model context");
+        record_current_test_tool_call(&mut trace, &tool_batch, &pending_call);
         let checkpoint = create_run_checkpoint(
             "run-multi-tool",
             RunCheckpointState {

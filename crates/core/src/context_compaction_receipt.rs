@@ -91,7 +91,7 @@ impl ContextCompactionReceiptStage {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionReceiptPlan {
     pub context_revision: String,
     pub persistent_revision: String,
@@ -103,7 +103,6 @@ pub struct ContextCompactionReceiptPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_target_input_tokens: Option<u64>,
     pub source_input_tokens: u64,
-    #[serde(default)]
     pub retained_input_tokens: u64,
     pub target_replacement_tokens: u64,
     pub expected_reclaimed_tokens: u64,
@@ -180,20 +179,19 @@ impl ContextCompactionReceiptPlan {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionReceiptResult {
     pub summary_id: String,
     pub source_input_tokens: u64,
     pub summary_input_tokens: u64,
     pub continuity_input_tokens: u64,
-    #[serde(default)]
     pub uncovered_tail_input_tokens: u64,
     pub replacement_input_tokens: u64,
     pub reclaimed_input_tokens: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionReceiptError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -201,7 +199,7 @@ pub struct ContextCompactionReceiptError {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionReceipt {
     pub schema_version: u32,
     pub operation_id: String,
@@ -214,10 +212,10 @@ pub struct ContextCompactionReceipt {
     /// Immutable, presentation-only model labels for Provider transition receipts.
     ///
     /// These snapshots never participate in routing, compare-and-set checks, or model mutation.
-    /// Older receipts and ordinary capacity compactions omit them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Ordinary capacity compactions omit them.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_transition_source_model_display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_transition_target_model_display_name: Option<String>,
     pub api_style: AgentApiStyle,
     pub status: ContextCompactionReceiptStatus,
@@ -642,4 +640,64 @@ fn truncate_error(value: &str) -> String {
         .chars()
         .take(MAXIMUM_RECEIPT_ERROR_CHARACTERS)
         .collect()
+}
+
+#[cfg(test)]
+mod strict_schema_tests {
+    use super::*;
+
+    #[test]
+    fn current_receipt_metrics_are_required_and_unknown_fields_are_rejected() {
+        let plan = ContextCompactionReceiptPlan {
+            context_revision: "context-revision".to_string(),
+            persistent_revision: "persistent-revision".to_string(),
+            request_input_tokens: 200,
+            available_input_tokens: None,
+            request_trigger_input_tokens: None,
+            request_target_input_tokens: None,
+            source_input_tokens: 100,
+            retained_input_tokens: 10,
+            target_replacement_tokens: 20,
+            expected_reclaimed_tokens: 70,
+            planned_reclaimed_tokens: 70,
+            projected_request_input_tokens: 130,
+            best_effort: false,
+            protected_input_tokens: 0,
+            protected_reasons: BTreeMap::new(),
+            atomic_unit_count: 1,
+            previous_summary_id: None,
+            covered_through: ContextJournalCursor::message("assistant-1"),
+        };
+        let encoded = serde_json::to_value(&plan).unwrap();
+        let decoded: ContextCompactionReceiptPlan =
+            serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, plan);
+
+        let mut missing = encoded.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("retainedInputTokens");
+        assert!(serde_json::from_value::<ContextCompactionReceiptPlan>(missing).is_err());
+
+        let mut extra = encoded;
+        extra["retiredMetric"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<ContextCompactionReceiptPlan>(extra).is_err());
+
+        let result = ContextCompactionReceiptResult {
+            summary_id: "summary-1".to_string(),
+            source_input_tokens: 100,
+            summary_input_tokens: 20,
+            continuity_input_tokens: 10,
+            uncovered_tail_input_tokens: 5,
+            replacement_input_tokens: 25,
+            reclaimed_input_tokens: 75,
+        };
+        let mut missing = serde_json::to_value(result).unwrap();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("uncoveredTailInputTokens");
+        assert!(serde_json::from_value::<ContextCompactionReceiptResult>(missing).is_err());
+    }
 }

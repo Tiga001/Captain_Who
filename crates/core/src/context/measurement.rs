@@ -25,7 +25,7 @@ fn context_projection_semantics(
     protocol: Option<&ProviderProtocolKey>,
 ) -> crate::ProviderContextProjectionSemantics {
     let Some(protocol) = protocol else {
-        return crate::ProviderContextProjectionSemantics::LegacyEffectiveCalls;
+        return crate::ProviderContextProjectionSemantics::GenericEffectiveCalls;
     };
     crate::resolve_provider_runtime_capabilities(protocol)
         .map(|capabilities| capabilities.context_projection())
@@ -322,11 +322,11 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
         }
         if let Some(turn) = message.assistant_turn() {
             let effective_call_count = turn.effective_tool_calls().len();
-            let uses_legacy_split_projection =
+            let uses_generic_split_projection =
                 context_projection_semantics(turn.provider_protocol())
-                    == crate::ProviderContextProjectionSemantics::LegacyEffectiveCalls;
+                    == crate::ProviderContextProjectionSemantics::GenericEffectiveCalls;
             if turn.runtime_tool_bindings().is_some()
-                && uses_legacy_split_projection
+                && uses_generic_split_projection
                 && effective_call_count > 1
             {
                 let extra_assistant_messages =
@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_legacy_turn_matches_split_wire_message_budget() {
+    fn complete_generic_turn_matches_split_wire_message_budget() {
         let calls = (0..3)
             .map(|index| LlmToolCall {
                 id: format!("call-{index}"),
@@ -435,7 +435,7 @@ mod tests {
             .map(|(index, call)| LlmRuntimeToolCallBinding::new(index, call, call.clone()))
             .collect();
         let complete = LlmMessage::from_assistant_turn(
-            LlmAssistantTurn::from_legacy("I will inspect the files.", calls.clone())
+            LlmAssistantTurn::from_split_projection("I will inspect the files.", calls.clone())
                 .with_runtime_tool_bindings(bindings)
                 .unwrap(),
         );
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_grouped_legacy_turn_keeps_single_assistant_structure_cost() {
+    fn grouped_generic_turn_keeps_single_assistant_structure_cost() {
         let calls = vec![
             LlmToolCall {
                 id: "call-1".to_string(),
@@ -484,7 +484,7 @@ mod tests {
             .map(|(index, call)| LlmRuntimeToolCallBinding::new(index, call, call.clone()))
             .collect();
         let runtime_split = LlmMessage::from_assistant_turn(
-            LlmAssistantTurn::from_legacy("", calls)
+            LlmAssistantTurn::from_split_projection("", calls)
                 .with_runtime_tool_bindings(bindings)
                 .unwrap(),
         );
@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_provider_profile_does_not_pay_legacy_split_overhead() {
+    fn grouped_provider_profile_does_not_pay_generic_split_overhead() {
         let profile = ProviderProfileConfig::deepseek_v4_default();
         let key = ProviderProtocolKey::new(
             ProviderProtocolDialect::OpenAiChatCompletions,
@@ -534,7 +534,7 @@ mod tests {
             .unwrap();
         let grouped = LlmMessage::from_assistant_turn(turn);
         let generic_live = LlmMessage::from_assistant_turn(
-            LlmAssistantTurn::from_legacy("", provider_calls)
+            LlmAssistantTurn::from_split_projection("", provider_calls)
                 .with_runtime_tool_bindings(bindings)
                 .unwrap(),
         );

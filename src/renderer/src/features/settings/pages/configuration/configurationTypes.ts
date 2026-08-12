@@ -1,1 +1,6 @@
-export type { ModelConfig, ModelFormValues, SearchMode } from '../../../../config/modelConfig'
+export type {
+  ModelConfig,
+  ModelConfigSaveDraft,
+  ModelFormValues,
+  SearchMode
+} from '../../../../config/modelConfig'

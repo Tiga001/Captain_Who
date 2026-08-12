@@ -48,7 +48,8 @@ describe('CoreServer Skill mutation client', () => {
     } satisfies SkillsUpdateLocalInput
     const uninstallInput = {
       skillId,
-      expectedRevision: 'skill-package-sha256-v1:new'
+      expectedRevision:
+        'skill-installation-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222'
     } satisfies SkillsUninstallInput
     const outputs = [
       {

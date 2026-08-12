@@ -19,17 +19,15 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AgentApprovalDecisionStatus, AgentChatInput, AgentChatMessage, AgentChatOutput,
-    AgentCommandRequest, AgentContextWindowSnapshot, AgentDiffProposal, AgentEvent,
-    AgentFileDraftSnapshot, AgentFileWriteProposal, AgentFileWriteResult,
-    AgentFileWriteResultStatus, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
-    AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
-    AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
-    AgentSkillMaterializationRequest, AgentSkillScriptRequest, AgentToolCall, AgentToolResult,
-    AgentTurnDiffIdentity, AgentTurnFileChange, AgentTurnFileContent, AgentUsage,
-    AgentWorkspaceContext, ContextJournalCursor, ConversationTurnTrace,
-    ConversationTurnTraceTerminalStatus, ModelCapabilities, ProviderProtocolDialect,
-    ProviderProtocolKey, ProviderUsageSemantics,
+    AgentCommandRequest, AgentContextWindowSnapshot, AgentEvent, AgentFileDraftSnapshot,
+    AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentPatchResult,
+    AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
+    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentRunContext, AgentRunStatus,
+    AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolResult, AgentTurnDiffIdentity,
+    AgentTurnFileChange, AgentTurnFileContent, AgentUsage, AgentWorkspaceContext,
+    ContextJournalCursor, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+    ModelCapabilities, ProviderProtocolDialect, ProviderProtocolKey, ProviderUsageSemantics,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,

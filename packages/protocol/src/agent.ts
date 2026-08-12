@@ -200,7 +200,7 @@ export interface AgentMcpToolApprovalSummary {
    * Bounded model-authored display text. It is never forwarded to the MCP Server, remains
    * untrusted, and may contain user-provided sensitive text.
    */
-  displayReason?: string
+  displayReason: string | null
   arguments: AgentMcpArgumentSummary
   risk: AgentMcpToolRisk
   external: boolean
@@ -288,23 +288,24 @@ export interface AgentMcpToolInvocationEvent {
    * Bounded model-authored display text copied from the frozen approval summary. Render as plain
    * text; do not treat it as secret-redacted or log it separately.
    */
-  displayReason?: string
+  displayReason: string | null
   external: boolean
   state: AgentMcpToolInvocationState
   dispatchCertainty: AgentMcpDispatchCertainty
-  outcome?: AgentMcpToolInvocationOutcome
-  isError?: boolean
-  errorCode?: string
-  durationMs?: number
+  outcome: AgentMcpToolInvocationOutcome | null
+  isError: boolean | null
+  errorCode: string | null
+  durationMs: number | null
   outputTruncated: boolean
   /** Value-free, Host-classified diagnostics. Renderer presentation should not persist it. */
-  diagnostics?: AgentMcpInvocationDiagnostics
+  diagnostics: AgentMcpInvocationDiagnostics | null
 }
 
 export type AgentToolIdentity =
   | { type: 'builtin'; toolName: string }
   | { type: 'runtime_extension'; extensionId: string; toolName: string }
   | { type: 'mcp'; provenance: AgentMcpToolProvenance }
+  | { type: 'unregistered'; toolName: string }
 
 export type AgentToolApprovalMode = 'never' | 'always' | 'dynamic'
 
@@ -352,7 +353,7 @@ export type ConversationTurnTraceItem =
       operation: unknown
       approvalStatus: AgentApprovalStatus
       truncated: boolean
-      provenance?: AgentToolIdentity
+      provenance: AgentToolIdentity
     }
   | {
       type: 'tool_result'
@@ -560,9 +561,9 @@ export interface AgentConversationMessageAttachment {
 }
 
 export interface AgentWorkspaceContext {
-  projectId?: string
-  displayName?: string
-  rootPath?: string
+  projectId: string | null
+  displayName: string | null
+  rootPath: string | null
 }
 
 export interface AgentAttachmentReference {
@@ -596,9 +597,9 @@ export interface AgentPromptPreferences {
 }
 
 export interface AgentRunContext {
-  conversationId?: string
-  projectId?: string | null
-  workspace?: AgentWorkspaceContext
+  conversationId: string | null
+  projectId: string | null
+  workspace: AgentWorkspaceContext | null
   attachmentLibrary?: AgentAttachmentLibraryContext
   permissions: AgentPermissions
 }
@@ -1058,7 +1059,7 @@ export interface AgentToolCall {
   tool: AgentToolName
   args: unknown
   approvalStatus: AgentApprovalStatus
-  reason?: string
+  reason: string | null
 }
 
 export interface AgentToolDefinition {
@@ -1089,8 +1090,8 @@ export interface AgentDiffProposal {
   operation: AgentPatchOperation
   filePath: string
   patch: string
-  baseRevision?: string
-  summary?: string
+  baseRevision: string | null
+  summary: string | null
   approvalStatus: AgentApprovalStatus
 }
 
@@ -1137,8 +1138,8 @@ export interface AgentFileWriteProposal {
   draftId: string
   mode: AgentFileWriteMode
   filePath: string
-  baseRevision?: string
-  summary?: string
+  baseRevision: string | null
+  summary: string | null
   additions: number
   deletions: number
   lineCount: number
@@ -1300,25 +1301,22 @@ export interface AgentCommandArtifactObservation {
   schemaVersion: number
   status: AgentCommandArtifactObservationStatus
   /** False only when both snapshots and the bounded change report are complete. */
-  partial?: boolean
+  partial: boolean
   /** Stable backend reason codes explaining incomplete observation evidence. */
-  stopReasons?: string[]
+  stopReasons: string[]
   /** Office files considered across the before and after snapshots. */
-  scanned?: number
+  scanned: number
   /** Change records included in this observation. */
-  returned?: number
+  returned: number
   /** Known change records omitted from the bounded report. */
-  omitted?: number
+  omitted: number
   coverage: AgentCommandArtifactObservationCoverage
   changes: AgentCommandArtifactChange[]
   changesTruncated: boolean
   changesOmitted: number
-  expectedOutputs?: AgentCommandExpectedArtifactOutcome[]
-  warnings?: AgentCommandArtifactObservationWarning[]
+  expectedOutputs: AgentCommandExpectedArtifactOutcome[]
+  warnings: AgentCommandArtifactObservationWarning[]
 }
-
-/** Selects a host-owned runtime without granting command authorization. */
-export type AgentCommandRuntimeProvider = 'managedArtifact'
 
 export type AgentCommandRuntimeKind = 'node' | 'python'
 
@@ -1328,18 +1326,6 @@ export type AgentCommandRuntimeKind = 'node' | 'python'
  * model-visible run_command.runtimeProfile enum.
  */
 export type AgentCommandRuntimeProfile = 'documents' | 'spreadsheets' | 'presentations' | 'pdf'
-
-export interface AgentCommandRuntimePackageRequirement {
-  name: string
-  version: string
-}
-
-/** Frozen resolver request carried with the command action. */
-export interface AgentCommandRuntimeRequest {
-  provider: AgentCommandRuntimeProvider
-  kind: AgentCommandRuntimeKind
-  requiredPackages: AgentCommandRuntimePackageRequirement[]
-}
 
 export interface AgentCommandRuntimeResolvedPackage {
   name: string
@@ -1384,6 +1370,11 @@ export type AgentFileInputRef =
   | { type: 'generated_artifact'; uri: string; path: string }
   | { type: 'skill_resource'; uri: string }
 
+export interface AgentFileInputSpec {
+  mountPath: string
+  source: AgentFileInputRef
+}
+
 export interface AgentFileInputBinding {
   schemaVersion: 1
   mountPath: string
@@ -1392,19 +1383,16 @@ export interface AgentFileInputBinding {
   sha256: string
 }
 
-export interface AgentCommandRequest {
+/** Renderer-safe projection of a durable command action; Host authority is deliberately absent. */
+export interface AgentCommandActionProjection {
   id: string
   command: string
-  cwd?: string
-  timeoutMs?: number
+  cwd: string | null
+  timeoutMs: number | null
   approvalStatus: AgentApprovalStatus
-  riskLevel?: AgentCommandRiskLevel
-  reason?: string
-  observe?: AgentCommandArtifactObservationRequest
-  inputs?: AgentFileInputBinding[]
-  /** @deprecated Only present on legacy pending actions, which the host refuses and reprepares. */
-  runtime?: AgentCommandRuntimeRequest
-  runtimeBinding?: AgentCommandRuntimeBinding
+  riskLevel: AgentCommandRiskLevel | null
+  reason: string | null
+  observe: AgentCommandArtifactObservationRequest | null
 }
 
 export type AgentSkillMaterializationResultStatus =
@@ -1413,10 +1401,10 @@ export type AgentSkillMaterializationResultStatus =
 export interface AgentSkillMaterializationRequest {
   id: string
   sourceUri: string
-  sourcePrefix?: string
+  sourcePrefix: string | null
   destination: string
   approvalStatus: AgentApprovalStatus
-  reason?: string
+  reason: string | null
 }
 
 export interface AgentSkillMaterializationResult {
@@ -1471,9 +1459,9 @@ export interface AgentSkillScriptRequest {
   args: string[]
   requirements: AgentSkillScriptRequirements
   preflight: AgentSkillScriptPreflightReport
-  timeoutMs?: number
+  timeoutMs: number | null
   approvalStatus: AgentApprovalStatus
-  reason?: string
+  reason: string | null
 }
 
 export interface AgentSkillScriptResult {
@@ -1618,27 +1606,18 @@ export type OfficeOperationParameters =
 interface OfficeExecutionRequestBase {
   documentKind: OfficeDocumentKind
   operation: OfficeOperation
-  documentPath?: string
-  outputPath?: string
-  destinationPath?: string
-  timeoutMs?: number
+  documentPath: string | null
+  outputPath: string | null
+  destinationPath: string | null
+  inputs: AgentFileInputSpec[]
+  timeoutMs: number | null
 }
 
-export type OfficeExecutionRequest = OfficeExecutionRequestBase &
-  (
-    | { parameters: OfficeOperationParameters; arguments?: never }
-    /** @deprecated Schema-v3 compatibility only; schema-v4 actions use typed parameters. */
-    | { parameters?: never; arguments: string[] }
-  )
+export type OfficeExecutionRequest = OfficeExecutionRequestBase & {
+  parameters: OfficeOperationParameters
+}
 
 export type OfficeFilePreconditionState = 'missing' | 'present'
-
-export interface OfficeFilePrecondition {
-  path: string
-  state: OfficeFilePreconditionState
-  contentRevision?: string
-  size?: number
-}
 
 export type OfficePathSlot =
   | { type: 'document' }
@@ -1654,8 +1633,8 @@ export type OfficeWriteDisposition = 'createNew' | 'replaceExisting'
 
 export interface OfficePathIdentity {
   revision: string
-  device?: number
-  inode?: number
+  device: number | null
+  inode: number | null
 }
 
 /**
@@ -1670,11 +1649,11 @@ export interface OfficeFrozenPath {
   scope: OfficePathScope
   normalizedPath: string
   state: OfficeFilePreconditionState
-  objectIdentity?: OfficePathIdentity
+  objectIdentity: OfficePathIdentity | null
   parentIdentity: OfficePathIdentity
-  contentRevision?: string
-  size?: number
-  writeDisposition?: OfficeWriteDisposition
+  contentRevision: string | null
+  size: number | null
+  writeDisposition: OfficeWriteDisposition | null
 }
 
 /** Immutable, shell-free Office execution snapshot prepared by the trusted backend. */
@@ -1682,24 +1661,19 @@ export interface OfficePreparedExecution {
   schemaVersion: number
   providerId: string
   engineRevision: string
-  workspaceRevision?: string
+  workspaceRevision: string | null
   access: OfficeOperationAccess
   request: OfficeExecutionRequest
   argv: string[]
   paths: OfficeFrozenPath[]
-  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
-  documentPrecondition?: OfficeFilePrecondition
-  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
-  outputPrecondition?: OfficeFilePrecondition
-  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
-  destinationPrecondition?: OfficeFilePrecondition
-  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
-  resourcePreconditions?: OfficeFilePrecondition[]
+  inputBindings: AgentFileInputBinding[]
 }
 
 export interface AgentOfficeOperationRequest {
   schemaVersion: number
   id: string
+  /** Exact, model-facing Office Tool arguments frozen by the Host. */
+  semanticArgs: Record<string, unknown>
   prepared: OfficePreparedExecution
   approvalStatus: AgentApprovalStatus
   reason: string
@@ -1748,7 +1722,7 @@ export type AgentProposedAction =
   | { type: 'mcp_tool_call'; approval: AgentMcpToolApproval }
   | { type: 'diff'; diff: AgentDiffProposal }
   | { type: 'file_write'; fileWrite: AgentFileWriteProposal }
-  | { type: 'command'; command: AgentCommandRequest }
+  | { type: 'command'; command: AgentCommandActionProjection }
   | { type: 'skill_materialization'; materialization: AgentSkillMaterializationRequest }
   | { type: 'skill_script'; script: AgentSkillScriptRequest }
   | { type: 'office_operation'; officeOperation: AgentOfficeOperationRequest }
@@ -1779,8 +1753,6 @@ export type AgentEvent =
       retryAt: number
       attempt: number
       maxAttempts: number
-      /** Legacy wire field. Host parsing intentionally drops this provider-authored text. */
-      reason?: string
     }
   | {
       type: 'tool_input_progress'

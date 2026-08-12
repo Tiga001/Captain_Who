@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 1;
+pub const STORAGE_SCHEMA_VERSION: i32 = 3;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:cbd40e31f62ced1f06857b46bac878d893bdd3c776a6baa5d794493550a5b773";
+    "sha256:a757cbd73bfa720a40d36d6ec2c4827bc71255496b4da90f6868c731fc1ac46e";
 
 /// Opens the single supported development schema.
 ///
@@ -177,6 +177,75 @@ mod tests {
             .unwrap()
             .is_some();
         assert!(!maintenance_table_exists);
+    }
+
+    #[test]
+    fn canonical_composer_schema_requires_complete_array_payloads() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+
+        let columns = [
+            "permission_mode_version",
+            "attachments_json",
+            "skills_json",
+            "queued_messages_json",
+        ];
+        for column in columns {
+            let (not_null, default_value): (i64, Option<String>) = connection
+                .query_row(
+                    "SELECT [notnull], dflt_value FROM pragma_table_info('composer_drafts')
+                     WHERE name = ?1",
+                    [column],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(not_null, 1, "{column} must be required");
+            assert_eq!(default_value, None, "{column} must not have a default");
+        }
+
+        let non_array = connection.execute(
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+                attachments_json, skills_json, queued_messages_json, updated_at
+             ) VALUES ('draft-invalid', '', 'default', 1, NULL, NULL, '{}', '[]', '[]', 1)",
+            [],
+        );
+        assert!(non_array.is_err());
+
+        for statement in [
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, model_id, project_id,
+                attachments_json, skills_json, queued_messages_json, updated_at
+             ) VALUES ('draft-missing-version', '', 'default', NULL, NULL, '[]', '[]', '[]', 1)",
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+                attachments_json, queued_messages_json, updated_at
+             ) VALUES ('draft-missing-skills', '', 'default', 1, NULL, NULL, '[]', '[]', 1)",
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+                attachments_json, skills_json, updated_at
+             ) VALUES ('draft-missing-queue', '', 'default', 1, NULL, NULL, '[]', '[]', 1)",
+        ] {
+            assert!(connection.execute(statement, []).is_err());
+        }
+    }
+
+    #[test]
+    fn canonical_goal_revision_actor_is_required() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+
+        let (not_null, default_value): (i64, Option<String>) = connection
+            .query_row(
+                "SELECT [notnull], dflt_value
+                 FROM pragma_table_info('conversation_goal_revisions')
+                 WHERE name = 'actor'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(not_null, 1);
+        assert_eq!(default_value, None);
     }
 
     #[test]

@@ -59,16 +59,17 @@ fn lifecycle_event_contains_only_bounded_safe_fields() {
     assert!(diagnostics.result.is_none());
     assert!(diagnostics.failure_stage.is_none());
 
-    let mut legacy = serde_json::to_value(&pending).unwrap();
-    let legacy = legacy.as_object_mut().unwrap();
-    legacy.remove("displayReason");
-    legacy.remove("diagnostics");
-    let legacy = serde_json::from_value::<AgentMcpToolInvocationEvent>(serde_json::Value::Object(
-        legacy.clone(),
-    ))
-    .unwrap();
-    assert_eq!(legacy.display_reason, None);
-    assert_eq!(legacy.diagnostics, None);
+    for required_field in ["displayReason", "diagnostics"] {
+        let mut missing_required = serde_json::to_value(&pending).unwrap();
+        missing_required
+            .as_object_mut()
+            .unwrap()
+            .remove(required_field);
+        assert!(
+            serde_json::from_value::<AgentMcpToolInvocationEvent>(missing_required).is_err(),
+            "missing current field {required_field} must fail closed"
+        );
+    }
 
     for (state, outcome, is_error) in [
         (

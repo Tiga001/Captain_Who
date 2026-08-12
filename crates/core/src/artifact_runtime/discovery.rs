@@ -1388,9 +1388,9 @@ fn io_error(operation: &str, error: std::io::Error) -> ArtifactRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::CommandRuntimeProfileResolver;
     use crate::command::{
-        run_authorized_command_with_artifact_runtime, CommandAuthorizationSource,
+        CommandAuthorizationSource, CommandRuntimeProfileResolver, CommandSessionManager,
+        CommandSessionScopeId, CommandStartOptions, CommandStartOutcome,
         COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH,
     };
     use crate::{
@@ -1400,6 +1400,7 @@ mod tests {
     };
     use std::fs::File;
     use std::io::Write;
+    use std::sync::Arc;
 
     struct Fixture {
         directory: tempfile::TempDir,
@@ -1649,7 +1650,7 @@ mod tests {
     #[test]
     fn discovers_a_complete_revision_bound_bundle_without_path_fallback() {
         let fixture = Fixture::new();
-        let provider = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap();
+        let provider = Arc::new(ArtifactRuntimeProvider::discover(&fixture.options()).unwrap());
         let status = provider.status();
         assert_eq!(status.availability, ArtifactRuntimeAvailability::Available);
         assert_eq!(
@@ -1779,7 +1780,7 @@ mod tests {
     #[test]
     fn execution_refuses_a_profile_binding_that_no_longer_matches_the_provider() {
         let fixture = Fixture::new();
-        let provider = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap();
+        let provider = Arc::new(ArtifactRuntimeProvider::discover(&fixture.options()).unwrap());
         let workspace = tempfile::tempdir().unwrap();
         fs::write(workspace.path().join("build.mjs"), "// must never run\n").unwrap();
         let mut binding = provider
@@ -1799,25 +1800,35 @@ mod tests {
             reason: Some("verify frozen profile conflict".to_string()),
             observe: None,
             inputs: Vec::new(),
-            runtime: None,
             runtime_binding: Some(Box::new(binding)),
         };
-        let result = run_authorized_command_with_artifact_runtime(
-            Some(workspace.path()),
-            &request,
-            AgentPermissions {
-                read: AgentReadPermission::WorkspaceOnly,
-                write: AgentWritePermission::WorkspaceOnly,
-                command: AgentCommandPermission::RequireApproval,
-                command_safety: AgentCommandSafetyPolicy::Guarded,
-                patch: AgentPatchPermission::RequireApproval,
-            },
-            CommandAuthorizationSource::ExplicitUser,
-            AgentCancellationToken::new(),
-            None,
-            Some(&provider),
-        )
-        .unwrap();
+        let manager = CommandSessionManager::default();
+        let outcome = manager
+            .start_authorized_command_with_runtime_and_lifecycle(
+                CommandSessionScopeId::new("runtime-binding-conflict").unwrap(),
+                Some(workspace.path()),
+                &request,
+                AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    command: AgentCommandPermission::RequireApproval,
+                    command_safety: AgentCommandSafetyPolicy::Guarded,
+                    patch: AgentPatchPermission::RequireApproval,
+                },
+                CommandAuthorizationSource::ExplicitUser,
+                CommandStartOptions::default(),
+                Some(Arc::clone(&provider)),
+                None,
+                None,
+                Arc::new(|_| {}),
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+        let CommandStartOutcome::Exited(terminal) = outcome else {
+            panic!("binding mismatch must fail before spawning a managed process");
+        };
+        let result = terminal.execution;
 
         assert_eq!(result.exit_code, None);
         assert_eq!(

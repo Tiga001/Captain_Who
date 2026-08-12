@@ -94,12 +94,12 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         )
         .unwrap();
 
-    let input = ForkConversationInput {
-        request_id: "fork-request-1".to_string(),
-        source_conversation_id: "conversation-source".to_string(),
-        through_assistant_message_id: "message-assistant".to_string(),
-    };
-    let forked = service.fork_conversation(input.clone()).unwrap();
+    let input =
+        assistant_reply_fork_request("fork-request-1", "conversation-source", "message-assistant");
+    let forked = service
+        .fork_conversation_request_view(input.clone())
+        .unwrap()
+        .conversation;
     assert_eq!(forked.project_id.as_deref(), Some("project-1"));
     assert_eq!(forked.messages.len(), 2);
     let forked_boundary_message_id = forked.messages[1].id.clone();
@@ -116,7 +116,10 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         })
     );
 
-    let retry = service.fork_conversation(input).unwrap();
+    let retry = service
+        .fork_conversation_request_view(input)
+        .unwrap()
+        .conversation;
     assert_eq!(retry.id, forked.id);
     assert_eq!(service.load_conversations().unwrap().len(), 2);
 
@@ -147,12 +150,13 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         .id
         .clone();
     let recursive = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-request-2".to_string(),
-            source_conversation_id: retained.id.clone(),
-            through_assistant_message_id: retained_assistant_id,
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-request-2",
+            retained.id.clone(),
+            retained_assistant_id,
+        ))
+        .unwrap()
+        .conversation;
     service.delete_conversation(&retained.id).unwrap();
 
     let recursive = service.load_conversation(&recursive.id).unwrap().unwrap();
@@ -311,12 +315,13 @@ fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
     assert!(abandoned_source_path.is_file());
 
     let forked = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-guidance-attachments".to_string(),
-            source_conversation_id: "conversation-guidance-fork".to_string(),
-            through_assistant_message_id: "message-assistant-guidance-fork".to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-guidance-attachments",
+            "conversation-guidance-fork",
+            "message-assistant-guidance-fork",
+        ))
+        .unwrap()
+        .conversation;
     let forked_assistant = forked.messages.last().unwrap();
     assert!(forked_assistant.attachments.is_empty());
     let forked_run: serde_json::Value =

@@ -266,7 +266,7 @@ fn save_deepseek_approval_provider(
                 api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
-                provider_profile_config: Some(profile),
+                provider_profile_config: profile,
                 input_price: "0".to_string(),
                 cached_input_price: String::new(),
                 output_price: "0".to_string(),
@@ -440,6 +440,7 @@ async fn run_deepseek_missing_reasoning_restart(
             .as_object_mut()
             .unwrap()
             .remove("providerProfileConfig");
+        changed_request["models"][0]["previousModelId"] = json!(model_id);
         changed_request["models"][0]["providerProfileUpdate"] = json!({"kind": "select_generic"});
         let changed_settings =
             storage
@@ -453,8 +454,6 @@ async fn run_deepseek_missing_reasoning_restart(
         assert_eq!(
             changed_settings.models[0]
                 .provider_profile_config
-                .as_ref()
-                .unwrap()
                 .profile
                 .id,
             mycopilot_core::ProviderProfileId::GenericOpenAiChat
@@ -864,6 +863,7 @@ async fn pending_generic_run_stays_frozen_when_next_run_switches_to_deepseek() {
         .as_object_mut()
         .unwrap()
         .remove("providerProfileConfig");
+    update["models"][0]["previousModelId"] = json!(model_id);
     update["models"][0]["providerProfileUpdate"] = json!({
         "kind": "select_registered_profile",
         "profileId": "deepseek_v4_chat",
@@ -2858,6 +2858,62 @@ async fn mcp_result_persistence_failure_ends_the_live_ui_and_reconciles_without_
     .await;
     let pending = service.list_pending_actions();
     assert_eq!(pending.len(), 1);
+    let AgentProposedAction::McpToolCall { approval } = &pending[0].action else {
+        panic!("persistence-failure fixture requires an MCP approval");
+    };
+    let mut conversation = storage
+        .load_conversation("conversation-mcp-persistence-failure")
+        .unwrap()
+        .unwrap();
+    let assistant = conversation
+        .messages
+        .iter_mut()
+        .find(|message| message.id == "assistant-mcp-persistence-failure")
+        .unwrap();
+    let started_at = assistant.created_at;
+    assistant.agent_run_json = Some(
+        json!({
+            "runId": turn.run_id,
+            "status": "waiting_for_approval",
+            "startedAt": started_at,
+            "toolDefinitions": [],
+            "toolCalls": [],
+            "toolResults": [],
+            "approvals": [],
+            "diffs": [],
+            "fileDrafts": [],
+            "webSearchActivities": [],
+            "readActivities": [],
+            "mcpInvocations": [{
+                "actionId": approval.identity.action_id,
+                "invocationId": approval.identity.invocation_id,
+                "callId": approval.identity.call_id,
+                "serverId": approval.identity.provenance.server_id,
+                "serverDisplayName": approval.summary.server_display_name,
+                "scope": approval.identity.provenance.scope,
+                "rawToolName": approval.identity.provenance.raw_tool_name,
+                "modelToolName": approval.identity.provenance.model_tool_name,
+                "external": true,
+                "state": "pending_approval",
+                "dispatchCertainty": "definitely_not_dispatched",
+                "outputTruncated": false
+            }],
+            "timeline": [{
+                "id": format!("mcp-invocation-{}", approval.identity.invocation_id),
+                "type": "mcp_tool_call",
+                "invocationId": approval.identity.invocation_id
+            }],
+            "messageStreamCheckpoints": {},
+            "state": {
+                "status": "waiting_for_approval",
+                "activeRunId": turn.run_id,
+                "lastError": null,
+                "updatedAt": started_at
+            }
+        })
+        .to_string(),
+    );
+    storage.save_conversation(conversation).unwrap();
     let storage_id = pending_action_storage_id(&turn.run_id, &pending[0].action_id);
     inject_manual_action_audit_failure(&storage_id, "completed");
     service

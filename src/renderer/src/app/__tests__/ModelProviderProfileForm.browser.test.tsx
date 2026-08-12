@@ -41,6 +41,7 @@ const model: ModelConfig = {
   inputPrice: '0',
   cachedInputPrice: '',
   outputPrice: '0',
+  providerProfileUpdate: { kind: 'unchanged' },
   enabled: true
 }
 

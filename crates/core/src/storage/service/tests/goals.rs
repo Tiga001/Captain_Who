@@ -126,18 +126,12 @@ fn goal_journal_stores_one_full_snapshot_then_actor_attributed_semantic_diffs() 
         .unwrap();
     assert_eq!(revisions.len(), 3);
     assert_eq!(revisions[0].sequence, 1);
-    assert_eq!(
-        revisions[0].actor,
-        Some(ConversationGoalMutationActor::Model)
-    );
+    assert_eq!(revisions[0].actor, ConversationGoalMutationActor::Model);
     assert!(matches!(
         &revisions[0].event,
         ConversationGoalRevisionEvent::Initial { goal } if goal == &created
     ));
-    assert_eq!(
-        revisions[1].actor,
-        Some(ConversationGoalMutationActor::User)
-    );
+    assert_eq!(revisions[1].actor, ConversationGoalMutationActor::User);
     assert!(matches!(
         &revisions[1].event,
         ConversationGoalRevisionEvent::ObjectiveChanged {
@@ -147,10 +141,7 @@ fn goal_journal_stores_one_full_snapshot_then_actor_attributed_semantic_diffs() 
         } if previous_objective == "Finish the migration."
             && objective == "Finish the migration and publish the report."
     ));
-    assert_eq!(
-        revisions[2].actor,
-        Some(ConversationGoalMutationActor::Model)
-    );
+    assert_eq!(revisions[2].actor, ConversationGoalMutationActor::Model);
     assert!(matches!(
         &revisions[2].event,
         ConversationGoalRevisionEvent::StatusChanged {
@@ -267,7 +258,7 @@ fn a_new_goal_replaces_only_the_current_projection_and_keeps_prior_revisions() {
     assert_eq!(second_revisions.len(), 1);
     assert_eq!(
         second_revisions[0].actor,
-        Some(ConversationGoalMutationActor::User)
+        ConversationGoalMutationActor::User
     );
 }
 
@@ -370,12 +361,13 @@ fn fork_does_not_copy_an_active_goal_without_an_explicit_actor() {
         .unwrap();
 
     let forked = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-visible-goal".to_string(),
-            source_conversation_id: "conversation-goal-source".to_string(),
-            through_assistant_message_id: "goal-assistant".to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-visible-goal",
+            "conversation-goal-source",
+            "goal-assistant",
+        ))
+        .unwrap()
+        .conversation;
     assert!(service
         .load_conversation_goal(&forked.id)
         .unwrap()
@@ -451,12 +443,13 @@ fn terminal_and_blocked_goals_do_not_cross_a_fork() {
         service.save_conversation(saved).unwrap();
 
         let forked = service
-            .fork_conversation(ForkConversationInput {
-                request_id: format!("fork-{suffix}"),
-                source_conversation_id: conversation_id,
-                through_assistant_message_id: assistant_id,
-            })
-            .unwrap();
+            .fork_conversation_request_view(assistant_reply_fork_request(
+                format!("fork-{suffix}"),
+                conversation_id,
+                assistant_id,
+            ))
+            .unwrap()
+            .conversation;
         assert!(service
             .load_conversation_goal(&forked.id)
             .unwrap()

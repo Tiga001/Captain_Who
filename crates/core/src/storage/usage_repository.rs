@@ -850,20 +850,25 @@ mod tests {
         let connection = in_memory_connection();
         insert_conversation(&connection, "conversation-1");
         insert_conversation(&connection, "conversation-2");
+        let provider_profile =
+            serde_json::to_string(&crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ))
+            .unwrap();
         connection
             .execute(
                 "
                 INSERT INTO models (
                     id, display_name, supports_image, provider_connection_revision,
-                    provider_protocol_revision,
+                    provider_protocol_revision, provider_profile_config_json,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
                 VALUES ('provider/model-a', 'Current model name', 0,
                         'provider-connection-v1:test-model-a',
                         'provider-protocol-v1:test-model-a',
-                        '0.03', '0.04', 1, 0, 0, 0)
+                        ?1, '0.03', '0.04', 1, 0, 0, 0)
                 ",
-                [],
+                rusqlite::params![&provider_profile],
             )
             .unwrap();
         upsert_test_usage_record(
@@ -925,15 +930,15 @@ mod tests {
                 "
                 INSERT INTO models (
                     id, display_name, supports_image, provider_connection_revision,
-                    provider_protocol_revision,
+                    provider_protocol_revision, provider_profile_config_json,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
                 VALUES ('provider/model-a', 'Restored model', 0,
                         'provider-connection-v1:test-restored-model',
                         'provider-protocol-v1:test-restored-model',
-                        '0.05', '0.06', 1, 0, 3_000, 3_000)
+                        ?1, '0.05', '0.06', 1, 0, 3_000, 3_000)
                 ",
-                [],
+                rusqlite::params![&provider_profile],
             )
             .unwrap();
         let restored = summarize();

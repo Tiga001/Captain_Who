@@ -9,8 +9,8 @@ fn assistant_run_message(
 ) -> ChatMessageRecord {
     let terminal = matches!(run_status, "completed" | "failed" | "cancelled");
     let presentation_status = if run_status == "cancelled" {
-        // This is the real legacy failure shape: the top-level lifecycle was saved, but the
-        // renderer-owned nested state remained stale.
+        // Simulate a current crash window in which the top-level lifecycle committed before its
+        // renderer projection. Startup rebuilds the projection from durable trace authority.
         "running"
     } else {
         run_status
@@ -104,7 +104,9 @@ fn in_progress_trace(
                 sequence: 1,
                 call_id: format!("call-{run_id}"),
                 tool: "read_file".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 operation: serde_json::json!({ "path": "notes.txt" }),
                 approval_status: crate::AgentApprovalStatus::NotRequired,
                 truncated: false,
@@ -133,9 +135,87 @@ fn store_in_progress_trace(
 ) -> ConversationTurnTrace {
     let trace = in_progress_trace(conversation_id, assistant_message_id, run_id);
     assert!(service
-        .append_in_progress_conversation_turn_trace(&trace, 10, 20)
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &model_context_for_closed_trace(&trace),
+            10,
+            20,
+        )
         .unwrap());
     trace
+}
+
+fn model_context_for_closed_trace(
+    trace: &ConversationTurnTrace,
+) -> Vec<ConversationModelContextItem> {
+    trace
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence, content, ..
+            } => Some(ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
+            ConversationTurnTraceItem::ToolCall {
+                sequence,
+                call_id,
+                tool,
+                operation,
+                ..
+            } => Some(ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                    id: call_id.clone(),
+                    name: tool.clone(),
+                    args: operation.clone(),
+                    provider_identity: crate::AgentProviderToolCallIdentity {
+                        provider_tool_index: u32::try_from(*sequence).unwrap(),
+                        provider_call_id: call_id.clone(),
+                        runtime_call_id: call_id.clone(),
+                    },
+                }],
+                is_error: false,
+            }),
+            ConversationTurnTraceItem::ToolResult {
+                sequence,
+                call_id,
+                success,
+                observation,
+                ..
+            } => Some(ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: serde_json::to_string(observation).unwrap(),
+                tool_call_id: Some(call_id.clone()),
+                tool_calls: Vec::new(),
+                is_error: !success,
+            }),
+            ConversationTurnTraceItem::UserGuidance {
+                sequence, content, ..
+            } => Some(ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
+            ConversationTurnTraceItem::CommandSessionLifecycle { .. } => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -162,12 +242,12 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
     usage.completed_at = Some(25);
     service.upsert_agent_usage(usage).unwrap();
 
-    let blocked = service.fork_conversation(ForkConversationInput {
-        request_id: "fork-before-reconciliation".to_string(),
-        source_conversation_id: conversation_id.to_string(),
-        through_assistant_message_id: assistant_message_id.to_string(),
-    });
-    assert!(blocked.unwrap_err().contains("这条回复仍在生成"));
+    let blocked = service.fork_conversation_request_view(assistant_reply_fork_request(
+        "fork-before-reconciliation",
+        conversation_id,
+        assistant_message_id,
+    ));
+    assert!(blocked.unwrap_err().message().contains("这条回复仍在生成"));
 
     assert_eq!(
         service
@@ -198,7 +278,7 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
     assert_eq!(run["status"], "cancelled");
     assert_eq!(run["state"]["status"], "cancelled");
     assert!(run["state"]["activeRunId"].is_null());
-    assert_eq!(run["timeline"][0]["kind"], "presentation-only");
+    assert_eq!(run["timeline"], serde_json::json!([]));
 
     let usage_state: (String, Option<String>, Option<i64>) = service
         .state
@@ -230,12 +310,13 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
     assert_eq!(lifecycle_times, (2, Some(22)));
 
     let forked = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-after-reconciliation".to_string(),
-            source_conversation_id: conversation_id.to_string(),
-            through_assistant_message_id: assistant_message_id.to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-after-reconciliation",
+            conversation_id,
+            assistant_message_id,
+        ))
+        .unwrap()
+        .conversation;
     let cloned_assistant = &forked.messages[1];
     let cloned_trace = service
         .get_conversation_turn_trace(&cloned_assistant.id)
@@ -263,6 +344,8 @@ fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
     let conversation_id = "conversation-open-call";
     let assistant_message_id = "assistant-open-call";
     let run_id = "run-open-call";
+    let provider_call_id = "provider-image-call";
+    let call_id = crate::llm::model_response_tool_call_id(run_id, 0, 0, provider_call_id);
     save_run_conversation(
         &service,
         conversation_id,
@@ -281,9 +364,11 @@ fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
         truncated: false,
         items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
-            call_id: "image-call".to_string(),
+            call_id: call_id.clone(),
             tool: "image_generation".to_string(),
-            provenance: None,
+            provenance: crate::AgentToolIdentity::Builtin {
+                tool_name: "image_generation".to_string(),
+            },
             operation: serde_json::json!({
                 "request": { "operation": "generate", "prompt": "private prompt" },
                 "reason": "Create the requested image."
@@ -292,9 +377,35 @@ fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
             truncated: false,
         }],
     };
-    service
-        .append_in_progress_conversation_turn_trace(&trace, 10, 20)
-        .unwrap();
+    let model_context = vec![ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![crate::AgentContextCheckpointToolCall {
+            id: call_id.clone(),
+            name: "image_generation".to_string(),
+            args: serde_json::json!({
+                "request": { "operation": "generate", "prompt": "private prompt" },
+                "reason": "Create the requested image."
+            }),
+            provider_identity: crate::AgentProviderToolCallIdentity {
+                provider_tool_index: 0,
+                provider_call_id: provider_call_id.to_string(),
+                runtime_call_id: call_id.clone(),
+            },
+        }],
+        is_error: false,
+    }];
+    assert!(service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &model_context,
+            10,
+            20,
+        )
+        .unwrap());
 
     assert_eq!(
         service
@@ -318,8 +429,20 @@ fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
             tool,
             success: false,
             ..
-        }) if call_id == "image-call" && tool == "image_generation"
+        }) if call_id == &crate::llm::model_response_tool_call_id(
+            run_id,
+            0,
+            0,
+            provider_call_id,
+        ) && tool == "image_generation"
     ));
+    let model_context = service
+        .get_conversation_model_context_log(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    repaired
+        .validate_complete_model_context(&model_context.items)
+        .unwrap();
 }
 
 #[test]

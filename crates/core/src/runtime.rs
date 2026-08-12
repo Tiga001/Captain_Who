@@ -68,8 +68,8 @@ use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
 use crate::{
     resolve_provider_runtime_capabilities, ConversationTraceSnapshot, ConversationTurnTrace,
-    ConversationTurnTraceTerminalStatus, ProviderContinuationRequirement,
-    ProviderPrivateReplaySemantics, ProviderUsageSemantics,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    ProviderContinuationRequirement, ProviderPrivateReplaySemantics, ProviderUsageSemantics,
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
@@ -442,7 +442,7 @@ impl AgentRuntime {
                 restore_trace_assistant_message_id.as_deref(),
             )
         })?;
-        let mut shared_context_baseline =
+        let shared_context_baseline =
             publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
         let restored_checkpoint = restore_input_checkpoint(
             &mut input,
@@ -519,9 +519,9 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
-        if restored_checkpoint.is_none()
-            && hydrate_legacy_model_history(&mut input, storage.as_deref(), tool_registry.as_ref())
-                .map_err(|error| {
+        if let Some(restored) = restored_checkpoint.as_ref() {
+            validate_resumed_tool_provenance(&setup_conversation_trace, &tool_registry).map_err(
+                |error| {
                     attach_failed_runtime_trace(
                         error,
                         &setup_conversation_trace,
@@ -529,13 +529,8 @@ impl AgentRuntime {
                         trace_conversation_id.as_deref(),
                         trace_assistant_message_id.as_deref(),
                     )
-                })?
-        {
-            // The host baseline was assembled before legacy archive hydration. Rebuild from the
-            // repaired input for this request; subsequent runs load the persisted model history.
-            shared_context_baseline = None;
-        }
-        if let Some(restored) = restored_checkpoint.as_ref() {
+                },
+            )?;
             initial_tool_set
                 .validate_checkpoint(&restored.tool_set)
                 .map_err(|error| {
@@ -1155,7 +1150,6 @@ impl AgentRuntime {
                                         provider_code,
                                         delay_ms,
                                         retry_at,
-                                        reason,
                                     } => {
                                         event_stream.emit(AgentEvent::LlmRetry {
                                             run_id: delta_run_id.clone(),
@@ -1166,7 +1160,6 @@ impl AgentRuntime {
                                             provider_code,
                                             delay_ms,
                                             retry_at,
-                                            reason,
                                         });
                                     }
                                     LlmStreamEvent::Committed => {
@@ -1333,7 +1326,8 @@ impl AgentRuntime {
                         conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
-                            .record_narration(&response_content);
+                            .record_narration(&response_content)
+                            .map_err(AgentError::new)?;
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     }
                     if let Some(stream_id) = committed_message_stream_id.take() {
@@ -1432,7 +1426,7 @@ impl AgentRuntime {
                             .cloned()
                             .ok_or_else(|| {
                                 AgentError::new(
-                                    "Legacy assistant turn 不能产生新的 text-fallback Tool Call。",
+                                    "Split-projection assistant turn 不能产生新的 text-fallback Tool Call。",
                                 )
                             })?;
                         let fallback_provider_calls = tool_bindings
@@ -1652,6 +1646,8 @@ impl AgentRuntime {
                         ));
                     }
                     let cancellation_queued_tool_call = queued_tool_call.clone();
+                    let model_context_provider_identity =
+                        cancellation_queued_tool_call.provider_identity()?;
                     let batch_claim = tool_batch.claim(&queued_tool_call.call);
                     let deferred_by_skill_activation =
                         queued_tool_call.deferred_by_skill_activation;
@@ -1694,9 +1690,12 @@ impl AgentRuntime {
                         batch_claim,
                         ToolCallBatchClaim::Duplicate { .. }
                     );
-                    let tool_identity = tool_registry.identity(&call.tool).cloned();
-                    let is_mcp_tool =
-                        matches!(tool_identity.as_ref(), Some(AgentToolIdentity::Mcp { .. }));
+                    let tool_identity = tool_registry.identity(&call.tool).cloned().unwrap_or_else(
+                        || AgentToolIdentity::Unregistered {
+                            tool_name: call.tool.clone(),
+                        },
+                    );
+                    let is_mcp_tool = matches!(&tool_identity, AgentToolIdentity::Mcp { .. });
 
                     if deferred_by_skill_activation {
                         policy_preflight_failure = Some(failed_tool_call_result(
@@ -1884,11 +1883,14 @@ impl AgentRuntime {
                         let sequence =
                             recorder.record_tool_call_with_identity(&trace_call, tool_identity);
                         if let Some(sequence) = sequence {
-                            recorder.record_model_message(
+                            recorder
+                                .record_model_tool_call_message(
                                 sequence,
                                 0,
                                 &durable_trace_assistant_message,
-                            );
+                                model_context_provider_identity.clone(),
+                            )
+                                .map_err(AgentError::new)?;
                             if trace_call.args != call.args || checkpoint_call.args != call.args {
                                 recorder.mark_truncated();
                             }
@@ -2131,7 +2133,8 @@ impl AgentRuntime {
                                         archive_metadata.clone(),
                                     );
                                     if let Some(sequence) = sequence {
-                                        recorder.record_model_message(
+                                        recorder
+                                            .record_model_message(
                                             sequence,
                                             0,
                                             &LlmMessage::tool_result(
@@ -2139,7 +2142,8 @@ impl AgentRuntime {
                                                 model_observation.clone(),
                                                 true,
                                             ),
-                                        );
+                                        )
+                                            .map_err(AgentError::new)?;
                                     }
                                     sequence
                                 };
@@ -2526,29 +2530,77 @@ impl AgentRuntime {
                                         diff: diff.clone(),
                                     });
                                 }
-                                if let Some(executor) = host_executor.as_ref() {
-                                    execute_host_action_on_blocking_thread(
-                                        executor.clone(),
-                                        action,
-                                        call.clone(),
-                                        cancellation_token.clone(),
-                                    )
-                                    .await
-                                } else {
-                                    let _ = tool_registry.invalidate_proposed_action(&action);
-                                    Ok(failed_tool_call_result(
-                                        &call,
-                                        AgentError::structured(
-                                            "agent.host_executor_unavailable",
-                                            "The Host execution boundary is unavailable.",
-                                            json!({
-                                                "type": "host_execution",
-                                                "code": "hostExecutorUnavailable",
-                                                "outcome": "not_dispatched",
-                                                "retryable": false,
-                                            }),
-                                        ),
-                                    ))
+                                let frozen_checkpoint_result = match &action {
+                                    AgentProposedAction::McpToolCall { approval } => {
+                                        runtime_extensions.snapshots().and_then(
+                                            |extension_snapshots| {
+                                                let trace = conversation_trace
+                                                    .lock()
+                                                    .unwrap_or_else(|error| error.into_inner());
+                                                create_run_checkpoint(
+                                                    &run_id,
+                                                    RunCheckpointState {
+                                                        context: &active_context,
+                                                        next_model_request_index,
+                                                        tool_batch: &tool_batch,
+                                                        extension_snapshots,
+                                                        pending_tool_call_id: &call.id,
+                                                        conversation_trace: &trace,
+                                                        tool_set: &effective_tool_set,
+                                                        run_context: run_context.as_ref(),
+                                                        model_capabilities,
+                                                        run_world_state: run_world_state.snapshot(),
+                                                        provider_profile_config:
+                                                            &llm_request.provider_profile_config,
+                                                        provider_protocol_key:
+                                                            &llm_request.provider_protocol_key,
+                                                    },
+                                                )
+                                                .map(|mut checkpoint| {
+                                                    checkpoint.pending_action_id = Some(
+                                                        approval.identity.action_id.clone(),
+                                                    );
+                                                    checkpoint
+                                                })
+                                            },
+                                        )
+                                        .map(Some)
+                                    }
+                                    _ => Ok(None),
+                                };
+                                match frozen_checkpoint_result {
+                                    Ok(frozen_checkpoint) => {
+                                        if let Some(executor) = host_executor.as_ref() {
+                                            execute_host_action_on_blocking_thread(
+                                                executor.clone(),
+                                                action,
+                                                call.clone(),
+                                                frozen_checkpoint,
+                                                cancellation_token.clone(),
+                                            )
+                                            .await
+                                        } else {
+                                            let _ =
+                                                tool_registry.invalidate_proposed_action(&action);
+                                            Ok(failed_tool_call_result(
+                                                &call,
+                                                AgentError::structured(
+                                                    "agent.host_executor_unavailable",
+                                                    "The Host execution boundary is unavailable.",
+                                                    json!({
+                                                        "type": "host_execution",
+                                                        "code": "hostExecutorUnavailable",
+                                                        "outcome": "not_dispatched",
+                                                        "retryable": false,
+                                                    }),
+                                                ),
+                                            ))
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = tool_registry.invalidate_proposed_action(&action);
+                                        Ok(failed_tool_call_result(&call, error))
+                                    }
                                 }
                             }
                             Err(error) => Ok(failed_tool_call_result(&call, error)),
@@ -2751,7 +2803,8 @@ impl AgentRuntime {
                             archive_metadata.clone(),
                         );
                         if let Some(sequence) = sequence {
-                            recorder.record_model_message(
+                            recorder
+                                .record_model_message(
                                 sequence,
                                 0,
                                 &LlmMessage::tool_result(
@@ -2759,7 +2812,8 @@ impl AgentRuntime {
                                     checkpoint_observation.clone(),
                                     !result.ok,
                                 ),
-                            );
+                            )
+                                .map_err(AgentError::new)?;
                         }
                         sequence
                     };
@@ -3056,6 +3110,34 @@ impl AgentRuntime {
             trace_assistant_message_id.as_deref(),
         )
     }
+}
+
+/// Revalidates every ToolCall identity frozen into a resumed run against the trusted registry.
+///
+/// `Unregistered` is a rejection-only audit identity for hallucinated calls. It is deliberately
+/// impossible to use as checkpoint, approval, or execution authority. Likewise, a registered tool
+/// whose implementation identity changed cannot be resumed merely because its provider-visible
+/// name stayed the same.
+fn validate_resumed_tool_provenance(
+    recorder: &ConversationTraceRecorder,
+    tool_registry: &ToolRegistry,
+) -> AgentResult<()> {
+    for item in recorder.checkpoint_snapshot().items {
+        let ConversationTurnTraceItem::ToolCall {
+            tool, provenance, ..
+        } = item
+        else {
+            continue;
+        };
+        if matches!(provenance, AgentToolIdentity::Unregistered { .. })
+            || tool_registry.identity(&tool) != Some(&provenance)
+        {
+            return Err(AgentError::new(
+                "运行检查点的工具来源与当前冻结工具注册不一致。",
+            ));
+        }
+    }
+    Ok(())
 }
 
 type PendingAssistantToolContext = (LlmMessage, LlmMessage, crate::context::ContextGroup);
@@ -3372,8 +3454,14 @@ fn settle_terminal_grouped_tool_batch(
             approval_status: AgentApprovalStatus::NotRequired,
             reason: extract_reason_from_args(&queued.call.args),
         });
-        let tool_identity = tool_registry.identity(&call.tool).cloned();
-        let is_mcp_tool = matches!(tool_identity, Some(AgentToolIdentity::Mcp { .. }));
+        let model_context_provider_identity = queued.provider_identity()?;
+        let tool_identity = tool_registry
+            .identity(&call.tool)
+            .cloned()
+            .unwrap_or_else(|| AgentToolIdentity::Unregistered {
+                tool_name: call.tool.clone(),
+            });
+        let is_mcp_tool = matches!(&tool_identity, AgentToolIdentity::Mcp { .. });
         let trace_call = tool_registry.trace_call_projection(&call);
         let checkpoint_call = tool_registry.checkpoint_call_projection(&call);
         let durable_trace_assistant_message = LlmMessage::assistant(
@@ -3382,7 +3470,14 @@ fn settle_terminal_grouped_tool_batch(
         );
         let call_sequence = staged_trace.record_tool_call_with_identity(&trace_call, tool_identity);
         if let Some(sequence) = call_sequence {
-            staged_trace.record_model_message(sequence, 0, &durable_trace_assistant_message);
+            staged_trace
+                .record_model_tool_call_message(
+                    sequence,
+                    0,
+                    &durable_trace_assistant_message,
+                    model_context_provider_identity,
+                )
+                .map_err(AgentError::new)?;
             if trace_call.args != call.args || checkpoint_call.args != call.args {
                 staged_trace.mark_truncated();
             }
@@ -3483,11 +3578,17 @@ fn settle_terminal_grouped_tool_batch(
             archive_metadata,
         );
         if let Some(sequence) = result_sequence {
-            staged_trace.record_model_message(
-                sequence,
-                0,
-                &LlmMessage::tool_result(call.id.clone(), checkpoint_observation.clone(), is_error),
-            );
+            staged_trace
+                .record_model_message(
+                    sequence,
+                    0,
+                    &LlmMessage::tool_result(
+                        call.id.clone(),
+                        checkpoint_observation.clone(),
+                        is_error,
+                    ),
+                )
+                .map_err(AgentError::new)?;
         }
         if !is_mcp_tool {
             staged_events.push(AgentEvent::ToolResult {
@@ -3623,9 +3724,12 @@ fn apply_steer_inputs(
         let mut recorder = conversation_trace
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        preceding_assistant_sequence = preceding_assistant_content
-            .as_deref()
-            .and_then(|content| recorder.record_narration(content));
+        preceding_assistant_sequence = match preceding_assistant_content.as_deref() {
+            Some(content) => recorder
+                .record_narration(content)
+                .map_err(AgentError::new)?,
+            None => None,
+        };
         for input in &inputs {
             let sequence = recorder
                 .record_user_guidance(
@@ -3664,7 +3768,9 @@ fn apply_steer_inputs(
                 .images_mut()
                 .expect("user attachment messages support images") =
                 attachment_context.images.clone();
-            recorder.record_model_message(*sequence, 0, &message);
+            recorder
+                .record_model_message(*sequence, 0, &message)
+                .map_err(AgentError::new)?;
         }
     }
     let baseline = publish_trace_snapshot(conversation_trace, trace_observer)?;

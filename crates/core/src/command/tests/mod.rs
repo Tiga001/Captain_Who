@@ -2,7 +2,6 @@ use super::*;
 use crate::{AgentApprovalStatus, AgentCommandPermission, AgentReadPermission};
 use tempfile::TempDir;
 
-mod execution;
 mod policy_basics;
 mod policy_complex;
 mod session_manager;
@@ -18,31 +17,7 @@ fn request(command: &str, timeout_ms: Option<u64>) -> AgentCommandRequest {
         reason: None,
         observe: None,
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: None,
-    }
-}
-
-fn frozen_runtime_binding() -> crate::AgentCommandRuntimeBinding {
-    let resolved_packages = vec![crate::AgentCommandRuntimeResolvedPackage {
-        name: "python-docx".to_string(),
-        version: "1.2.0".to_string(),
-    }];
-    crate::AgentCommandRuntimeBinding {
-        schema_version: crate::AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
-        profile: crate::AgentCommandRuntimeProfile::Documents,
-        profile_revision: runtime_profile_revision(
-            crate::AgentCommandRuntimeProfile::Documents,
-            crate::AgentCommandRuntimeKind::Python,
-            &resolved_packages,
-        ),
-        provider_id: crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
-        bundle_version: "test-bundle".to_string(),
-        bundle_revision: "test-revision".to_string(),
-        kind: crate::AgentCommandRuntimeKind::Python,
-        runtime_version: "3.12.0".to_string(),
-        runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
-        resolved_packages,
     }
 }
 

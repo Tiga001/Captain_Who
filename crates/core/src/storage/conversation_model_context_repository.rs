@@ -329,7 +329,9 @@ mod tests {
                     sequence: 0,
                     call_id: "call-1".to_string(),
                     tool: "conversation_history".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "conversation_history".to_string(),
+                    },
                     operation: json!({ "open": "hist_v1_turn" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -368,7 +370,11 @@ mod tests {
                     id: "call-1".to_string(),
                     name: "conversation_history".to_string(),
                     args: json!({ "open": "hist_v1_turn" }),
-                    provider_identity: None,
+                    provider_identity: crate::AgentProviderToolCallIdentity {
+                        provider_tool_index: 0,
+                        provider_call_id: "call-1".to_string(),
+                        runtime_call_id: "call-1".to_string(),
+                    },
                 }],
                 is_error: false,
             },

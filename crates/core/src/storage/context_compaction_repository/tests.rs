@@ -50,7 +50,9 @@ fn setup() -> Connection {
                 sequence: 0,
                 call_id: "call-1".to_string(),
                 tool: "web_fetch".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "web_fetch".to_string(),
+                },
                 operation: json!({ "url": "https://example.com" }),
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,
@@ -842,7 +844,9 @@ fn command_session_lifecycle_stays_in_audit_but_out_of_the_compaction_journal() 
                 sequence: 0,
                 call_id: call_id.to_string(),
                 tool: "run_command".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
                 operation: json!({ "command": "long-running-command" }),
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
@@ -1535,15 +1539,20 @@ fn deleting_a_summary_owner_cannot_expose_released_provider_history() {
 }
 
 fn seed_provider_transition_target(connection: &Connection, target_model_id: &str, revision: &str) {
+    let provider_profile =
+        serde_json::to_string(&crate::ProviderProfileConfig::generic_for_dialect(
+            crate::ProviderProtocolDialect::OpenAiChatCompletions,
+        ))
+        .unwrap();
     connection
         .execute(
             "INSERT INTO models (
                 id, display_name, supports_image, provider_connection_revision,
-                provider_protocol_revision,
+                provider_protocol_revision, provider_profile_config_json,
                 input_price, output_price, enabled, position, created_at, updated_at
-             ) VALUES (?1, ?1, 0, 'provider-connection-v1:test-target', ?2,
+             ) VALUES (?1, ?1, 0, 'provider-connection-v1:test-target', ?2, ?3,
                        '0', '0', 1, 0, 1, 1)",
-            params![target_model_id, revision],
+            params![target_model_id, revision, provider_profile],
         )
         .unwrap();
 }
@@ -1621,10 +1630,12 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
     connection
         .execute(
             "INSERT INTO composer_drafts (
-                scope_id, message, permission_mode, model_id, attachments_json,
-                skills_json, queued_messages_json, updated_at
-             ) VALUES ('conversation-1', 'unsent text', 'ask', 'source-model', '[]', '[]', '[]', 100)",
-            [],
+                scope_id, message, permission_mode, permission_mode_version,
+                model_id, project_id, attachments_json, skills_json,
+                queued_messages_json, updated_at
+             ) VALUES ('conversation-1', 'unsent text', 'ask', ?1,
+                       'source-model', NULL, '[]', '[]', '[]', 100)",
+            [crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION],
         )
         .unwrap();
     connection
@@ -1788,7 +1799,7 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
         crate::storage::models::ComposerDraftRecord {
             scope_id: "conversation-1".to_string(),
             message: "stale unsent text".to_string(),
-            permission_mode: "ask".to_string(),
+            permission_mode: "default".to_string(),
             permission_mode_version: 0,
             model_id: Some("source-model".to_string()),
             project_id: None,
@@ -2029,10 +2040,12 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
     connection
         .execute(
             "INSERT INTO composer_drafts (
-                scope_id, message, permission_mode, model_id, attachments_json,
-                skills_json, queued_messages_json, updated_at
-             ) VALUES ('conversation-1', 'unsent text', 'ask', 'source-model', '[]', '[]', '[]', 7)",
-            [],
+                scope_id, message, permission_mode, permission_mode_version,
+                model_id, project_id, attachments_json, skills_json,
+                queued_messages_json, updated_at
+             ) VALUES ('conversation-1', 'unsent text', 'ask', ?1,
+                       'source-model', NULL, '[]', '[]', '[]', 7)",
+            [crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION],
         )
         .unwrap();
     let prefix = prepare_prefix(

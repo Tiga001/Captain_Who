@@ -9,6 +9,7 @@ use mycopilot_core::{
     AgentChatMessage, AgentEventEmitter, AgentMcpToolApproval, AgentProposedAction,
     AgentRunContext, AgentRunStatus, AgentRuntimeHostServices, McpApprovedToolInvocation,
     McpToolCatalogContext, McpToolContentBlock, McpToolInvoker, McpToolRuntime, ModelCapabilities,
+    ProviderProfileConfig, ProviderProtocolDialect, ProviderProtocolKey,
 };
 use mycopilot_core_server::adapters::mcp_runtime::McpRuntimeBridge;
 use mycopilot_mcp_client::{
@@ -194,14 +195,24 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
         .await;
     });
 
+    let provider_profile =
+        ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions);
+    let provider_configuration_revision = Some("provider-protocol-v1:mcp-stdio-e2e".to_string());
+    let provider_protocol_key = ProviderProtocolKey::new(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+        &provider_profile,
+        "fixed-model-fixture",
+        provider_configuration_revision.clone(),
+    )
+    .expect("freeze the current Generic OpenAI provider protocol");
     let input = AgentChatInput {
         api_url: format!("http://{model_address}/v1/chat/completions"),
         api_token: "fixed-model-fixture-token".to_string(),
-        provider_configuration_revision: None,
+        provider_configuration_revision,
         provider_connection_revision: None,
         search_connection_revision: None,
-        provider_profile_config: None,
-        provider_protocol_key: None,
+        provider_profile_config: Some(provider_profile),
+        provider_protocol_key: Some(provider_protocol_key),
         model: "fixed-model-fixture".to_string(),
         model_capabilities: ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),

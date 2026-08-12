@@ -158,7 +158,7 @@ describe('Agent command Session protocol', () => {
     expect(restored.session.command).toBe(command)
   })
 
-  it('strictly restores terminal published outputs while accepting legacy snapshots without them', () => {
+  it('strictly restores terminal outputs while accepting the current empty-output omission', () => {
     const terminal = {
       ...snapshot,
       status: 'exited',

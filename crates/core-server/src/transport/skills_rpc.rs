@@ -16,21 +16,7 @@ pub(crate) enum ParsedSkillsOperation {
     CancelPreparation(SkillsCancelPreparationRequest),
     InstallLocal(LocalSkillInstallRequest),
     UpdateLocal(LocalSkillUpdateRequest),
-    Uninstall(ParsedSkillUninstallRequest),
-}
-
-pub(crate) enum ParsedSkillUninstallRequest {
-    Exact(SkillUninstallExactRequest),
-    Legacy(SkillUninstallRequest),
-}
-
-impl ParsedSkillUninstallRequest {
-    pub(crate) fn skill_id(&self) -> &SkillId {
-        match self {
-            Self::Exact(request) => request.skill_id(),
-            Self::Legacy(request) => request.skill_id(),
-        }
-    }
+    Uninstall(SkillUninstallExactRequest),
 }
 
 impl ParsedSkillsRequest {
@@ -179,27 +165,12 @@ pub(crate) fn parse_skills_request(request: JsonRpcRequest) -> Result<ParsedSkil
                 .map_err(|message| response_error(Some(id.clone()), -32602, message))?;
             let skill_id = SkillId::parse(input.skill_id)
                 .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
-            let uninstall = if input
-                .expected_revision
-                .starts_with(SKILL_INSTALLATION_REVISION_PREFIX)
-            {
-                let expected_revision = SkillInstallationRevision::parse(input.expected_revision)
-                    .map_err(|error| {
-                    invalid_skill_installation_params(&id, error.to_string())
-                })?;
-                ParsedSkillUninstallRequest::Exact(SkillUninstallExactRequest::new(
-                    skill_id,
-                    expected_revision,
-                ))
-            } else {
-                let expected_revision = SkillRevision::parse(input.expected_revision)
-                    .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
-                ParsedSkillUninstallRequest::Legacy(SkillUninstallRequest::new(
-                    skill_id,
-                    expected_revision,
-                ))
-            };
-            ParsedSkillsOperation::Uninstall(uninstall)
+            let expected_revision = SkillInstallationRevision::parse(input.expected_revision)
+                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+            ParsedSkillsOperation::Uninstall(SkillUninstallExactRequest::new(
+                skill_id,
+                expected_revision,
+            ))
         }
         _ => return Err(response_error(Some(id), -32601, "Method not found")),
     };
@@ -525,14 +496,7 @@ pub(crate) fn handle_parsed_skills_request(
             )
         }
         ParsedSkillsOperation::Uninstall(input) => {
-            let result = match &input {
-                ParsedSkillUninstallRequest::Exact(request) => {
-                    skill_installation_service.uninstall_exact(request)
-                }
-                ParsedSkillUninstallRequest::Legacy(request) => {
-                    skill_installation_service.uninstall(request)
-                }
-            };
+            let result = skill_installation_service.uninstall_exact(&input);
             if result.is_ok() {
                 // The managed-store mutation is the authoritative commit. SQLite is
                 // a derived preference store: cleanup must never turn a

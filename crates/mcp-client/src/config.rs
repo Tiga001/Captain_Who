@@ -38,11 +38,10 @@ pub enum McpTrustLevel {
 /// per-call prompt after all other identity, trust and catalog checks pass.
 /// `Deny` is an emergency/configuration kill switch and is enforced again
 /// inside the Manager.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum McpApprovalMode {
-    #[default]
     Prompt,
     Auto,
     Deny,
@@ -129,13 +128,12 @@ pub enum McpTransportConfig {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpServerConfig {
     pub id: McpServerId,
     pub display_name: String,
     pub scope: McpServerScope,
     pub trust: McpTrustLevel,
-    #[serde(default)]
     pub approval_mode: McpApprovalMode,
     pub enabled: bool,
     pub transport: McpTransportConfig,
@@ -250,11 +248,26 @@ mod tests {
     }
 
     #[test]
-    fn missing_approval_mode_remains_prompt_for_backward_compatibility() {
-        assert_eq!(McpApprovalMode::default(), McpApprovalMode::Prompt);
-        let mut serialized = serde_json::to_value(config()).unwrap();
-        serialized.as_object_mut().unwrap().remove("approvalMode");
-        let restored: McpServerConfig = serde_json::from_value(serialized).unwrap();
-        assert_eq!(restored.approval_mode, McpApprovalMode::Prompt);
+    fn current_config_requires_approval_mode_and_rejects_extra_fields() {
+        let expected = config();
+        let serialized = serde_json::to_value(&expected).unwrap();
+        assert_eq!(
+            serde_json::from_value::<McpServerConfig>(serialized.clone()).unwrap(),
+            expected
+        );
+
+        let mut missing_approval_mode = serialized.clone();
+        missing_approval_mode
+            .as_object_mut()
+            .unwrap()
+            .remove("approvalMode");
+        assert!(serde_json::from_value::<McpServerConfig>(missing_approval_mode).is_err());
+
+        let mut extra_field = serialized;
+        extra_field
+            .as_object_mut()
+            .unwrap()
+            .insert("legacyApproval".to_string(), serde_json::json!("prompt"));
+        assert!(serde_json::from_value::<McpServerConfig>(extra_field).is_err());
     }
 }

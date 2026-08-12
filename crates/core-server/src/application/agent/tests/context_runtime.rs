@@ -81,10 +81,11 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
             4,
         )
         .unwrap();
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 16000,
         "contextWindowIndicatorEnabled": true,
         "maxTokens": 1000,
@@ -96,15 +97,26 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                 "name": "compaction-review",
                 "revision": "skill-package-sha256-v1:compaction",
                 "source": "workspace:project",
-                "instructions": "SKILL_COMPACTION_OVERLAY_MARKER"
+                "instructions": "SKILL_COMPACTION_OVERLAY_MARKER",
+                "sourceBytes": 31
             }]
         },
         "context": {
-            "conversationId": "conversation-compaction-host"
+            "conversationId": "conversation-compaction-host",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval"
+            }
         },
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let services = service.context_compaction_services(
         "run-compaction-host",
@@ -342,10 +354,11 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         })
         .unwrap();
     let service = AgentService::new(storage.clone());
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "contextWindowIndicatorEnabled": true,
         "maxTokens": 30000,
@@ -356,15 +369,26 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
                 "name": "live-review",
                 "revision": "skill-package-sha256-v1:live",
                 "source": "workspace:project",
-                "instructions": "SKILL_LIVE_OVERLAY_MARKER"
+                "instructions": "SKILL_LIVE_OVERLAY_MARKER",
+                "sourceBytes": 25
             }]
         },
         "context": {
-            "conversationId": "conversation-live"
+            "conversationId": "conversation-live",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval"
+            }
         },
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let observer = service.trace_observer(
         "run-live",
@@ -388,9 +412,18 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         content: "I will inspect the relevant files.".to_string(),
         truncated: false,
     };
+    let narration_context = ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: "I will inspect the relevant files.".to_string(),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        is_error: false,
+    };
     observer(ConversationTraceSnapshot {
         items: vec![narration.clone()],
-        model_context_items: Vec::new(),
+        model_context_items: vec![narration_context.clone()],
         next_sequence: 1,
         truncated: false,
     })
@@ -419,13 +452,36 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             "request": { "operation": "generate", "prompt": "private prompt" },
             "reason": "Create the requested image."
         }),
-        provenance: None,
+        provenance: AgentToolIdentity::Builtin {
+            tool_name: "image_generation".to_string(),
+        },
         approval_status: AgentApprovalStatus::NotRequired,
         truncated: false,
     };
+    let call_context = ConversationModelContextItem {
+        sequence: 1,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![AgentContextCheckpointToolCall {
+            id: canonical_call_id.clone(),
+            name: "image_generation".to_string(),
+            args: json!({
+                "request": { "operation": "generate", "prompt": "private prompt" },
+                "reason": "Create the requested image."
+            }),
+            provider_identity: AgentProviderToolCallIdentity {
+                provider_tool_index: 0,
+                provider_call_id: canonical_call_id.clone(),
+                runtime_call_id: canonical_call_id.clone(),
+            },
+        }],
+        is_error: false,
+    };
     observer(ConversationTraceSnapshot {
         items: vec![narration.clone(), call.clone()],
-        model_context_items: Vec::new(),
+        model_context_items: vec![narration_context.clone(), call_context.clone()],
         next_sequence: 2,
         truncated: false,
     })
@@ -452,21 +508,31 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             if call_id == &canonical_call_id
     ));
 
+    let result_observation = json!({ "status": "succeeded" });
     let result = ConversationTurnTraceItem::ToolResult {
         sequence: 2,
-        call_id: canonical_call_id,
+        call_id: canonical_call_id.clone(),
         tool: "image_generation".to_string(),
         status: ConversationTraceToolResultStatus::Succeeded,
         success: true,
-        observation: json!({ "status": "succeeded" }),
+        observation: result_observation.clone(),
         approval_status: AgentApprovalStatus::NotRequired,
         error: None,
         truncated: false,
         archive: Default::default(),
     };
+    let result_context = ConversationModelContextItem {
+        sequence: 2,
+        ordinal: 0,
+        role: "tool".to_string(),
+        content: result_observation.to_string(),
+        tool_call_id: Some(canonical_call_id),
+        tool_calls: Vec::new(),
+        is_error: false,
+    };
     observer(ConversationTraceSnapshot {
         items: vec![narration, call, result],
-        model_context_items: Vec::new(),
+        model_context_items: vec![narration_context, call_context, result_context],
         next_sequence: 3,
         truncated: false,
     })
@@ -502,6 +568,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
 fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-terminal-skill".to_string(),
@@ -555,11 +622,12 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
         )
         .unwrap();
 
-    let service = AgentService::new(storage);
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let service = AgentService::new(storage.clone());
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "contextWindowIndicatorEnabled": true,
         "maxTokens": 30000,
@@ -570,15 +638,26 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
                 "name": "terminal-review",
                 "revision": "skill-package-sha256-v1:terminal",
                 "source": "workspace:project",
-                "instructions": "SKILL_TERMINAL_OVERLAY_MARKER"
+                "instructions": "SKILL_TERMINAL_OVERLAY_MARKER",
+                "sourceBytes": 29
             }]
         },
         "context": {
-            "conversationId": "conversation-terminal-skill"
+            "conversationId": "conversation-terminal-skill",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval"
+            }
         },
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
 
     let snapshot = service
         .finalize_conversation_context_state(
@@ -634,18 +713,31 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage);
-    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+    let service = AgentService::new(storage.clone());
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "contextWindowIndicatorEnabled": false,
         "maxTokens": 30000,
-        "context": { "conversationId": "conversation-hidden-indicator" },
+        "context": {
+            "conversationId": "conversation-hidden-indicator",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval"
+            }
+        },
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut agent_input);
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let observer = service.trace_observer(
         "run-hidden-indicator",
@@ -712,18 +804,31 @@ fn deleting_messages_invalidates_the_conversation_context_state() {
             unread_at: None,
         })
         .unwrap();
-    let service = AgentService::new(storage);
-    let input = serde_json::from_value::<AgentChatInput>(json!({
+    let service = AgentService::new(storage.clone());
+    let mut input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "model-1",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "contextWindowIndicatorEnabled": true,
         "maxTokens": 30000,
-        "context": { "conversationId": "conversation-delete-context" },
+        "context": {
+            "conversationId": "conversation-delete-context",
+            "projectId": null,
+            "workspace": null,
+            "permissions": {
+                "read": "workspace_only",
+                "write": "denied",
+                "command": "require_approval",
+                "commandSafety": "guarded",
+                "patch": "require_approval"
+            }
+        },
         "messages": []
     }))
     .unwrap();
+    freeze_test_pending_provider_configuration(&storage, &mut input);
 
     let projection = service
         .context_window_tool_projection(&input, None)

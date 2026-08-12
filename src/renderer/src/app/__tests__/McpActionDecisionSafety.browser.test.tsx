@@ -49,7 +49,8 @@ function mcpAction(): Extract<AgentProposedAction, { type: 'mcp_tool_call' }> {
         id: `tc1_${'a'.repeat(43)}`,
         tool: 'provider_safe_echo',
         args: {},
-        approvalStatus: 'required'
+        approvalStatus: 'required',
+        reason: null
       },
       summary: {
         serverId: '33333333-3333-4333-8333-333333333333',
@@ -57,6 +58,7 @@ function mcpAction(): Extract<AgentProposedAction, { type: 'mcp_tool_call' }> {
         scope: { type: 'user' },
         rawToolName: 'echo_text',
         modelToolName: 'provider_safe_echo',
+        displayReason: null,
         arguments: {
           encodedBytes: 2,
           topLevelPropertyCount: 0,

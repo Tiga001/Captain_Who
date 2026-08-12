@@ -19,6 +19,7 @@ function call(overrides: Partial<AgentToolCall> = {}): AgentToolCall {
     tool: 'image_generation',
     args: { request: { operation: 'generate', hasInputImage: false }, reason: 'Create a cover' },
     approvalStatus: 'not_required',
+    reason: null,
     ...overrides
   }
 }

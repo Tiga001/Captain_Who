@@ -4,7 +4,7 @@ use mycopilot_core::storage::agent_command_session_repository::{
     AgentCommandSessionCreate, AGENT_COMMAND_SESSION_SCHEMA_VERSION,
 };
 use mycopilot_core::storage::models::{
-    ChatConversationRecord, ChatMessageRecord, ForkConversationInput,
+    ChatConversationRecord, ChatMessageRecord, ConversationForkPoint, ForkConversationRequest,
 };
 use mycopilot_core::{AgentCommandSessionSnapshot, AgentCommandSessionStatus};
 
@@ -155,10 +155,12 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
             id: JsonRpcId::Number(17),
             method: STORAGE_FORK_CONVERSATION_METHOD.to_string(),
             params: Some(
-                serde_json::to_value(ForkConversationInput {
+                serde_json::to_value(ForkConversationRequest {
                     request_id: "fork-rpc-request".to_string(),
                     source_conversation_id: "conversation-fork-rpc".to_string(),
-                    through_assistant_message_id: "assistant-fork-rpc".to_string(),
+                    fork_point: ConversationForkPoint::AssistantReply {
+                        assistant_message_id: "assistant-fork-rpc".to_string(),
+                    },
                 })
                 .unwrap(),
             ),
@@ -179,4 +181,55 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
             "activeSessionCount": 1,
         })
     );
+}
+
+#[test]
+fn fork_request_rejects_retired_or_extra_fields() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+
+    for (id, params) in [
+        (
+            18,
+            serde_json::json!({
+                "requestId": "retired-fork-request",
+                "sourceConversationId": "conversation-1",
+                "throughAssistantMessageId": "assistant-1"
+            }),
+        ),
+        (
+            19,
+            serde_json::json!({
+                "requestId": "missing-fork-point",
+                "sourceConversationId": "conversation-1"
+            }),
+        ),
+        (
+            20,
+            serde_json::json!({
+                "requestId": "extra-fork-field",
+                "sourceConversationId": "conversation-1",
+                "forkPoint": {
+                    "kind": "assistant_reply",
+                    "assistantMessageId": "assistant-1",
+                    "operationId": "not-allowed"
+                }
+            }),
+        ),
+    ] {
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let response = handle_request(
+            storage.as_ref(),
+            &agent_service,
+            notifications,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(id),
+                method: STORAGE_FORK_CONVERSATION_METHOD.to_string(),
+                params: Some(params),
+            },
+        );
+        assert_eq!(response["error"]["code"], -32602, "{response}");
+    }
 }

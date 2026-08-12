@@ -1716,7 +1716,9 @@ mod tests {
                         sequence: 1,
                         call_id: "call-1".to_string(),
                         tool: "read_file".to_string(),
-                        provenance: None,
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "read_file".to_string(),
+                        },
                         operation: json!({ "path": "README.md" }),
                         approval_status: AgentApprovalStatus::Approved,
                         truncated: false,
@@ -1845,7 +1847,9 @@ mod tests {
                         sequence: 0,
                         call_id: "history-current".to_string(),
                         tool: "conversation_history".to_string(),
-                        provenance: None,
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "conversation_history".to_string(),
+                        },
                         operation: json!({ "query": "审批结束后的引导" }),
                         approval_status: AgentApprovalStatus::NotRequired,
                         truncated: false,
@@ -1915,7 +1919,9 @@ mod tests {
                 sequence: index * 2,
                 call_id: call_id.clone(),
                 tool: "read_file".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 operation: json!({ "path": format!("file-{index:02}.txt") }),
                 approval_status: AgentApprovalStatus::NotRequired,
                 truncated: false,
@@ -2227,7 +2233,9 @@ mod tests {
                     sequence: 0,
                     call_id: "large-call".to_string(),
                     tool: "read_file".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "read_file".to_string(),
+                    },
                     operation: json!({ "path": "large.txt", "query": "调用参数".repeat(4_000) }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

@@ -9,6 +9,7 @@ mod sqlite_registry;
 
 use mycopilot_core::durable_fs::{atomic_replace, sync_directory};
 use mycopilot_core::storage::agent_prompt_preferences_repository;
+use mycopilot_core::storage::config_repository::is_provider_protocol_revision;
 use mycopilot_core::storage::image_generation_repository::{
     self, DEFAULT_IMAGE_GENERATION_PROFILE_ID,
 };
@@ -59,7 +60,6 @@ struct ResetOptions {
 #[derive(Debug)]
 struct PreservedConfiguration {
     model_settings: Option<ModelSettingsRecord>,
-    normalized_model_profiles: usize,
     ui_preferences: UiPreferencesRecord,
     agent_prompt_preferences: AgentPromptPreferencesRecord,
     skill_enablement_overrides: Vec<(String, bool)>,
@@ -75,7 +75,6 @@ struct ResetReport {
     confirmed: bool,
     source_existed: bool,
     model_count: usize,
-    normalized_model_profiles: usize,
     skill_override_count: usize,
     mcp_server_count: usize,
     image_generation_profile_count: usize,
@@ -103,14 +102,13 @@ impl ResetReport {
              database: {}\n\
              source database: {source}\n\
              backup: {backup}\n\
-             preserved models: {} (profiles normalized: {})\n\
+             preserved models: {}\n\
              preserved Skill overrides: {}\n\
              preserved MCP servers: {}\n\
              preserved image-generation profiles: {}\n\
              discarded non-configuration rows: {}",
             self.database_path.display(),
             self.model_count,
-            self.normalized_model_profiles,
             self.skill_override_count,
             self.mcp_server_count,
             self.image_generation_profile_count,
@@ -288,12 +286,7 @@ fn inspect_source(
 ) -> io::Result<(Option<PreservedConfiguration>, u64)> {
     let connection = open_read_only(source_path)?;
     let model_settings = load_model_settings_for_development_reset(&connection)?;
-    let (model_settings, normalized_model_profiles) = model_settings
-        .map(normalize_model_profiles)
-        .transpose()?
-        .map_or((None, 0), |(settings, normalized)| {
-            (Some(settings), normalized)
-        });
+    let model_settings = model_settings.map(validate_model_profiles).transpose()?;
     let ui_preferences =
         preferences_repository::load_ui_preferences(&connection).map_err(redacted_storage_error)?;
     let agent_prompt_preferences =
@@ -332,7 +325,6 @@ fn inspect_source(
     };
     let configuration = PreservedConfiguration {
         model_settings,
-        normalized_model_profiles,
         ui_preferences,
         agent_prompt_preferences,
         skill_enablement_overrides,
@@ -345,10 +337,8 @@ fn inspect_source(
 
 /// Reads only the configuration fields that the explicit development reset preserves.
 ///
-/// The source database may still contain the retired broad `model-settings-v1` value in its
-/// per-model protocol revision column. That identity is deliberately not decoded here: the
-/// current strict save boundary generates a fresh `provider-protocol-v1` identity for every
-/// restored model. Production storage readers therefore remain current-schema-only.
+/// The source database must already use the current per-model Provider Protocol identity. The
+/// reset command rebuilds storage; it is not an importer for retired development formats.
 fn load_model_settings_for_development_reset(
     connection: &Connection,
 ) -> io::Result<Option<ModelSettingsRecord>> {
@@ -391,7 +381,8 @@ fn load_model_settings_for_development_reset(
                  input_price,
                  cached_input_price,
                  output_price,
-                 enabled
+                 enabled,
+                 provider_protocol_revision
              FROM models
              ORDER BY position ASC, created_at ASC",
         )
@@ -405,11 +396,12 @@ fn load_model_settings_for_development_reset(
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, bool>(4)?,
                 row.get::<_, Option<u32>>(5)?,
-                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, String>(9)?,
                 row.get::<_, bool>(10)?,
+                row.get::<_, String>(11)?,
             ))
         })
         .map_err(redacted_storage_error)?
@@ -429,17 +421,20 @@ fn load_model_settings_for_development_reset(
         cached_input_price,
         output_price,
         enabled,
+        provider_protocol_revision,
     ) in raw_models
     {
-        let provider_profile_config = profile_json
-            .map(|encoded| {
-                serde_json::from_str::<ProviderProfileConfig>(&encoded).map_err(|_| {
-                    invalid_data(format!(
-                        "model `{id}` has an unreadable Provider Profile configuration"
-                    ))
-                })
-            })
-            .transpose()?;
+        if !is_provider_protocol_revision(&provider_protocol_revision) {
+            return Err(invalid_data(format!(
+                "model `{id}` does not use the current Provider Protocol revision"
+            )));
+        }
+        let provider_profile_config = serde_json::from_str::<ProviderProfileConfig>(&profile_json)
+            .map_err(|_| {
+                invalid_data(format!(
+                    "model `{id}` has an unreadable Provider Profile configuration"
+                ))
+            })?;
         models.push(ModelConfigRecord {
             id,
             display_name,
@@ -464,40 +459,31 @@ fn load_model_settings_for_development_reset(
     }))
 }
 
-fn normalize_model_profiles(
-    mut settings: ModelSettingsRecord,
-) -> io::Result<(ModelSettingsRecord, usize)> {
-    let mut normalized = 0;
-    for model in &mut settings.models {
+fn validate_model_profiles(settings: ModelSettingsRecord) -> io::Result<ModelSettingsRecord> {
+    for model in &settings.models {
         let api_url = model
             .api_url_override
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&settings.api_url);
         let dialect = ProviderProtocolDialect::detect_from_api_url(api_url);
-        match model.provider_profile_config.as_ref() {
-            Some(config) => {
-                config.validate().map_err(|_| {
-                    invalid_data(format!(
-                        "model `{}` has an invalid Provider Profile; select a supported profile before resetting",
-                        model.id
-                    ))
-                })?;
-                config.validate_for_dialect(dialect).map_err(|_| {
-                    invalid_data(format!(
-                        "model `{}` has a Provider Profile incompatible with its API dialect",
-                        model.id
-                    ))
-                })?;
-            }
-            None => {
-                model.provider_profile_config =
-                    Some(ProviderProfileConfig::generic_for_dialect(dialect));
-                normalized += 1;
-            }
-        }
+        model.provider_profile_config.validate().map_err(|_| {
+            invalid_data(format!(
+                "model `{}` has an invalid Provider Profile; select a supported profile before resetting",
+                model.id
+            ))
+        })?;
+        model
+            .provider_profile_config
+            .validate_for_dialect(dialect)
+            .map_err(|_| {
+                invalid_data(format!(
+                    "model `{}` has a Provider Profile incompatible with its API dialect",
+                    model.id
+                ))
+            })?;
     }
-    Ok((settings, normalized))
+    Ok(settings)
 }
 
 fn load_skill_enablement_overrides(connection: &Connection) -> io::Result<Vec<(String, bool)>> {
@@ -694,14 +680,9 @@ fn verify_fresh_database(
                 if expected.models.len() == restored.settings.models.len() =>
             {
                 if restored
-                    .settings
-                    .models
-                    .iter()
-                    .any(|model| model.provider_profile_config.is_none())
-                    || restored
-                        .provider_protocol_revisions
-                        .values()
-                        .any(|revision| !revision.starts_with("provider-protocol-v1:"))
+                    .provider_protocol_revisions
+                    .values()
+                    .any(|revision| !revision.starts_with("provider-protocol-v1:"))
                 {
                     return Err(invalid_data(
                         "restored models do not have explicit Profiles and current protocol revisions",
@@ -968,8 +949,6 @@ fn report_from_configuration(
         model_count: configuration
             .and_then(|configuration| configuration.model_settings.as_ref())
             .map_or(0, |settings| settings.models.len()),
-        normalized_model_profiles: configuration
-            .map_or(0, |configuration| configuration.normalized_model_profiles),
         skill_override_count: configuration.map_or(0, |configuration| {
             configuration.skill_enablement_overrides.len()
         }),
@@ -1167,7 +1146,9 @@ mod tests {
                 api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(32_000),
-                provider_profile_config: None,
+                provider_profile_config: ProviderProfileConfig::generic_for_dialect(
+                    ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
                 input_price: "0".to_string(),
                 cached_input_price: "".to_string(),
                 output_price: "0".to_string(),
@@ -1337,11 +1318,33 @@ mod tests {
 
         assert!(!report.confirmed);
         assert_eq!(report.model_count, 1);
-        assert_eq!(report.normalized_model_profiles, 1);
         assert_eq!(report.mcp_server_count, 1);
         assert_eq!(fs::read(database).unwrap(), before);
         assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
         assert!(!report.render().contains(&secret));
+    }
+
+    #[test]
+    fn reset_rejects_a_non_current_per_model_protocol_revision() {
+        let fixture = tempfile::tempdir().unwrap();
+        populated_storage(fixture.path(), "reset-invalid-revision-token");
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE models SET provider_protocol_revision = 'provider-protocol-v1:not-a-uuid'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = execute(options(fixture.path(), false)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("current Provider Protocol revision"));
+        assert!(!fixture.path().join(BACKUP_DIRECTORY_NAME).exists());
     }
 
     #[test]
@@ -1366,9 +1369,13 @@ mod tests {
         let storage = StorageService::open(&fixture.path().join(DATABASE_FILE_NAME)).unwrap();
         let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
         assert_eq!(snapshot.settings.api_token, secret);
-        assert!(snapshot.settings.models[0]
-            .provider_profile_config
-            .is_some());
+        assert_eq!(
+            snapshot.settings.models[0]
+                .provider_profile_config
+                .profile
+                .id,
+            mycopilot_core::ProviderProfileId::GenericOpenAiChat
+        );
         assert!(
             snapshot.provider_protocol_revisions["model-a"].starts_with("provider-protocol-v1:")
         );
@@ -1411,55 +1418,6 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(!report.render().contains(secret));
-    }
-
-    #[test]
-    fn reset_normalizes_a_broad_protocol_revision_only_at_the_import_boundary() {
-        let fixture = tempfile::tempdir().unwrap();
-        populated_storage(fixture.path(), "broad-revision-secret");
-        let database = fixture.path().join(DATABASE_FILE_NAME);
-        let source = Connection::open(&database).unwrap();
-        let current_models_schema = source
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'models'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap();
-        let historical_models_schema = current_models_schema.replace(
-            "provider_protocol_revision GLOB 'provider-protocol-v1:?*'",
-            "(provider_protocol_revision GLOB 'provider-protocol-v1:?*' OR provider_protocol_revision GLOB 'model-settings-v1:?*')",
-        );
-        assert_ne!(historical_models_schema, current_models_schema);
-        source.pragma_update(None, "writable_schema", 1).unwrap();
-        source
-            .execute(
-                "UPDATE sqlite_schema SET sql = ?1 WHERE type = 'table' AND name = 'models'",
-                [historical_models_schema],
-            )
-            .unwrap();
-        source.pragma_update(None, "writable_schema", 0).unwrap();
-        drop(source);
-
-        let source = Connection::open(&database).unwrap();
-        source
-            .execute(
-                "UPDATE models SET provider_protocol_revision = ?1",
-                [format!("model-settings-v1:{}", uuid::Uuid::new_v4())],
-            )
-            .unwrap();
-        assert_eq!(pragma_rows(&source, "PRAGMA quick_check").unwrap(), ["ok"]);
-        drop(source);
-
-        let report = execute(options(fixture.path(), true)).unwrap();
-
-        assert_eq!(report.normalized_model_profiles, 1);
-        let storage = StorageService::open_for_development_reset(&database).unwrap();
-        let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
-        assert!(snapshot
-            .provider_protocol_revisions
-            .values()
-            .all(|revision| revision.starts_with("provider-protocol-v1:")));
     }
 
     #[test]

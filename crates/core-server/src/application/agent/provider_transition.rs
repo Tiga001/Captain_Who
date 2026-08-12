@@ -461,6 +461,16 @@ impl AgentService {
                 ),
             ));
         }
+        if conversation.model_id.is_none() && !conversation.messages.is_empty() {
+            return Ok(ProviderTransitionPreparation::Blocked(
+                provider_transition_blocked_output(
+                    conversation_id,
+                    target_model_id,
+                    AgentProviderTransitionReason::UnsupportedTarget,
+                    "当前会话历史缺少已冻结的模型身份，无法安全切换。",
+                ),
+            ));
+        }
 
         let settings_snapshot = self
             .storage
@@ -1337,7 +1347,7 @@ mod provider_transition_unit_tests {
     #[test]
     fn one_preflight_token_is_idempotent_but_a_failed_attempt_rotates_the_next_token() {
         let dialect = ProviderProtocolDialect::OpenAiChatCompletions;
-        let profile = ProviderProfileConfig::resolve(None, dialect).unwrap();
+        let profile = ProviderProfileConfig::generic_for_dialect(dialect);
         let protocol = ProviderProtocolKey::new(
             dialect,
             &profile,

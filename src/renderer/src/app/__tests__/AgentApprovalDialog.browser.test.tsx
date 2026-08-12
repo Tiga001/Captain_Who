@@ -98,8 +98,12 @@ describe('AgentApprovalDialog command approval', () => {
       command: {
         id: 'command-action',
         command,
+        cwd: null,
+        timeoutMs: null,
         approvalStatus: 'required',
-        reason: '检查 PDF 页面'
+        riskLevel: null,
+        reason: '检查 PDF 页面',
+        observe: null
       }
     }
     const onApprove = vi.fn()
@@ -131,12 +135,19 @@ describe('AgentApprovalDialog Office approval', () => {
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 3,
+        schemaVersion: 5,
         id: 'office-action',
         approvalStatus: 'required',
         reason: '导出预算工作簿',
+        semanticArgs: {
+          operation: 'view',
+          filePath: 'budget.xlsx',
+          mode: 'html',
+          outputPath: '@downloads/budget-preview.html',
+          reason: '导出预算工作簿'
+        },
         prepared: {
-          schemaVersion: 3,
+          schemaVersion: 5,
           providerId: 'officecli',
           engineRevision: 'office-engine-sha256-v1:test',
           workspaceRevision: 'office-workspace-sha256-v1:test',
@@ -145,8 +156,11 @@ describe('AgentApprovalDialog Office approval', () => {
             documentKind: 'spreadsheet',
             operation: 'view',
             documentPath: 'budget.xlsx',
-            arguments: ['html'],
-            outputPath: '@downloads/budget-preview.html'
+            parameters: { type: 'view', mode: 'html' },
+            outputPath: '@downloads/budget-preview.html',
+            destinationPath: null,
+            inputs: [],
+            timeoutMs: null
           },
           argv: ['view', 'budget.xlsx', 'html', '-o', '@downloads/budget-preview.html'],
           paths: [
@@ -160,7 +174,8 @@ describe('AgentApprovalDialog Office approval', () => {
               objectIdentity: { revision: 'office-path-v1:source', device: 1, inode: 3 },
               parentIdentity,
               contentRevision: 'office-file-sha256-v1:source',
-              size: 128
+              size: 128,
+              writeDisposition: null
             },
             {
               slot: { type: 'output' },
@@ -169,10 +184,18 @@ describe('AgentApprovalDialog Office approval', () => {
               scope: 'external',
               normalizedPath: '/Users/test/Downloads/budget-preview.html',
               state: 'missing',
-              parentIdentity: { revision: 'office-path-parent-v1:downloads' },
+              objectIdentity: null,
+              parentIdentity: {
+                revision: 'office-path-parent-v1:downloads',
+                device: null,
+                inode: null
+              },
+              contentRevision: null,
+              size: null,
               writeDisposition: 'createNew'
             }
-          ]
+          ],
+          inputBindings: []
         }
       }
     }

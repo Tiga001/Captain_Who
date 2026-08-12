@@ -62,7 +62,8 @@ describe('MCP timeline grouping', () => {
       id: 'ordinary-command',
       tool: 'run_command',
       args: { command: 'true' },
-      approvalStatus: 'not_required'
+      approvalStatus: 'not_required',
+      reason: null
     }
     const timeline: ChatAgentTimelineItem[] = [
       { id: 'mcp-one', type: 'mcp_tool_call', invocationId: 'one' },

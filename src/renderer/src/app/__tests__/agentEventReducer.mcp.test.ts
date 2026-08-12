@@ -67,7 +67,8 @@ function approval(): AgentMcpToolApproval {
       id: CALL_ID,
       tool: 'model-visible-name-without-an-mcp-prefix',
       args: {},
-      approvalStatus: 'required'
+      approvalStatus: 'required',
+      reason: null
     },
     summary: {
       serverId: SERVER_ID,
@@ -102,7 +103,7 @@ function lifecycle(
   state: AgentMcpToolInvocationEvent['state'],
   overrides: Partial<AgentMcpToolInvocationEvent> = {}
 ): Extract<AgentEvent, { type: 'mcp_tool_invocation_state_changed' }> {
-  const terminal =
+  const terminal: Partial<AgentMcpToolInvocationEvent> =
     state === 'completed'
       ? {
           dispatchCertainty: 'response_received' as const,
@@ -135,7 +136,15 @@ function lifecycle(
       state,
       outputTruncated: false,
       ...terminal,
-      ...overrides
+      ...overrides,
+      dispatchCertainty:
+        overrides.dispatchCertainty ?? terminal.dispatchCertainty ?? 'definitely_not_dispatched',
+      displayReason: overrides.displayReason ?? null,
+      outcome: overrides.outcome ?? terminal.outcome ?? null,
+      isError: overrides.isError ?? terminal.isError ?? null,
+      errorCode: overrides.errorCode ?? terminal.errorCode ?? null,
+      durationMs: overrides.durationMs ?? terminal.durationMs ?? null,
+      diagnostics: overrides.diagnostics ?? null
     }
   }
 }
@@ -190,7 +199,8 @@ describe('MCP lifecycle Renderer projection', () => {
         id: CALL_ID,
         tool: 'model-visible-name-without-an-mcp-prefix',
         args: {},
-        approvalStatus: 'approved'
+        approvalStatus: 'approved',
+        reason: null
       }
     })
     const surrounded = applyAgentEventToChatMessage(generic, {
@@ -325,7 +335,8 @@ describe('MCP lifecycle Renderer projection', () => {
         id: CALL_ID,
         tool: 'model-visible-name-without-an-mcp-prefix',
         args: { value: SECRET_CANARY },
-        approvalStatus: 'approved'
+        approvalStatus: 'approved',
+        reason: null
       }
     })
     const withResult = applyAgentEventToChatMessage(withCall, {
@@ -361,7 +372,8 @@ describe('MCP lifecycle Renderer projection', () => {
                 id: CALL_ID,
                 tool: 'provider-safe-name',
                 args: { value: SECRET_CANARY },
-                approvalStatus: 'required'
+                approvalStatus: 'required',
+                reason: null
               }
             ],
             toolResults: [
@@ -484,7 +496,8 @@ describe('MCP lifecycle Renderer projection', () => {
         id: 'ordinary-tool-call',
         tool: 'mcp__spoofed__name',
         args: { visibleGenericArgument: true },
-        approvalStatus: 'not_required'
+        approvalStatus: 'not_required',
+        reason: null
       }
     })
 

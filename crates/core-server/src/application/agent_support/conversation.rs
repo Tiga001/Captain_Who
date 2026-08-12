@@ -145,7 +145,7 @@ pub(crate) fn prepare_conversation_turn(
         &history_model_context,
         context_compaction_summary.as_ref(),
         &[user_message_id.as_str(), assistant_message_id.as_str()],
-    );
+    )?;
 
     let user_message = ChatMessageRecord {
         id: user_message_id.clone(),
@@ -300,7 +300,7 @@ pub(crate) fn conversation_history_messages(
     conversation: &ChatConversationRecord,
     traces: &[ConversationTurnTrace],
     excluded_message_ids: &[&str],
-) -> Vec<AgentChatMessage> {
+) -> Result<Vec<AgentChatMessage>, String> {
     conversation_history_messages_with_compaction(conversation, traces, None, excluded_message_ids)
 }
 
@@ -310,7 +310,7 @@ pub(crate) fn conversation_history_messages_with_compaction(
     traces: &[ConversationTurnTrace],
     compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
     excluded_message_ids: &[&str],
-) -> Vec<AgentChatMessage> {
+) -> Result<Vec<AgentChatMessage>, String> {
     conversation_history_messages_with_model_context(
         conversation,
         traces,
@@ -326,7 +326,7 @@ pub(crate) fn conversation_history_messages_with_model_context(
     model_context_logs: &[mycopilot_core::ConversationModelContextLog],
     compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
     excluded_message_ids: &[&str],
-) -> Vec<AgentChatMessage> {
+) -> Result<Vec<AgentChatMessage>, String> {
     let traces = traces
         .iter()
         .map(|trace| (trace.assistant_message_id.as_str(), trace))
@@ -357,7 +357,7 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 .rposition(|message| message.role == "user")
         })?
     });
-    conversation
+    let projected = conversation
         .messages
         .iter()
         .enumerate()
@@ -410,31 +410,72 @@ pub(crate) fn conversation_history_messages_with_model_context(
             })
         })
         .filter(|(message, _, _)| matches!(message.role.as_str(), "user" | "assistant"))
-        .filter_map(|(message, trace, conversation_model_context_items)| {
-            if message.status.as_deref() == Some("error") && trace.is_none() {
-                return None;
-            }
-            let content = if trace.as_ref().is_some_and(|trace| {
-                trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-            }) || (trace.as_ref().is_some_and(|trace| {
-                trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
-            }) && message.content.trim() == THINKING_PLACEHOLDER)
-            {
-                String::new()
-            } else {
-                message.content.clone()
+        .collect::<Vec<_>>();
+    let mut history = Vec::with_capacity(projected.len());
+    for (message, trace, conversation_model_context_items) in projected {
+        if message.role == "assistant" {
+            let Some(trace) = trace.as_ref() else {
+                return Err(format!(
+                    "conversation_history_corrupt: assistant message `{}` is missing its trace",
+                    message.id
+                ));
             };
-            if content.trim().is_empty() && trace.is_none() {
-                return None;
+            if trace.conversation_id != conversation.id || trace.assistant_message_id != message.id
+            {
+                return Err(format!(
+                    "conversation_history_corrupt: assistant message `{}` has mismatched trace identity",
+                    message.id
+                ));
             }
-            Some(AgentChatMessage {
-                message_id: Some(message.id.clone()),
-                role: message.role.clone(),
-                content,
-                created_at: Some(message.created_at),
-                conversation_turn_trace: trace,
-                conversation_model_context_items,
-            })
-        })
-        .collect()
+            trace.validate().map_err(|_| {
+                format!(
+                    "conversation_history_corrupt: assistant message `{}` has an invalid trace",
+                    message.id
+                )
+            })?;
+            trace
+                .validate_complete_model_context(&conversation_model_context_items)
+                .map_err(|_| {
+                    format!(
+                        "conversation_history_corrupt: assistant message `{}` has incomplete model context",
+                        message.id
+                    )
+                })?;
+            if (message.status.as_deref() == Some("pending"))
+                != (trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress)
+            {
+                return Err(format!(
+                    "conversation_history_corrupt: assistant message `{}` status disagrees with its trace",
+                    message.id
+                ));
+            }
+        } else if trace.is_some() || !conversation_model_context_items.is_empty() {
+            return Err(format!(
+                "conversation_history_corrupt: user message `{}` contains assistant trace state",
+                message.id
+            ));
+        }
+        let content = if trace.as_ref().is_some_and(|trace| {
+            trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+        }) || (trace.as_ref().is_some_and(|trace| {
+            trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
+        }) && message.content.trim() == THINKING_PLACEHOLDER)
+        {
+            String::new()
+        } else {
+            message.content.clone()
+        };
+        if content.trim().is_empty() && trace.is_none() {
+            continue;
+        }
+        history.push(AgentChatMessage {
+            message_id: Some(message.id.clone()),
+            role: message.role.clone(),
+            content,
+            created_at: Some(message.created_at),
+            conversation_turn_trace: trace,
+            conversation_model_context_items,
+        });
+    }
+    Ok(history)
 }

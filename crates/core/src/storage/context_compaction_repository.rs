@@ -946,8 +946,8 @@ fn rollback_world_state_epoch_for_summary(
         rows
     };
     let Some((active_epoch_id, active_base_summary_id)) = epochs.first() else {
-        // Legacy conversations without a World State journal keep their existing rollback
-        // behavior and establish a correctly based initial epoch on the next normal turn.
+        // Direct-library and pre-journal crash paths may currently have no World State ledger.
+        // Keep that valid no-ledger state and establish the initial epoch on the next normal turn.
         return Ok(());
     };
     if active_base_summary_id.as_deref() != Some(expected_summary_id) {
@@ -1216,9 +1216,6 @@ fn continuity_refs_exist(
     connection: &Connection,
     summary: &ContextCompactionSummary,
 ) -> Result<bool, ContextCompactionRepositoryError> {
-    if !summary.continuity.is_v2() {
-        return Ok(true);
-    }
     for reference in summary.continuity.all_refs() {
         let exists = match reference {
             crate::ContextHistoryRef::Message { message_id } => connection

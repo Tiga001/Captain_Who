@@ -30,7 +30,6 @@ pub struct SkillsUpdateLocalRequest {
 pub struct SkillsUninstallRequest {
     pub skill_id: String,
     /// Exact installation lifecycle revision returned by `skills.listManagement`.
-    /// The server still accepts a package revision for legacy callers.
     pub expected_revision: String,
 }
 

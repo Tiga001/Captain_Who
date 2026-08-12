@@ -1,11 +1,9 @@
 import type {
   AgentInputAttachment,
-  AgentMcpServerScope,
   AgentPermissions,
   AgentPromptPreferences
 } from '@mycopilot/protocol'
 import { unwrapHostInvocation } from '@mycopilot/host-api'
-import { parseAgentMcpProposedAction, parseAgentMcpToolInvocationEvent } from '@mycopilot/protocol'
 import type {
   ProviderProfileUiDescriptor,
   StorageAttachmentImageRecord,
@@ -23,24 +21,21 @@ import type {
   StorageProjectRecord,
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
-import type { ModelConfig, SearchMode } from '../../config/modelConfig'
+import type { ModelConfig, ModelConfigSaveDraft, SearchMode } from '../../config/modelConfig'
 import type { AppProject } from '../../config/projectConfig'
 import type {
-  ChatAgentTimelineItem,
   ChatAgentRunView,
-  ChatCommandSessionView,
   ChatComposerDraft,
   ChatConversation,
   ChatMessage,
   ChatMessageAttachment,
   ChatMessageUiState,
-  ChatMcpToolInvocationView,
   ChatQueuedMessage
 } from '../chat/chatTypes'
-import { ensureAgentRun, settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
-import { normalizeSkillSelections, parseStoredSkillSelections } from '../skills/skillSelection'
-import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
+import { settleAgentRunToolActivities } from '../agentRun/agentEventReducer'
+import { normalizeSkillSelections } from '../skills/skillSelection'
 import { hostClient } from '../../host/hostClient'
+import { parsePersistedAgentRunJson, stringifyPersistedAgentRun } from './persistedAgentRun'
 import {
   normalizeStoredComposerPermissionMode,
   serializeComposerPermissionMode
@@ -52,6 +47,10 @@ export interface ModelSettingsSnapshot {
   searchMode: SearchMode
   tavilyApiKey: string
   models: ModelConfig[]
+}
+
+export interface ModelSettingsSaveDraft extends Omit<ModelSettingsSnapshot, 'models'> {
+  models: Array<ModelConfig | ModelConfigSaveDraft>
 }
 
 export interface AgentPromptPreferencesSnapshot extends AgentPromptPreferences {
@@ -99,7 +98,7 @@ export async function loadProviderProfileUiDescriptors(): Promise<ProviderProfil
 }
 
 export async function saveModelSettings(
-  settings: ModelSettingsSnapshot
+  settings: ModelSettingsSaveDraft
 ): Promise<ModelSettingsSnapshot> {
   const saved = await hostClient.storage.saveModelSettings(mapModelSettingsToStorage(settings))
   const normalized = mapModelSettingsFromStorage(saved)
@@ -323,7 +322,7 @@ function mapModelSettingsFromStorage(
 }
 
 function mapModelSettingsToStorage(
-  settings: ModelSettingsSnapshot
+  settings: ModelSettingsSaveDraft
 ): StorageModelSettingsUpdateRecord {
   return {
     ...settings,
@@ -339,7 +338,8 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     apiTokenOverride: model.apiTokenOverride ?? undefined,
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? undefined,
-    providerProfileConfig: model.providerProfileConfig ?? undefined,
+    providerProfileConfig: model.providerProfileConfig,
+    providerProfileUpdate: { kind: 'unchanged' },
     inputPrice: model.inputPrice,
     cachedInputPrice: model.cachedInputPrice,
     outputPrice: model.outputPrice,
@@ -347,7 +347,9 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
   }
 }
 
-function mapModelToStorage(model: ModelConfig): StorageModelSettingsUpdateRecord['models'][number] {
+function mapModelToStorage(
+  model: ModelConfig | ModelConfigSaveDraft
+): StorageModelSettingsUpdateRecord['models'][number] {
   return {
     id: model.id,
     displayName: model.displayName,
@@ -355,8 +357,8 @@ function mapModelToStorage(model: ModelConfig): StorageModelSettingsUpdateRecord
     apiTokenOverride: model.apiTokenOverride ?? null,
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? null,
-    ...(model.previousModelId ? { previousModelId: model.previousModelId } : {}),
-    ...(model.providerProfileUpdate ? { providerProfileUpdate: model.providerProfileUpdate } : {}),
+    previousModelId: model.previousModelId ?? null,
+    providerProfileUpdate: model.providerProfileUpdate,
     inputPrice: model.inputPrice,
     cachedInputPrice: model.cachedInputPrice,
     outputPrice: model.outputPrice,
@@ -441,289 +443,8 @@ function mapConversationMetaToStorage(
   }
 }
 
-const STORED_MCP_EVENT_KEYS = [
-  'actionId',
-  'invocationId',
-  'callId',
-  'serverId',
-  'serverDisplayName',
-  'rawToolName',
-  'modelToolName',
-  'displayReason',
-  'external',
-  'state',
-  'dispatchCertainty',
-  'outcome',
-  'isError',
-  'errorCode',
-  'durationMs',
-  'outputTruncated'
-] as const
-const STORED_MCP_TERMINAL_STATES = new Set([
-  'completed',
-  'failed',
-  'cancelled',
-  'outcome_unknown',
-  'rejected',
-  'expired',
-  'payload_unavailable',
-  'policy_denied'
-])
-
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function projectStoredMcpScope(value: unknown): AgentMcpServerScope | undefined {
-  if (!isUnknownRecord(value) || typeof value.type !== 'string') return undefined
-  const keys = Object.keys(value)
-  if (value.type === 'builtin' || value.type === 'user' || value.type === 'managed') {
-    return keys.length === 1 ? { type: value.type } : undefined
-  }
-  if (
-    value.type === 'project' &&
-    keys.length === 2 &&
-    typeof value.projectId === 'string' &&
-    value.projectId.length > 0 &&
-    value.projectId.length <= 1024
-  ) {
-    return { type: 'project', projectId: value.projectId }
-  }
-  if (
-    value.type === 'plugin' &&
-    keys.length === 2 &&
-    typeof value.pluginId === 'string' &&
-    value.pluginId.length > 0 &&
-    value.pluginId.length <= 1024
-  ) {
-    return { type: 'plugin', pluginId: value.pluginId }
-  }
-  return undefined
-}
-
-function projectStoredMcpInvocation(value: unknown): ChatMcpToolInvocationView | undefined {
-  if (!isUnknownRecord(value)) return undefined
-  const eventCandidate: Record<string, unknown> = {}
-  for (const key of STORED_MCP_EVENT_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(value, key)) {
-      eventCandidate[key] = value[key]
-    }
-  }
-
-  try {
-    const event = parseAgentMcpToolInvocationEvent(eventCandidate)
-    const scope = projectStoredMcpScope(value.scope)
-    return {
-      actionId: event.actionId,
-      invocationId: event.invocationId,
-      callId: event.callId,
-      serverId: event.serverId,
-      serverDisplayName: event.serverDisplayName,
-      ...(scope ? { scope } : {}),
-      rawToolName: event.rawToolName,
-      modelToolName: event.modelToolName,
-      displayReason: event.displayReason,
-      external: true,
-      state: event.state,
-      dispatchCertainty: event.dispatchCertainty,
-      outcome: event.outcome,
-      isError: event.isError,
-      errorCode: event.errorCode,
-      durationMs: event.durationMs,
-      outputTruncated: event.outputTruncated
-    }
-  } catch {
-    return undefined
-  }
-}
-
-const DURABLE_COMMAND_TERMINAL_STATUSES = new Set<ChatCommandSessionView['status']>([
-  'exited',
-  'interrupted',
-  'timed_out',
-  'failed',
-  'outcome_unknown'
-])
-
-function optionalSafeInteger(value: unknown, minimum?: number): number | undefined {
-  if (!Number.isSafeInteger(value)) return undefined
-  const integer = value as number
-  return minimum === undefined || integer >= minimum ? integer : undefined
-}
-
-/**
- * Persist only immutable terminal process metadata and bounded published-Artifact receipts. Active
- * state and transcript bytes remain Host-owned, while this projection keeps old Timeline cards
- * truthful after the Host's bounded operational Session row has aged out.
- */
-function projectDurableTerminalCommandSession(
-  value: unknown,
-  expectedCallId: string
-): ChatCommandSessionView | undefined {
-  if (!isUnknownRecord(value)) return undefined
-  if (
-    value.callId !== expectedCallId ||
-    expectedCallId.length === 0 ||
-    expectedCallId.length > 1024
-  ) {
-    return undefined
-  }
-  if (
-    typeof value.status !== 'string' ||
-    !DURABLE_COMMAND_TERMINAL_STATUSES.has(value.status as ChatCommandSessionView['status'])
-  ) {
-    return undefined
-  }
-
-  const startedAt = optionalSafeInteger(value.startedAt, 0)
-  const endedAt = optionalSafeInteger(value.endedAt, 0)
-  const exitCode = optionalSafeInteger(value.exitCode)
-  const latestSequence = optionalSafeInteger(value.latestSequence, 0) ?? 0
-  const outputs = parseManagedCommandOutputs(value.outputs)
-  return {
-    callId: expectedCallId,
-    status: value.status as ChatCommandSessionView['status'],
-    ...(startedAt === undefined ? {} : { startedAt }),
-    ...(endedAt === undefined ? {} : { endedAt }),
-    ...(exitCode === undefined ? {} : { exitCode }),
-    latestSequence,
-    outputTruncated: value.outputTruncated === true,
-    ...(outputs === undefined || outputs.length === 0 ? {} : { outputs })
-  }
-}
-
-function projectDurableTerminalCommandSessions(
-  value: unknown,
-  allowedCallIds: ReadonlySet<string>
-): Record<string, ChatCommandSessionView> | undefined {
-  if (!isUnknownRecord(value)) return undefined
-  const projectedSessions: Record<string, ChatCommandSessionView> = {}
-  for (const [callId, session] of Object.entries(value)) {
-    if (!allowedCallIds.has(callId)) continue
-    const projected = projectDurableTerminalCommandSession(session, callId)
-    if (projected) projectedSessions[callId] = projected
-  }
-  return Object.keys(projectedSessions).length > 0 ? projectedSessions : undefined
-}
-
-function normalizeStoredAgentRun(storedRun: ChatAgentRunView): ChatAgentRunView {
-  const normalized = ensureAgentRun(storedRun, storedRun.runId, storedRun.status)
-  const runCommandCallIds = new Set(
-    normalized.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
-  )
-  const durableCommandSessions = projectDurableTerminalCommandSessions(
-    storedRun.commandSessions,
-    runCommandCallIds
-  )
-  // Active command state and transcript previews are Host-owned runtime projections. Retain only
-  // the allowlisted immutable terminal metadata written by the current Renderer.
-  const durableNormalized = { ...normalized }
-  if (durableCommandSessions) {
-    durableNormalized.commandSessions = durableCommandSessions
-  } else {
-    delete durableNormalized.commandSessions
-  }
-  delete durableNormalized.commandOutputPreviews
-  delete durableNormalized.llmRetry
-  const rawMcpInvocations = Array.isArray(storedRun.mcpInvocations) ? storedRun.mcpInvocations : []
-  const referencedMcpCallIds = new Set<string>(
-    rawMcpInvocations.flatMap((invocation) =>
-      isUnknownRecord(invocation) &&
-      typeof invocation.callId === 'string' &&
-      invocation.callId.length <= 1024
-        ? [invocation.callId]
-        : []
-    )
-  )
-  const approvals = normalized.approvals.filter((action) => {
-    if (!isUnknownRecord(action) || action.type !== 'mcp_tool_call') return true
-    try {
-      referencedMcpCallIds.add(parseAgentMcpProposedAction(action).approval.identity.callId)
-    } catch {
-      // Corrupt MCP approvals are always discarded. Without a fully valid typed identity, do not
-      // infer routing or retain any of their untrusted nested fields.
-    }
-    return false
-  })
-  const invocationById = new Map<string, ChatMcpToolInvocationView>()
-  for (const rawInvocation of rawMcpInvocations) {
-    const projected = projectStoredMcpInvocation(rawInvocation)
-    if (!projected) continue
-    const existing = invocationById.get(projected.invocationId)
-    const existingIsTerminal = existing ? STORED_MCP_TERMINAL_STATES.has(existing.state) : false
-    const projectedIsTerminal = STORED_MCP_TERMINAL_STATES.has(projected.state)
-    if (!existing || projectedIsTerminal || !existingIsTerminal) {
-      invocationById.set(projected.invocationId, projected)
-    }
-  }
-  const mcpInvocations = [...invocationById.values()]
-  const validInvocationIds = new Set(mcpInvocations.map((invocation) => invocation.invocationId))
-  const invocationByCallId = new Map(
-    mcpInvocations.map((invocation) => [invocation.callId, invocation] as const)
-  )
-  const emittedInvocationIds = new Set<string>()
-  const timeline: ChatAgentTimelineItem[] = []
-  for (const item of normalized.timeline) {
-    if (!isUnknownRecord(item) || typeof item.type !== 'string') continue
-    if (item.type === 'tool_call') {
-      if (typeof item.callId !== 'string') continue
-      const invocation = invocationByCallId.get(item.callId)
-      if (invocation) {
-        if (!emittedInvocationIds.has(invocation.invocationId)) {
-          timeline.push({
-            id: `mcp-invocation-${invocation.invocationId}`,
-            type: 'mcp_tool_call',
-            invocationId: invocation.invocationId
-          })
-          emittedInvocationIds.add(invocation.invocationId)
-        }
-        continue
-      }
-      if (referencedMcpCallIds.has(item.callId)) continue
-      timeline.push(item)
-      continue
-    }
-    if (item.type === 'mcp_tool_call') {
-      if (
-        typeof item.id !== 'string' ||
-        typeof item.invocationId !== 'string' ||
-        !validInvocationIds.has(item.invocationId)
-      ) {
-        continue
-      }
-      if (emittedInvocationIds.has(item.invocationId)) continue
-      timeline.push({
-        id: item.id,
-        type: 'mcp_tool_call',
-        invocationId: item.invocationId
-      })
-      emittedInvocationIds.add(item.invocationId)
-      continue
-    }
-    timeline.push(item)
-  }
-
-  return {
-    ...durableNormalized,
-    approvals,
-    toolCalls: normalized.toolCalls.filter(
-      (call) =>
-        isUnknownRecord(call) && typeof call.id === 'string' && !referencedMcpCallIds.has(call.id)
-    ),
-    toolResults: normalized.toolResults.filter(
-      (result) =>
-        isUnknownRecord(result) &&
-        typeof result.callId === 'string' &&
-        !referencedMcpCallIds.has(result.callId)
-    ),
-    timeline,
-    mcpInvocations
-  }
-}
-
 function mapMessageFromStorage(message: StorageChatMessageRecord): ChatMessage {
-  const parsedRun = parseJson<ChatAgentRunView>(message.agentRunJson)
-  const storedRun = parsedRun ? normalizeStoredAgentRun(parsedRun) : undefined
+  const storedRun = parsePersistedAgentRunJson(message.agentRunJson)
   const agentRun =
     storedRun &&
     (storedRun.status === 'completed' ||
@@ -802,7 +523,7 @@ function mapDraftFromStorage(draft: StorageComposerDraftRecord): ChatComposerDra
     modelId: draft.modelId ?? '',
     projectId: draft.projectId ?? null,
     attachments: parseDraftAttachments(draft.attachmentsJson),
-    skills: parseStoredSkillSelections(draft.skillsJson),
+    skills: parseDraftSkills(draft.skillsJson),
     queuedMessages: parseQueuedMessages(draft.queuedMessagesJson),
     updatedAt: draft.updatedAt
   }
@@ -898,45 +619,128 @@ export function getTranslucentSidebarOpacityPercent(transparency: unknown): stri
   return `${Math.round(effectiveTintOpacity)}%`
 }
 
-function parseDraftAttachments(value: string): AgentInputAttachment[] {
-  try {
-    const parsed = JSON.parse(value) as AgentInputAttachment[]
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
+const COMPOSER_DRAFT_CORRUPTION_ERROR = 'Stored composer draft is malformed'
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function parseQueuedMessages(value: string | undefined): ChatQueuedMessage[] {
-  if (!value) return []
+function parseDraftArray(value: string): unknown[] {
   try {
-    const parsed = JSON.parse(value) as ChatQueuedMessage[]
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .filter(
-        (message) =>
-          message &&
-          typeof message.id === 'string' &&
-          typeof message.clientMessageId === 'string' &&
-          typeof message.content === 'string' &&
-          Array.isArray(message.attachments) &&
-          typeof message.modelId === 'string' &&
-          (message.permissionMode === 'default' ||
-            message.permissionMode === 'custom' ||
-            message.permissionMode === 'full') &&
-          (message.projectId === null || typeof message.projectId === 'string') &&
-          Array.isArray(message.skills) &&
-          typeof message.createdAt === 'number'
-      )
-      .map((message) => ({
-        ...message,
-        skills: normalizeSkillSelections(message.skills),
-        status: message.status === 'error' ? 'error' : 'pending',
-        error: message.status === 'error' ? message.error : undefined
-      }))
+    const parsed = JSON.parse(value) as unknown
+    if (Array.isArray(parsed)) return parsed
   } catch {
-    return []
+    // The stable error below deliberately excludes persisted content.
   }
+  throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+}
+
+function isExactRecord(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[] = []
+): value is Record<string, unknown> {
+  if (!isUnknownRecord(value)) return false
+  const allowed = new Set([...required, ...optional])
+  return (
+    required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => allowed.has(key))
+  )
+}
+
+function parseDraftAttachments(value: string): AgentInputAttachment[] {
+  return parseDraftArray(value).map((candidate) => {
+    if (
+      !isExactRecord(
+        candidate,
+        ['id', 'kind', 'name', 'sizeBytes', 'encoding', 'data'],
+        ['mimeType', 'truncated']
+      ) ||
+      typeof candidate.id !== 'string' ||
+      (candidate.kind !== 'file' && candidate.kind !== 'image') ||
+      typeof candidate.name !== 'string' ||
+      (candidate.mimeType !== undefined && typeof candidate.mimeType !== 'string') ||
+      !Number.isSafeInteger(candidate.sizeBytes) ||
+      (candidate.sizeBytes as number) < 0 ||
+      (candidate.encoding !== 'utf8' && candidate.encoding !== 'base64') ||
+      typeof candidate.data !== 'string' ||
+      (candidate.truncated !== undefined && typeof candidate.truncated !== 'boolean')
+    ) {
+      throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+    }
+    return candidate as unknown as AgentInputAttachment
+  })
+}
+
+function parseDraftSkills(value: string): ChatComposerDraft['skills'] {
+  const parsed = parseDraftArray(value)
+  const normalized = normalizeSkillSelections(parsed)
+  if (
+    normalized.length !== parsed.length ||
+    parsed.some(
+      (candidate, index) =>
+        !isExactRecord(candidate, ['id', 'revision']) ||
+        candidate.id !== normalized[index]?.id ||
+        candidate.revision !== normalized[index]?.revision
+    )
+  ) {
+    throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+  }
+  return normalized
+}
+
+function parseQueuedMessages(value: string): ChatQueuedMessage[] {
+  return parseDraftArray(value).map((candidate) => {
+    if (
+      !isExactRecord(
+        candidate,
+        [
+          'id',
+          'clientMessageId',
+          'content',
+          'attachments',
+          'modelId',
+          'permissionMode',
+          'projectId',
+          'skills',
+          'status',
+          'createdAt'
+        ],
+        ['error']
+      ) ||
+      typeof candidate.id !== 'string' ||
+      typeof candidate.clientMessageId !== 'string' ||
+      typeof candidate.content !== 'string' ||
+      !Array.isArray(candidate.attachments) ||
+      typeof candidate.modelId !== 'string' ||
+      !['default', 'custom', 'full'].includes(String(candidate.permissionMode)) ||
+      (candidate.projectId !== null && typeof candidate.projectId !== 'string') ||
+      !Array.isArray(candidate.skills) ||
+      !['pending', 'submitting', 'error'].includes(String(candidate.status)) ||
+      !Number.isSafeInteger(candidate.createdAt) ||
+      (candidate.createdAt as number) < 0 ||
+      (candidate.error !== undefined && typeof candidate.error !== 'string')
+    ) {
+      throw new Error(COMPOSER_DRAFT_CORRUPTION_ERROR)
+    }
+    const attachments = parseDraftAttachments(JSON.stringify(candidate.attachments))
+    const skills = parseDraftSkills(JSON.stringify(candidate.skills))
+    return {
+      id: candidate.id,
+      clientMessageId: candidate.clientMessageId,
+      content: candidate.content,
+      attachments,
+      modelId: candidate.modelId,
+      permissionMode: candidate.permissionMode as ChatQueuedMessage['permissionMode'],
+      projectId: candidate.projectId,
+      skills,
+      status: candidate.status === 'error' ? 'error' : 'pending',
+      ...(candidate.status === 'error' && candidate.error !== undefined
+        ? { error: candidate.error }
+        : {}),
+      createdAt: candidate.createdAt as number
+    }
+  })
 }
 
 function parseJson<T>(value: string | null | undefined): T | undefined {
@@ -953,24 +757,7 @@ function stringifyJson(value: unknown): string | null {
 }
 
 function stringifyAgentRun(run: ChatAgentRunView | undefined): string | null {
-  if (!run) return null
-  const persistedRun = { ...run }
-  delete persistedRun.fileWritePreviews
-  delete persistedRun.commandOutputPreviews
-  delete persistedRun.llmRetry
-  const runCommandCallIds = new Set(
-    run.toolCalls.filter((call) => call.tool === 'run_command').map((call) => call.id)
-  )
-  const durableCommandSessions = projectDurableTerminalCommandSessions(
-    run.commandSessions,
-    runCommandCallIds
-  )
-  if (durableCommandSessions) {
-    persistedRun.commandSessions = durableCommandSessions
-  } else {
-    delete persistedRun.commandSessions
-  }
-  return JSON.stringify(persistedRun)
+  return stringifyPersistedAgentRun(run)
 }
 
 function normalizeMessageStatus(status: StorageChatMessageRecord['status']): ChatMessage['status'] {

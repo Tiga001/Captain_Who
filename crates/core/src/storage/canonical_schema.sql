@@ -293,9 +293,8 @@ CREATE TABLE models (
             api_token_override TEXT,
             supports_image INTEGER NOT NULL,
             context_window_tokens INTEGER,
-            provider_profile_config_json TEXT CHECK (
-                provider_profile_config_json IS NULL
-                OR json_valid(provider_profile_config_json)
+            provider_profile_config_json TEXT NOT NULL CHECK (
+                json_valid(provider_profile_config_json)
             ),
             provider_connection_revision TEXT NOT NULL CHECK (
                 provider_connection_revision GLOB 'provider-connection-v1:?*'
@@ -347,13 +346,17 @@ CREATE TABLE composer_drafts (
             scope_id TEXT PRIMARY KEY,
             message TEXT NOT NULL,
             permission_mode TEXT NOT NULL,
-            permission_mode_version INTEGER NOT NULL DEFAULT 0 CHECK (permission_mode_version >= 0),
+            permission_mode_version INTEGER NOT NULL CHECK (permission_mode_version >= 0),
             model_id TEXT,
             project_id TEXT,
-            attachments_json TEXT NOT NULL CHECK (json_valid(attachments_json)),
-            skills_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(skills_json)),
-            queued_messages_json TEXT NOT NULL DEFAULT '[]' CHECK (
-                json_valid(queued_messages_json)
+            attachments_json TEXT NOT NULL CHECK (
+                json_valid(attachments_json) AND json_type(attachments_json) = 'array'
+            ),
+            skills_json TEXT NOT NULL CHECK (
+                json_valid(skills_json) AND json_type(skills_json) = 'array'
+            ),
+            queued_messages_json TEXT NOT NULL CHECK (
+                json_valid(queued_messages_json) AND json_type(queued_messages_json) = 'array'
             ),
             updated_at INTEGER NOT NULL
         );
@@ -1363,7 +1366,7 @@ CREATE TABLE conversation_goal_revisions (
             goal_id TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence > 0),
             schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-            actor TEXT CHECK (actor IS NULL OR actor IN ('model', 'user')),
+            actor TEXT NOT NULL CHECK (actor IN ('model', 'user')),
             event_kind TEXT NOT NULL CHECK (
                 event_kind IN ('initial', 'objective_changed', 'status_changed')
             ),
@@ -1372,7 +1375,7 @@ CREATE TABLE conversation_goal_revisions (
             PRIMARY KEY (goal_id, sequence),
             CHECK (
                 (sequence = 1 AND event_kind = 'initial')
-                OR (sequence > 1 AND event_kind != 'initial' AND actor IS NOT NULL)
+                OR (sequence > 1 AND event_kind != 'initial')
             ),
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );

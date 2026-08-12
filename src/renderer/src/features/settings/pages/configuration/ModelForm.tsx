@@ -8,6 +8,7 @@ import type { SettingsSelectOption } from '../../components/SettingsSelect'
 import type { ModelConfig, ModelFormValues } from './configurationTypes'
 import {
   initialProviderProfileFormState,
+  initialNewProviderProfileFormState,
   selectProviderProfile,
   updateDeepSeekProviderSettings,
   type ProviderProfileSelection
@@ -62,7 +63,8 @@ function toFormValues(model?: ModelConfig): ModelFormValues {
     inputPrice: model?.inputPrice ?? '0',
     cachedInputPrice: model?.cachedInputPrice ?? '',
     outputPrice: model?.outputPrice ?? '0',
-    supportsImage: model?.supportsImage ?? false
+    supportsImage: model?.supportsImage ?? false,
+    providerProfileUpdate: model?.providerProfileUpdate ?? { kind: 'select_generic' }
   }
 }
 
@@ -70,7 +72,10 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
   const { t } = useFrontendConfig()
   const initialValues = useMemo(() => toFormValues(model), [model])
   const initialProviderProfile = useMemo(
-    () => initialProviderProfileFormState(model?.providerProfileConfig, providerProfileDescriptors),
+    () =>
+      model?.providerProfileConfig
+        ? initialProviderProfileFormState(model.providerProfileConfig, providerProfileDescriptors)
+        : initialNewProviderProfileFormState(),
     [model, providerProfileDescriptors]
   )
   const [values, setValues] = useState<ModelFormValues>(initialValues)

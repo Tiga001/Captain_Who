@@ -99,7 +99,7 @@ describe('model settings storage client', () => {
     expect(saved.models[0]?.providerProfileConfig).toEqual(
       authoritativeSettings.models[0]?.providerProfileConfig
     )
-    expect(saved.models[0]?.providerProfileUpdate).toBeUndefined()
+    expect(saved.models[0]?.providerProfileUpdate).toEqual({ kind: 'unchanged' })
   })
 
   it('passes the safe profile descriptor projection through unchanged', async () => {

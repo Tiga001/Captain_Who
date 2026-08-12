@@ -26,13 +26,6 @@ const DEFAULT_REASONING = {
   effort: 'provider_default'
 } as const
 
-const REASONING_MODES: readonly ProviderReasoningMode[] = [
-  'provider_default',
-  'enabled',
-  'disabled'
-]
-const REASONING_EFFORTS: readonly ProviderReasoningEffort[] = ['provider_default', 'high', 'max']
-
 function isGenericProfileId(profileId: string): boolean {
   return profileId === 'generic_openai_chat' || profileId === 'generic_anthropic_messages'
 }
@@ -58,34 +51,21 @@ export function normalizeDeepSeekReasoning(reasoning: {
 function reasoningFromStoredConfig(
   config: ProviderProfileConfig
 ): ProviderProfileFormState['reasoning'] {
-  const candidate = (config as { reasoning?: { mode?: unknown; effort?: unknown } }).reasoning
-  if (
-    !candidate ||
-    !REASONING_MODES.includes(candidate.mode as ProviderReasoningMode) ||
-    !REASONING_EFFORTS.includes(candidate.effort as ProviderReasoningEffort)
-  ) {
-    return { ...DEFAULT_REASONING }
+  return normalizeDeepSeekReasoning(config.reasoning)
+}
+
+export function initialNewProviderProfileFormState(): ProviderProfileFormState {
+  return {
+    selection: 'generic',
+    reasoning: { ...DEFAULT_REASONING },
+    update: { kind: 'select_generic' }
   }
-  return normalizeDeepSeekReasoning({
-    mode: candidate.mode as ProviderReasoningMode,
-    effort: candidate.effort as ProviderReasoningEffort
-  })
 }
 
 export function initialProviderProfileFormState(
-  config: ProviderProfileConfig | undefined,
+  config: ProviderProfileConfig,
   descriptors: readonly ProviderProfileUiDescriptor[]
 ): ProviderProfileFormState {
-  if (!config) {
-    return {
-      selection: 'generic',
-      reasoning: { ...DEFAULT_REASONING },
-      // A current Renderer makes the legacy/no-profile effective default explicit on save.
-      // Older clients that omit this update still retain the Host's `unchanged` semantics.
-      update: { kind: 'select_generic' }
-    }
-  }
-
   const profileId = String(config.profile.id)
   if (config.schemaVersion !== 1) {
     return {

@@ -706,6 +706,15 @@ async fn approved_command_reuses_one_session_archive_across_restart_and_runtime_
             } if item_call_id == &call_id
                 && operation["command"] == APPROVED_COMMAND_CANONICAL
         )));
+    assert_eq!(
+        checkpoint.conversation_trace_items,
+        storage
+            .get_conversation_turn_trace("assistant-approved-command-archive")
+            .unwrap()
+            .expect("waiting approval has a durable in-progress trace")
+            .items,
+        "the frozen approval checkpoint and durable Trace must share one exact prefix"
+    );
 
     drop(receiver);
     drop(service);
@@ -1058,6 +1067,26 @@ async fn rejected_command_after_restart_resumes_the_model_without_starting_a_ses
         .tool_call_id
         .clone()
         .expect("rejected command retains its ToolCall identity");
+    let persisted_checkpoint = storage
+        .list_pending_agent_actions()
+        .unwrap()
+        .into_iter()
+        .next()
+        .and_then(|record| {
+            PersistedAgentResumeInput::decode(&record.agent_input_json)
+                .ok()
+                .and_then(|input| input.agent_input.resume_checkpoint)
+        })
+        .expect("rejected command pending row keeps its frozen checkpoint");
+    assert_eq!(
+        persisted_checkpoint.conversation_trace_items,
+        storage
+            .get_conversation_turn_trace("assistant-rejected-command-restart")
+            .unwrap()
+            .expect("waiting rejection has a durable in-progress trace")
+            .items,
+        "the rejected-command checkpoint and durable Trace must share one exact prefix"
+    );
     assert!(!workspace.join("rejected-command-marker.txt").exists());
 
     drop(receiver);

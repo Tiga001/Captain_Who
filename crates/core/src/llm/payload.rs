@@ -2,7 +2,7 @@
 #[cfg(test)]
 use super::adapter::ProviderAdapterRegistry;
 use super::adapter::{
-    deepseek_reasoning_content, project_deepseek_exchange, project_legacy_generic_exchange,
+    deepseek_reasoning_content, project_deepseek_exchange, project_generic_split_exchange,
     DeepSeekWireMessage, GenericWireMessage,
 };
 use super::{LlmChatRequest, LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
@@ -19,7 +19,7 @@ pub(super) fn build_payload(request: &LlmChatRequest) -> Value {
 }
 
 pub(super) fn build_openai_payload(request: &LlmChatRequest) -> AgentResult<Value> {
-    let messages = project_legacy_generic_exchange(&request.messages)?;
+    let messages = project_generic_split_exchange(&request.messages)?;
     let mut payload = Map::from_iter([
         ("model".to_string(), json!(request.model())),
         (
@@ -176,7 +176,7 @@ fn build_deepseek_messages(request: &LlmChatRequest) -> AgentResult<Vec<Value>> 
 }
 
 pub(super) fn build_anthropic_payload(request: &LlmChatRequest) -> AgentResult<Value> {
-    let projected = project_legacy_generic_exchange(&request.messages)?;
+    let projected = project_generic_split_exchange(&request.messages)?;
     let (system, messages) = split_anthropic_messages(&projected);
     let mut payload = Map::from_iter([
         ("model".to_string(), json!(request.model())),

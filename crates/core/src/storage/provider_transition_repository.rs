@@ -360,25 +360,36 @@ mod tests {
     fn setup() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
+        let provider_profile =
+            serde_json::to_string(&crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ))
+            .unwrap();
         connection
-            .execute_batch(
+            .execute(
                 "INSERT INTO models (
                     id, display_name, supports_image, provider_connection_revision,
-                    provider_protocol_revision,
+                    provider_protocol_revision, provider_profile_config_json,
                     input_price, output_price, enabled, position, created_at, updated_at
                  ) VALUES ('target-model', 'Target', 0,
                            'provider-connection-v1:target-connection',
-                           'provider-protocol-v1:target-revision',
-                           '0', '0', 1, 0, 1, 1);
-                 INSERT INTO conversations (
+                           'provider-protocol-v1:target-revision', ?1,
+                           '0', '0', 1, 0, 1, 1)",
+                [&provider_profile],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations (
                     id, project_id, model_id, title, created_at, updated_at,
                     pinned_at, archived_at, unread_at
                  ) VALUES ('conversation-1', NULL, 'source-model', 'Test', 1, 7,
                            NULL, NULL, NULL);
                  INSERT INTO composer_drafts (
-                    scope_id, message, permission_mode, model_id, attachments_json,
-                    skills_json, queued_messages_json, updated_at
-                 ) VALUES ('conversation-1', 'keep me', 'ask', 'source-model',
+                    scope_id, message, permission_mode, permission_mode_version,
+                    model_id, project_id, attachments_json, skills_json,
+                    queued_messages_json, updated_at
+                 ) VALUES ('conversation-1', 'keep me', 'ask', 1, 'source-model', NULL,
                            '[]', '[]', '[]', 7);",
             )
             .unwrap();

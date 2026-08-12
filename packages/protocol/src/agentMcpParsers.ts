@@ -56,8 +56,8 @@ const LLM_RETRY_CATEGORIES = [
 ] as const satisfies readonly AgentLlmRetryCategory[]
 
 /**
- * Parses Agent event families that have strict Host-boundary contracts. Legacy event families
- * retain their historical projection until they receive their own versioned parsers.
+ * Parses Agent event families that have dedicated strict Host-boundary contracts. Other current
+ * event families keep their existing typed projection until they receive dedicated parsers.
  */
 export function parseAgentEventForHost(value: unknown): AgentEvent {
   const record = expectRecord(value, 'Agent event')
@@ -187,24 +187,16 @@ function parseAgentLlmRetryEvent(
       'delayMs',
       'retryAt',
       'attempt',
-      'maxAttempts',
-      'reason'
+      'maxAttempts'
     ] as const,
     context
   )
-  if (record.reason !== undefined) {
-    // Validate only for resource bounds. Provider-authored text is deliberately not returned.
-    expectBoundedString(record.reason, `${context}.reason`, 16 * 1024)
+  const rawCategory = expectBoundedNonEmptyString(record.category, `${context}.category`, 64)
+  if (!LLM_RETRY_CATEGORIES.includes(rawCategory as AgentLlmRetryCategory)) {
+    throw invalidProtocolValue(context, 'category must be a supported retry category')
   }
-  const rawCategory =
-    record.category === undefined
-      ? undefined
-      : expectBoundedNonEmptyString(record.category, `${context}.category`, 64)
-  const category = LLM_RETRY_CATEGORIES.includes(rawCategory as AgentLlmRetryCategory)
-    ? (rawCategory as AgentLlmRetryCategory)
-    : 'unknown'
-  const delayMs =
-    record.delayMs === undefined ? 0 : expectSafeInteger(record.delayMs, `${context}.delayMs`, 0)
+  const category = rawCategory as AgentLlmRetryCategory
+  const delayMs = expectSafeInteger(record.delayMs, `${context}.delayMs`, 0)
   if (delayMs > MAX_LLM_RETRY_DELAY_MS) {
     throw invalidProtocolValue(context, `delayMs must not exceed ${MAX_LLM_RETRY_DELAY_MS}`)
   }
@@ -234,8 +226,7 @@ function parseAgentLlmRetryEvent(
     category,
     ...(providerCode === undefined ? {} : { providerCode }),
     delayMs,
-    retryAt:
-      record.retryAt === undefined ? 0 : expectSafeInteger(record.retryAt, `${context}.retryAt`, 0),
+    retryAt: expectSafeInteger(record.retryAt, `${context}.retryAt`, 0),
     attempt,
     maxAttempts
   }
@@ -319,7 +310,7 @@ export function parseAgentMcpToolApproval(value: unknown): AgentMcpToolApproval 
       (approvalMode === 'prompt' && call.approvalStatus === 'required') ||
       (approvalMode === 'auto' && call.approvalStatus === 'approved')
     ) ||
-    call.reason !== undefined
+    call.reason !== null
   ) {
     throw invalidProtocolValue(context, 'approval mode and call status must remain consistent')
   }
@@ -364,9 +355,21 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     ] as const,
     context
   )
+  for (const key of [
+    'displayReason',
+    'outcome',
+    'isError',
+    'errorCode',
+    'durationMs',
+    'diagnostics'
+  ] as const) {
+    if (!Object.hasOwn(record, key)) {
+      throw invalidProtocolValue(context, `${key} is required`)
+    }
+  }
   const outcome =
-    record.outcome === undefined
-      ? undefined
+    record.outcome === null
+      ? null
       : expectEnum(
           record.outcome,
           [
@@ -385,18 +388,16 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
           `${context}.outcome`
         )
   const isError =
-    record.isError === undefined ? undefined : expectBoolean(record.isError, `${context}.isError`)
+    record.isError === null ? null : expectBoolean(record.isError, `${context}.isError`)
   const errorCode =
-    record.errorCode === undefined
-      ? undefined
-      : expectSafeCode(record.errorCode, `${context}.errorCode`)
+    record.errorCode === null ? null : expectSafeCode(record.errorCode, `${context}.errorCode`)
   const durationMs =
-    record.durationMs === undefined
-      ? undefined
+    record.durationMs === null
+      ? null
       : expectSafeInteger(record.durationMs, `${context}.durationMs`, 0)
   const displayReason =
-    record.displayReason === undefined
-      ? undefined
+    record.displayReason === null
+      ? null
       : expectDisplayText(record.displayReason, `${context}.displayReason`, 512)
   const external = expectBoolean(record.external, `${context}.external`)
   if (!external) {
@@ -432,21 +433,21 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
   )
   const outputTruncated = expectBoolean(record.outputTruncated, `${context}.outputTruncated`)
   const diagnostics =
-    record.diagnostics === undefined
-      ? undefined
+    record.diagnostics === null
+      ? null
       : parseAgentMcpInvocationDiagnostics(record.diagnostics, `${context}.diagnostics`)
   assertValidInvocationLifecycle(
     context,
     state,
     dispatchCertainty,
-    outcome,
-    isError,
-    errorCode,
-    durationMs,
+    outcome ?? undefined,
+    isError ?? undefined,
+    errorCode ?? undefined,
+    durationMs ?? undefined,
     outputTruncated
   )
-  if (diagnostics !== undefined) {
-    assertValidInvocationDiagnostics(context, state, outcome, diagnostics)
+  if (diagnostics !== null) {
+    assertValidInvocationDiagnostics(context, state, outcome ?? undefined, diagnostics)
   }
   return {
     actionId,
@@ -459,16 +460,16 @@ export function parseAgentMcpToolInvocationEvent(value: unknown): AgentMcpToolIn
     ),
     rawToolName: expectDisplayText(record.rawToolName, `${context}.rawToolName`, 1024),
     modelToolName: expectDisplayText(record.modelToolName, `${context}.modelToolName`, 64),
-    ...(displayReason === undefined ? {} : { displayReason }),
+    displayReason,
     external,
     state,
     dispatchCertainty,
-    ...(outcome === undefined ? {} : { outcome }),
-    ...(isError === undefined ? {} : { isError }),
-    ...(errorCode === undefined ? {} : { errorCode }),
-    ...(durationMs === undefined ? {} : { durationMs }),
+    outcome,
+    isError,
+    errorCode,
+    durationMs,
     outputTruncated,
-    ...(diagnostics === undefined ? {} : { diagnostics })
+    diagnostics
   }
 }
 
@@ -599,7 +600,7 @@ function boundedDiagnosticInteger(value: unknown, context: string, maximum: numb
 function assertValidInvocationDiagnostics(
   context: string,
   state: AgentMcpToolInvocationEvent['state'],
-  outcome: AgentMcpToolInvocationEvent['outcome'],
+  outcome: Exclude<AgentMcpToolInvocationEvent['outcome'], null> | undefined,
   diagnostics: AgentMcpInvocationDiagnostics
 ): void {
   const hasResult = diagnostics.result !== undefined
@@ -639,7 +640,7 @@ function assertValidInvocationLifecycle(
   context: string,
   state: AgentMcpToolInvocationEvent['state'],
   dispatchCertainty: AgentMcpToolInvocationEvent['dispatchCertainty'],
-  outcome: AgentMcpToolInvocationEvent['outcome'],
+  outcome: Exclude<AgentMcpToolInvocationEvent['outcome'], null> | undefined,
   isError: boolean | undefined,
   errorCode: string | undefined,
   durationMs: number | undefined,
@@ -944,6 +945,9 @@ function parseApprovalSummary(value: unknown, context: string): AgentMcpToolAppr
   if (!external) {
     throw invalidProtocolValue(context, 'external must be true')
   }
+  if (!Object.hasOwn(record, 'displayReason')) {
+    throw invalidProtocolValue(context, 'displayReason is required')
+  }
   return {
     serverId: expectUuid(record.serverId, `${context}.serverId`),
     serverDisplayName: expectServerDisplayName(
@@ -953,11 +957,10 @@ function parseApprovalSummary(value: unknown, context: string): AgentMcpToolAppr
     scope: parseScope(record.scope, `${context}.scope`),
     rawToolName: expectDisplayText(record.rawToolName, `${context}.rawToolName`, 1024),
     modelToolName: expectDisplayText(record.modelToolName, `${context}.modelToolName`, 64),
-    ...(record.displayReason === undefined
-      ? {}
-      : {
-          displayReason: expectDisplayText(record.displayReason, `${context}.displayReason`, 512)
-        }),
+    displayReason:
+      record.displayReason === null
+        ? null
+        : expectDisplayText(record.displayReason, `${context}.displayReason`, 512),
     arguments: parseArgumentSummary(record.arguments, `${context}.arguments`),
     risk: expectEnum(
       record.risk,
@@ -1019,10 +1022,11 @@ function parseMcpToolCall(value: unknown, context: string): AgentToolCall {
   expectOnlyKeys(record, ['id', 'tool', 'args', 'approvalStatus', 'reason'] as const, context)
   const args = expectRecord(record.args, `${context}.args`)
   expectOnlyKeys(args, [] as const, `${context}.args`)
+  if (!Object.hasOwn(record, 'reason')) {
+    throw invalidProtocolValue(context, 'reason is required')
+  }
   const reason =
-    record.reason === undefined
-      ? undefined
-      : expectDisplayText(record.reason, `${context}.reason`, 1024)
+    record.reason === null ? null : expectDisplayText(record.reason, `${context}.reason`, 1024)
   return {
     id: expectModelToolCallId(record.id, `${context}.id`),
     tool: expectBoundedNonEmptyString(record.tool, `${context}.tool`, 64),
@@ -1032,7 +1036,7 @@ function parseMcpToolCall(value: unknown, context: string): AgentToolCall {
       ['not_required', 'required', 'approved', 'rejected'] as const,
       `${context}.approvalStatus`
     ),
-    ...(reason === undefined ? {} : { reason })
+    reason
   }
 }
 

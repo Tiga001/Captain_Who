@@ -139,14 +139,37 @@ fn approval_action(
     }
 }
 
-fn resume_checkpoint(run_id: &str, action_id: &str) -> AgentRunCheckpoint {
+fn resume_checkpoint(
+    run_id: &str,
+    action_id: &str,
+    action: &AgentProposedAction,
+) -> AgentRunCheckpoint {
     let pending_tool_call_id = call_id(action_id);
-    serde_json::from_value(json!({
+    let mut checkpoint: AgentRunCheckpoint = serde_json::from_value(json!({
         "version": AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         "runId": run_id,
-        "contextItems": [],
+        "contextItems": [{
+            "role": "assistant",
+            "content": "",
+            "images": [],
+            "toolCalls": [{
+                "id": pending_tool_call_id,
+                "name": "mcp__expiry_fixture__expire",
+                "args": {},
+                "providerIdentity": {
+                    "providerToolIndex": 0,
+                    "providerCallId": pending_tool_call_id,
+                    "runtimeCallId": pending_tool_call_id
+                }
+            }],
+            "isError": false,
+            "sources": [],
+            "scope": "conversation",
+            "retention": "durable"
+        }],
         "nextModelRequestIndex": 1,
         "queuedToolCalls": [],
+        "deferredExternalToolCallCount": 0,
         "suppressedNarration": false,
         "extensionSnapshots": [],
         "toolSet": crate::test_tool_set_checkpoint(),
@@ -157,14 +180,51 @@ fn resume_checkpoint(run_id: &str, action_id: &str) -> AgentRunCheckpoint {
         "assistantTurnIdentity": crate::test_assistant_turn_identity(&[
             pending_tool_call_id.as_str()
         ]),
+        "providerContinuationRefs": [],
         "runWorldState": crate::test_run_world_state(),
         "pendingActionId": action_id,
         "pendingToolCallId": pending_tool_call_id,
         "conversationTraceItems": [],
+        "conversationModelContextItems": [],
         "nextConversationTraceSequence": 0,
         "conversationTraceTruncated": false
     }))
-    .unwrap()
+    .unwrap();
+    let AgentProposedAction::McpToolCall { approval } = action else {
+        unreachable!("expiry fixture is always an MCP approval")
+    };
+    let provider_identity = AgentProviderToolCallIdentity {
+        provider_tool_index: 0,
+        provider_call_id: approval.call.id.clone(),
+        runtime_call_id: approval.call.id.clone(),
+    };
+    checkpoint.conversation_trace_items = vec![ConversationTurnTraceItem::ToolCall {
+        sequence: 0,
+        call_id: approval.call.id.clone(),
+        tool: approval.call.tool.clone(),
+        operation: approval.call.args.clone(),
+        provenance: AgentToolIdentity::Mcp {
+            provenance: approval.identity.provenance.clone(),
+        },
+        approval_status: approval.call.approval_status,
+        truncated: false,
+    }];
+    checkpoint.conversation_model_context_items = vec![ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![AgentContextCheckpointToolCall {
+            id: approval.call.id.clone(),
+            name: approval.call.tool.clone(),
+            args: approval.call.args.clone(),
+            provider_identity,
+        }],
+        is_error: false,
+    }];
+    checkpoint.next_conversation_trace_sequence = 1;
+    checkpoint
 }
 
 fn store_action(
@@ -182,16 +242,105 @@ fn store_action(
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "fixed-expiry-test-token",
         "model": "expiry-test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
-    input.resume_checkpoint = Some(resume_checkpoint(run_id, &action_id));
+    input.resume_checkpoint = Some(resume_checkpoint(run_id, &action_id, &action));
     save_test_pending_provider_for_input(storage, &mut input);
+    let conversation_id = format!("conversation-{run_id}");
+    let assistant_message_id = format!("assistant-{run_id}");
+    let AgentProposedAction::McpToolCall { approval } = &action else {
+        unreachable!("expiry fixture is always an MCP approval")
+    };
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.clone(),
+            project_id: None,
+            model_id: Some("expiry-test-model".to_string()),
+            title: "MCP approval expiry".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.clone(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some(
+                    json!({
+                        "runId": run_id,
+                        "status": "waiting_for_approval",
+                        "startedAt": created_at,
+                        "toolDefinitions": [],
+                        "toolCalls": [],
+                        "toolResults": [],
+                        "approvals": [],
+                        "diffs": [],
+                        "fileDrafts": [],
+                        "webSearchActivities": [],
+                        "readActivities": [],
+                        "mcpInvocations": [{
+                            "actionId": approval.identity.action_id,
+                            "invocationId": approval.identity.invocation_id,
+                            "callId": approval.identity.call_id,
+                            "serverId": approval.identity.provenance.server_id,
+                            "serverDisplayName": approval.summary.server_display_name,
+                            "scope": approval.identity.provenance.scope,
+                            "rawToolName": approval.identity.provenance.raw_tool_name,
+                            "modelToolName": approval.identity.provenance.model_tool_name,
+                            "external": true,
+                            "state": "pending_approval",
+                            "dispatchCertainty": "definitely_not_dispatched",
+                            "outputTruncated": false
+                        }],
+                        "timeline": [{
+                            "id": format!("mcp-invocation-{}", approval.identity.invocation_id),
+                            "type": "mcp_tool_call",
+                            "invocationId": approval.identity.invocation_id
+                        }],
+                        "messageStreamCheckpoints": {},
+                        "state": {
+                            "status": "waiting_for_approval",
+                            "activeRunId": run_id,
+                            "lastError": null,
+                            "updatedAt": created_at
+                        }
+                    })
+                    .to_string(),
+                ),
+                ui_state_json: None,
+            }],
+            created_at,
+            updated_at: created_at,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let checkpoint = input.resume_checkpoint.as_ref().unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.clone(),
+        assistant_message_id: assistant_message_id.clone(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: checkpoint.conversation_trace_items.clone(),
+    };
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &checkpoint.conversation_model_context_items,
+            created_at,
+            created_at,
+        )
+        .unwrap();
     service
         .store_pending_action(
             run_id,
-            &format!("conversation-{run_id}"),
-            &format!("assistant-{run_id}"),
+            &conversation_id,
+            &assistant_message_id,
             action,
             input,
         )
@@ -230,7 +379,8 @@ fn store_action(
 fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_payloads() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let now = Arc::new(AtomicI64::new(2_000_000));
+    let cutoff = now_ms().saturating_add(120_000);
+    let now = Arc::new(AtomicI64::new(cutoff));
     let invoker = Arc::new(ExpiryInvoker::default());
     let service = AgentService::new(Arc::clone(&storage))
         .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>)
@@ -244,36 +394,36 @@ fn expiry_tick_terminalizes_only_expired_predispatch_actions_and_invalidates_pay
         &storage,
         "run-expired-pending",
         PendingActionStatus::Pending,
-        1_939_999,
-        1_999_999,
+        cutoff - 60_001,
+        cutoff - 1,
     );
     let (approved_id, approved_invocation) = store_action(
         &service,
         &storage,
         "run-expired-approved",
         PendingActionStatus::Approved,
-        1_940_000,
-        2_000_000,
+        cutoff - 60_000,
+        cutoff,
     );
     let (executing_id, executing_invocation) = store_action(
         &service,
         &storage,
         "run-expired-executing",
         PendingActionStatus::Executing,
-        1_939_999,
-        1_999_999,
+        cutoff - 60_001,
+        cutoff - 1,
     );
     let (future_id, future_invocation) = store_action(
         &service,
         &storage,
         "run-future-pending",
         PendingActionStatus::Pending,
-        1_940_001,
-        2_000_001,
+        cutoff - 59_999,
+        cutoff + 1,
     );
 
     let summary = service.reconcile_expired_mcp_approvals().unwrap();
-    assert_eq!(summary.cutoff_ms, 2_000_000);
+    assert_eq!(summary.cutoff_ms, cutoff);
     assert_eq!(summary.candidates, 2);
     assert_eq!(summary.terminalized, 2);
     assert_eq!(summary.status_cas_conflicts, 0);

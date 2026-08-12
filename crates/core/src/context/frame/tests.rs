@@ -418,22 +418,6 @@ fn checkpoint_round_trip_preserves_skill_snapshot_source_and_origin() {
 }
 
 #[test]
-fn checkpoint_still_decodes_the_retired_continuity_source() {
-    let frame = ContextFrame::new(vec![ContextItem::text(
-        LlmMessageRole::User,
-        "legacy continuity payload",
-        ContextSource::LegacyContinuityIndex,
-        ContextScope::Conversation,
-        ContextRetention::Retained,
-    )]);
-
-    let checkpoint = frame.checkpoint_items().unwrap();
-    assert_eq!(checkpoint[0].sources, vec!["continuity_index"]);
-    let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
-    assert_eq!(restored.to_messages(), frame.to_messages());
-}
-
-#[test]
 fn checkpoint_rejects_request_only_context() {
     let frame = ContextFrame::new(vec![ContextItem::text(
         LlmMessageRole::User,

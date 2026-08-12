@@ -1,5 +1,48 @@
 use super::*;
 
+fn pending_checkpoint_context_item(
+    call: &AgentToolCall,
+) -> mycopilot_core::AgentContextCheckpointItem {
+    mycopilot_core::AgentContextCheckpointItem {
+        role: "assistant".to_string(),
+        content: String::new(),
+        images: Vec::new(),
+        tool_call_id: None,
+        tool_calls: vec![pending_checkpoint_tool_call(call)],
+        is_error: false,
+        sources: vec!["model_response".to_string()],
+        scope: "run".to_string(),
+        retention: "retained".to_string(),
+        group: None,
+        origin: None,
+    }
+}
+
+fn pending_checkpoint_tool_call(call: &AgentToolCall) -> AgentContextCheckpointToolCall {
+    AgentContextCheckpointToolCall {
+        id: call.id.clone(),
+        name: call.tool.clone(),
+        args: call.args.clone(),
+        provider_identity: AgentProviderToolCallIdentity {
+            provider_tool_index: 0,
+            provider_call_id: call.id.clone(),
+            runtime_call_id: call.id.clone(),
+        },
+    }
+}
+
+fn pending_model_context_item(call: &AgentToolCall) -> ConversationModelContextItem {
+    ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![pending_checkpoint_tool_call(call)],
+        is_error: false,
+    }
+}
+
 #[test]
 fn user_run_cancellation_leaves_the_explicit_goal_active() {
     let fixture = tempdir().unwrap();
@@ -143,6 +186,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -150,7 +194,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel".to_string(),
         pending_action_id: None,
-        context_items: Vec::new(),
+        context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
         deferred_external_tool_call_count: 0,
@@ -165,13 +209,15 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items: vec![pending_model_context_item(&call)],
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             operation: json!({ "path": "safe.txt" }),
-            provenance: None,
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
             approval_status: AgentApprovalStatus::Required,
             truncated: false,
         }],
@@ -290,14 +336,50 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "pending-command".to_string(),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items: vec![
+            ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: "write-forced".to_string(),
+                    name: "write_file".to_string(),
+                    args: json!({ "filePath": "created.txt", "mode": "create" }),
+                    provider_identity: AgentProviderToolCallIdentity {
+                        provider_tool_index: 0,
+                        provider_call_id: "write-forced".to_string(),
+                        runtime_call_id: "write-forced".to_string(),
+                    },
+                }],
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 1,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: json!({
+                    "filePath": "created.txt",
+                    "status": "applied",
+                    "additions": 3,
+                    "deletions": 0
+                })
+                .to_string(),
+                tool_call_id: Some("write-forced".to_string()),
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        ],
         conversation_trace_items: vec![
             ConversationTurnTraceItem::ToolCall {
                 sequence: 0,
                 call_id: "write-forced".to_string(),
                 tool: "write_file".to_string(),
                 operation: json!({ "filePath": "created.txt", "mode": "create" }),
-                provenance: None,
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "write_file".to_string(),
+                },
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,
             },
@@ -342,6 +424,136 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
 }
 
 #[test]
+fn failed_forced_cancellation_projection_is_retired_by_current_startup_reconciliation() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-forced-recovery".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Forced cancellation recovery".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-forced-recovery".to_string(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let durable_trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-forced-recovery".to_string(),
+        conversation_id: "conversation-forced-recovery".to_string(),
+        assistant_message_id: "assistant-forced-recovery".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: "A durable partial response.".to_string(),
+            truncated: false,
+        }],
+    };
+    let durable_model_context = vec![ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: "A durable partial response.".to_string(),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        is_error: false,
+    }];
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &durable_trace,
+            &durable_model_context,
+            1,
+            1,
+        )
+        .unwrap();
+
+    let service = AgentService::new(storage.clone());
+    service.register_usage_context(
+        "run-forced-recovery",
+        AgentRunUsageContext {
+            conversation_id: "conversation-forced-recovery".to_string(),
+            assistant_message_id: "assistant-forced-recovery".to_string(),
+            run_id: "run-forced-recovery".to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    service.trace_snapshots.lock().unwrap().insert(
+        "run-forced-recovery".to_string(),
+        ConversationTraceSnapshot {
+            items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: "corrupt-call".to_string(),
+                tool: "write_file".to_string(),
+                provenance: AgentToolIdentity::Builtin {
+                    tool_name: "write_file".to_string(),
+                },
+                operation: json!({ "filePath": "private.txt" }),
+                approval_status: AgentApprovalStatus::Approved,
+                truncated: false,
+            }],
+            model_context_items: Vec::new(),
+            next_sequence: 1,
+            truncated: false,
+        },
+    );
+
+    service.persist_forced_cancelled_runs(&["run-forced-recovery".to_string()]);
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace("assistant-forced-recovery")
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed,
+        "startup must retire the orphaned durable trace before later in-memory cancellation cleanup"
+    );
+
+    assert_eq!(
+        storage
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), 100)
+            .unwrap(),
+        0
+    );
+    let recovered = storage
+        .get_conversation_turn_trace("assistant-forced-recovery")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recovered.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    let model_context = storage
+        .get_conversation_model_context_log("assistant-forced-recovery")
+        .unwrap()
+        .unwrap();
+    recovered
+        .validate_complete_model_context(&model_context.items)
+        .unwrap();
+}
+
+#[test]
 fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -381,7 +593,9 @@ fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
             call_id: "unresolved".to_string(),
             tool: "read_file".to_string(),
             operation: json!({ "path": "file.txt" }),
-            provenance: None,
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: "read_file".to_string(),
+            },
             approval_status: AgentApprovalStatus::NotRequired,
             truncated: false,
         }],
@@ -447,15 +661,14 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         reason: Some("verify approval cancellation race".to_string()),
         observe: None,
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: None,
     };
-    let call = command_tool_call(&command);
+    let call = checkpoint_call_for_command(&command);
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-before-spawn".to_string(),
         pending_action_id: None,
-        context_items: Vec::new(),
+        context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
         deferred_external_tool_call_count: 0,
@@ -470,13 +683,15 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items: vec![pending_model_context_item(&call)],
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             operation: call.args.clone(),
-            provenance: None,
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
             approval_status: AgentApprovalStatus::Required,
             truncated: false,
         }],
@@ -487,6 +702,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         "apiUrl": "https://must-not-be-called.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -601,7 +817,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
-        context_items: Vec::new(),
+        context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
         deferred_external_tool_call_count: 0,
@@ -616,13 +832,15 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items: vec![pending_model_context_item(&call)],
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             operation: call.args.clone(),
-            provenance: None,
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
             approval_status: AgentApprovalStatus::Required,
             truncated: false,
         }],
@@ -633,6 +851,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         "apiUrl": "https://must-not-be-called.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();
@@ -791,15 +1010,14 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         reason: Some("exercise cancellation".to_string()),
         observe: None,
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: None,
     };
-    let call = command_tool_call(&command);
+    let call = checkpoint_call_for_command(&command);
     let checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-command-cancel".to_string(),
         pending_action_id: None,
-        context_items: Vec::new(),
+        context_items: vec![pending_checkpoint_context_item(&call)],
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
         deferred_external_tool_call_count: 0,
@@ -814,13 +1032,15 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         provider_continuation_refs: Vec::new(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items: vec![pending_model_context_item(&call)],
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
             tool: call.tool.clone(),
             operation: call.args.clone(),
-            provenance: None,
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: call.tool.clone(),
+            },
             approval_status: AgentApprovalStatus::Required,
             truncated: false,
         }],
@@ -831,6 +1051,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         "apiUrl": "https://should-not-be-called.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();

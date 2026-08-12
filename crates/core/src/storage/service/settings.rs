@@ -6,11 +6,10 @@ pub(super) fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<
     validate_model_settings_fields(settings)?;
     for model in &settings.models {
         let model_id = model.id.trim();
-        if let Some(config) = &model.provider_profile_config {
-            config
-                .validate()
-                .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
-        }
+        model
+            .provider_profile_config
+            .validate()
+            .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
     }
     Ok(())
 }
@@ -154,11 +153,8 @@ impl StorageService {
         config_repository::load_model_settings_snapshot(&mut connection).map_err(storage_error)
     }
 
-    pub fn save_model_settings(&self, mut settings: ModelSettingsRecord) -> Result<(), String> {
+    pub fn save_model_settings(&self, settings: ModelSettingsRecord) -> Result<(), String> {
         let mut connection = self.state.connection()?;
-        let existing =
-            config_repository::load_model_settings(&mut connection).map_err(storage_error)?;
-        preserve_existing_provider_profiles(&mut settings, existing.as_ref());
         validate_model_settings(&settings)?;
         config_repository::save_model_settings(&mut connection, settings).map_err(storage_error)
     }
@@ -180,8 +176,6 @@ impl StorageService {
             tavily_api_key,
             models: requested_models,
         } = request;
-        let mut updates = Vec::with_capacity(requested_models.len());
-        let mut preserved_profiles = Vec::with_capacity(requested_models.len());
         let mut models = Vec::with_capacity(requested_models.len());
         let mut matched_existing_ids = HashSet::new();
 
@@ -207,14 +201,51 @@ impl StorageService {
             {
                 return Err(format!("原模型 ID 被重复引用：{source_model_id}"));
             }
-            validate_legacy_profile_echo(&requested, existing_model)?;
-            let preserved = existing_model.and_then(|model| model.provider_profile_config.clone());
-            updates.push(requested.provider_profile_update.clone());
-            preserved_profiles.push(preserved.clone());
-            models.push(requested.into_record(preserved));
+            let preserved = existing_model.map(|model| model.provider_profile_config.clone());
+            let effective_api_url = requested
+                .api_url_override
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&api_url);
+            let dialect = crate::ProviderProtocolDialect::detect_from_api_url(effective_api_url);
+            let profile = match &requested.provider_profile_update {
+                ProviderProfileUpdate::Unchanged => {
+                    let profile = preserved.as_ref().ok_or_else(|| {
+                        format!(
+                            "模型 {} 尚无可保留的 Provider Profile，请显式选择通用兼容或已注册 Profile。",
+                            requested.id
+                        )
+                    })?;
+                    let preview = requested.clone().into_record(profile.clone());
+                    validate_unchanged_profile(&preview, preserved.as_ref(), dialect)?;
+                    profile.clone()
+                }
+                ProviderProfileUpdate::SelectGeneric => {
+                    crate::ProviderProfileConfig::generic_for_dialect(dialect)
+                }
+                ProviderProfileUpdate::SelectRegisteredProfile {
+                    profile_id,
+                    settings: public_settings,
+                } => {
+                    let registration =
+                        crate::resolve_ui_selectable_provider_registration(*profile_id, dialect)
+                            .map_err(|error| {
+                                format!(
+                                    "模型 {} 的 Provider Profile 选择无效：{error}",
+                                    requested.id
+                                )
+                            })?;
+                    registration
+                        .config_from_public_settings(*public_settings)
+                        .map_err(|error| {
+                            format!("模型 {} 的 Provider 设置无效：{error}", requested.id)
+                        })?
+                }
+            };
+            models.push(requested.into_record(profile));
         }
 
-        let mut settings = ModelSettingsRecord {
+        let settings = ModelSettingsRecord {
             api_url,
             api_token,
             search_mode,
@@ -222,46 +253,6 @@ impl StorageService {
             models,
         };
         validate_model_settings_fields(&settings)?;
-
-        for (index, update) in updates.into_iter().enumerate() {
-            let dialect = provider_dialect_for_model(&settings, &settings.models[index]);
-            match update.unwrap_or(ProviderProfileUpdate::Unchanged) {
-                ProviderProfileUpdate::Unchanged => {
-                    validate_unchanged_profile(
-                        &settings.models[index],
-                        preserved_profiles[index].as_ref(),
-                        dialect,
-                    )?;
-                }
-                ProviderProfileUpdate::SelectGeneric => {
-                    settings.models[index].provider_profile_config =
-                        Some(crate::ProviderProfileConfig::generic_for_dialect(dialect));
-                }
-                ProviderProfileUpdate::SelectRegisteredProfile {
-                    profile_id,
-                    settings: public_settings,
-                } => {
-                    let registration =
-                        crate::resolve_ui_selectable_provider_registration(profile_id, dialect)
-                            .map_err(|error| {
-                                format!(
-                                    "模型 {} 的 Provider Profile 选择无效：{error}",
-                                    settings.models[index].id
-                                )
-                            })?;
-                    settings.models[index].provider_profile_config = Some(
-                        registration
-                            .config_from_public_settings(public_settings)
-                            .map_err(|error| {
-                                format!(
-                                    "模型 {} 的 Provider 设置无效：{error}",
-                                    settings.models[index].id
-                                )
-                            })?,
-                    );
-                }
-            }
-        }
 
         config_repository::save_model_settings(&mut connection, settings).map_err(storage_error)?;
         config_repository::load_model_settings(&mut connection)
@@ -287,19 +278,23 @@ impl StorageService {
     pub fn load_composer_drafts(&self) -> Result<Vec<ComposerDraftRecord>, String> {
         let connection = self.state.connection()?;
         composer_draft_repository::list_composer_drafts(&connection)
-            .map(|drafts| {
+            .map_err(storage_error)
+            .and_then(|drafts| {
                 drafts
                     .into_iter()
-                    .map(ComposerDraftRecord::normalize_permission_mode)
+                    .map(|draft| {
+                        draft.validate_current_payloads()?;
+                        Ok(draft.normalize_permission_mode())
+                    })
                     .collect()
             })
-            .map_err(storage_error)
     }
 
     pub fn save_composer_draft(
         &self,
         draft: ComposerDraftRecord,
     ) -> Result<ComposerDraftRecord, String> {
+        draft.validate_current_payloads()?;
         let draft = draft.normalize_permission_mode();
         let connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, draft.project_id.as_deref())?;
@@ -465,81 +460,12 @@ impl StorageService {
     }
 }
 
-/// Older Renderer builds do not know the provider profile field. Treat omission as "not
-/// supplied" and retain a matching model's explicit profile instead of resetting it to Generic.
-/// A new client can select Generic explicitly by sending the corresponding versioned config.
-fn preserve_existing_provider_profiles(
-    incoming: &mut ModelSettingsRecord,
-    existing: Option<&ModelSettingsRecord>,
-) {
-    let Some(existing) = existing else {
-        return;
-    };
-    for model in &mut incoming.models {
-        if model.provider_profile_config.is_some() {
-            continue;
-        }
-        model.provider_profile_config = existing
-            .models
-            .iter()
-            .find(|candidate| candidate.id == model.id)
-            .and_then(|candidate| candidate.provider_profile_config.clone());
-    }
-}
-
-fn provider_dialect_for_model(
-    settings: &ModelSettingsRecord,
-    model: &ModelConfigRecord,
-) -> crate::ProviderProtocolDialect {
-    let api_url = model
-        .api_url_override
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(&settings.api_url);
-    crate::ProviderProtocolDialect::detect_from_api_url(api_url)
-}
-
-fn validate_legacy_profile_echo(
-    requested: &crate::storage::models::ModelConfigSaveRequest,
-    existing: Option<&ModelConfigRecord>,
-) -> Result<(), String> {
-    let Some(echoed) = requested.provider_profile_config.as_ref() else {
-        return Ok(());
-    };
-    if !matches!(
-        requested.provider_profile_update,
-        None | Some(ProviderProfileUpdate::Unchanged)
-    ) {
-        return Err(format!(
-            "模型 {} 同时提交了旧版 Provider 配置和显式 Profile 更新。",
-            requested.id
-        ));
-    }
-    let Some(existing) = existing.and_then(|model| model.provider_profile_config.as_ref()) else {
-        return Err(format!(
-            "模型 {} 不能通过旧版字段创建 Provider Profile。",
-            requested.id
-        ));
-    };
-    let authoritative = serde_json::to_value(existing)
-        .map_err(|_| "Provider Profile 无法安全比较。".to_string())?;
-    if &authoritative != echoed {
-        return Err(format!(
-            "模型 {} 的旧版 Provider Profile 与 Host 权威配置不一致。",
-            requested.id
-        ));
-    }
-    Ok(())
-}
-
 fn validate_unchanged_profile(
     model: &ModelConfigRecord,
     existing_config: Option<&crate::ProviderProfileConfig>,
     dialect: crate::ProviderProtocolDialect,
 ) -> Result<(), String> {
-    let Some(config) = model.provider_profile_config.as_ref() else {
-        return Ok(());
-    };
+    let config = &model.provider_profile_config;
     let exactly_preserved = existing_config == Some(config);
 
     match config.validate() {

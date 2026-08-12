@@ -660,7 +660,8 @@ function storedConversationWithCommandRun(): ChatConversation {
       id: 'command-call',
       tool: 'run_command',
       args: { command: 'python3 snake_game/main.py' },
-      approvalStatus: 'approved'
+      approvalStatus: 'approved',
+      reason: null
     }
   ]
   assistant.agentRun.timeline = [
@@ -1226,7 +1227,8 @@ describe('managed command Session lifecycle routing', () => {
         id: 'command-call',
         tool: 'run_command',
         args: { command: 'python3 snake_game/main.py' },
-        approvalStatus: 'approved'
+        approvalStatus: 'approved',
+        reason: null
       }
     })
     emitAgentEvent({
@@ -1330,7 +1332,8 @@ describe('managed command Session lifecycle routing', () => {
     assistant.agentRun.toolCalls = [
       {
         ...assistant.agentRun.toolCalls[0],
-        approvalStatus: 'required'
+        approvalStatus: 'required',
+        reason: null
       }
     ]
     assistant.agentRun.approvals = [
@@ -1339,7 +1342,12 @@ describe('managed command Session lifecycle routing', () => {
         command: {
           id: 'command-call',
           command: 'python3 snake_game/main.py',
-          approvalStatus: 'required'
+          cwd: null,
+          timeoutMs: null,
+          approvalStatus: 'required',
+          riskLevel: null,
+          reason: null,
+          observe: null
         }
       }
     ]
@@ -1370,7 +1378,12 @@ describe('managed command Session lifecycle routing', () => {
           command: {
             id: 'command-call',
             command: 'python3 snake_game/main.py',
-            approvalStatus: 'required'
+            cwd: null,
+            timeoutMs: null,
+            approvalStatus: 'required',
+            riskLevel: null,
+            reason: null,
+            observe: null
           }
         },
         createdAt: 5,
@@ -2160,7 +2173,8 @@ describe('authoritative run cancellation and conversation forking', () => {
         id: 'command-call',
         tool: 'run_command',
         args: { command: 'python3 snake_game/main.py' },
-        approvalStatus: 'approved'
+        approvalStatus: 'approved',
+        reason: null
       }
     })
     emitAgentEvent({

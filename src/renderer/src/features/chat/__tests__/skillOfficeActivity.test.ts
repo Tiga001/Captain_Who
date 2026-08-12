@@ -28,6 +28,7 @@ function toolCall(
   return {
     args: {},
     approvalStatus: 'not_required',
+    reason: null,
     ...overrides
   }
 }

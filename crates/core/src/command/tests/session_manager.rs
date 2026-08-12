@@ -1,5 +1,6 @@
 use super::*;
 use crate::command::session::CommandSessionCompletionHook;
+use crate::AgentCommandOutputStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier};
 

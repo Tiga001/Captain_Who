@@ -702,8 +702,9 @@ pub(crate) fn promote_staged(
 /// A staged row becomes replayable once its exact owner trace contains any bound Runtime ToolCall.
 /// The full Provider Assistant Turn has crossed into visible history at that point even when a
 /// multi-call batch crashed before publishing later calls. Exact provider-turn hydration will
-/// independently reject an incomplete projection, while legacy projections must still observe
-/// the provider boundary. Staged rows with no matching durable call remain invisible orphans.
+/// independently reject an incomplete projection, while provider-neutral split projections must
+/// still observe the provider boundary. Staged rows with no matching durable call remain invisible
+/// orphans.
 fn promote_recoverable_staged_for_conversation(
     connection: &Connection,
     conversation_id: &str,

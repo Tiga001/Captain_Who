@@ -76,6 +76,20 @@ fn conversation(id: &str, project_id: Option<&str>, message_id: &str) -> ChatCon
     }
 }
 
+fn assistant_reply_fork_request(
+    request_id: impl Into<String>,
+    source_conversation_id: impl Into<String>,
+    assistant_message_id: impl Into<String>,
+) -> ForkConversationRequest {
+    ForkConversationRequest {
+        request_id: request_id.into(),
+        source_conversation_id: source_conversation_id.into(),
+        fork_point: ConversationForkPoint::AssistantReply {
+            assistant_message_id: assistant_message_id.into(),
+        },
+    }
+}
+
 fn input_attachment(
     id: &str,
     kind: AgentInputAttachmentKind,
@@ -99,8 +113,8 @@ fn composer_draft(scope_id: &str, project_id: Option<&str>, message: &str) -> Co
     ComposerDraftRecord {
         scope_id: scope_id.to_string(),
         message: message.to_string(),
-        permission_mode: "workspace".to_string(),
-        permission_mode_version: 0,
+        permission_mode: "default".to_string(),
+        permission_mode_version: crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION,
         model_id: Some("model-1".to_string()),
         project_id: project_id.map(ToString::to_string),
         attachments_json: "[]".to_string(),

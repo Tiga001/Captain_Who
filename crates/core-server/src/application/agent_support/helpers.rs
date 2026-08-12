@@ -42,7 +42,6 @@ pub(super) fn redact_renderer_mcp_binding_fields(value: &mut Value) {
             if object.get("type").and_then(Value::as_str) == Some("command") {
                 if let Some(command) = object.get_mut("command").and_then(Value::as_object_mut) {
                     command.remove("inputs");
-                    command.remove("runtime");
                     command.remove("runtimeBinding");
                 }
             }

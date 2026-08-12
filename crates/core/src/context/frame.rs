@@ -8,7 +8,7 @@ use crate::llm::{LlmAssistantTurn, LlmMessage, LlmMessagePlacement, LlmMessageRo
 use crate::protocol::{
     AgentAssistantTurnCheckpointIdentity, AgentContextCheckpointGroup, AgentContextCheckpointImage,
     AgentContextCheckpointItem, AgentContextCheckpointOrigin, AgentContextCheckpointToolCall,
-    AgentError, AgentProviderToolCallIdentity, AgentResult,
+    AgentError, AgentResult,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -113,9 +113,6 @@ impl ContextRetention {
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
     ConversationSummary,
-    // Decode-only compatibility for approval checkpoints created before Continuity left the
-    // model context. New assembly and compaction code never constructs this source.
-    LegacyContinuityIndex,
     WorldStateSnapshot,
     WorldStateDiff,
     ConversationGoal,
@@ -141,7 +138,6 @@ impl ContextSource {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
             Self::ConversationSummary => "conversation_summary",
-            Self::LegacyContinuityIndex => "continuity_index",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
             Self::ConversationGoal => "conversation_goal",
@@ -167,7 +163,6 @@ impl ContextSource {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
             "conversation_summary" => Some(Self::ConversationSummary),
-            "continuity_index" => Some(Self::LegacyContinuityIndex),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
             "conversation_goal" => Some(Self::ConversationGoal),
@@ -436,7 +431,6 @@ impl ContextMetadata {
             return ContextCacheBand::StableContract;
         }
         if self.sources.contains(&ContextSource::ConversationSummary)
-            || self.sources.contains(&ContextSource::LegacyContinuityIndex)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
                 && matches!(self.scope, ContextScope::Conversation)
             || self.sources.contains(&ContextSource::ConversationGoal)
@@ -454,7 +448,6 @@ impl ContextMetadata {
             return LlmMessagePlacement::StableSystemPolicy;
         }
         if self.sources.contains(&ContextSource::ConversationSummary)
-            || self.sources.contains(&ContextSource::LegacyContinuityIndex)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
             || self.sources.contains(&ContextSource::ConversationGoal)

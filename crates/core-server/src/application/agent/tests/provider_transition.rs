@@ -36,6 +36,75 @@ fn conversation_with_completed_history(id: &str, model_id: Option<&str>) -> Chat
     }
 }
 
+fn completed_history_model_context() -> Vec<ConversationModelContextItem> {
+    let call_id = history_call_id();
+    vec![
+        ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: "I am creating the requested file.".to_string(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: call_id.clone(),
+                name: "write_file".to_string(),
+                args: json!({
+                    "filePath": "src/history.rs",
+                    "mode": "create",
+                    "content": "provider transition fixture"
+                }),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: "write-history".to_string(),
+                    runtime_call_id: call_id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            sequence: 2,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: r#"{"ok":true,"result":{"status":"applied"}}"#.to_string(),
+            tool_call_id: Some(call_id),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ]
+}
+
+fn persist_completed_history(
+    storage: &StorageService,
+    conversation_id: &str,
+    assistant_message_id: &str,
+) {
+    let trace = completed_trace(conversation_id, assistant_message_id);
+    let model_context = completed_history_model_context();
+    storage
+        .finalize_chat_message_with_conversation_trace_model_context_and_usage(
+            conversation_id,
+            assistant_message_id,
+            "已完成",
+            Some("sent"),
+            "completed",
+            &trace,
+            Some(&model_context),
+            2,
+            3,
+            None,
+        )
+        .unwrap();
+}
+
 fn two_model_settings(
     target_profile: Option<mycopilot_core::ProviderProfileConfig>,
 ) -> ModelSettingsRecord {
@@ -43,7 +112,11 @@ fn two_model_settings(
     let mut target = settings.models[0].clone();
     target.id = "model-2".to_string();
     target.display_name = "Model 2".to_string();
-    target.provider_profile_config = target_profile;
+    target.provider_profile_config = target_profile.unwrap_or_else(|| {
+        mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        )
+    });
     settings.models.push(target);
     settings
 }
@@ -156,7 +229,7 @@ async fn wait_for_provider_transition_completed(
 }
 
 #[test]
-fn legacy_conversation_preflight_and_compatible_start_are_authoritative_and_idempotent() {
+fn conversation_history_without_a_frozen_source_model_fails_closed() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
@@ -176,37 +249,13 @@ fn legacy_conversation_preflight_and_compatible_start_are_authoritative_and_idem
             target_model_id: "model-2".to_string(),
         })
         .unwrap();
+    assert_eq!(preflight.decision, AgentProviderTransitionDecision::Blocked);
     assert_eq!(
-        preflight.decision,
-        AgentProviderTransitionDecision::Compatible
+        preflight.reason,
+        AgentProviderTransitionReason::UnsupportedTarget
     );
-    assert!(
-        serde_json::to_value(&preflight)
-            .unwrap()
-            .get("currentModelId")
-            .is_none(),
-        "legacy source identity stays inside the authenticated token, not the wire DTO"
-    );
-    let preflight_operation_id = preflight.operation_id.clone().unwrap();
-    let token = preflight.transition_token.unwrap();
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let input = AgentProviderTransitionStartInput {
-        conversation_id: "conversation-provider-transition-compatible".to_string(),
-        target_model_id: "model-2".to_string(),
-        transition_token: token,
-    };
-    let first = service
-        .start_provider_transition(input.clone(), notifications.clone())
-        .unwrap();
-    let duplicate = service
-        .start_provider_transition(input.clone(), notifications)
-        .unwrap();
-    assert_eq!(first, duplicate);
-    assert_eq!(first.operation_id, preflight_operation_id);
-    assert_eq!(
-        first.status,
-        AgentProviderTransitionOperationStatus::Completed
-    );
+    assert!(preflight.operation_id.is_none());
+    assert!(preflight.transition_token.is_none());
     assert_eq!(
         storage
             .load_conversation("conversation-provider-transition-compatible")
@@ -214,25 +263,8 @@ fn legacy_conversation_preflight_and_compatible_start_are_authoritative_and_idem
             .unwrap()
             .model_id
             .as_deref(),
-        Some("model-2")
+        None
     );
-
-    // The database commit may succeed before the first RPC reply reaches Renderer. A rebuilt
-    // AgentService must resolve the same Host-signed operation without rerunning preflight/CAS.
-    drop(service);
-    let restarted = AgentService::new(storage.clone());
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let recovered = restarted
-        .start_provider_transition(input, notifications)
-        .unwrap();
-    assert_eq!(recovered, first);
-    let exact_status = restarted
-        .get_provider_transition_status(AgentProviderTransitionGetStatusInput {
-            conversation_id: "conversation-provider-transition-compatible".to_string(),
-            operation_id: Some(preflight_operation_id),
-        })
-        .unwrap();
-    assert_eq!(exact_status.operations, vec![first]);
 }
 
 #[test]
@@ -248,13 +280,7 @@ fn incompatible_send_guard_rejects_before_persisting_the_new_turn() {
     let conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
     let assistant_message_id = conversation.messages[1].id.clone();
     storage.save_conversation(conversation).unwrap();
-    storage
-        .replace_conversation_turn_trace(
-            &completed_trace(conversation_id, &assistant_message_id),
-            2,
-            3,
-        )
-        .unwrap();
+    persist_completed_history(&storage, conversation_id, &assistant_message_id);
     let service = AgentService::new(storage.clone());
     let preflight = service
         .preflight_provider_transition(AgentProviderTransitionPreflightInput {
@@ -328,13 +354,7 @@ async fn confirmed_incompatible_transition_compacts_and_opens_a_sendable_target_
     let conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
     let assistant_message_id = conversation.messages[1].id.clone();
     storage.save_conversation(conversation).unwrap();
-    storage
-        .replace_conversation_turn_trace(
-            &completed_trace(conversation_id, &assistant_message_id),
-            2,
-            3,
-        )
-        .unwrap();
+    persist_completed_history(&storage, conversation_id, &assistant_message_id);
     let original_messages = serde_json::to_value(
         storage
             .load_conversation(conversation_id)
@@ -451,12 +471,19 @@ async fn fork_adaptation_marker_forces_compaction_in_both_profile_directions_and
         let mut settings = two_model_settings(
             target_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_v4_default),
         );
-        settings.models[0].provider_profile_config =
-            source_is_deepseek.then(mycopilot_core::ProviderProfileConfig::deepseek_v4_default);
+        settings.models[0].provider_profile_config = if source_is_deepseek {
+            mycopilot_core::ProviderProfileConfig::deepseek_v4_default()
+        } else {
+            mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+                mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+            )
+        };
         storage.save_model_settings(settings).unwrap();
         let conversation_id = format!("conversation-fork-adaptation-{suffix}");
         let conversation = conversation_with_completed_history(&conversation_id, Some("model-1"));
+        let assistant_message_id = conversation.messages[1].id.clone();
         storage.save_conversation(conversation).unwrap();
+        persist_completed_history(&storage, &conversation_id, &assistant_message_id);
         let connection = rusqlite::Connection::open(&database_path).unwrap();
         connection
             .execute(
@@ -524,24 +551,18 @@ async fn deepseek_to_generic_transition_releases_private_state_and_opens_a_gener
     let storage = Arc::new(StorageService::open(&database_path).unwrap());
     let mut settings = two_model_settings(None);
     settings.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     storage.save_model_settings(settings).unwrap();
     let conversation_id = "conversation-deepseek-to-generic-transition";
     let conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
     let assistant_message_id = conversation.messages[1].id.clone();
     storage.save_conversation(conversation).unwrap();
-    storage
-        .replace_conversation_turn_trace(
-            &completed_trace(conversation_id, &assistant_message_id),
-            2,
-            3,
-        )
-        .unwrap();
+    persist_completed_history(&storage, conversation_id, &assistant_message_id);
     let continuation_id = seed_replayable_provider_turn(
         &database_path,
         conversation_id,
         &assistant_message_id,
-        "write-history",
+        &history_call_id(),
     );
 
     let service = AgentService::new(storage.clone())
@@ -620,13 +641,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
     let conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
     let assistant_message_id = conversation.messages[1].id.clone();
     storage.save_conversation(conversation).unwrap();
-    storage
-        .replace_conversation_turn_trace(
-            &completed_trace(conversation_id, &assistant_message_id),
-            2,
-            3,
-        )
-        .unwrap();
+    persist_completed_history(&storage, conversation_id, &assistant_message_id);
 
     let before_revision = storage
         .load_model_settings_snapshot()
@@ -636,7 +651,7 @@ async fn same_model_protocol_revision_change_compacts_before_reusing_the_model_i
         .clone();
     let mut changed_settings = initial_settings;
     changed_settings.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     storage.save_model_settings(changed_settings).unwrap();
     let after_revision = storage
         .load_model_settings_snapshot()
@@ -701,13 +716,7 @@ async fn failed_transition_gets_a_new_retry_token_and_can_succeed() {
     let conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
     let assistant_message_id = conversation.messages[1].id.clone();
     storage.save_conversation(conversation).unwrap();
-    storage
-        .replace_conversation_turn_trace(
-            &completed_trace(conversation_id, &assistant_message_id),
-            2,
-            3,
-        )
-        .unwrap();
+    persist_completed_history(&storage, conversation_id, &assistant_message_id);
 
     let failing_generator: ContextCompactionSummaryGenerator = Arc::new(|_, _| {
         Box::pin(async { Err(AgentError::new("expected transition generation failure")) })

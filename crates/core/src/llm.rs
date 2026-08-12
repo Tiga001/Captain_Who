@@ -133,7 +133,10 @@ impl LlmMessage {
     pub(crate) fn text(role: LlmMessageRole, content: impl Into<String>) -> Self {
         let content = content.into();
         if role == LlmMessageRole::Assistant {
-            return Self::from_assistant_turn(LlmAssistantTurn::from_legacy(content, Vec::new()));
+            return Self::from_assistant_turn(LlmAssistantTurn::from_split_projection(
+                content,
+                Vec::new(),
+            ));
         }
         assert_ne!(
             role,
@@ -159,7 +162,7 @@ impl LlmMessage {
     }
 
     pub(crate) fn assistant(content: impl Into<String>, tool_calls: Vec<LlmToolCall>) -> Self {
-        Self::from_assistant_turn(LlmAssistantTurn::from_legacy(content, tool_calls))
+        Self::from_assistant_turn(LlmAssistantTurn::from_split_projection(content, tool_calls))
     }
 
     pub(crate) fn from_assistant_turn(turn: LlmAssistantTurn) -> Self {
@@ -662,7 +665,7 @@ impl LlmAssistantTurn {
         })
     }
 
-    pub(crate) fn from_legacy(
+    pub(crate) fn from_split_projection(
         visible_text: impl Into<String>,
         provider_tool_calls: Vec<LlmToolCall>,
     ) -> Self {
@@ -785,7 +788,7 @@ impl LlmAssistantTurn {
         self.reasoning = reasoning;
         if let Some(continuation) = &self.provider_continuation {
             let provider_protocol = self.provider_protocol.as_ref().ok_or_else(|| {
-                AgentError::new("Legacy assistant turn 不能携带 provider continuation。")
+                AgentError::new("Split-projection assistant turn 不能携带 provider continuation。")
             })?;
             continuation.validate_for(provider_protocol, self.digest())?;
         }
@@ -799,7 +802,7 @@ impl LlmAssistantTurn {
         continuation: ProviderContinuation,
     ) -> AgentResult<Self> {
         let provider_protocol = self.provider_protocol.as_ref().ok_or_else(|| {
-            AgentError::new("Legacy assistant turn 不能携带 provider continuation。")
+            AgentError::new("Split-projection assistant turn 不能携带 provider continuation。")
         })?;
         continuation.validate_for(provider_protocol, self.digest())?;
         self.provider_continuation = Some(continuation);
@@ -815,7 +818,7 @@ impl LlmAssistantTurn {
             .map_err(|error| AgentError::new(format!("Provider continuation ref 无效：{error}")))?;
         if self.provider_protocol.is_none() {
             return Err(AgentError::new(
-                "Legacy assistant turn 不能引用 provider continuation。",
+                "Split-projection assistant turn 不能引用 provider continuation。",
             ));
         }
         self.provider_continuation_ref = Some(continuation_ref);
@@ -839,6 +842,8 @@ impl LlmAssistantTurn {
                     .as_bytes(),
             );
         } else {
+            // Stable digest domain for the provider-neutral split projection. The byte label is
+            // protocol identity, not a compatibility branch, and must not change on a rename.
             hash_len_prefixed(&mut hasher, b"legacy");
         }
         hash_len_prefixed(&mut hasher, self.provider_visible_text.as_bytes());
@@ -1084,7 +1089,6 @@ pub(crate) enum LlmStreamEvent {
         provider_code: Option<String>,
         delay_ms: u64,
         retry_at: u64,
-        reason: String,
     },
     Committed,
 }
@@ -1115,9 +1119,9 @@ pub(crate) fn estimate_assistant_turn_continuation_tokens(
     let Some(continuation) = turn.provider_continuation() else {
         return Ok(0);
     };
-    let provider_protocol = turn
-        .provider_protocol()
-        .ok_or_else(|| AgentError::new("Legacy assistant turn 不能估算 provider continuation。"))?;
+    let provider_protocol = turn.provider_protocol().ok_or_else(|| {
+        AgentError::new("Split-projection assistant turn 不能估算 provider continuation。")
+    })?;
     ProviderAdapterRegistry::resolve_key(provider_protocol)?
         .estimate_continuation_tokens(Some(continuation))
 }

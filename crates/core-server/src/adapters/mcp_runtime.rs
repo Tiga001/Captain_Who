@@ -2076,14 +2076,27 @@ mod tests {
             }
         });
 
+        let provider_profile_config = mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        );
+        let provider_configuration_revision =
+            Some(format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()));
+        let provider_protocol_key = mycopilot_core::ProviderProtocolKey::new(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+            &provider_profile_config,
+            "owned-fixture-model",
+            provider_configuration_revision.clone(),
+        )
+        .unwrap();
+
         let input = AgentChatInput {
             api_url: format!("http://{address}/v1/chat/completions"),
             api_token: "owned-fixture-token".to_string(),
-            provider_configuration_revision: None,
+            provider_configuration_revision,
             provider_connection_revision: None,
             search_connection_revision: None,
-            provider_profile_config: None,
-            provider_protocol_key: None,
+            provider_profile_config: Some(provider_profile_config),
+            provider_protocol_key: Some(provider_protocol_key),
             model: "owned-fixture-model".to_string(),
             model_capabilities: ModelCapabilities::default(),
             api_style: Some(AgentApiStyle::OpenAiCompatible),

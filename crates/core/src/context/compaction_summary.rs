@@ -36,7 +36,7 @@ impl ContextCompactionGenerationKind {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionGeneration {
     pub kind: ContextCompactionGenerationKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,7 +81,8 @@ impl ContextCompactionGeneration {
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum ContextJournalCursor {
     /// Covers the complete message, including a terminal assistant record when present.
@@ -137,7 +138,8 @@ impl ContextJournalCursor {
 #[serde(
     tag = "type",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum ContextCompactionSourceItem {
     Message {
@@ -230,7 +232,7 @@ impl ContextCompactionSourceItem {
 
 /// Immutable summary version selected by a conversation's active compaction head.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionSummary {
     pub schema_version: u32,
     pub id: String,
@@ -249,7 +251,6 @@ pub struct ContextCompactionSummary {
     /// Backend-only Continuity Index cost, retained for diagnostics and hard-limit enforcement.
     /// It is not injected into the main model context or counted in `replacement_input_tokens`.
     pub continuity_input_tokens: u64,
-    #[serde(default)]
     pub uncovered_tail_input_tokens: u64,
     /// Complete model-visible replacement cost. Continuity is deliberately excluded.
     pub replacement_input_tokens: u64,
@@ -291,9 +292,7 @@ impl ContextCompactionSummary {
         {
             return Err(AgentError::new("上下文压缩替换内容的 token 计量无效。"));
         }
-        if self.continuity.is_v2()
-            && self.continuity_input_tokens > super::CONTEXT_CONTINUITY_HARD_MAX_TOKENS
-        {
+        if self.continuity_input_tokens > super::CONTEXT_CONTINUITY_HARD_MAX_TOKENS {
             return Err(AgentError::new("Continuity V2 超过 1,500 token 硬上限。"));
         }
         if self.created_at < 0 {
@@ -322,7 +321,7 @@ pub(crate) fn render_compaction_semantic_summary_for_context(content: &str) -> A
 
 /// Stable source snapshot passed to the summary generator and checked again at commit.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionPrefix {
     pub conversation_id: String,
     pub source_revision: String,
@@ -371,7 +370,7 @@ impl ContextCompactionPrefix {
 
 /// Validated generator output that can be committed against exactly one source snapshot.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextCompactionSummaryDraft {
     pub id: String,
     pub source_revision: String,
@@ -383,7 +382,6 @@ pub struct ContextCompactionSummaryDraft {
     pub summary_input_tokens: u64,
     /// Backend-only Continuity Index cost; excluded from `replacement_input_tokens`.
     pub continuity_input_tokens: u64,
-    #[serde(default)]
     pub uncovered_tail_input_tokens: u64,
     /// Complete model-visible replacement cost. Continuity is deliberately excluded.
     pub replacement_input_tokens: u64,
@@ -410,9 +408,7 @@ impl ContextCompactionSummaryDraft {
         {
             return Err(AgentError::new("上下文压缩草稿的 token 计量无效。"));
         }
-        if self.continuity.is_v2()
-            && self.continuity_input_tokens > super::CONTEXT_CONTINUITY_HARD_MAX_TOKENS
-        {
+        if self.continuity_input_tokens > super::CONTEXT_CONTINUITY_HARD_MAX_TOKENS {
             return Err(AgentError::new(
                 "Continuity V2 草稿超过 1,500 token 硬上限。",
             ));
@@ -486,7 +482,9 @@ mod tests {
                         sequence: 1,
                         call_id: "call-1".to_string(),
                         tool: "read_file".to_string(),
-                        provenance: None,
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "read_file".to_string(),
+                        },
                         operation: serde_json::json!({ "path": "README.md" }),
                         approval_status: crate::AgentApprovalStatus::NotRequired,
                         truncated: false,
@@ -512,7 +510,7 @@ mod tests {
             ],
         };
         let continuity = ContextContinuitySnapshot::from_prefix(&prefix).unwrap();
-        let summary = ContextCompactionSummaryDraft {
+        let draft = ContextCompactionSummaryDraft {
             id: "summary-1".to_string(),
             source_revision: prefix.source_revision.clone(),
             content: "The file was read successfully.".to_string(),
@@ -524,9 +522,18 @@ mod tests {
             uncovered_tail_input_tokens: 0,
             replacement_input_tokens: 50,
             created_at: 1,
-        }
-        .finish(&prefix)
-        .unwrap();
+        };
+        let mut incomplete_draft = serde_json::to_value(&draft).unwrap();
+        incomplete_draft
+            .as_object_mut()
+            .unwrap()
+            .remove("uncoveredTailInputTokens");
+        assert!(serde_json::from_value::<ContextCompactionSummaryDraft>(incomplete_draft).is_err());
+
+        let summary = draft.finish(&prefix).unwrap();
+        let mut summary_with_extra = serde_json::to_value(&summary).unwrap();
+        summary_with_extra["retiredField"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ContextCompactionSummary>(summary_with_extra).is_err());
 
         assert_eq!(summary.covered_through, cursor);
     }
@@ -547,7 +554,9 @@ mod tests {
                     sequence: 1,
                     call_id: "call-1".to_string(),
                     tool: "read_file".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "read_file".to_string(),
+                    },
                     operation: serde_json::json!({ "path": "README.md" }),
                     approval_status: crate::AgentApprovalStatus::NotRequired,
                     truncated: false,

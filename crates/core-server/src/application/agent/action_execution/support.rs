@@ -122,6 +122,11 @@ pub(super) fn command_audit_persistence_failure(
     execution_result: Option<&AgentCommandExecutionResult>,
 ) -> AgentToolResult {
     let execution_attempted = execution_result.is_some();
+    let canonical_execution = execution_result.map(|execution_result| {
+        mycopilot_core::command::command_tool_result(&command.id, execution_result)
+            .result
+            .expect("canonical command ToolResult always contains execution evidence")
+    });
     let message = if execution_attempted {
         "The command finished, but its final action audit could not be persisted. Inspect the observed artifacts before retrying."
     } else {
@@ -143,7 +148,7 @@ pub(super) fn command_audit_persistence_failure(
             // model-facing continuation never mistakes an audit failure for a clean rollback.
             "effectsMayHaveOccurred": execution_attempted,
             "auditError": bounded_audit_error(audit_error),
-            "execution": execution_result,
+            "execution": canonical_execution,
         })),
         error: Some(message.to_string()),
     }

@@ -1,7 +1,5 @@
 use super::*;
 
-pub(super) const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-
 pub(super) const MAX_TIMEOUT_MS: u64 = 600_000;
 
 pub(super) const MAX_OUTPUT_BYTES: usize = 128 * 1024;
@@ -104,14 +102,6 @@ impl CommandExecutionError {
 
     pub fn artifact_observation(&self) -> Option<&AgentCommandArtifactObservation> {
         self.artifact_observation.as_deref()
-    }
-
-    pub(super) fn with_artifact_observation(
-        mut self,
-        artifact_observation: Option<AgentCommandArtifactObservation>,
-    ) -> Self {
-        self.artifact_observation = artifact_observation.map(Box::new);
-        self
     }
 }
 

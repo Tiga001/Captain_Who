@@ -1632,7 +1632,9 @@ mod tests {
                         sequence: 0,
                         call_id: "runtime-call-1".to_string(),
                         tool: "read_file".to_string(),
-                        provenance: None,
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "read_file".to_string(),
+                        },
                         operation: json!({"path": "src/lib.rs"}),
                         approval_status: AgentApprovalStatus::NotRequired,
                         truncated: false,
@@ -1857,11 +1859,13 @@ mod tests {
 
         let forked = fixture
             .storage
-            .fork_conversation_view_with_provider_continuation_vault(
-                crate::storage::models::ForkConversationInput {
+            .fork_conversation_request_view_with_provider_continuation_vault(
+                crate::storage::models::ForkConversationRequest {
                     request_id: "provider-vault-fork-request".to_string(),
                     source_conversation_id: CONVERSATION_ID.to_string(),
-                    through_assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+                    fork_point: crate::storage::models::ConversationForkPoint::AssistantReply {
+                        assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+                    },
                 },
                 &fixture.vault,
             )
@@ -1921,11 +1925,13 @@ mod tests {
             .unwrap();
         let fork_error = tamper_fixture
             .storage
-            .fork_conversation_view_with_provider_continuation_vault(
-                crate::storage::models::ForkConversationInput {
+            .fork_conversation_request_view_with_provider_continuation_vault(
+                crate::storage::models::ForkConversationRequest {
                     request_id: "tampered-provider-vault-fork-request".to_string(),
                     source_conversation_id: CONVERSATION_ID.to_string(),
-                    through_assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+                    fork_point: crate::storage::models::ConversationForkPoint::AssistantReply {
+                        assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+                    },
                 },
                 &tamper_fixture.vault,
             )

@@ -1,4 +1,5 @@
 use super::*;
+use crate::AgentRunCheckpoint;
 use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,7 +187,11 @@ pub type AgentModelRequestObserver = Arc<dyn Fn(ModelRequestObservation) + Send 
 pub type AgentContextWindowObserver =
     Arc<dyn Fn(AgentContextWindowSnapshot) + Send + Sync + 'static>;
 pub type AgentHostActionExecutor = Arc<
-    dyn Fn(AgentProposedAction, AgentCancellationToken) -> AgentResult<AgentToolResult>
+    dyn Fn(
+            AgentProposedAction,
+            Option<AgentRunCheckpoint>,
+            AgentCancellationToken,
+        ) -> AgentResult<AgentToolResult>
         + Send
         + Sync
         + 'static,
@@ -767,15 +772,17 @@ pub fn create_conversation_context_state_with_host_services(
         .api_style
         .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
     let provider_dialect = crate::provider_profile::ProviderProtocolDialect::from(api_style);
-    let provider_profile_config = crate::provider_profile::ProviderProfileConfig::resolve(
-        input.provider_profile_config.as_ref(),
-        provider_dialect,
-    )
-    .map_err(|error| {
-        AgentError::new(format!(
-            "Provider profile configuration is invalid: {error}"
-        ))
-    })?;
+    let provider_profile_config = input
+        .provider_profile_config
+        .clone()
+        .ok_or_else(|| AgentError::new("Provider profile configuration is missing."))?;
+    provider_profile_config
+        .validate_for_dialect(provider_dialect)
+        .map_err(|error| {
+            AgentError::new(format!(
+                "Provider profile configuration is invalid: {error}"
+            ))
+        })?;
     let provider_protocol_key = match input.provider_protocol_key.clone() {
         Some(key) => {
             key.validate_against_config(&provider_profile_config)
@@ -862,15 +869,17 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
 ) -> AgentResult<String> {
     let system_prompt = build_system_prompt(input.prompt_preferences.as_ref(), tool_definitions);
     let provider_dialect = crate::provider_profile::ProviderProtocolDialect::from(api_style);
-    let provider_profile_config = crate::provider_profile::ProviderProfileConfig::resolve(
-        input.provider_profile_config.as_ref(),
-        provider_dialect,
-    )
-    .map_err(|error| {
-        AgentError::new(format!(
-            "Provider profile configuration is invalid: {error}"
-        ))
-    })?;
+    let provider_profile_config = input
+        .provider_profile_config
+        .clone()
+        .ok_or_else(|| AgentError::new("Provider profile configuration is missing."))?;
+    provider_profile_config
+        .validate_for_dialect(provider_dialect)
+        .map_err(|error| {
+            AgentError::new(format!(
+                "Provider profile configuration is invalid: {error}"
+            ))
+        })?;
     let provider_protocol_key = match input.provider_protocol_key.as_ref() {
         Some(key) => key.clone(),
         None => crate::provider_profile::ProviderProtocolKey::new(

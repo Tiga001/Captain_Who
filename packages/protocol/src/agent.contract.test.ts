@@ -140,7 +140,8 @@ const toolIdentities = [
       schemaDigest: 'd'.repeat(64),
       schemaNormalizerVersion: 1
     }
-  }
+  },
+  { type: 'unregistered', toolName: 'hallucinated_tool' }
 ] satisfies AgentToolIdentity[]
 
 const mcpTraceToolCall = {
@@ -209,11 +210,12 @@ describe('Agent tool identity contract', () => {
           schemaDigest: 'd'.repeat(64),
           schemaNormalizerVersion: 1
         }
-      }
+      },
+      { type: 'unregistered', toolName: 'hallucinated_tool' }
     ])
   })
 
-  it('allows optional typed provenance on a tool-call trace item', () => {
+  it('requires typed provenance on a tool-call trace item', () => {
     expect(mcpTraceToolCall.provenance).toEqual(toolIdentities[2])
   })
 })

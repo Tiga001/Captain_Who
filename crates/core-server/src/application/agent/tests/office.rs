@@ -6,9 +6,9 @@ use mycopilot_core::office::{
     OfficeGridLayout, OfficeOperation, OfficeOperationAccess, OfficeOperationParameters,
     OfficePathIdentity, OfficePathPurpose, OfficePathScope, OfficePathSlot,
     OfficePreparedExecution, OfficePublishedOutput, OfficePublishedOutputKind,
-    OfficePublishedOutputRole, OfficeRenderPageSelection, OfficeRequestParameters, OfficeViewMode,
-    OfficeViewRenderMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
-    OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+    OfficePublishedOutputRole, OfficeRenderPageSelection, OfficeViewMode, OfficeViewRenderMode,
+    OfficeWriteDisposition, OFFICECLI_PROVIDER_ID, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
+    OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
 use mycopilot_core::skills::SkillResourceSession;
 use std::collections::BTreeMap;
@@ -465,12 +465,12 @@ fn prepared_spreadsheet_operation() -> OfficePreparedExecution {
             document_kind: OfficeDocumentKind::Spreadsheet,
             operation: OfficeOperation::Set,
             document_path: Some("budget.xlsx".to_string()),
-            parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+            parameters: OfficeOperationParameters::Set {
                 target: "/Sheet1/A1".to_string(),
                 properties: BTreeMap::from([("value".to_string(), serde_json::json!(42))]),
                 replacement: None,
                 force: false,
-            }),
+            },
             output_path: None,
             destination_path: None,
             inputs: Vec::new(),
@@ -497,10 +497,6 @@ fn prepared_spreadsheet_operation() -> OfficePreparedExecution {
             write_disposition: Some(OfficeWriteDisposition::ReplaceExisting),
         }],
         input_bindings: Vec::new(),
-        document_precondition: None,
-        output_precondition: None,
-        destination_precondition: None,
-        resource_preconditions: Vec::new(),
     }
 }
 
@@ -515,7 +511,7 @@ fn prepared_document_render_operation() -> OfficePreparedExecution {
             document_kind: OfficeDocumentKind::Document,
             operation: OfficeOperation::View,
             document_path: Some("sample.docx".to_string()),
-            parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+            parameters: OfficeOperationParameters::View {
                 mode: OfficeViewMode::Screenshot,
                 start: None,
                 end: None,
@@ -529,7 +525,7 @@ fn prepared_document_render_operation() -> OfficePreparedExecution {
                 grid: Some(OfficeGridLayout::Auto),
                 render_mode: Some(OfficeViewRenderMode::Auto),
                 page_count: false,
-            }),
+            },
             output_path: Some("preview.png".to_string()),
             destination_path: None,
             inputs: Vec::new(),
@@ -577,10 +573,6 @@ fn prepared_document_render_operation() -> OfficePreparedExecution {
             },
         ],
         input_bindings: Vec::new(),
-        document_precondition: None,
-        output_precondition: None,
-        destination_precondition: None,
-        resource_preconditions: Vec::new(),
     }
 }
 
@@ -921,40 +913,6 @@ fn office_revalidation_failure_preserves_frozen_execution_context() {
 }
 
 #[test]
-fn legacy_office_action_envelope_is_rejected_before_provider_execution() {
-    let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
-    let executions = Arc::new(AtomicUsize::new(0));
-    let service =
-        AgentService::new(storage).with_office_engine(Arc::new(SuccessfulTrackingOfficeEngine {
-            executions: Arc::clone(&executions),
-        }));
-    let input = command_test_input(fixture.path());
-    let mut operation = match prepared_office_action("office-legacy-envelope") {
-        AgentProposedAction::OfficeOperation { office_operation } => office_operation,
-        _ => unreachable!(),
-    };
-    operation.schema_version = 1;
-
-    let result = service.execute_office_operation(
-        &input,
-        &operation,
-        None,
-        AgentCancellationToken::new(),
-        None,
-    );
-
-    assert!(!result.ok);
-    assert_eq!(result.call_id, "office-legacy-envelope");
-    assert_eq!(
-        result.result.as_ref().unwrap()["code"],
-        "invalidApprovedSnapshot"
-    );
-    assert_eq!(result.result.as_ref().unwrap()["recovery"], "retry");
-    assert_eq!(executions.load(Ordering::SeqCst), 0);
-}
-
-#[test]
 fn host_rejects_noncanonical_or_overlong_frozen_office_reasons_before_execution() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -1017,23 +975,17 @@ fn office_action_helpers_expose_stable_identity_without_executable_path() {
     assert_eq!(action_id_for_action(&action), "office-call-2");
     assert_eq!(action_type_for_action(&action), "office_operation");
     assert_eq!(tool_name_for_action(&action), "office_spreadsheet");
-    let call = tool_call_for_action(&action);
-    assert_eq!(call.tool, "office_spreadsheet");
-    assert_eq!(call.args["operation"], "writeCell");
-    assert_eq!(call.args["filePath"], "budget.xlsx");
-    assert_eq!(call.args["sheetName"], "Sheet1");
-    assert_eq!(call.args["cell"], "A1");
-    assert_eq!(call.args["value"], 42);
-    assert_eq!(call.args["reason"], "Update budget");
-    assert!(call.args.get("request").is_none());
-    assert!(call.args.get("parameters").is_none());
-    assert!(call.args.get("arguments").is_none());
-    assert!(call.args["request"].get("parameters").is_none());
-    assert!(call.args["request"].get("arguments").is_none());
-    assert!(serde_json::to_string(&call)
-        .unwrap()
-        .contains("office_spreadsheet"));
-    assert!(!serde_json::to_string(&call).unwrap().contains("officecli"));
+    let AgentProposedAction::OfficeOperation { office_operation } = action else {
+        unreachable!()
+    };
+    assert_eq!(office_operation.semantic_args["operation"], "writeCell");
+    assert_eq!(office_operation.semantic_args["filePath"], "budget.xlsx");
+    assert_eq!(office_operation.semantic_args["sheetName"], "Sheet1");
+    assert_eq!(office_operation.semantic_args["cell"], "A1");
+    assert_eq!(office_operation.semantic_args["value"], 42);
+    assert_eq!(office_operation.semantic_args["reason"], "Update budget");
+    let encoded = serde_json::to_string(&office_operation.semantic_args).unwrap();
+    assert!(!encoded.contains("officecli"));
 }
 
 #[test]

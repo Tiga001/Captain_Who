@@ -57,38 +57,17 @@ export function parseStorageForkConversationRequest(
 ): StorageForkConversationRequest {
   const context = 'storage fork conversation request'
   const record = expectRecord(value, context)
-  expectOnlyKeys(
-    record,
-    ['requestId', 'sourceConversationId', 'forkPoint', 'throughAssistantMessageId'] as const,
-    context
-  )
+  expectOnlyKeys(record, ['requestId', 'sourceConversationId', 'forkPoint'] as const, context)
 
   const requestId = expectBoundedForkIdentifier(record.requestId, `${context}.requestId`)
   const sourceConversationId = expectBoundedForkIdentifier(
     record.sourceConversationId,
     `${context}.sourceConversationId`
   )
-  const hasExplicitPoint = record.forkPoint !== undefined
-  const hasLegacyPoint = record.throughAssistantMessageId !== undefined
-  if (hasExplicitPoint === hasLegacyPoint) {
-    throw invalidProtocolValue(context, 'expected exactly one fork point')
-  }
-
-  if (hasExplicitPoint) {
-    return {
-      requestId,
-      sourceConversationId,
-      forkPoint: parseStorageConversationForkPoint(record.forkPoint)
-    }
-  }
-
   return {
     requestId,
     sourceConversationId,
-    throughAssistantMessageId: expectBoundedForkIdentifier(
-      record.throughAssistantMessageId,
-      `${context}.throughAssistantMessageId`
-    )
+    forkPoint: parseStorageConversationForkPoint(record.forkPoint)
   }
 }
 

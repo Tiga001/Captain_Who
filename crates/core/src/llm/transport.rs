@@ -244,7 +244,6 @@ where
                     provider_code: plan.provider_code.clone(),
                     delay_ms: duration_ms(plan.delay),
                     retry_at: plan.retry_at,
-                    reason,
                 });
                 total_retry_sleep += plan.delay;
                 wait_before_retry(plan.delay, cancellation_token.clone())

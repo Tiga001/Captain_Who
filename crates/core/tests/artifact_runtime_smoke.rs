@@ -2,8 +2,8 @@ use mycopilot_core::artifact_runtime::{
     ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider, ARTIFACT_RUNTIME_PROVIDER_ID,
 };
 use mycopilot_core::command::{
-    run_authorized_command_with_artifact_runtime, CommandAuthorizationSource,
-    CommandRuntimeProfileResolver,
+    CommandAuthorizationSource, CommandRuntimeProfileResolver, CommandSessionManager,
+    CommandSessionScopeId, CommandStartOptions, CommandStartOutcome,
 };
 use mycopilot_core::{
     AgentApprovalStatus, AgentCancellationToken, AgentCommandArtifactObservationKind,
@@ -13,16 +13,20 @@ use mycopilot_core::{
     AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
 };
 use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[test]
 #[ignore = "release smoke test; requires MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT"]
 fn managed_node_and_python_create_observed_office_artifacts() {
     let component = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT")
         .expect("set MYCOPILOT_ARTIFACT_RUNTIME_TEST_COMPONENT to a prepared component");
-    let provider = ArtifactRuntimeProvider::discover(
-        &ArtifactRuntimeDiscoveryOptions::new().with_configured_component_dir(component),
-    )
-    .expect("discover prepared Artifact Runtime");
+    let provider = Arc::new(
+        ArtifactRuntimeProvider::discover(
+            &ArtifactRuntimeDiscoveryOptions::new().with_configured_component_dir(component),
+        )
+        .expect("discover prepared Artifact Runtime"),
+    );
     let workspace = tempfile::tempdir().expect("create smoke workspace");
 
     fs::write(
@@ -149,7 +153,7 @@ process.exitCode = 7
 
 fn execute(
     workspace: &std::path::Path,
-    provider: &ArtifactRuntimeProvider,
+    provider: &Arc<ArtifactRuntimeProvider>,
     command: &str,
     expected_output: &str,
     profile: AgentCommandRuntimeProfile,
@@ -172,25 +176,42 @@ fn execute(
             additional_roots: Vec::new(),
         }),
         inputs: Vec::new(),
-        runtime: None,
         runtime_binding: Some(Box::new(runtime_binding)),
     };
-    run_authorized_command_with_artifact_runtime(
-        Some(workspace),
-        &request,
-        AgentPermissions {
-            read: AgentReadPermission::WorkspaceOnly,
-            write: AgentWritePermission::WorkspaceOnly,
-            command: AgentCommandPermission::RequireApproval,
-            command_safety: AgentCommandSafetyPolicy::Guarded,
-            patch: AgentPatchPermission::RequireApproval,
-        },
-        CommandAuthorizationSource::ExplicitUser,
-        AgentCancellationToken::new(),
-        None,
-        Some(provider),
-    )
-    .expect("execute managed Artifact Runtime command")
+    let manager = CommandSessionManager::default();
+    let outcome = manager
+        .start_authorized_command_with_runtime_and_lifecycle(
+            CommandSessionScopeId::new(format!("artifact-smoke-{expected_output}"))
+                .expect("valid smoke Session scope"),
+            Some(workspace),
+            &request,
+            AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                command_safety: AgentCommandSafetyPolicy::Guarded,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+            CommandAuthorizationSource::ExplicitUser,
+            CommandStartOptions::default(),
+            Some(Arc::clone(provider)),
+            None,
+            None,
+            Arc::new(|_| {}),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .expect("start managed Artifact Runtime Session");
+    match outcome {
+        CommandStartOutcome::Exited(terminal) => terminal.execution,
+        CommandStartOutcome::Running(snapshot) => {
+            manager
+                .wait_terminal_result(&snapshot.session_id, Duration::from_secs(60))
+                .expect("wait for managed Artifact Runtime Session")
+                .expect("managed Artifact Runtime Session must become terminal")
+                .execution
+        }
+    }
 }
 
 fn assert_successful_observed_creation(

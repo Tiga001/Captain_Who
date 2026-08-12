@@ -856,13 +856,23 @@ impl AgentService {
             .clone();
         let completed_at = now_ms();
         for context in contexts {
-            let trace = cancelled_conversation_trace_from_snapshot(
+            let terminal = match cancelled_conversation_trace_from_snapshot(
                 snapshots.get(&context.run_id).cloned().unwrap_or_default(),
                 &context.run_id,
                 &context.conversation_id,
                 &context.assistant_message_id,
                 REASON,
-            );
+            ) {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    // Shutdown must not manufacture model history from a rejected in-memory
+                    // projection. Leave the already durable in-progress trace untouched; the
+                    // current-schema startup reconciler closes it with its exact durable model
+                    // context before any new run is admitted.
+                    eprintln!("failed to close forced cancelled conversation trace: {error}");
+                    continue;
+                }
+            };
             let usage_record = self.prepare_run_usage_record(
                 &context.run_id,
                 AgentRunStatus::Cancelled,
@@ -871,13 +881,14 @@ impl AgentService {
             );
             let persisted = self
                 .storage
-                .finalize_chat_message_with_conversation_trace_and_usage(
+                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
                     &context.conversation_id,
                     &context.assistant_message_id,
                     "",
                     status_for_run(AgentRunStatus::Cancelled),
                     run_status_label(AgentRunStatus::Cancelled),
-                    &trace,
+                    &terminal.trace,
+                    Some(&terminal.model_context_items),
                     context.started_at,
                     completed_at,
                     usage_record.as_ref(),
@@ -886,6 +897,8 @@ impl AgentService {
                 self.finish_persisted_run_usage(&context.run_id, AgentRunStatus::Cancelled);
                 self.invalidate_conversation_context_state(&context.conversation_id);
             } else if let Err(error) = persisted {
+                // The transaction is all-or-nothing. A later startup retires the unchanged
+                // in-progress trace through the same strict trace/model-context boundary.
                 eprintln!("failed to persist forced cancelled conversation trace: {error}");
             }
         }
@@ -959,6 +972,36 @@ impl AgentService {
         assistant_message_id: &str,
         output: &mut AgentChatOutput,
     ) -> Result<(), String> {
+        self.persist_final_assistant_output_inner(
+            conversation_id,
+            assistant_message_id,
+            output,
+            None,
+        )
+    }
+
+    pub(super) fn persist_final_assistant_output_with_model_context(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        output: &mut AgentChatOutput,
+        model_context_items: &[ConversationModelContextItem],
+    ) -> Result<(), String> {
+        self.persist_final_assistant_output_inner(
+            conversation_id,
+            assistant_message_id,
+            output,
+            Some(model_context_items),
+        )
+    }
+
+    fn persist_final_assistant_output_inner(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        output: &mut AgentChatOutput,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+    ) -> Result<(), String> {
         let completed_at = now_ms();
         if matches!(
             output.status,
@@ -1002,7 +1045,7 @@ impl AgentService {
             );
             let cumulative_usage = self.preview_cumulative_run_usage(&output.run_id, None);
             self.storage
-                .finalize_chat_message_with_conversation_trace_and_usage(
+                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
                     conversation_id,
                     assistant_message_id,
                     if output.status == AgentRunStatus::Cancelled {
@@ -1013,6 +1056,7 @@ impl AgentService {
                     status_for_run(output.status),
                     run_status_label(output.status),
                     &trace,
+                    model_context_items,
                     completed_at,
                     completed_at,
                     usage_record.as_ref(),
@@ -1046,6 +1090,25 @@ impl AgentService {
         usage: Option<AgentUsage>,
         conversation_turn_trace: &ConversationTurnTrace,
     ) -> Result<Option<AgentUsage>, String> {
+        self.persist_assistant_error_with_model_context(
+            conversation_id,
+            assistant_message_id,
+            message,
+            usage,
+            conversation_turn_trace,
+            None,
+        )
+    }
+
+    pub(super) fn persist_assistant_error_with_model_context(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        message: &str,
+        usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
+        model_context_items: Option<&[ConversationModelContextItem]>,
+    ) -> Result<Option<AgentUsage>, String> {
         let run_id = self.find_usage_run_id(conversation_id, assistant_message_id);
         let fallback_usage = usage.clone();
         let completed_at = now_ms();
@@ -1058,13 +1121,14 @@ impl AgentService {
             )
         });
         self.storage
-            .finalize_chat_message_with_conversation_trace_and_usage(
+            .finalize_chat_message_with_conversation_trace_model_context_and_usage(
                 conversation_id,
                 assistant_message_id,
                 message,
                 Some("error"),
                 run_status_label(AgentRunStatus::Failed),
                 conversation_turn_trace,
+                model_context_items,
                 completed_at,
                 completed_at,
                 usage_record.as_ref(),

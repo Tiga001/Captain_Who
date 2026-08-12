@@ -76,7 +76,7 @@ export function updateFileDraftApprovalStatus(
       filePath: action.fileWrite.filePath,
       mode: action.fileWrite.mode,
       status,
-      baseRevision: action.fileWrite.baseRevision,
+      baseRevision: action.fileWrite.baseRevision ?? undefined,
       additions: action.fileWrite.additions,
       deletions: action.fileWrite.deletions,
       lineCount: action.fileWrite.lineCount,
@@ -84,7 +84,7 @@ export function updateFileDraftApprovalStatus(
       chunkCount: 0,
       nextChunkIndex: 0,
       statsFinal: true,
-      summary: action.fileWrite.summary,
+      summary: action.fileWrite.summary ?? undefined,
       createdAt: now,
       updatedAt: now
     }

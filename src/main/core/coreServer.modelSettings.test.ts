@@ -45,6 +45,9 @@ describe('CoreServer model settings client', () => {
         {
           id: 'deepseek-chat',
           displayName: 'DeepSeek Chat',
+          previousModelId: null,
+          apiUrlOverride: null,
+          apiTokenOverride: null,
           supportsImage: false,
           contextWindowTokens: null,
           providerProfileUpdate: {
@@ -71,6 +74,8 @@ describe('CoreServer model settings client', () => {
         {
           id: 'deepseek-chat',
           displayName: 'DeepSeek Chat',
+          apiUrlOverride: null,
+          apiTokenOverride: null,
           supportsImage: false,
           contextWindowTokens: null,
           providerProfileConfig: {

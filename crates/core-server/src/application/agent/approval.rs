@@ -466,7 +466,7 @@ impl AgentService {
                 &Default::default(),
             )
             .map_err(|error| error.to_string())?;
-            let trace = cancelled_conversation_trace_from_checkpoint(
+            let terminal = cancelled_conversation_trace_from_checkpoint(
                 checkpoint,
                 conversation_id,
                 assistant_message_id,
@@ -474,7 +474,7 @@ impl AgentService {
                 &execution.tool_result,
                 &model_observation,
                 REASON,
-            );
+            )?;
             let usage_record = self.prepare_run_usage_record(
                 &record.snapshot.run_id,
                 AgentRunStatus::Cancelled,
@@ -482,13 +482,14 @@ impl AgentService {
                 Some(REASON.to_string()),
             );
             self.storage
-                .finalize_chat_message_with_conversation_trace_and_usage(
+                .finalize_chat_message_with_conversation_trace_model_context_and_usage(
                     conversation_id,
                     assistant_message_id,
                     "",
                     status_for_run(AgentRunStatus::Cancelled),
                     run_status_label(AgentRunStatus::Cancelled),
-                    &trace,
+                    &terminal.trace,
+                    Some(&terminal.model_context_items),
                     completed_at,
                     completed_at,
                     usage_record.as_ref(),

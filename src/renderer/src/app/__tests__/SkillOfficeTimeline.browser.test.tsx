@@ -102,6 +102,7 @@ function imageGenerationCall(id: string, reason: string): AgentToolCall {
     id,
     tool: 'image_generation',
     approvalStatus: 'not_required',
+    reason: null,
     args: {
       request: { operation: 'generate', hasInputImage: false },
       reason
@@ -152,6 +153,7 @@ describe('Skill and Office chat timeline', () => {
           id: 'command-1',
           tool: 'run_command',
           approvalStatus: 'not_required',
+          reason: null,
           args: { command: 'true', reason: '完成最后一次验证。' }
         }
       ],
@@ -344,18 +346,21 @@ describe('Skill and Office chat timeline', () => {
           id: 'read-1',
           tool: 'skills_read_resource',
           approvalStatus: 'not_required',
+          reason: null,
           args: { uri, startByte: 0 }
         },
         {
           id: 'discover',
           tool: 'skills_list_resources',
           approvalStatus: 'not_required',
+          reason: null,
           args: {}
         },
         {
           id: 'read-2',
           tool: 'skills_read_resource',
           approvalStatus: 'not_required',
+          reason: null,
           args: { uri, startByte: 1024 }
         }
       ],
@@ -751,6 +756,7 @@ describe('Skill and Office chat timeline', () => {
           id: 'session-pdf',
           tool: 'run_command',
           approvalStatus: 'not_required',
+          reason: null,
           args: { command: 'render-pdf' }
         }
       ],
@@ -814,6 +820,7 @@ describe('Skill and Office chat timeline', () => {
           id: 'command-1',
           tool: 'run_command',
           approvalStatus: 'approved',
+          reason: null,
           args: { command: 'python build.py' }
         }
       ],

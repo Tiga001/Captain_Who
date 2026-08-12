@@ -3,8 +3,7 @@ use crate::command::{
     classify_command_risk, infer_managed_artifact_builder_command,
     infer_managed_artifact_command_kind, infer_managed_pdf_command_kind,
     infer_managed_pdf_workspace_inputs, normalize_command_text, validate_command_runtime_binding,
-    validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
-    validate_managed_artifact_command_shape, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
+    validate_managed_artifact_builder_output_scope, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
     MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
 };
 use crate::file_input::{
@@ -16,10 +15,9 @@ use crate::file_input::{
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandArtifactObservationKind,
     AgentCommandArtifactObservationRequest, AgentCommandRequest, AgentCommandRuntimeProfile,
-    AgentCommandRuntimeRequest, AgentError, AgentFileInputRef, AgentFileInputSpec,
-    AgentProposedAction, AgentResult, AgentSkillMaterializationResult,
-    AgentSkillMaterializationResultStatus, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    AgentToolSafety,
+    AgentError, AgentFileInputRef, AgentFileInputSpec, AgentProposedAction, AgentResult,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus, AgentToolCall,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
 use crate::skills::{
     SkillResourceUri, APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, PDF_LOCAL_ID,
@@ -323,14 +321,7 @@ struct RunCommandArgs {
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
     #[serde(default)]
-    inputs: Vec<RunCommandInputWire>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum RunCommandInputWire {
-    ModelPath(RunCommandModelPathInput),
-    Legacy(AgentFileInputSpec),
+    inputs: Vec<RunCommandModelPathInput>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,7 +495,6 @@ fn command_request_from_call(
         reason,
         observe: builder_config.observe,
         inputs,
-        runtime: None,
         runtime_binding: runtime_binding.map(Box::new),
     })
 }
@@ -578,23 +568,20 @@ fn sanitize_managed_pdf_cwd(cwd: Option<String>) -> AgentResult<Option<String>> 
 
 fn resolve_run_command_inputs(
     context: &AgentFileInputExecutionContext,
-    inputs: Vec<RunCommandInputWire>,
+    inputs: Vec<RunCommandModelPathInput>,
 ) -> AgentResult<Vec<AgentFileInputSpec>> {
     inputs
         .into_iter()
         .enumerate()
-        .map(|(index, input)| match input {
-            RunCommandInputWire::Legacy(spec) => Ok(spec),
-            RunCommandInputWire::ModelPath(input) => {
-                let source = agent_file_input_ref_from_model_path(context, &input.path)
-                    .map_err(AgentError::from)?;
-                Ok(AgentFileInputSpec {
-                    mount_path: input
-                        .mount_path
-                        .unwrap_or_else(|| default_agent_file_input_mount_path(&source, index)),
-                    source,
-                })
-            }
+        .map(|(index, input)| {
+            let source = agent_file_input_ref_from_model_path(context, &input.path)
+                .map_err(AgentError::from)?;
+            Ok(AgentFileInputSpec {
+                mount_path: input
+                    .mount_path
+                    .unwrap_or_else(|| default_agent_file_input_mount_path(&source, index)),
+                source,
+            })
         })
         .collect()
 }
@@ -1136,16 +1123,15 @@ pub(crate) fn validate_frozen_command_trace_args(
     let inputs =
         normalize_frozen_run_command_inputs(&command, args.inputs, &frozen_inputs, frozen_pdf)?;
     let mut expected_observe = explicit_observe.clone();
-    let runtime_matches = match (&frozen.runtime_binding, &frozen.runtime) {
-        (Some(binding), None) if binding.profile == AgentCommandRuntimeProfile::Pdf => {
+    let runtime_matches = match frozen.runtime_binding.as_deref() {
+        Some(binding) if binding.profile == AgentCommandRuntimeProfile::Pdf => {
             expected_observe = explicit_observe.clone();
             validate_command_runtime_binding(binding).is_ok()
                 && args.runtime_profile.is_none()
-                && args.runtime.is_none()
                 && frozen.observe == explicit_observe
                 && infer_managed_pdf_command_kind(&command).ok().flatten() == Some(binding.kind)
         }
-        (Some(binding), None) => {
+        Some(binding) => {
             let derived = derive_managed_builder_config(
                 &command,
                 args.runtime_profile,
@@ -1155,33 +1141,12 @@ pub(crate) fn validate_frozen_command_trace_args(
             .map_err(|_| {
                 "run_command frozen ToolCall Managed Builder config is invalid".to_string()
             })?;
-            // Pending actions created before backend observation binding may legitimately have
-            // neither a model-authored nor a frozen observation. Preserve that narrow legacy
-            // shape; every newly prepared managed command freezes a non-empty Office observer.
-            expected_observe = if frozen.observe.is_none() && explicit_observe.is_none() {
-                None
-            } else {
-                derived.observe
-            };
+            expected_observe = derived.observe;
             validate_command_runtime_binding(binding).is_ok()
-                && args.runtime.is_none()
                 && derived.runtime_profile == Some(binding.profile)
                 && infer_managed_artifact_command_kind(&command).ok() == Some(binding.kind)
         }
-        (None, Some(legacy)) => {
-            args.runtime_profile.is_none()
-                && args
-                    .runtime
-                    .map(|runtime| sanitize_runtime(&command, runtime))
-                    .transpose()
-                    .map_err(|_| {
-                        "run_command frozen ToolCall legacy runtime request is invalid".to_string()
-                    })?
-                    .as_ref()
-                    == Some(legacy)
-        }
-        (None, None) => args.runtime_profile.is_none() && args.runtime.is_none(),
-        (Some(_), Some(_)) => false,
+        None => args.runtime_profile.is_none(),
     };
 
     if command != frozen.command
@@ -1207,41 +1172,36 @@ struct FrozenRunCommandArgs {
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
     #[serde(default)]
-    inputs: Vec<RunCommandInputWire>,
-    /// Legacy field accepted only while reconciling already-persisted pending actions.
-    runtime: Option<AgentCommandRuntimeRequest>,
+    inputs: Vec<RunCommandModelPathInput>,
 }
 
 fn normalize_frozen_run_command_inputs(
     command: &str,
-    inputs: Vec<RunCommandInputWire>,
+    inputs: Vec<RunCommandModelPathInput>,
     frozen_inputs: &[AgentFileInputSpec],
     frozen_pdf: bool,
 ) -> Result<Vec<AgentFileInputSpec>, String> {
     let mut specs = inputs
         .into_iter()
         .enumerate()
-        .map(|(index, input)| match input {
-            RunCommandInputWire::Legacy(spec) => Ok(spec),
-            RunCommandInputWire::ModelPath(input) => {
-                let frozen = frozen_inputs.get(index).ok_or_else(|| {
-                    "run_command frozen ToolCall inputs exceed prepared inputs".to_string()
-                })?;
-                if !agent_file_input_ref_matches_model_path(&frozen.source, &input.path)
-                    .map_err(|_| "run_command frozen ToolCall input path is invalid".to_string())?
-                {
-                    return Err(
-                        "run_command frozen ToolCall input path differs from prepared input"
-                            .to_string(),
-                    );
-                }
-                Ok(AgentFileInputSpec {
-                    mount_path: input.mount_path.unwrap_or_else(|| {
-                        default_agent_file_input_mount_path(&frozen.source, index)
-                    }),
-                    source: frozen.source.clone(),
-                })
+        .map(|(index, input)| {
+            let frozen = frozen_inputs.get(index).ok_or_else(|| {
+                "run_command frozen ToolCall inputs exceed prepared inputs".to_string()
+            })?;
+            if !agent_file_input_ref_matches_model_path(&frozen.source, &input.path)
+                .map_err(|_| "run_command frozen ToolCall input path is invalid".to_string())?
+            {
+                return Err(
+                    "run_command frozen ToolCall input path differs from prepared input"
+                        .to_string(),
+                );
             }
+            Ok(AgentFileInputSpec {
+                mount_path: input
+                    .mount_path
+                    .unwrap_or_else(|| default_agent_file_input_mount_path(&frozen.source, index)),
+                source: frozen.source.clone(),
+            })
         })
         .collect::<Result<Vec<_>, String>>()?;
     if frozen_pdf {
@@ -1296,15 +1256,6 @@ fn normalize_trace_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
             .collect::<Vec<_>>()
             .join("/"),
     ))
-}
-
-fn sanitize_runtime(
-    command: &str,
-    runtime: AgentCommandRuntimeRequest,
-) -> AgentResult<AgentCommandRuntimeRequest> {
-    validate_command_runtime_request(&runtime).map_err(AgentError::new)?;
-    validate_managed_artifact_command_shape(command, &runtime).map_err(AgentError::new)?;
-    Ok(runtime)
 }
 
 fn sanitize_observe(
@@ -2157,10 +2108,10 @@ mod tests {
     fn model_path_input_derives_a_private_mount_name_without_source_routing() {
         let resolved = resolve_run_command_inputs(
             &AgentFileInputExecutionContext::default(),
-            vec![RunCommandInputWire::ModelPath(RunCommandModelPathInput {
+            vec![RunCommandModelPathInput {
                 path: "assets/hero.png".to_string(),
                 mount_path: None,
-            })],
+            }],
         )
         .unwrap();
 
@@ -2215,7 +2166,6 @@ mod tests {
         );
         assert_eq!(request.reason.as_deref(), Some("verify tests"));
         assert!(request.observe.is_none());
-        assert!(request.runtime.is_none());
         assert!(request.runtime_binding.is_none());
     }
 

@@ -1,4 +1,5 @@
 import { expect, it, vi } from 'vitest'
+import type { AgentProposedAction } from '@mycopilot/protocol'
 import type { ChatMessage } from '../chatTypes'
 
 const storage = vi.hoisted(() => ({
@@ -11,11 +12,14 @@ vi.mock('../../../host/hostClient', () => ({
 }))
 
 const { loadConversation, saveChatMessageState } = await import('../../storage/storageClient')
+const { parsePersistedAgentRun } = await import('../../storage/persistedAgentRun')
 
-function storedMcpApprovalAction(callId: string) {
+function storedMcpApprovalAction(
+  callId: string
+): Extract<AgentProposedAction, { type: 'mcp_tool_call' }> {
   const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
   return {
-    type: 'mcp_tool_call',
+    type: 'mcp_tool_call' as const,
     approval: {
       identity: {
         actionId: '94c2f39c-ddaa-49bb-a3ef-8756053d68c8',
@@ -24,7 +28,7 @@ function storedMcpApprovalAction(callId: string) {
         callId,
         provenance: {
           serverId,
-          scope: { type: 'user' },
+          scope: { type: 'user' as const },
           rawToolName: 'move_file',
           modelToolName: 'mcp__filesystem_test__move_file',
           configEpoch: '41818332-0842-4d2e-808f-175b70eb4628',
@@ -41,7 +45,8 @@ function storedMcpApprovalAction(callId: string) {
         id: callId,
         tool: 'mcp__filesystem_test__move_file',
         args: {},
-        approvalStatus: 'required'
+        approvalStatus: 'required',
+        reason: null
       },
       summary: {
         serverId,
@@ -49,6 +54,7 @@ function storedMcpApprovalAction(callId: string) {
         scope: { type: 'user' },
         rawToolName: 'move_file',
         modelToolName: 'mcp__filesystem_test__move_file',
+        displayReason: null,
         arguments: {
           encodedBytes: 24,
           topLevelPropertyCount: 1,
@@ -82,13 +88,16 @@ it('keeps live command output transient while persisting the final tool result',
     agentRun: {
       runId: 'run-command',
       status: 'completed',
+      startedAt: 1,
+      completedAt: 2,
       toolDefinitions: [],
       toolCalls: [
         {
           id: 'command-call',
           tool: 'run_command',
           args: { command: 'printf done' },
-          approvalStatus: 'not_required'
+          approvalStatus: 'not_required',
+          reason: null
         }
       ],
       toolResults: [
@@ -156,6 +165,7 @@ it('preserves a multiline command exactly through persistence and hydration', as
     agentRun: {
       runId: 'run-multiline-command',
       status: 'completed',
+      startedAt: 1,
       completedAt: 2,
       toolDefinitions: [],
       toolCalls: [
@@ -163,7 +173,8 @@ it('preserves a multiline command exactly through persistence and hydration', as
           id: 'multiline-command-call',
           tool: 'run_command',
           args: { command, reason: '读取 PDF' },
-          approvalStatus: 'approved'
+          approvalStatus: 'approved',
+          reason: null
         }
       ],
       toolResults: [],
@@ -216,7 +227,7 @@ it('preserves a multiline command exactly through persistence and hydration', as
   })
 })
 
-it('discards legacy persisted managed command projections during reload', async () => {
+it('rejects a nonterminal command session in durable chat state', async () => {
   storage.loadConversation.mockResolvedValueOnce({
     id: 'conversation-command-reload',
     projectId: null,
@@ -240,7 +251,8 @@ it('discards legacy persisted managed command projections during reload', async 
               id: 'command-call',
               tool: 'run_command',
               args: { command: 'long-running' },
-              approvalStatus: 'approved'
+              approvalStatus: 'approved',
+              reason: null
             }
           ],
           toolResults: [],
@@ -274,10 +286,9 @@ it('discards legacy persisted managed command projections during reload', async 
     unreadAt: null
   })
 
-  const restored = await loadConversation('conversation-command-reload')
-
-  expect(restored?.messages[0].agentRun?.commandSessions).toBeUndefined()
-  expect(restored?.messages[0].agentRun?.commandOutputPreviews).toBeUndefined()
+  await expect(loadConversation('conversation-command-reload')).rejects.toThrow(
+    'Stored Agent run is malformed'
+  )
 })
 
 it('persists and reloads only immutable command terminal metadata', async () => {
@@ -301,6 +312,7 @@ it('persists and reloads only immutable command terminal metadata', async () => 
     agentRun: {
       runId: 'run-command-terminal',
       status: 'completed',
+      startedAt: 1,
       completedAt: 20,
       toolDefinitions: [],
       toolCalls: [
@@ -308,7 +320,8 @@ it('persists and reloads only immutable command terminal metadata', async () => 
           id: 'command-call',
           tool: 'run_command',
           args: { command: 'long-running' },
-          approvalStatus: 'approved'
+          approvalStatus: 'approved',
+          reason: null
         }
       ],
       toolResults: [
@@ -447,6 +460,7 @@ it('persists settled Skill installation activity across a conversation reload', 
     agentRun: {
       runId: 'run-skill-installation',
       status: 'completed',
+      startedAt: 1,
       completedAt: 10,
       toolDefinitions: [],
       toolCalls: [],
@@ -490,85 +504,47 @@ it('persists settled Skill installation activity across a conversation reload', 
   expect(restored?.messages[0].agentRun?.skillInstallations).toEqual([skillInstallation])
 })
 
-it('fails closed when a restored terminal run still contains a running MCP invocation', async () => {
-  const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
-  const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
-  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
-  const callId = `tc1_${'a'.repeat(43)}`
-  const canary = 'MCP_STORAGE_CANARY_DO_NOT_RETAIN'
-  storage.loadConversation.mockResolvedValueOnce({
-    id: 'conversation-mcp-recovery',
+const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
+const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
+const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
+const callId = `tc1_${'a'.repeat(43)}`
+
+function currentStoredRun(overrides: Record<string, unknown> = {}) {
+  return {
+    runId: 'run-current',
+    status: 'completed',
+    startedAt: 1,
+    completedAt: 10,
+    toolDefinitions: [],
+    toolCalls: [],
+    toolResults: [],
+    webSearchActivities: [],
+    readActivities: [],
+    approvals: [],
+    diffs: [],
+    fileDrafts: [],
+    mcpInvocations: [],
+    messageStreamCheckpoints: {},
+    timeline: [],
+    ...overrides
+  }
+}
+
+function storedConversation(agentRun: Record<string, unknown>, id = 'conversation-current') {
+  return {
+    id,
     projectId: null,
     modelId: 'model-1',
-    title: 'MCP recovery',
+    title: 'Current persisted run',
     messages: [
       {
-        id: 'assistant-mcp-recovery',
+        id: 'assistant-current',
         role: 'assistant',
         content: 'partial',
         createdAt: 1,
         status: 'error',
         attachments: [],
-        agentRunJson: JSON.stringify({
-          runId: 'run-mcp-recovery',
-          status: 'failed',
-          completedAt: 10,
-          toolDefinitions: [],
-          toolCalls: [
-            {
-              id: callId,
-              tool: 'mcp__filesystem_test__move_file',
-              args: { rawArguments: canary },
-              approvalStatus: 'approved'
-            }
-          ],
-          toolResults: [
-            {
-              callId,
-              tool: 'mcp__filesystem_test__move_file',
-              ok: true,
-              result: { rawResult: canary },
-              error: canary
-            }
-          ],
-          approvals: [{ type: 'mcp_tool_call', rawArguments: canary }],
-          diffs: [],
-          timeline: [
-            {
-              id: `mcp-invocation-${invocationId}`,
-              type: 'mcp_tool_call',
-              invocationId,
-              payloadRef: canary
-            },
-            {
-              id: `tool-call-${callId}`,
-              type: 'tool_call',
-              callId
-            }
-          ],
-          mcpInvocations: [
-            {
-              actionId,
-              invocationId,
-              callId,
-              serverId,
-              serverDisplayName: 'Filesystem Test',
-              rawToolName: 'move_file',
-              modelToolName: 'mcp__filesystem_test__move_file',
-              displayReason: 'Move the approved fixture file',
-              external: true,
-              state: 'running',
-              dispatchCertainty: 'possibly_dispatched',
-              outputTruncated: false,
-              rawArguments: canary,
-              rawResult: canary,
-              structuredContent: canary,
-              stderr: canary,
-              payloadRef: canary,
-              ciphertext: canary
-            }
-          ]
-        }),
+        agentRunJson: JSON.stringify(agentRun),
         uiStateJson: null
       }
     ],
@@ -577,9 +553,190 @@ it('fails closed when a restored terminal run still contains a running MCP invoc
     pinnedAt: null,
     archivedAt: null,
     unreadAt: null
-  })
+  }
+}
 
-  const restored = await loadConversation('conversation-mcp-recovery')
+function runningMcpInvocation() {
+  return {
+    actionId,
+    invocationId,
+    callId,
+    serverId,
+    serverDisplayName: 'Filesystem Test',
+    scope: { type: 'user' as const },
+    rawToolName: 'move_file',
+    modelToolName: 'mcp__filesystem_test__move_file',
+    displayReason: 'Move the approved fixture file',
+    external: true as const,
+    state: 'running',
+    dispatchCertainty: 'possibly_dispatched',
+    outputTruncated: false
+  }
+}
+
+function currentOfficeApproval() {
+  return {
+    type: 'office_operation',
+    officeOperation: {
+      schemaVersion: 5,
+      id: 'office-validate',
+      semanticArgs: { operation: 'validate', filePath: 'report.docx' },
+      prepared: {
+        schemaVersion: 5,
+        providerId: 'officecli',
+        engineRevision: 'sha256:engine',
+        workspaceRevision: null,
+        access: 'readOnly',
+        request: {
+          documentKind: 'document',
+          operation: 'validate',
+          documentPath: 'report.docx',
+          outputPath: null,
+          destinationPath: null,
+          inputs: [],
+          timeoutMs: null,
+          parameters: { type: 'validate' }
+        },
+        argv: ['validate', 'report.docx'],
+        paths: [],
+        inputBindings: []
+      },
+      approvalStatus: 'required',
+      reason: 'Validate the document'
+    }
+  }
+}
+
+function currentSkillInstallationApproval() {
+  return {
+    type: 'skill_installation',
+    installation: {
+      schemaVersion: 1,
+      id: 'skill-install-action-1',
+      installRef: `skill_install_${'a'.repeat(32)}`,
+      preview: {
+        name: 'example-skill',
+        description: 'Example Skill',
+        sourceSummary: { kind: 'githubRepository' },
+        resolvedRevision: 'b'.repeat(40),
+        fileCount: 1,
+        totalBytes: 100,
+        resourceSummary: { total: 0, references: 0, assets: 0, scripts: 0, bytes: 0 },
+        containsScripts: false,
+        warnings: [],
+        compatibility: 'compatible',
+        operation: 'install',
+        impact: 'addManagedSkill'
+      },
+      approvalStatus: 'required',
+      expiresAt: 1_753_844_100_000
+    }
+  }
+}
+
+it('accepts only the current command approval projection and rejects runtime authority fields', () => {
+  const command = {
+    type: 'command',
+    command: {
+      id: 'command-current',
+      command: 'cargo test',
+      cwd: null,
+      timeoutMs: 30_000,
+      approvalStatus: 'required',
+      riskLevel: 'read_only',
+      reason: 'Run tests',
+      observe: null
+    }
+  }
+  expect(parsePersistedAgentRun(currentStoredRun({ approvals: [command] }))).toBeDefined()
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [{ ...command, command: { ...command.command, runtime: { kind: 'python' } } }]
+      })
+    )
+  ).toBeUndefined()
+})
+
+it('rejects removed Office arguments and precondition fields at their nested boundaries', () => {
+  const current = currentOfficeApproval()
+  expect(parsePersistedAgentRun(currentStoredRun({ approvals: [current] }))).toBeDefined()
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [
+          {
+            ...current,
+            officeOperation: { ...current.officeOperation, arguments: { operation: 'validate' } }
+          }
+        ]
+      })
+    )
+  ).toBeUndefined()
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [
+          {
+            ...current,
+            officeOperation: {
+              ...current.officeOperation,
+              prepared: { ...current.officeOperation.prepared, precondition: { revision: 'old' } }
+            }
+          }
+        ]
+      })
+    )
+  ).toBeUndefined()
+})
+
+it('strictly validates the current Skill installation action instead of accepting any object', () => {
+  const current = currentSkillInstallationApproval()
+  expect(parsePersistedAgentRun(currentStoredRun({ approvals: [current] }))).toBeDefined()
+  const missingInstallRef = { ...current.installation }
+  Reflect.deleteProperty(missingInstallRef, 'installRef')
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [{ ...current, installation: missingInstallRef }]
+      })
+    )
+  ).toBeUndefined()
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [
+          {
+            ...current,
+            installation: {
+              ...current.installation,
+              preview: { ...current.installation.preview, packagePath: '/old/path' }
+            }
+          }
+        ]
+      })
+    )
+  ).toBeUndefined()
+})
+
+it('settles a valid nonterminal MCP child when its current parent run is terminal', async () => {
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(
+      currentStoredRun({
+        status: 'failed',
+        mcpInvocations: [runningMcpInvocation()],
+        timeline: [
+          {
+            id: `mcp-invocation-${invocationId}`,
+            type: 'mcp_tool_call',
+            invocationId
+          }
+        ]
+      })
+    )
+  )
+
+  const restored = await loadConversation('conversation-current')
   expect(restored?.messages[0].agentRun?.mcpInvocations?.[0]).toMatchObject({
     state: 'outcome_unknown',
     outcome: 'outcome_unknown',
@@ -587,298 +744,170 @@ it('fails closed when a restored terminal run still contains a running MCP invoc
     errorCode: 'mcp.tool_outcome_unknown',
     displayReason: 'Move the approved fixture file'
   })
-  const restoredRun = restored?.messages[0].agentRun
-  expect(restoredRun?.toolCalls).toEqual([])
-  expect(restoredRun?.toolResults).toEqual([])
-  expect(restoredRun?.approvals).toEqual([])
-  expect(JSON.stringify(restoredRun)).not.toContain(canary)
-  expect(Object.keys(restoredRun?.mcpInvocations?.[0] ?? {})).not.toContain('rawArguments')
 })
 
-it('normalizes a minimal terminal recovery record before settling activities', async () => {
-  storage.loadConversation.mockResolvedValueOnce({
-    id: 'conversation-minimal-recovery',
-    projectId: null,
-    modelId: 'model-1',
-    title: 'Minimal recovery',
-    messages: [
-      {
-        id: 'assistant-minimal-recovery',
-        role: 'assistant',
-        content: '',
-        createdAt: 1,
-        status: 'error',
-        attachments: [],
-        agentRunJson: JSON.stringify({
-          runId: 'run-minimal-recovery',
-          status: 'failed'
-        }),
-        uiStateJson: null
-      }
-    ],
+it('persists the current safe MCP projection and excludes its approval payload', async () => {
+  const message: ChatMessage = {
+    id: 'assistant-mcp-current',
+    role: 'assistant',
+    content: '',
     createdAt: 1,
-    updatedAt: 2,
-    pinnedAt: null,
-    archivedAt: null,
-    unreadAt: null
-  })
+    status: 'pending',
+    agentRun: {
+      runId: 'run-mcp-current',
+      status: 'waiting_for_approval',
+      startedAt: 1,
+      toolDefinitions: [],
+      toolCalls: [],
+      toolResults: [],
+      approvals: [storedMcpApprovalAction(callId)],
+      diffs: [],
+      mcpInvocations: [
+        {
+          ...runningMcpInvocation(),
+          state: 'pending_approval',
+          dispatchCertainty: 'definitely_not_dispatched'
+        }
+      ],
+      timeline: [
+        {
+          id: `mcp-invocation-${invocationId}`,
+          type: 'mcp_tool_call',
+          invocationId
+        }
+      ]
+    }
+  }
+  storage.saveChatMessageState.mockResolvedValueOnce(undefined)
+  await saveChatMessageState('conversation-mcp-current', message)
 
-  const restored = await loadConversation('conversation-minimal-recovery')
-  expect(restored?.messages[0].agentRun).toMatchObject({
-    runId: 'run-minimal-recovery',
-    status: 'failed',
-    toolDefinitions: [],
-    toolCalls: [],
-    toolResults: [],
-    approvals: [],
-    diffs: [],
-    timeline: [],
-    mcpInvocations: []
-  })
+  const storedMessage = storage.saveChatMessageState.mock.calls.at(-1)?.[0]?.message
+  const persisted = JSON.parse(storedMessage.agentRunJson)
+  expect(persisted.approvals).toEqual([])
+  expect(persisted.mcpInvocations).toEqual(message.agentRun?.mcpInvocations)
+  expect(JSON.stringify(persisted)).not.toContain('payloadPersistence')
+
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(persisted, 'conversation-mcp-current')
+  )
+  const restored = await loadConversation('conversation-mcp-current')
+  expect(restored?.messages[0].agentRun?.mcpInvocations).toEqual(message.agentRun?.mcpInvocations)
 })
 
-it('replaces restored generic MCP trace anchors in place without moving calls above narration', async () => {
-  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
-  const firstInvocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
-  const secondInvocationId = '513520d2-d01c-4a98-aeed-4d106df58ce2'
-  const firstCallId = `tc1_${'d'.repeat(43)}`
-  const secondCallId = `tc1_${'e'.repeat(43)}`
-  const invocation = ({
-    actionId,
-    invocationId,
-    callId,
-    rawToolName
-  }: {
-    actionId: string
-    invocationId: string
-    callId: string
-    rawToolName: string
-  }) => ({
-    actionId,
-    invocationId,
-    callId,
-    serverId,
-    serverDisplayName: 'Filesystem Test',
-    rawToolName,
-    modelToolName: `mcp__filesystem_test__${rawToolName}`,
-    displayReason: `Use ${rawToolName}`,
-    external: true,
-    state: 'completed',
-    dispatchCertainty: 'response_received',
-    outcome: 'succeeded',
-    isError: false,
-    durationMs: 5,
-    outputTruncated: false
-  })
-
-  storage.loadConversation.mockResolvedValueOnce({
-    id: 'conversation-mcp-trace-order',
-    projectId: null,
-    modelId: 'model-1',
-    title: 'MCP trace order',
-    messages: [
-      {
-        id: 'assistant-mcp-trace-order',
-        role: 'assistant',
-        content: '第一段。第二段。第三段。',
-        createdAt: 1,
-        status: 'sent',
-        attachments: [],
-        agentRunJson: JSON.stringify({
-          runId: 'run-mcp-trace-order',
-          status: 'completed',
-          completedAt: 10,
-          toolDefinitions: [],
-          toolCalls: [],
-          toolResults: [],
-          approvals: [],
-          diffs: [],
-          timeline: [
-            { id: 'message-before-first', type: 'message', content: '第一段。' },
-            { id: `tool-call-${firstCallId}`, type: 'tool_call', callId: firstCallId },
-            { id: 'message-between-calls', type: 'message', content: '第二段。' },
-            { id: `tool-call-${secondCallId}`, type: 'tool_call', callId: secondCallId },
-            { id: 'message-after-second', type: 'message', content: '第三段。' }
-          ],
-          mcpInvocations: [
-            invocation({
-              actionId: '94c2f39c-ddaa-49bb-a3ef-8756053d68c8',
-              invocationId: firstInvocationId,
-              callId: firstCallId,
-              rawToolName: 'list_allowed_directories'
-            }),
-            invocation({
-              actionId: 'ac55521b-c307-4d59-b292-ed86f7f198bb',
-              invocationId: secondInvocationId,
-              callId: secondCallId,
-              rawToolName: 'read_text_file'
-            })
-          ]
-        }),
-        uiStateJson: null
-      }
-    ],
-    createdAt: 1,
-    updatedAt: 10,
-    pinnedAt: null,
-    archivedAt: null,
-    unreadAt: null
-  })
-
-  const timeline = (await loadConversation('conversation-mcp-trace-order'))?.messages[0].agentRun
-    ?.timeline
-  expect(timeline).toEqual([
-    { id: 'message-before-first', type: 'message', content: '第一段。' },
-    {
-      id: `mcp-invocation-${firstInvocationId}`,
-      type: 'mcp_tool_call',
-      invocationId: firstInvocationId
-    },
-    { id: 'message-between-calls', type: 'message', content: '第二段。' },
-    {
-      id: `mcp-invocation-${secondInvocationId}`,
-      type: 'mcp_tool_call',
-      invocationId: secondInvocationId
-    },
-    { id: 'message-after-second', type: 'message', content: '第三段。' }
-  ])
+it('rejects a nonempty persisted run with missing current fields', async () => {
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation({ runId: 'run-incomplete', status: 'failed' })
+  )
+  await expect(loadConversation('conversation-current')).rejects.toThrow(
+    'Stored Agent run is malformed'
+  )
 })
 
-it('removes legacy generic MCP bodies using a valid approval identity even without an invocation', async () => {
-  const callId = `tc1_${'b'.repeat(43)}`
-  const canary = 'MCP_APPROVAL_ONLY_BODY_CANARY'
-  storage.loadConversation.mockResolvedValueOnce({
-    id: 'conversation-mcp-approval-only',
-    projectId: null,
-    modelId: 'model-1',
-    title: 'MCP approval recovery',
-    messages: [
-      {
-        id: 'assistant-mcp-approval-only',
-        role: 'assistant',
-        content: '',
-        createdAt: 1,
-        status: 'error',
-        attachments: [],
-        agentRunJson: JSON.stringify({
-          runId: 'run-mcp-approval-only',
-          status: 'failed',
-          toolDefinitions: [],
-          toolCalls: [
-            {
-              id: callId,
-              tool: 'mcp__filesystem_test__move_file',
-              args: { rawArguments: canary },
-              approvalStatus: 'required'
-            }
-          ],
-          toolResults: [
-            {
-              callId,
-              tool: 'mcp__filesystem_test__move_file',
-              ok: false,
-              error: canary
-            }
-          ],
-          approvals: [storedMcpApprovalAction(callId)],
-          diffs: [],
-          timeline: [{ id: `tool-call-${callId}`, type: 'tool_call', callId }]
-        }),
-        uiStateJson: null
-      }
-    ],
-    createdAt: 1,
-    updatedAt: 2,
-    pinnedAt: null,
-    archivedAt: null,
-    unreadAt: null
-  })
+it('accepts the current pre-start projection before the Host assigns a run id', async () => {
+  const preStart = {
+    ...currentStoredRun({ runId: null, status: 'starting' }),
+    completedAt: undefined
+  }
+  storage.loadConversation.mockResolvedValueOnce(storedConversation(preStart))
 
-  const restoredRun = (await loadConversation('conversation-mcp-approval-only'))?.messages[0]
-    .agentRun
-  expect(restoredRun?.approvals).toEqual([])
-  expect(restoredRun?.toolCalls).toEqual([])
-  expect(restoredRun?.toolResults).toEqual([])
-  expect(restoredRun?.timeline).toEqual([])
-  expect(JSON.stringify(restoredRun)).not.toContain(canary)
+  const restored = await loadConversation('conversation-current')
+  expect(restored?.messages[0].agentRun?.runId).toBeNull()
+  expect(restored?.messages[0].agentRun?.status).toBe('starting')
 })
 
-it('deduplicates legacy invocation identities and preserves the authoritative terminal projection', async () => {
-  const actionId = '94c2f39c-ddaa-49bb-a3ef-8756053d68c8'
-  const invocationId = 'a8a6102c-8ad6-45d5-bb0d-3e4f0ad2a30f'
-  const serverId = 'ce18d23c-e74f-4e89-8695-ce1e7c60ec92'
-  const callId = `tc1_${'c'.repeat(43)}`
-  storage.loadConversation.mockResolvedValueOnce({
-    id: 'conversation-mcp-duplicate',
-    projectId: null,
-    modelId: 'model-1',
-    title: 'MCP duplicate recovery',
-    messages: [
-      {
-        id: 'assistant-mcp-duplicate',
-        role: 'assistant',
-        content: '',
-        createdAt: 1,
-        status: 'error',
-        attachments: [],
-        agentRunJson: JSON.stringify({
-          runId: 'run-mcp-duplicate',
-          status: 'failed',
-          toolDefinitions: [],
-          toolCalls: [],
-          toolResults: [],
-          approvals: [],
-          diffs: [],
-          timeline: [],
-          mcpInvocations: [
-            {
-              actionId,
-              invocationId,
-              callId,
-              serverId,
-              serverDisplayName: 'Filesystem Test',
-              rawToolName: 'move_file',
-              modelToolName: 'mcp__filesystem_test__move_file',
-              external: true,
-              state: 'running',
-              dispatchCertainty: 'possibly_dispatched',
-              outputTruncated: false
-            },
-            {
-              actionId,
-              invocationId,
-              callId,
-              serverId,
-              serverDisplayName: 'Filesystem Test',
-              rawToolName: 'move_file',
-              modelToolName: 'mcp__filesystem_test__move_file',
-              external: true,
-              state: 'completed',
-              dispatchCertainty: 'response_received',
-              outcome: 'succeeded',
-              isError: false,
-              durationMs: 25,
-              outputTruncated: false
-            }
-          ]
-        }),
-        uiStateJson: null
-      }
-    ],
-    createdAt: 1,
-    updatedAt: 2,
-    pinnedAt: null,
-    archivedAt: null,
-    unreadAt: null
-  })
+it('rejects malformed persisted web search sources instead of accepting an old partial shape', async () => {
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(
+      currentStoredRun({
+        webSearchActivities: [
+          {
+            callId: 'search-call',
+            query: 'current query',
+            provider: 'current-provider',
+            status: 'completed',
+            sources: [
+              {
+                id: 'source-1',
+                title: 'Missing current source fields'
+              }
+            ],
+            updatedAt: 10
+          }
+        ]
+      })
+    )
+  )
+  await expect(loadConversation('conversation-current')).rejects.toThrow(
+    'Stored Agent run is malformed'
+  )
+})
 
-  const invocations = (await loadConversation('conversation-mcp-duplicate'))?.messages[0].agentRun
-    ?.mcpInvocations
-  expect(invocations).toHaveLength(1)
-  expect(invocations?.[0]).toMatchObject({
-    invocationId,
-    state: 'completed',
-    dispatchCertainty: 'response_received',
-    outcome: 'succeeded'
-  })
+it('rejects extra MCP persisted fields instead of stripping them', async () => {
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(
+      currentStoredRun({
+        mcpInvocations: [{ ...runningMcpInvocation(), rawArguments: 'must-not-survive' }],
+        timeline: [
+          {
+            id: `mcp-invocation-${invocationId}`,
+            type: 'mcp_tool_call',
+            invocationId
+          }
+        ]
+      })
+    )
+  )
+  await expect(loadConversation('conversation-current')).rejects.toThrow(
+    'Stored Agent run is malformed'
+  )
+})
+
+it('rejects duplicate MCP identities instead of choosing one projection', async () => {
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(
+      currentStoredRun({
+        mcpInvocations: [runningMcpInvocation(), runningMcpInvocation()],
+        timeline: [
+          {
+            id: `mcp-invocation-${invocationId}`,
+            type: 'mcp_tool_call',
+            invocationId
+          }
+        ]
+      })
+    )
+  )
+  await expect(loadConversation('conversation-current')).rejects.toThrow(
+    'Stored Agent run is malformed'
+  )
+})
+
+it('rejects generic and MCP cross-projections instead of rewriting the Timeline', async () => {
+  storage.loadConversation.mockResolvedValueOnce(
+    storedConversation(
+      currentStoredRun({
+        toolCalls: [
+          {
+            id: callId,
+            tool: 'mcp__filesystem_test__move_file',
+            args: {},
+            approvalStatus: 'approved',
+            reason: null
+          }
+        ],
+        mcpInvocations: [runningMcpInvocation()],
+        timeline: [
+          { id: `tool-call-${callId}`, type: 'tool_call', callId },
+          {
+            id: `mcp-invocation-${invocationId}`,
+            type: 'mcp_tool_call',
+            invocationId
+          }
+        ]
+      })
+    )
+  )
+  await expect(loadConversation('conversation-current')).rejects.toThrow(
+    'Stored Agent run is malformed'
+  )
 })

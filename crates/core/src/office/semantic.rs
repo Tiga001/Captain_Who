@@ -9,8 +9,8 @@
 use super::{
     types::office_agent_input_placeholder, validate_office_request, OfficeDocumentKind,
     OfficeElementPosition, OfficeExecutionRequest, OfficeGridLayout, OfficeOperation,
-    OfficeOperationParameters, OfficePageRange, OfficePropertyMap, OfficeRequestParameters,
-    OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode, OfficeViewport,
+    OfficeOperationParameters, OfficePageRange, OfficePropertyMap, OfficeTextReplacement,
+    OfficeViewMode, OfficeViewRenderMode, OfficeViewport,
 };
 use crate::{AgentFileInputRef, AgentFileInputSpec};
 use serde::{Deserialize, Serialize};
@@ -1207,7 +1207,7 @@ pub fn compile_office_semantic_request(
         document_kind: semantic.document_kind,
         operation,
         document_path: file_path,
-        parameters: OfficeRequestParameters::Typed(parameters),
+        parameters,
         output_path,
         destination_path,
         inputs: semantic_input_specs(&semantic.intent),
@@ -1948,7 +1948,7 @@ mod tests {
             element_type,
             properties,
             ..
-        } = canonical.typed_parameters().unwrap()
+        } = canonical.typed_parameters()
         else {
             panic!("expected add");
         };
@@ -1976,7 +1976,7 @@ mod tests {
         let canonical = compile_office_semantic_request(&formula).unwrap();
         let OfficeOperationParameters::Set {
             target, properties, ..
-        } = canonical.typed_parameters().unwrap()
+        } = canonical.typed_parameters()
         else {
             panic!("expected set");
         };
@@ -1999,7 +1999,7 @@ mod tests {
             element_type,
             properties,
             ..
-        } = canonical.typed_parameters().unwrap()
+        } = canonical.typed_parameters()
         else {
             panic!("expected add");
         };
@@ -2025,7 +2025,7 @@ mod tests {
             element_type,
             properties,
             ..
-        } = canonical.typed_parameters().unwrap()
+        } = canonical.typed_parameters()
         else {
             panic!("expected add");
         };
@@ -2050,7 +2050,7 @@ mod tests {
         let canonical = compile_office_semantic_request(&image).unwrap();
         let OfficeOperationParameters::Add {
             parent, properties, ..
-        } = canonical.typed_parameters().unwrap()
+        } = canonical.typed_parameters()
         else {
             panic!("expected add");
         };

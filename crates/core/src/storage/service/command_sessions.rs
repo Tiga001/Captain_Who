@@ -699,7 +699,9 @@ mod tests {
                 sequence,
                 call_id: call_id.to_string(),
                 tool: "run_command".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
                 operation: json!({"command": format!("long-command-{index}")}),
                 approval_status: AgentApprovalStatus::Approved,
                 truncated: false,

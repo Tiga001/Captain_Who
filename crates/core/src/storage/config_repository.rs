@@ -222,7 +222,7 @@ pub fn save_model_settings(
                 &model.api_token_override,
                 model.supports_image,
                 model.context_window_tokens,
-                encode_provider_profile_config(model.provider_profile_config.as_ref())?,
+                encode_provider_profile_config(&model.provider_profile_config)?,
                 provider_connection_revisions
                     .get(&model.id)
                     .ok_or(rusqlite::Error::InvalidQuery)?,
@@ -319,30 +319,18 @@ fn load_models(connection: &Transaction<'_>) -> rusqlite::Result<LoadedModels> {
     })
 }
 
-fn encode_provider_profile_config(
-    config: Option<&ProviderProfileConfig>,
-) -> rusqlite::Result<Option<String>> {
-    config
-        .map(|config| {
-            serde_json::to_string(config)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-        })
-        .transpose()
+fn encode_provider_profile_config(config: &ProviderProfileConfig) -> rusqlite::Result<String> {
+    serde_json::to_string(config)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 fn decode_provider_profile_config(
-    encoded: Option<String>,
+    encoded: String,
     column: usize,
-) -> rusqlite::Result<Option<ProviderProfileConfig>> {
-    encoded
-        .map(|encoded| {
-            let config =
-                serde_json::from_str::<ProviderProfileConfig>(&encoded).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-                })?;
-            Ok(config)
-        })
-        .transpose()
+) -> rusqlite::Result<ProviderProfileConfig> {
+    serde_json::from_str::<ProviderProfileConfig>(&encoded).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+    })
 }
 
 fn new_model_settings_revision() -> String {

@@ -44,7 +44,8 @@ const approval = {
     id: callId,
     tool: 'mcp__owned_fixture__echo_text',
     args: {},
-    approvalStatus: 'required'
+    approvalStatus: 'required',
+    reason: null
   },
   summary: {
     serverId,
@@ -86,6 +87,11 @@ const invocation = {
   external: true,
   state: 'running',
   dispatchCertainty: 'possibly_dispatched',
+  outcome: null,
+  isError: null,
+  errorCode: null,
+  durationMs: null,
+  diagnostics: null,
   outputTruncated: false
 } as const
 
@@ -104,8 +110,8 @@ const resultSizeSummary = {
   omittedEncodedBytes: 128
 } as const
 
-describe('LLM retry Host projection', () => {
-  it('keeps structured retry metadata while dropping provider-authored text', () => {
+describe('current LLM retry Host contract', () => {
+  it('keeps the complete structured retry metadata', () => {
     const parsed = parseAgentEventForHost({
       type: 'llm_retry',
       runId: 'run-retry',
@@ -115,8 +121,7 @@ describe('LLM retry Host projection', () => {
       delayMs: 5_000,
       retryAt: 1_800_000_005_000,
       attempt: 2,
-      maxAttempts: 3,
-      reason: 'upstream body that must not reach Renderer state'
+      maxAttempts: 3
     })
 
     expect(parsed).toEqual({
@@ -130,41 +135,35 @@ describe('LLM retry Host projection', () => {
       attempt: 2,
       maxAttempts: 3
     })
-    expect(parsed).not.toHaveProperty('reason')
   })
 
-  it('normalizes legacy and future retry categories without inspecting raw error text', () => {
-    expect(
-      parseAgentEventForHost({
-        type: 'llm_retry',
-        runId: 'run-retry',
-        streamId: 'stream-legacy',
-        attempt: 2,
-        maxAttempts: 3,
-        reason: '429 too many requests: secret provider body'
-      })
-    ).toEqual({
+  it('rejects the removed reason shape, missing scheduling fields, and unknown categories', () => {
+    const current = {
       type: 'llm_retry',
       runId: 'run-retry',
-      streamId: 'stream-legacy',
-      category: 'unknown',
-      delayMs: 0,
-      retryAt: 0,
+      streamId: 'stream-current',
+      category: 'network',
+      delayMs: 1_000,
+      retryAt: 1_800_000_001_000,
       attempt: 2,
       maxAttempts: 3
-    })
-    expect(
+    }
+    expect(() =>
+      parseAgentEventForHost({ ...current, reason: 'removed provider-authored text' })
+    ).toThrow(/unexpected field reason/)
+    expect(() => {
+      const missingDelay: Record<string, unknown> = { ...current }
+      delete missingDelay.delayMs
+      parseAgentEventForHost(missingDelay)
+    }).toThrow(/delayMs/)
+    expect(() =>
       parseAgentEventForHost({
+        ...current,
         type: 'llm_retry',
-        runId: 'run-retry',
         streamId: 'stream-future',
-        category: 'new_provider_category',
-        delayMs: 1_000,
-        retryAt: 1_800_000_001_000,
-        attempt: 2,
-        maxAttempts: 3
+        category: 'new_provider_category'
       })
-    ).toMatchObject({ category: 'unknown' })
+    ).toThrow(/supported retry category/)
   })
 
   it('replaces stream reset diagnostics with a stable lifecycle reason', () => {
@@ -230,6 +229,11 @@ describe('Round 4 MCP Agent contract', () => {
 
   it('parses a safe typed approval and keeps the Tool args projection empty', () => {
     expect(parseAgentMcpToolApproval(approval)).toEqual(approval)
+    const callWithoutReason: Record<string, unknown> = { ...approval.call }
+    delete callWithoutReason.reason
+    expect(() => parseAgentMcpToolApproval({ ...approval, call: callWithoutReason })).toThrow(
+      /reason is required/
+    )
     expect(() =>
       parseAgentMcpToolApproval({
         ...approval,
@@ -350,18 +354,12 @@ describe('Round 4 MCP Agent contract', () => {
     expect(parseAgentMcpToolInvocationEvent(toolError)).toEqual(toolError)
   })
 
-  it('accepts legacy invocation events without diagnostics', () => {
-    expect(parseAgentMcpToolInvocationEvent(invocation)).toEqual(invocation)
-    expect(
-      parseAgentMcpToolInvocationEvent({
-        ...invocation,
-        state: 'completed',
-        dispatchCertainty: 'response_received',
-        outcome: 'succeeded',
-        isError: false,
-        durationMs: 25
-      })
-    ).not.toHaveProperty('diagnostics')
+  it('requires the current diagnostics field even when its value is null', () => {
+    const withoutDiagnostics: Record<string, unknown> = { ...invocation }
+    delete withoutDiagnostics.diagnostics
+    expect(() => parseAgentMcpToolInvocationEvent(withoutDiagnostics)).toThrow(
+      /diagnostics is required/
+    )
   })
 
   it.each([
@@ -738,10 +736,12 @@ describe('Round 4 MCP Agent contract', () => {
     }
   )
 
-  it('accepts a missing legacy lifecycle reason and rejects an oversized one', () => {
-    const legacyInvocation = { ...invocation }
-    delete legacyInvocation.displayReason
-    expect(parseAgentMcpToolInvocationEvent(legacyInvocation)).toEqual(legacyInvocation)
+  it('requires the current lifecycle reason field and rejects an oversized one', () => {
+    const withoutDisplayReason: Record<string, unknown> = { ...invocation }
+    delete withoutDisplayReason.displayReason
+    expect(() => parseAgentMcpToolInvocationEvent(withoutDisplayReason)).toThrow(
+      /displayReason is required/
+    )
     expect(() =>
       parseAgentMcpToolInvocationEvent({
         ...invocation,

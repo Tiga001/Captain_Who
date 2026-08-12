@@ -84,7 +84,8 @@ function createMcpAction(
         args: {
           [PROPERTY_NAME_CANARY]: RAW_ARGUMENT_CANARY
         },
-        approvalStatus: 'required'
+        approvalStatus: 'required',
+        reason: null
       },
       summary: {
         serverId: '3ac3ec2b-3549-4dca-bf7d-298511b42523',

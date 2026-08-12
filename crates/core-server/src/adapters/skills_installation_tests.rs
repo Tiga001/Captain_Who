@@ -257,16 +257,45 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
     storage
         .set_skill_enablement_override(&skill_id, false)
         .unwrap();
+    let management = call_skill_rpc(
+        &storage,
+        &catalog,
+        &installations,
+        8,
+        SKILLS_LIST_MANAGEMENT_METHOD,
+        json!({}),
+    );
+    let second_installation_revision = management["result"]["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|skill| skill["id"] == skill_id)
+        .and_then(|skill| skill["installationRevision"].as_str())
+        .unwrap()
+        .to_string();
+
+    let package_revision_uninstall = call_skill_rpc(
+        &storage,
+        &catalog,
+        &installations,
+        9,
+        SKILLS_UNINSTALL_METHOD,
+        json!({
+            "skillId": skill_id,
+            "expectedRevision": second_revision,
+        }),
+    );
+    assert_eq!(package_revision_uninstall["error"]["code"], -32602);
 
     let uninstall_params = json!({
         "skillId": skill_id,
-        "expectedRevision": second_revision,
+        "expectedRevision": second_installation_revision,
     });
     let uninstalled = call_skill_rpc(
         &storage,
         &catalog,
         &installations,
-        8,
+        10,
         SKILLS_UNINSTALL_METHOD,
         uninstall_params.clone(),
     );
@@ -280,7 +309,7 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
         &storage,
         &catalog,
         &installations,
-        9,
+        11,
         SKILLS_UNINSTALL_METHOD,
         uninstall_params,
     );
@@ -296,7 +325,7 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
         &storage,
         &catalog,
         &installations,
-        10,
+        12,
         SKILLS_LIST_METHOD,
         json!({ "projectId": "project-1" }),
     );

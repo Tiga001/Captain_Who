@@ -1,9 +1,7 @@
 //! Deterministic, bounded references retained beside a lossy compaction summary.
 //!
-//! V1 copied previews and projected metadata for nearly every historical record. V2 keeps only a
-//! small backend-selected index into the authoritative message, trace and exact-history stores.
-//! V1 remains readable so existing conversations can be upgraded by their next successful
-//! compaction without an eager history rewrite.
+//! The continuity index keeps only a small backend-selected set of references into the
+//! authoritative message, trace and exact-history stores.
 
 use super::compaction_summary::{
     ContextCompactionPrefix, ContextCompactionSourceItem, ContextJournalCursor,
@@ -14,11 +12,9 @@ use crate::conversation_trace::{
 };
 use crate::protocol::{AgentApprovalStatus, AgentError, AgentResult};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const CONTEXT_CONTINUITY_SCHEMA_VERSION: u32 = 2;
-pub const CONTEXT_CONTINUITY_V1_SCHEMA_VERSION: u32 = 1;
 pub const CONTEXT_CONTINUITY_TARGET_TOKENS: u64 = 800;
 pub const CONTEXT_CONTINUITY_HARD_MAX_TOKENS: u64 = 1_500;
 
@@ -52,27 +48,17 @@ const ALLOWED_COUNT_KEYS: [&str; 9] = [
     COUNT_ARCHIVED_RESULTS,
 ];
 
-/// The V2 continuity index. `entries` exists only for deserializing an old V1 snapshot and is
-/// omitted from every V2 serialization.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ContextContinuitySnapshot {
     pub schema_version: u32,
     pub covered_through: ContextJournalCursor,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub task_evidence_refs: Vec<ContextHistoryRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_failure_refs: Vec<ContextHistoryRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approval_refs: Vec<ContextHistoryRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub important_decision_refs: Vec<ContextHistoryRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_refs: Vec<ContextHistoryRef>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub archived_counts: BTreeMap<String, u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub entries: Vec<ContextContinuityEntry>,
 }
 
 /// Public name for consumers that want to explicitly bind to the V2 contract.
@@ -82,7 +68,8 @@ pub type ContinuityIndexV2 = ContextContinuitySnapshot;
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum ContextHistoryRef {
     Message {
@@ -94,68 +81,6 @@ pub enum ContextHistoryRef {
     },
     Archive {
         archive_ref: String,
-    },
-}
-
-/// V1 compatibility payload. New snapshots never create these entries.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextContinuityText {
-    pub text: String,
-    pub total_chars: usize,
-    pub content_revision: String,
-    pub truncated: bool,
-}
-
-/// V1 compatibility payload. New snapshots never create these entries.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum ContextContinuityEntry {
-    UserMessage {
-        cursor: ContextJournalCursor,
-        created_at: String,
-        text: ContextContinuityText,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        status: Option<String>,
-    },
-    AssistantMessage {
-        cursor: ContextJournalCursor,
-        created_at: String,
-        text: ContextContinuityText,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        status: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        terminal_status: Option<ConversationTurnTraceTerminalStatus>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        terminal_error: Option<String>,
-    },
-    AssistantNarration {
-        cursor: ContextJournalCursor,
-        run_id: String,
-        created_at: String,
-        preview: String,
-        total_chars: usize,
-        truncated: bool,
-    },
-    ToolExchange {
-        call_cursor: ContextJournalCursor,
-        result_cursor: ContextJournalCursor,
-        run_id: String,
-        created_at: String,
-        call_id: String,
-        tool: String,
-        operation: Value,
-        status: ConversationTraceToolResultStatus,
-        success: bool,
-        outcome: Value,
-        approval_status: AgentApprovalStatus,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        truncated: bool,
     },
 }
 
@@ -175,17 +100,13 @@ impl ContextContinuitySnapshot {
 
     pub fn validate(&self) -> AgentResult<()> {
         self.covered_through.validate()?;
-        match self.schema_version {
-            CONTEXT_CONTINUITY_V1_SCHEMA_VERSION => self.validate_v1(),
-            CONTEXT_CONTINUITY_SCHEMA_VERSION => self.validate_v2(),
-            version => Err(AgentError::new(format!(
-                "不支持的 ContextContinuitySnapshot schema version：{version}。"
-            ))),
+        if self.schema_version != CONTEXT_CONTINUITY_SCHEMA_VERSION {
+            return Err(AgentError::new(format!(
+                "不支持的 ContextContinuitySnapshot schema version：{}。",
+                self.schema_version
+            )));
         }
-    }
-
-    pub fn is_v2(&self) -> bool {
-        self.schema_version == CONTEXT_CONTINUITY_SCHEMA_VERSION
+        self.validate_current()
     }
 
     pub fn all_refs(&self) -> impl Iterator<Item = &ContextHistoryRef> {
@@ -203,10 +124,7 @@ impl ContextContinuitySnapshot {
             .map_err(|error| AgentError::new(format!("无法序列化上下文连续性索引：{error}")))
     }
 
-    fn validate_v2(&self) -> AgentResult<()> {
-        if !self.entries.is_empty() {
-            return Err(AgentError::new("Continuity V2 不能携带 V1 entries。"));
-        }
+    fn validate_current(&self) -> AgentResult<()> {
         for (label, refs, maximum) in [
             (
                 "taskEvidenceRefs",
@@ -252,39 +170,6 @@ impl ContextContinuitySnapshot {
             return Err(AgentError::new(
                 "Continuity V2 archivedCounts 包含非受控或过多的计数键。",
             ));
-        }
-        Ok(())
-    }
-
-    fn validate_v1(&self) -> AgentResult<()> {
-        if self.entries.is_empty() {
-            return Err(AgentError::new("V1 上下文连续性骨架不能为空。"));
-        }
-        if !self.task_evidence_refs.is_empty()
-            || !self.unresolved_failure_refs.is_empty()
-            || !self.approval_refs.is_empty()
-            || !self.important_decision_refs.is_empty()
-            || !self.recent_refs.is_empty()
-            || !self.archived_counts.is_empty()
-        {
-            return Err(AgentError::new("V1 连续性记录不能混入 V2 字段。"));
-        }
-        let mut references = BTreeSet::new();
-        for entry in &self.entries {
-            entry.validate_v1()?;
-            for cursor in entry.cursors() {
-                if !references.insert(cursor_key(cursor)) {
-                    return Err(AgentError::new("V1 连续性记录包含重复的原始记录引用。"));
-                }
-            }
-        }
-        if self
-            .entries
-            .last()
-            .and_then(ContextContinuityEntry::last_cursor)
-            != Some(&self.covered_through)
-        {
-            return Err(AgentError::new("V1 连续性记录末尾与摘要覆盖边界不一致。"));
         }
         Ok(())
     }
@@ -355,94 +240,14 @@ impl ContinuitySelector {
             return Ok(Self::default());
         };
         previous.continuity.validate()?;
-        let mut selector = Self::default();
-        if previous.continuity.is_v2() {
-            selector.task_evidence = previous.continuity.task_evidence_refs.clone().into();
-            selector.unresolved_failures =
-                previous.continuity.unresolved_failure_refs.clone().into();
-            selector.approvals = previous.continuity.approval_refs.clone().into();
-            selector.important_decisions =
-                previous.continuity.important_decision_refs.clone().into();
-            selector.recent = previous.continuity.recent_refs.clone().into();
-            selector.archived_counts = previous.continuity.archived_counts.clone();
-        } else {
-            selector.import_v1(&previous.continuity.entries);
-        }
-        Ok(selector)
-    }
-
-    fn import_v1(&mut self, entries: &[ContextContinuityEntry]) {
-        for entry in entries {
-            match entry {
-                ContextContinuityEntry::UserMessage { cursor, .. } => {
-                    increment(&mut self.archived_counts, COUNT_MESSAGES);
-                    push_bounded(
-                        &mut self.task_evidence,
-                        history_ref_from_cursor(cursor),
-                        MAX_TASK_EVIDENCE_REFS,
-                    );
-                }
-                ContextContinuityEntry::AssistantMessage {
-                    cursor,
-                    terminal_status,
-                    terminal_error,
-                    ..
-                } => {
-                    increment(&mut self.archived_counts, COUNT_MESSAGES);
-                    let reference = history_ref_from_cursor(cursor);
-                    if terminal_error.is_some()
-                        || terminal_status.is_some_and(|status| {
-                            matches!(
-                                status,
-                                ConversationTurnTraceTerminalStatus::Failed
-                                    | ConversationTurnTraceTerminalStatus::Cancelled
-                            )
-                        })
-                    {
-                        increment(&mut self.archived_counts, COUNT_FAILURES);
-                        push_bounded(
-                            &mut self.unresolved_failures,
-                            reference,
-                            MAX_UNRESOLVED_FAILURE_REFS,
-                        );
-                    } else {
-                        push_bounded(&mut self.recent, reference, MAX_RECENT_REFS);
-                    }
-                }
-                ContextContinuityEntry::AssistantNarration { .. } => {
-                    increment(&mut self.archived_counts, COUNT_NARRATION);
-                    increment(&mut self.archived_counts, COUNT_TRACE_ITEMS);
-                }
-                ContextContinuityEntry::ToolExchange {
-                    result_cursor,
-                    tool,
-                    status,
-                    approval_status,
-                    ..
-                } => {
-                    if is_continuity_excluded_tool(tool) {
-                        continue;
-                    }
-                    increment(&mut self.archived_counts, COUNT_TOOL_CALLS);
-                    increment(&mut self.archived_counts, COUNT_TOOL_RESULTS);
-                    increment_by(&mut self.archived_counts, COUNT_TRACE_ITEMS, 2);
-                    let reference = history_ref_from_cursor(result_cursor);
-                    if *status != ConversationTraceToolResultStatus::Succeeded {
-                        increment(&mut self.archived_counts, COUNT_FAILURES);
-                        push_bounded(
-                            &mut self.unresolved_failures,
-                            reference.clone(),
-                            MAX_UNRESOLVED_FAILURE_REFS,
-                        );
-                    }
-                    if *approval_status != AgentApprovalStatus::NotRequired {
-                        increment(&mut self.archived_counts, COUNT_APPROVALS);
-                        push_bounded(&mut self.approvals, reference.clone(), MAX_APPROVAL_REFS);
-                    }
-                    push_bounded(&mut self.recent, reference, MAX_RECENT_REFS);
-                }
-            }
-        }
+        Ok(Self {
+            task_evidence: previous.continuity.task_evidence_refs.clone().into(),
+            unresolved_failures: previous.continuity.unresolved_failure_refs.clone().into(),
+            approvals: previous.continuity.approval_refs.clone().into(),
+            important_decisions: previous.continuity.important_decision_refs.clone().into(),
+            recent: previous.continuity.recent_refs.clone().into(),
+            archived_counts: previous.continuity.archived_counts.clone(),
+        })
     }
 
     fn observe(&mut self, source: &ContextCompactionSourceItem) {
@@ -598,7 +403,6 @@ impl ContinuitySelector {
             important_decision_refs,
             recent_refs,
             archived_counts: self.archived_counts,
-            entries: Vec::new(),
         }
     }
 }
@@ -678,113 +482,6 @@ fn looks_like_explicit_correction_or_decision(content: &str) -> bool {
     .any(|marker| normalized.contains(marker))
 }
 
-impl ContextContinuityEntry {
-    fn cursors(&self) -> Vec<&ContextJournalCursor> {
-        match self {
-            Self::UserMessage { cursor, .. }
-            | Self::AssistantMessage { cursor, .. }
-            | Self::AssistantNarration { cursor, .. } => vec![cursor],
-            Self::ToolExchange {
-                call_cursor,
-                result_cursor,
-                ..
-            } => vec![call_cursor, result_cursor],
-        }
-    }
-
-    fn last_cursor(&self) -> Option<&ContextJournalCursor> {
-        match self {
-            Self::UserMessage { cursor, .. }
-            | Self::AssistantMessage { cursor, .. }
-            | Self::AssistantNarration { cursor, .. } => Some(cursor),
-            Self::ToolExchange { result_cursor, .. } => Some(result_cursor),
-        }
-    }
-
-    fn validate_v1(&self) -> AgentResult<()> {
-        for cursor in self.cursors() {
-            cursor.validate()?;
-        }
-        match self {
-            Self::UserMessage {
-                created_at, text, ..
-            }
-            | Self::AssistantMessage {
-                created_at, text, ..
-            } => {
-                validate_v1_identity("createdAt", created_at)?;
-                text.validate_v1()
-            }
-            Self::AssistantNarration {
-                run_id,
-                created_at,
-                preview,
-                total_chars,
-                ..
-            } => {
-                validate_v1_identity("runId", run_id)?;
-                validate_v1_identity("createdAt", created_at)?;
-                if preview.trim().is_empty() || preview.chars().count() > *total_chars {
-                    return Err(AgentError::new("V1 连续性叙述预览无效。"));
-                }
-                Ok(())
-            }
-            Self::ToolExchange {
-                run_id,
-                created_at,
-                call_id,
-                tool,
-                status,
-                success,
-                ..
-            } => {
-                for (label, value) in [
-                    ("runId", run_id.as_str()),
-                    ("createdAt", created_at.as_str()),
-                    ("callId", call_id.as_str()),
-                    ("tool", tool.as_str()),
-                ] {
-                    validate_v1_identity(label, value)?;
-                }
-                if *success != (*status == ConversationTraceToolResultStatus::Succeeded) {
-                    return Err(AgentError::new("V1 工具结果 success/status 不一致。"));
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-impl ContextContinuityText {
-    fn validate_v1(&self) -> AgentResult<()> {
-        if self.content_revision.trim().is_empty()
-            || self.text.chars().count() > self.total_chars
-            || self.truncated != (self.text.chars().count() < self.total_chars)
-        {
-            return Err(AgentError::new("V1 连续性消息文本投影无效。"));
-        }
-        Ok(())
-    }
-}
-
-fn validate_v1_identity(label: &str, value: &str) -> AgentResult<()> {
-    if value.trim().is_empty() {
-        Err(AgentError::new(format!("V1 连续性记录缺少 {label}。")))
-    } else {
-        Ok(())
-    }
-}
-
-fn cursor_key(cursor: &ContextJournalCursor) -> String {
-    match cursor {
-        ContextJournalCursor::Message { message_id } => format!("message:{message_id}"),
-        ContextJournalCursor::TraceItem {
-            assistant_message_id,
-            sequence,
-        } => format!("trace:{assistant_message_id}:{sequence}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,7 +507,9 @@ mod tests {
                     sequence: index * 2,
                     call_id: format!("call-{index}"),
                     tool: "read_file".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "read_file".to_string(),
+                    },
                     operation: json!({ "path": format!("file-{index}.txt") }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -980,8 +679,36 @@ mod tests {
     }
 
     #[test]
-    fn v1_is_readable_and_next_compaction_converts_it_to_v2() {
-        let v1: ContextContinuitySnapshot = serde_json::from_value(json!({
+    fn current_snapshot_round_trips_and_rejects_old_incomplete_or_extra_shapes() {
+        let snapshot = ContextContinuitySnapshot {
+            schema_version: CONTEXT_CONTINUITY_SCHEMA_VERSION,
+            covered_through: ContextJournalCursor::message("user-current"),
+            task_evidence_refs: vec![ContextHistoryRef::message("user-current")],
+            unresolved_failure_refs: Vec::new(),
+            approval_refs: Vec::new(),
+            important_decision_refs: Vec::new(),
+            recent_refs: Vec::new(),
+            archived_counts: BTreeMap::from([(COUNT_MESSAGES.to_string(), 1)]),
+        };
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        let decoded: ContextContinuitySnapshot = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, snapshot);
+        decoded.validate().unwrap();
+
+        let mut unknown_version = encoded.clone();
+        unknown_version["schemaVersion"] = json!(1);
+        let decoded: ContextContinuitySnapshot = serde_json::from_value(unknown_version).unwrap();
+        assert!(decoded.validate().is_err());
+
+        let mut missing = encoded.clone();
+        missing.as_object_mut().unwrap().remove("recentRefs");
+        assert!(serde_json::from_value::<ContextContinuitySnapshot>(missing).is_err());
+
+        let mut extra = encoded;
+        extra["entries"] = json!([]);
+        assert!(serde_json::from_value::<ContextContinuitySnapshot>(extra).is_err());
+
+        let retired_v1 = json!({
             "schemaVersion": 1,
             "coveredThrough": { "kind": "message", "messageId": "user-old" },
             "entries": [{
@@ -991,51 +718,12 @@ mod tests {
                 "text": {
                     "text": "old request",
                     "totalChars": 11,
-                    "contentRevision": "sha256:legacy",
+                    "contentRevision": "sha256:retired",
                     "truncated": false
                 }
             }]
-        }))
-        .unwrap();
-        v1.validate().unwrap();
-        let previous = ContextCompactionSummary {
-            schema_version: CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
-            id: "summary-v1".to_string(),
-            conversation_id: "conversation-1".to_string(),
-            source_revision: "source-v1".to_string(),
-            previous_summary_id: None,
-            covered_through: ContextJournalCursor::message("user-old"),
-            content: "legacy summary".to_string(),
-            continuity: v1,
-            generation: ContextCompactionGeneration::test(),
-            source_input_tokens: 1_000,
-            summary_input_tokens: 20,
-            continuity_input_tokens: 100,
-            uncovered_tail_input_tokens: 0,
-            replacement_input_tokens: 120,
-            created_at: 1,
-        };
-        let current_cursor = ContextJournalCursor::message("user-new");
-        let converted = ContextContinuitySnapshot::from_prefix(&ContextCompactionPrefix {
-            conversation_id: "conversation-1".to_string(),
-            source_revision: "source-v2".to_string(),
-            covered_through: current_cursor.clone(),
-            previous_summary: Some(previous),
-            source_items: vec![ContextCompactionSourceItem::Message {
-                cursor: current_cursor,
-                role: "user".to_string(),
-                content: "new request".to_string(),
-                created_at: 2,
-                status: Some("sent".to_string()),
-                terminal_status: None,
-                terminal_error: None,
-            }],
-        })
-        .unwrap();
-
-        assert!(converted.is_v2());
-        assert!(converted.entries.is_empty());
-        assert_eq!(converted.task_evidence_refs.len(), 2);
+        });
+        assert!(serde_json::from_value::<ContextContinuitySnapshot>(retired_v1).is_err());
     }
 
     #[test]
@@ -1056,7 +744,9 @@ mod tests {
                             sequence: 0,
                             call_id: "transient-call".to_string(),
                             tool: tool.to_string(),
-                            provenance: None,
+                            provenance: crate::AgentToolIdentity::Builtin {
+                                tool_name: tool.to_string(),
+                            },
                             operation: json!({}),
                             approval_status: AgentApprovalStatus::NotRequired,
                             truncated: false,

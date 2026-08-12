@@ -7,7 +7,7 @@ use mycopilot_core::{
 use serde_json::json;
 use tempfile::tempdir;
 
-fn settings(profile: Option<ProviderProfileConfig>) -> ModelSettingsRecord {
+fn settings(profile: ProviderProfileConfig) -> ModelSettingsRecord {
     ModelSettingsRecord {
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: "test-token".to_string(),
@@ -30,15 +30,20 @@ fn settings(profile: Option<ProviderProfileConfig>) -> ModelSettingsRecord {
 }
 
 #[test]
-fn legacy_absence_resolves_to_generic_without_reasoning_wire_changes() {
+fn explicit_generic_profiles_validate_without_reasoning_wire_changes() {
     let openai =
-        ProviderProfileConfig::resolve(None, ProviderProtocolDialect::OpenAiChatCompletions)
-            .unwrap();
+        ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions);
+    openai
+        .validate_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions)
+        .unwrap();
     assert_eq!(openai.profile.id, ProviderProfileId::GenericOpenAiChat);
     assert_eq!(openai.reasoning.mode, ReasoningMode::ProviderDefault);
 
     let anthropic =
-        ProviderProfileConfig::resolve(None, ProviderProtocolDialect::AnthropicMessages).unwrap();
+        ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::AnthropicMessages);
+    anthropic
+        .validate_for_dialect(ProviderProtocolDialect::AnthropicMessages)
+        .unwrap();
     assert_eq!(
         anthropic.profile.id,
         ProviderProfileId::GenericAnthropicMessages
@@ -67,32 +72,26 @@ fn unknown_or_incompatible_profiles_fail_closed() {
 }
 
 #[test]
-fn model_storage_round_trips_and_legacy_saves_preserve_explicit_profiles() {
+fn model_storage_round_trips_explicit_profiles() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     let deepseek = ProviderProfileConfig::deepseek_v4_default();
 
     storage
-        .save_model_settings(settings(Some(deepseek.clone())))
+        .save_model_settings(settings(deepseek.clone()))
         .unwrap();
     assert_eq!(
         storage.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
-        Some(deepseek.clone())
-    );
-
-    storage.save_model_settings(settings(None)).unwrap();
-    assert_eq!(
-        storage.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
-        Some(deepseek)
+        deepseek
     );
 
     let generic =
         ProviderProfileConfig::generic_for_dialect(ProviderProtocolDialect::OpenAiChatCompletions);
     storage
-        .save_model_settings(settings(Some(generic.clone())))
+        .save_model_settings(settings(generic.clone()))
         .unwrap();
     assert_eq!(
         storage.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
-        Some(generic)
+        generic
     );
 }

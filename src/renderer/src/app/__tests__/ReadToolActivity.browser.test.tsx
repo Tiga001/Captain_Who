@@ -46,7 +46,8 @@ const call: AgentToolCall = {
   id: 'read-image-call',
   tool: 'read_image',
   args: { path: 'preview.png' },
-  approvalStatus: 'not_required'
+  approvalStatus: 'not_required',
+  reason: null
 }
 
 function activity(overrides: Partial<ChatReadActivity> = {}): ChatReadActivity {
@@ -192,7 +193,8 @@ describe('ReadToolActivity structured path failures', () => {
       id,
       tool: 'read_file',
       args: { path },
-      approvalStatus: 'not_required'
+      approvalStatus: 'not_required',
+      reason: null
     }
   }
 

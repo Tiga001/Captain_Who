@@ -5,6 +5,7 @@ fn test_input(permissions: AgentPermissions) -> AgentChatInput {
         "apiUrl": "https://should-not-be-called.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "messages": []
     }))
     .unwrap();

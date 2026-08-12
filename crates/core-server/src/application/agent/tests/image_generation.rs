@@ -55,6 +55,10 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
             unread_at: None,
         })
         .unwrap();
+    let image_operation = json!({
+        "request": { "operation": "generate", "prompt": "private prompt" },
+        "reason": "Create the requested image."
+    });
     let trace = ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: run_id.to_string(),
@@ -67,17 +71,39 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
             sequence: 0,
             call_id: call_id.to_string(),
             tool: "image_generation".to_string(),
-            operation: json!({
-                "request": { "operation": "generate", "prompt": "private prompt" },
-                "reason": "Create the requested image."
-            }),
-            provenance: None,
+            operation: image_operation.clone(),
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: "image_generation".to_string(),
+            },
             approval_status: AgentApprovalStatus::NotRequired,
             truncated: false,
         }],
     };
+    let model_context_items = vec![ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "assistant".to_string(),
+        content: String::new(),
+        tool_call_id: None,
+        tool_calls: vec![AgentContextCheckpointToolCall {
+            id: call_id.to_string(),
+            name: "image_generation".to_string(),
+            args: image_operation,
+            provider_identity: AgentProviderToolCallIdentity {
+                provider_tool_index: 0,
+                provider_call_id: call_id.to_string(),
+                runtime_call_id: call_id.to_string(),
+            },
+        }],
+        is_error: false,
+    }];
     storage
-        .append_in_progress_conversation_turn_trace(&trace, 1, 2)
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &model_context_items,
+            1,
+            2,
+        )
         .unwrap();
 
     let execution_id =
@@ -207,6 +233,13 @@ async fn restart_pairs_a_durable_image_call_with_its_terminal_journal_receipt() 
     assert!(observation["failure"]["generationMayHaveSucceeded"]
         .as_bool()
         .unwrap());
+    let recovered_model_context = storage
+        .get_conversation_model_context_log(assistant_message_id)
+        .unwrap()
+        .expect("image recovery advances model context atomically");
+    recovered
+        .validate_complete_model_context(&recovered_model_context.items)
+        .unwrap();
 
     assert_eq!(
         service

@@ -164,7 +164,7 @@ impl AgentService {
         if deletion_lifecycle.contains_input(&agent_input) {
             return Err("项目或会话正在移除，无法启动 MCP 操作。".to_string());
         }
-        if !mcp_pending_action_binding_matches(run_id, None, &action, &agent_input) {
+        if !pending_action_binding_matches(run_id, None, &action, &agent_input) {
             return Err("automatic MCP journal frozen identity is inconsistent".to_string());
         }
 
@@ -300,9 +300,9 @@ impl AgentService {
         if deletion_lifecycle.contains_input(&agent_input) {
             return Err("项目或会话正在移除，无法发布待审批操作。".to_string());
         }
-        if !mcp_pending_action_binding_matches(run_id, None, &action, &agent_input) {
+        if !pending_action_binding_matches(run_id, None, &action, &agent_input) {
             self.invalidate_mcp_pending_payload(&action);
-            return Err("MCP pending approval frozen identity is inconsistent.".to_string());
+            return Err("Pending action frozen Tool Call identity is inconsistent.".to_string());
         }
         let action_id = action_id_for_action(&action);
         let tool_call_id = match &action {
@@ -326,6 +326,8 @@ impl AgentService {
             },
             agent_input,
         };
+        tool_call_for_pending_record(&pending_record)
+            .map_err(|_| "Pending action frozen Tool Call identity is inconsistent.".to_string())?;
 
         {
             let pending_actions = self
@@ -756,7 +758,7 @@ impl AgentService {
 
     /// Durably records an automatically approved action audit transition.
     ///
-    /// Most legacy auto-approved actions treat audit persistence as best effort through
+    /// Other current auto-approved actions treat audit persistence as best effort through
     /// [`Self::record_auto_action_audit`]. File-producing Office operations use this fallible
     /// boundary directly for non-claim transitions. Office operations and commands use the
     /// stricter claim/finalize methods below so retries cannot overwrite an execution receipt or
@@ -1046,14 +1048,56 @@ fn auto_action_audit_record(
     }
 }
 
-pub(super) fn mcp_pending_action_binding_matches(
+pub(super) fn pending_action_binding_matches(
     run_id: &str,
     record: Option<&AgentPendingActionRecord>,
     action: &AgentProposedAction,
     agent_input: &AgentChatInput,
 ) -> bool {
+    let action_id = action_id_for_action(action);
+    let tool_name = tool_name_for_action(action);
+    let (tool_call_id, pending_action_id) = match action {
+        AgentProposedAction::McpToolCall { approval } => (
+            approval.identity.call_id.as_str(),
+            Some(approval.identity.action_id.as_str()),
+        ),
+        _ => (action_id.as_str(), None),
+    };
+    let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
+        return false;
+    };
+    if checkpoint.run_id != run_id
+        || checkpoint.pending_action_id.as_deref() != pending_action_id
+        || checkpoint.pending_tool_call_id != tool_call_id
+    {
+        return false;
+    }
+    let mut checkpoint_calls = checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .filter(|call| call.id == tool_call_id);
+    let Some(checkpoint_call) = checkpoint_calls.next() else {
+        return false;
+    };
+    if checkpoint_calls.next().is_some()
+        || checkpoint_call.name != tool_name
+        || checkpoint_call.provider_identity.runtime_call_id != tool_call_id
+    {
+        return false;
+    }
+    if !record.is_none_or(|record| {
+        record.action_type == action_type_for_action(action)
+            && record.run_id == run_id
+            && record.action_id == pending_action_storage_id(run_id, &action_id)
+            && record.tool_call_id.as_deref() == Some(tool_call_id)
+            && record.tool_name == tool_name
+    }) {
+        return false;
+    }
+
     let AgentProposedAction::McpToolCall { approval } = action else {
-        return record.is_none_or(|record| record.action_type != "mcp_tool_call");
+        return true;
     };
     let lifecycle_state = match approval.approval_mode {
         mycopilot_core::AgentMcpApprovalMode::Prompt => {
@@ -1087,36 +1131,7 @@ pub(super) fn mcp_pending_action_binding_matches(
     {
         return false;
     }
-    match approval.approval_mode {
-        mycopilot_core::AgentMcpApprovalMode::Prompt => {
-            let Some(checkpoint) = agent_input.resume_checkpoint.as_ref() else {
-                return false;
-            };
-            if checkpoint.run_id != identity.run_id
-                || checkpoint.pending_action_id.as_deref() != Some(identity.action_id.as_str())
-                || checkpoint.pending_tool_call_id != identity.call_id
-            {
-                return false;
-            }
-        }
-        mycopilot_core::AgentMcpApprovalMode::Auto => {
-            if agent_input
-                .resume_checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.run_id != identity.run_id)
-            {
-                return false;
-            }
-        }
-        mycopilot_core::AgentMcpApprovalMode::Deny => return false,
-    }
-    record.is_none_or(|record| {
-        record.action_type == "mcp_tool_call"
-            && record.run_id == identity.run_id
-            && record.action_id == pending_action_storage_id(run_id, &identity.action_id)
-            && record.tool_call_id.as_deref() == Some(identity.call_id.as_str())
-            && record.tool_name == identity.provenance.model_tool_name
-    })
+    identity.run_id == checkpoint.run_id
 }
 
 pub(super) fn load_persisted_pending_actions(
@@ -1128,70 +1143,101 @@ pub(super) fn load_persisted_pending_actions(
 
     let mut pending_actions = HashMap::with_capacity(records.len());
     for record in records {
-        if record.status != "pending" && record.action_type != "mcp_tool_call" {
-            return Err(format!(
-                "non-MCP interrupted action {} survived generic startup reconciliation",
-                record.action_id
-            ));
-        }
-        let decoded_input =
-            PersistedAgentResumeInput::decode(&record.agent_input_json).map_err(|_| {
-                format!(
-                    "persisted pending action {} has an invalid resume projection",
-                    record.action_id
-                )
-            })?;
-        let action = match serde_json::from_str::<AgentProposedAction>(&record.action_json) {
-            Ok(action) => action,
-            Err(_) => {
-                return Err(format!(
-                    "persisted pending action {} has an invalid action projection",
-                    record.action_id
-                ));
-            }
-        };
-        if !mcp_pending_action_binding_matches(
-            &record.run_id,
-            Some(&record),
-            &action,
-            &decoded_input.agent_input,
-        ) {
-            return Err(format!(
-                "persisted pending action {} failed identity validation",
-                record.action_id
-            ));
-        }
-        let agent_input = restore_agent_input_secrets(storage, decoded_input)?;
         let status = pending_status_from_label(&record.status).ok_or_else(|| {
             format!(
                 "persisted pending action {} has unknown status {}",
                 record.action_id, record.status
             )
         })?;
+        let decoded_input = match PersistedAgentResumeInput::decode(&record.agent_input_json) {
+            Ok(decoded) => decoded,
+            Err(_) => {
+                retire_unsupported_or_malformed_pending_action(storage, &record, status)?;
+                continue;
+            }
+        };
+        let action = match serde_json::from_str::<AgentProposedAction>(&record.action_json) {
+            Ok(action) => action,
+            Err(_) => {
+                retire_unsupported_or_malformed_pending_action(storage, &record, status)?;
+                continue;
+            }
+        };
+        if !pending_action_binding_matches(
+            &record.run_id,
+            Some(&record),
+            &action,
+            &decoded_input.agent_input,
+        ) {
+            retire_unsupported_or_malformed_pending_action(storage, &record, status)?;
+            continue;
+        }
+        let agent_input = match restore_agent_input_secrets(storage, decoded_input) {
+            Ok(input) => input,
+            Err(_) => {
+                retire_unsupported_or_malformed_pending_action(storage, &record, status)?;
+                continue;
+            }
+        };
         let action_id = action_id_for_action(&action);
-        let storage_id = record.action_id.clone();
+        let storage_id = pending_action_storage_id(&record.run_id, &action_id);
+        if record.action_id != storage_id {
+            retire_unsupported_or_malformed_pending_action(storage, &record, status)?;
+            continue;
+        }
         let snapshot = PendingAgentActionSnapshot {
             action_id,
-            action_type: record.action_type,
-            tool_name: record.tool_name,
-            tool_call_id: record.tool_call_id,
-            run_id: record.run_id,
-            conversation_id: record.conversation_id,
-            assistant_message_id: record.assistant_message_id,
+            action_type: record.action_type.clone(),
+            tool_name: record.tool_name.clone(),
+            tool_call_id: record.tool_call_id.clone(),
+            run_id: record.run_id.clone(),
+            conversation_id: record.conversation_id.clone(),
+            assistant_message_id: record.assistant_message_id.clone(),
             action,
             created_at: record.created_at,
             status,
         };
-        pending_actions.insert(
-            storage_id.clone(),
-            PendingActionRecord {
-                storage_id,
-                snapshot,
-                agent_input,
-            },
-        );
+        let pending_record = PendingActionRecord {
+            storage_id: storage_id.clone(),
+            snapshot,
+            agent_input,
+        };
+        if tool_call_for_pending_record(&pending_record).is_err() {
+            retire_unsupported_or_malformed_pending_action(storage, &record, status)?;
+            continue;
+        }
+        pending_actions.insert(storage_id.clone(), pending_record);
     }
     Ok(pending_actions)
+}
+
+fn retire_unsupported_or_malformed_pending_action(
+    storage: &StorageService,
+    record: &AgentPendingActionRecord,
+    status: PendingActionStatus,
+) -> Result<(), String> {
+    match status {
+        PendingActionStatus::Pending
+        | PendingActionStatus::Approved
+        | PendingActionStatus::Executing => {}
+        PendingActionStatus::Rejected
+        | PendingActionStatus::Cancelled
+        | PendingActionStatus::Completed
+        | PendingActionStatus::Failed => {
+            return Err("unsupported_or_malformed_pending_action_has_terminal_status".to_string());
+        }
+    }
+    let changed = storage
+        .retire_unsupported_or_malformed_pending_agent_action_on_startup(
+            &record.action_id,
+            &record.status,
+            now_ms(),
+        )
+        .map_err(|_| "unsupported_or_malformed_pending_action_could_not_be_retired".to_string())?;
+    if !changed {
+        return Err("unsupported_or_malformed_pending_action_lost_status_cas".to_string());
+    }
+    Ok(())
 }
 
 pub(super) fn resolve_pending_action_storage_id(
@@ -1200,13 +1246,9 @@ pub(super) fn resolve_pending_action_storage_id(
     action_id: &str,
 ) -> Option<String> {
     let canonical = pending_action_storage_id(run_id, action_id);
-    if pending_actions.contains_key(&canonical) {
-        return Some(canonical);
-    }
-    pending_actions.iter().find_map(|(storage_id, record)| {
-        (record.snapshot.run_id == run_id && record.snapshot.action_id == action_id)
-            .then(|| storage_id.clone())
-    })
+    pending_actions
+        .contains_key(&canonical)
+        .then_some(canonical)
 }
 
 pub(super) fn pending_storage_record(

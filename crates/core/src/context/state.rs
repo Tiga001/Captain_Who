@@ -185,7 +185,7 @@ impl AgentConversationContextState {
     /// Number of context items produced by the exact-prefix/trace-suffix renderer.
     ///
     /// This is intentionally not the physical trace row count: legacy traces can contain
-    /// run-scoped records (for example Todo) that the compatibility renderer omits.
+    /// run-scoped records (for example Todo) that the current model-visible projection omits.
     pub fn rendered_trace_activity_count(
         trace: &ConversationTurnTrace,
         model_context_items: &[ConversationModelContextItem],

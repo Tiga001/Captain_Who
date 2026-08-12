@@ -14,7 +14,7 @@ use super::types::{
     OfficeOperationParameters, OfficePathIdentity, OfficePathPurpose, OfficePathScope,
     OfficePathSlot, OfficePreparedExecution, OfficePropertyMap, OfficePublishedOutput,
     OfficePublishedOutputKind, OfficePublishedOutputRole, OfficeRenderPageSelection,
-    OfficeRequestParameters, OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
+    OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
     OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
     OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
@@ -216,10 +216,6 @@ pub(super) fn prepare_office_cli(
         argv: prepared.argv,
         paths: prepared.paths,
         input_bindings,
-        document_precondition: None,
-        output_precondition: None,
-        destination_precondition: None,
-        resource_preconditions: Vec::new(),
     })
 }
 
@@ -828,7 +824,7 @@ fn portable_relative_path(path: &Path) -> Result<String, OfficeEngineError> {
 }
 
 fn requested_page_selection(request: &OfficeExecutionRequest) -> OfficeRenderPageSelection {
-    let Some(OfficeOperationParameters::View { pages, .. }) = request.typed_parameters() else {
+    let OfficeOperationParameters::View { pages, .. } = request.typed_parameters() else {
         return OfficeRenderPageSelection::All;
     };
     if pages.is_empty() {

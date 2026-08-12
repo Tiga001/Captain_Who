@@ -55,6 +55,7 @@ describe('RunCommandToolActivity', () => {
   it('keeps the reason in the title and the command in the expanded body', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: {
         command: 'python3 gen_budget.py',
         reason: '执行脚本生成预算工作簿'
@@ -93,6 +94,7 @@ describe('RunCommandToolActivity', () => {
     ].join('\n')
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: { command, reason: '批量检查 PDF 页面' },
       id: 'multiline-command',
       tool: 'run_command'
@@ -122,6 +124,7 @@ describe('RunCommandToolActivity', () => {
   it('renders bounded live output before the final ToolResult arrives', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: {
         command: 'pnpm test',
         reason: '运行测试'
@@ -165,6 +168,7 @@ describe('RunCommandToolActivity', () => {
   it('shows an explicit running shell before the command emits its first byte', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'not_required',
+      reason: null,
       args: { command: 'pnpm check', reason: '运行检查' },
       id: 'silent-command',
       tool: 'run_command'
@@ -182,6 +186,7 @@ describe('RunCommandToolActivity', () => {
   it('distinguishes approval waiting from a process that is starting', async () => {
     const waitingCall: AgentToolCall = {
       approvalStatus: 'required',
+      reason: null,
       args: { command: 'python3 app.py', reason: '启动应用' },
       id: 'approval-command',
       tool: 'run_command'
@@ -212,6 +217,7 @@ describe('RunCommandToolActivity', () => {
   it('renders a managed non-zero exit as failed with exit code and duration', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: { command: 'pnpm test', reason: '运行测试' },
       id: 'failed-command',
       tool: 'run_command'
@@ -259,6 +265,7 @@ describe('RunCommandToolActivity', () => {
   it('renders a running receipt as started instead of completed and keeps later output', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: { command: 'python3 app.py', reason: '启动应用' },
       id: 'managed-command',
       tool: 'run_command'
@@ -318,6 +325,7 @@ describe('RunCommandToolActivity', () => {
   it('shows live elapsed time only while a managed command is running', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: { command: 'pnpm check', reason: '运行检查' },
       id: 'timed-command',
       tool: 'run_command'
@@ -345,6 +353,7 @@ describe('RunCommandToolActivity', () => {
   it('keeps a durable handoff receipt as the last-known running state until Host refreshes it', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',
+      reason: null,
       args: { command: 'python3 app.py', reason: '启动应用' },
       id: 'stale-managed-command',
       tool: 'run_command'
@@ -373,6 +382,7 @@ describe('RunCommandToolActivity', () => {
   it('passes transient output through the generic timeline activity path', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'not_required',
+      reason: null,
       args: { command: 'pnpm check', reason: '运行检查' },
       id: 'timeline-command',
       tool: 'run_command'

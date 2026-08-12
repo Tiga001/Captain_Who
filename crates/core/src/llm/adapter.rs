@@ -133,7 +133,7 @@ impl ProviderAdapter for GenericOpenAiAdapter {
     }
 
     fn validate_wire_protocol(&self, request: &LlmChatRequest) -> AgentResult<()> {
-        validate_legacy_generic_wire_protocol(&request.messages)
+        validate_generic_split_wire_protocol(&request.messages)
     }
 
     fn prepare_request(&self, request: &LlmChatRequest) -> AgentResult<Value> {
@@ -208,7 +208,7 @@ impl ProviderAdapter for GenericAnthropicAdapter {
     }
 
     fn validate_wire_protocol(&self, request: &LlmChatRequest) -> AgentResult<()> {
-        validate_legacy_generic_wire_protocol(&request.messages)
+        validate_generic_split_wire_protocol(&request.messages)
     }
 
     fn prepare_request(&self, request: &LlmChatRequest) -> AgentResult<Value> {
@@ -492,9 +492,9 @@ pub(super) fn deepseek_reasoning_content<'a>(
     let Some(continuation) = turn.provider_continuation() else {
         return Ok(None);
     };
-    let turn_protocol = turn
-        .provider_protocol()
-        .ok_or_else(|| AgentError::new("Legacy Assistant Turn 不能回放 DeepSeek continuation。"))?;
+    let turn_protocol = turn.provider_protocol().ok_or_else(|| {
+        AgentError::new("Split-projection Assistant Turn 不能回放 DeepSeek continuation。")
+    })?;
     continuation.validate_for(turn_protocol, turn.digest())?;
     if continuation.provenance() != request_protocol {
         return Err(AgentError::new(
@@ -792,7 +792,7 @@ pub(super) enum GenericWireMessage<'a> {
     },
 }
 
-pub(super) fn project_legacy_generic_exchange(
+pub(super) fn project_generic_split_exchange(
     messages: &[LlmMessage],
 ) -> AgentResult<Vec<GenericWireMessage<'_>>> {
     let mut projected = Vec::new();
@@ -884,8 +884,8 @@ pub(super) fn project_legacy_generic_exchange(
     Ok(projected)
 }
 
-fn validate_legacy_generic_wire_protocol(messages: &[LlmMessage]) -> AgentResult<()> {
-    let projected = project_legacy_generic_exchange(messages)?;
+fn validate_generic_split_wire_protocol(messages: &[LlmMessage]) -> AgentResult<()> {
+    let projected = project_generic_split_exchange(messages)?;
     validate_generic_wire_protocol(&projected)
 }
 
@@ -958,9 +958,10 @@ mod tests {
                 LlmRuntimeToolCallBinding::new(index, provider_call, runtime_call)
             })
             .collect();
-        let turn = LlmAssistantTurn::from_legacy("Inspecting both files.", provider_calls)
-            .with_runtime_tool_bindings(bindings)
-            .unwrap();
+        let turn =
+            LlmAssistantTurn::from_split_projection("Inspecting both files.", provider_calls)
+                .with_runtime_tool_bindings(bindings)
+                .unwrap();
         let mut image_context = LlmMessage::text(LlmMessageRole::User, "Image from first result");
         image_context.images_mut().unwrap().push(LlmImage {
             mime_type: "image/png".to_string(),
@@ -978,7 +979,7 @@ mod tests {
             LlmMessage::tool_result(runtime_calls[1].id.clone(), "second result", false),
         ];
 
-        let projected = project_legacy_generic_exchange(&messages).unwrap();
+        let projected = project_generic_split_exchange(&messages).unwrap();
 
         assert_eq!(projected.len(), 6);
         assert!(matches!(
@@ -1036,16 +1037,17 @@ mod tests {
             args: provider_calls[1].args.clone(),
         };
         let binding = LlmRuntimeToolCallBinding::new(1, &provider_calls[1], runtime_call.clone());
-        let turn = LlmAssistantTurn::from_legacy("Reading the retained file.", provider_calls)
-            .with_runtime_tool_bindings(vec![binding])
-            .unwrap();
+        let turn =
+            LlmAssistantTurn::from_split_projection("Reading the retained file.", provider_calls)
+                .with_runtime_tool_bindings(vec![binding])
+                .unwrap();
         let messages = vec![
             LlmMessage::from_assistant_turn(turn),
             LlmMessage::text(LlmMessageRole::User, "Interstitial runtime context"),
             LlmMessage::tool_result(runtime_call.id.clone(), "retained result", false),
         ];
 
-        let projected = project_legacy_generic_exchange(&messages).unwrap();
+        let projected = project_generic_split_exchange(&messages).unwrap();
 
         assert_eq!(projected.len(), 3);
         assert!(matches!(

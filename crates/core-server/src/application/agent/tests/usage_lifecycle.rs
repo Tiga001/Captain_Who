@@ -102,7 +102,28 @@ fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
                             "totalTokens": 0,
                             "billableRequestCount": 0
                         },
-                        "timeline": [{ "id": "keep-presentation" }]
+                        "startedAt": 1,
+                        "toolDefinitions": [],
+                        "toolCalls": [],
+                        "toolResults": [],
+                        "webSearchActivities": [],
+                        "readActivities": [],
+                        "approvals": [],
+                        "diffs": [],
+                        "fileDrafts": [],
+                        "mcpInvocations": [],
+                        "messageStreamCheckpoints": {},
+                        "timeline": [{
+                            "id": "keep-presentation",
+                            "type": "message",
+                            "content": "Presentation remains intact."
+                        }],
+                        "state": {
+                            "status": "running",
+                            "activeRunId": "run-cumulative",
+                            "lastError": null,
+                            "updatedAt": 1
+                        }
                     })
                     .to_string(),
                 ),
@@ -316,6 +337,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "messages": []
     }))
@@ -347,7 +369,11 @@ fn pending_approval_persists_full_run_checkpoint() {
                     id: "call-checkpoint".to_string(),
                     name: "apply_patch".to_string(),
                     args: json!({ "operation": "create", "filePath": "report.txt" }),
-                    provider_identity: None,
+                    provider_identity: mycopilot_core::AgentProviderToolCallIdentity {
+                        provider_tool_index: 0,
+                        provider_call_id: "call-checkpoint".to_string(),
+                        runtime_call_id: "call-checkpoint".to_string(),
+                    },
                 }],
                 is_error: false,
                 sources: vec!["model_response".to_string()],

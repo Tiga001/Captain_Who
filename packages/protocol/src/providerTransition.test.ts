@@ -55,7 +55,7 @@ describe('Provider transition protocol', () => {
     expect(() =>
       parseAgentProviderTransitionPreflightOutput({
         conversationId: 'conversation-1',
-        currentModelId: 'legacy-model',
+        currentModelId: 'current-model',
         targetModelId: 'generic-model',
         decision: 'compatible',
         reason: 'same_protocol',

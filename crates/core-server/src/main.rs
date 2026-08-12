@@ -123,8 +123,7 @@ use mycopilot_core::skills::{
     ReqwestGitHubTransport, SharedGitHubTransport, SkillId, SkillInstallationId,
     SkillInstallationMutation, SkillInstallationOperation, SkillInstallationRevision,
     SkillInstallationService, SkillInstallationServiceError, SkillInstallationWorkflow,
-    SkillRevision, SkillSourceResolutionService, SkillUninstallExactRequest, SkillUninstallRequest,
-    SkillsService, SKILL_INSTALLATION_REVISION_PREFIX,
+    SkillRevision, SkillSourceResolutionService, SkillUninstallExactRequest, SkillsService,
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,

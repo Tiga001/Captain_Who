@@ -18,7 +18,8 @@ const call: AgentToolCall = {
   id: 'history-call',
   tool: 'conversation_history',
   args: { query: 'Exact History Archive' },
-  approvalStatus: 'not_required'
+  approvalStatus: 'not_required',
+  reason: null
 }
 
 describe('ConversationHistoryToolActivity', () => {

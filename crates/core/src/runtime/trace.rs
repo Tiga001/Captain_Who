@@ -136,6 +136,7 @@ pub(super) fn conversation_trace_from_input_checkpoint(
                 &model_observation,
                 durable_archive,
             )
+            .map_err(AgentError::new)?
         }
         None => ConversationTraceSnapshot {
             items: checkpoint.conversation_trace_items.clone(),

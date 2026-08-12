@@ -61,11 +61,11 @@ fn browser_invocation_limit(request: &OfficeExecutionRequest) -> u32 {
     let document_contact_sheet = request.document_kind == OfficeDocumentKind::Document
         && matches!(
             request.typed_parameters(),
-            Some(OfficeOperationParameters::View {
+            OfficeOperationParameters::View {
                 mode: OfficeViewMode::Screenshot,
                 grid: Some(_),
                 ..
-            })
+            }
         );
     if document_contact_sheet {
         // OfficeCLI v1.0.139 uses one bounded page-count pass and one capture pass for a Word
@@ -78,9 +78,9 @@ fn browser_invocation_limit(request: &OfficeExecutionRequest) -> u32 {
 }
 
 pub(super) fn request_requires_browser_runtime(request: &OfficeExecutionRequest) -> bool {
-    let Some(OfficeOperationParameters::View {
+    let OfficeOperationParameters::View {
         mode, page_count, ..
-    }) = request.typed_parameters()
+    } = request.typed_parameters()
     else {
         return false;
     };

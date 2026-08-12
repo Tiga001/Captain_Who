@@ -1015,9 +1015,9 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
     restore_and_materialize_old("runtime-after-update.md");
 
     let uninstalled = installations
-        .uninstall(&SkillUninstallRequest::new(
+        .uninstall_exact(&SkillUninstallExactRequest::new(
             descriptor.id().clone(),
-            updated.package_revision().unwrap().clone(),
+            updated.installation_revision().unwrap().clone(),
         ))
         .unwrap();
     assert_eq!(uninstalled.outcome(), SkillInstallationOutcome::Uninstalled);
@@ -1204,7 +1204,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
     settings.models[0].api_token_override = Some("model-token".to_string());
     storage.save_model_settings(settings).unwrap();
 
-    let prepared = prepare_conversation_turn(
+    let mut prepared = prepare_conversation_turn(
         &storage,
         &SkillsService::new(),
         AgentConversationTurnInput {
@@ -1229,6 +1229,87 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
 
     assert_eq!(prepared.agent_input.api_url, "https://model.example/v1");
     assert_eq!(prepared.agent_input.api_token, "model-token");
+
+    let pending_call = AgentToolCall {
+        id: "call-model-override".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({ "operation": "verify-model-override" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let provider_identity = AgentProviderToolCallIdentity {
+        provider_tool_index: 0,
+        provider_call_id: pending_call.id.clone(),
+        runtime_call_id: pending_call.id.clone(),
+    };
+    let checkpoint_call = AgentContextCheckpointToolCall {
+        id: pending_call.id.clone(),
+        name: pending_call.tool.clone(),
+        args: pending_call.args.clone(),
+        provider_identity: provider_identity.clone(),
+    };
+    prepared.agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        run_id: "run-model-override".to_string(),
+        pending_action_id: None,
+        context_items: vec![mycopilot_core::AgentContextCheckpointItem {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: vec![checkpoint_call.clone()],
+            is_error: false,
+            sources: vec!["model_response".to_string()],
+            scope: "run".to_string(),
+            retention: "retained".to_string(),
+            group: None,
+            origin: None,
+        }],
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        deferred_external_tool_call_count: 0,
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
+        run_context: prepared.agent_input.context.clone(),
+        model_capabilities: prepared.agent_input.model_capabilities,
+        provider_profile_config: prepared
+            .agent_input
+            .provider_profile_config
+            .clone()
+            .expect("prepared turn freezes its Provider Profile"),
+        provider_protocol_key: prepared
+            .agent_input
+            .provider_protocol_key
+            .clone()
+            .expect("prepared turn freezes its Provider protocol key"),
+        assistant_turn_identity: crate::test_assistant_turn_identity(&[pending_call.id.as_str()]),
+        provider_continuation_refs: Vec::new(),
+        run_world_state: crate::test_run_world_state(),
+        pending_tool_call_id: pending_call.id.clone(),
+        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: pending_call.id.clone(),
+            tool: pending_call.tool.clone(),
+            operation: pending_call.args.clone(),
+            provenance: AgentToolIdentity::Builtin {
+                tool_name: pending_call.tool.clone(),
+            },
+            approval_status: pending_call.approval_status,
+            truncated: false,
+        }],
+        conversation_model_context_items: vec![ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![checkpoint_call],
+            is_error: false,
+        }],
+        next_conversation_trace_sequence: 1,
+        conversation_trace_truncated: false,
+    });
 
     let persisted = PersistedAgentResumeInput::from_agent_input(&prepared.agent_input)
         .unwrap()

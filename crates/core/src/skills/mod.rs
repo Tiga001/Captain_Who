@@ -58,7 +58,7 @@ pub use installation_service::{
     LocalSkillInstallRequest, LocalSkillUpdateExactRequest, LocalSkillUpdateRequest,
     SkillInstallationInventoryError, SkillInstallationMutation, SkillInstallationOperation,
     SkillInstallationOutcome, SkillInstallationService, SkillInstallationServiceError,
-    SkillUninstallExactRequest, SkillUninstallRequest,
+    SkillUninstallExactRequest,
 };
 pub use installation_session::{
     SkillInstallationSessionConfig, SkillInstallationSessionConfigurationError,
@@ -83,9 +83,9 @@ pub use installed::USER_INSTALLED_SKILL_SOURCE_ID;
 pub use managed_installer::{
     ManagedSkillCommittedState, ManagedSkillInstallOutcome, ManagedSkillInstallRequest,
     ManagedSkillInstaller, ManagedSkillInstallerError, ManagedSkillInstallerErrorCode,
-    ManagedSkillLegacyUninstallRequest, ManagedSkillMutation, ManagedSkillMutationResult,
-    ManagedSkillStoreCapacity, ManagedSkillUninstallOutcome, ManagedSkillUninstallRequest,
-    ManagedSkillUpdateOutcome, ManagedSkillUpdateRequest,
+    ManagedSkillMutation, ManagedSkillMutationResult, ManagedSkillStoreCapacity,
+    ManagedSkillUninstallOutcome, ManagedSkillUninstallRequest, ManagedSkillUpdateOutcome,
+    ManagedSkillUpdateRequest,
 };
 pub use materialization::{
     SkillMaterializationDestination, SkillMaterializationError, SkillMaterializationErrorCode,

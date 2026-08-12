@@ -82,7 +82,11 @@ fn save_provider_profile_fixture(
     let mut settings = test_model_settings();
     settings.api_url = api_url.to_string();
     settings.api_token = "provider-profile-token".to_string();
-    settings.models[0].provider_profile_config = profile;
+    settings.models[0].provider_profile_config = profile.unwrap_or_else(|| {
+        mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        )
+    });
     storage.save_model_settings(settings).unwrap();
 }
 
@@ -106,7 +110,7 @@ fn turn_input(model_id: &str) -> AgentConversationTurnInput {
 }
 
 #[test]
-fn legacy_model_freezes_the_generic_profile_for_the_resolved_dialect() {
+fn current_model_freezes_the_generic_profile_for_the_resolved_dialect() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     storage.save_model_settings(test_model_settings()).unwrap();
@@ -159,7 +163,10 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
                 "tavilyApiKey": "",
                 "models": [{
                     "id": "model-1",
+                    "previousModelId": null,
                     "displayName": "DeepSeek V4 Chat",
+                    "apiUrlOverride": null,
+                    "apiTokenOverride": null,
                     "supportsImage": false,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {
@@ -171,6 +178,7 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
                         }
                     },
                     "inputPrice": "0",
+                    "cachedInputPrice": "",
                     "outputPrice": "0",
                     "enabled": true
                 }]
@@ -178,10 +186,7 @@ fn renderer_profile_selection_round_trips_into_the_frozen_registration() {
         )
         .unwrap();
     let authoritative = storage.save_model_settings_request(request).unwrap();
-    let stored = authoritative.models[0]
-        .provider_profile_config
-        .as_ref()
-        .unwrap();
+    let stored = &authoritative.models[0].provider_profile_config;
     assert_eq!(
         stored.profile,
         mycopilot_core::ProviderProfileRef::deepseek_v4_chat()
@@ -227,11 +232,15 @@ fn renderer_generic_selection_freezes_the_anthropic_generic_registration() {
                 "tavilyApiKey": "",
                 "models": [{
                     "id": "model-1",
+                    "previousModelId": null,
                     "displayName": "Anthropic-compatible",
+                    "apiUrlOverride": null,
+                    "apiTokenOverride": null,
                     "supportsImage": false,
                     "contextWindowTokens": 128000,
                     "providerProfileUpdate": {"kind": "select_generic"},
                     "inputPrice": "0",
+                    "cachedInputPrice": "",
                     "outputPrice": "0",
                     "enabled": true
                 }]
@@ -309,7 +318,9 @@ fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() 
             api_token_override: Some("other-token".to_string()),
             supports_image: false,
             context_window_tokens: Some(64_000),
-            provider_profile_config: None,
+            provider_profile_config: mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+                mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+            ),
             input_price: "0".to_string(),
             cached_input_price: String::new(),
             output_price: "0".to_string(),
@@ -330,7 +341,7 @@ fn prepared_runs_bind_to_only_the_selected_models_effective_protocol_revision() 
 
     let mut wire_change = storage.load_model_settings().unwrap().unwrap();
     wire_change.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     storage.save_model_settings(wire_change).unwrap();
     let after_wire_change = prepare("wire-change");
     assert_ne!(
@@ -351,7 +362,7 @@ fn explicit_profile_incompatible_with_the_endpoint_dialect_fails_closed() {
     let mut settings = test_model_settings();
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
     settings.models[0].provider_profile_config =
-        Some(mycopilot_core::ProviderProfileConfig::deepseek_v4_default());
+        mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
     storage.save_model_settings(settings).unwrap();
 
     let error = match prepare_conversation_turn(

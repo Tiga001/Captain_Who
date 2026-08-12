@@ -12,6 +12,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 pub const OFFICECLI_PROVIDER_ID: &str = "officecli";
 pub const OFFICE_ENGINE_STATUS_SCHEMA_VERSION: u32 = 1;
 pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 5;
@@ -143,7 +151,6 @@ pub enum OfficeOperationAccess {
     ReadOnly,
     /// A structured file mutation. Its location is described independently by
     /// each frozen path's [`OfficePathScope`].
-    #[serde(alias = "workspaceWrite")]
     FileWrite,
 }
 
@@ -325,8 +332,8 @@ pub type OfficePropertyMap = BTreeMap<String, Value>;
 
 /// Typed, provider-neutral parameters for one managed Office operation.
 ///
-/// `OfficeExecutionRequest.operation` is repeated outside this enum for compact UI routing and
-/// legacy protocol compatibility. The trusted compiler requires the two discriminants to agree.
+/// `OfficeExecutionRequest.operation` is repeated outside this enum for compact UI routing. The
+/// trusted compiler requires the envelope and parameter discriminants to agree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -456,27 +463,6 @@ impl OfficeOperationParameters {
         match self {
             Self::View { mode, .. } => Some(*mode),
             _ => None,
-        }
-    }
-}
-
-/// Version bridge for persisted schema-v3 actions.
-///
-/// New actions always serialize the typed object. The legacy vector remains deserializable only
-/// so startup and audit code can load old pending actions and reject their schema explicitly; it
-/// is never accepted by the schema-v4 compiler.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum OfficeRequestParameters {
-    Typed(OfficeOperationParameters),
-    Legacy(Vec<String>),
-}
-
-impl OfficeRequestParameters {
-    pub fn typed(&self) -> Option<&OfficeOperationParameters> {
-        match self {
-            Self::Typed(parameters) => Some(parameters),
-            Self::Legacy(_) => None,
         }
     }
 }
@@ -622,7 +608,7 @@ pub struct OfficeEngineStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficeExecutionRequest {
     pub document_kind: OfficeDocumentKind,
     pub operation: OfficeOperation,
@@ -630,31 +616,26 @@ pub struct OfficeExecutionRequest {
     /// paths, system aliases, and registered attachment paths are authorized by
     /// the host-owned [`OfficeExecutionContext`]. `help` is the only operation
     /// for which this must be absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub document_path: Option<String>,
     /// Provider-neutral operation parameters. The model never supplies OfficeCLI argv.
-    ///
-    /// `arguments` is accepted as a deserialize-only alias for schema-v3 pending actions. Such
-    /// actions retain their original outer schema version and are rejected before execution.
-    #[serde(rename = "parameters", alias = "arguments")]
-    pub parameters: OfficeRequestParameters,
+    pub parameters: OfficeOperationParameters,
     /// Managed render output. The engine owns provider output-flag construction;
     /// callers cannot inject an unvalidated output target through typed fields.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub output_path: Option<String>,
     /// Managed save-as target for mutation operations. The provider edits a
     /// private copy of `document_path`; only this separately frozen destination
     /// is published. Omit for an in-place mutation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub destination_path: Option<String>,
     /// Unified, model-declared read inputs used by path-bearing semantic operations.
     ///
     /// The request contains logical sources only. Preparation freezes exact bytes into
     /// `OfficePreparedExecution::input_bindings`; execution re-resolves and materializes them
     /// into a private read-only directory before invoking the provider.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<AgentFileInputSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -663,13 +644,12 @@ impl OfficeExecutionRequest {
         self.operation.access(self.output_path.is_some())
     }
 
-    pub fn typed_parameters(&self) -> Option<&OfficeOperationParameters> {
-        self.parameters.typed()
+    pub fn typed_parameters(&self) -> &OfficeOperationParameters {
+        &self.parameters
     }
 
     pub fn view_mode(&self) -> Option<OfficeViewMode> {
-        self.typed_parameters()
-            .and_then(OfficeOperationParameters::view_mode)
+        self.typed_parameters().view_mode()
     }
 }
 
@@ -791,18 +771,7 @@ pub enum OfficeFileState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OfficeFilePrecondition {
-    pub path: String,
-    pub state: OfficeFileState,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum OfficePathSlot {
     Document,
     Output,
@@ -837,18 +806,18 @@ pub enum OfficeWriteDisposition {
 /// canonical location and stable metadata; Unix hosts additionally bind the
 /// device/inode pair so same-content replacements are detected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficePathIdentity {
     pub revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub device: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub inode: Option<u64>,
 }
 
 /// One path slot from the normalized, permission-checked execution plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficeFrozenPath {
     pub slot: OfficePathSlot,
     pub logical_path: String,
@@ -856,56 +825,40 @@ pub struct OfficeFrozenPath {
     pub scope: OfficePathScope,
     pub normalized_path: String,
     pub state: OfficeFileState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub object_identity: Option<OfficePathIdentity>,
     pub parent_identity: OfficePathIdentity,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub content_revision: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub size: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub write_disposition: Option<OfficeWriteDisposition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OfficePreparedExecution {
     pub schema_version: u32,
     pub provider_id: String,
     pub engine_revision: String,
     /// A non-reversible digest of the canonical workspace identity. This
     /// binds approvals to one workspace without exposing its host path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub workspace_revision: Option<String>,
     pub access: OfficeOperationAccess,
     pub request: OfficeExecutionRequest,
     /// Logical, user-reviewable argv. Runtime-private staging paths never
     /// replace these values in the frozen plan.
     pub argv: Vec<String>,
-    /// Schema-v3 normalized path plan. It is rebuilt from the logical request
+    /// Current normalized path plan. It is rebuilt from the logical request
     /// and the current execution context immediately before execution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<OfficeFrozenPath>,
     /// Immutable content identities for every model-declared Office input.
     ///
     /// These bindings are prepared before approval and revalidated against current run
     /// authorities immediately before provider execution.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_bindings: Vec<AgentFileInputBinding>,
-    // The schema-v2 fields remain deserializable so persisted pending actions
-    // receive an explicit unsupported-schema error instead of a decode error.
-    // They are not trusted or populated by schema-v3 preparation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub document_precondition: Option<OfficeFilePrecondition>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_precondition: Option<OfficeFilePrecondition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destination_precondition: Option<OfficeFilePrecondition>,
-    /// Immutable identities for workspace resources referenced by path-bearing
-    /// properties. Runtime copies these resources to a private snapshot before
-    /// the provider starts.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub resource_preconditions: Vec<OfficeFilePrecondition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

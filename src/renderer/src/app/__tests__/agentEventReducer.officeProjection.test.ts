@@ -33,7 +33,8 @@ describe('Command frozen action projection', () => {
         timeoutMs: 30_000,
         approvalStatus: 'required',
         riskLevel: 'read_only',
-        reason: 'Verify the core crate'
+        reason: 'Verify the core crate',
+        observe: null
       }
     }
 
@@ -52,12 +53,28 @@ describe('Office frozen action projection', () => {
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         id: 'office-add',
         approvalStatus: 'required',
         reason: 'Add the quarterly summary chart',
+        semanticArgs: {
+          operation: 'add',
+          filePath: 'budget.xlsx',
+          parent: '/Sheet1',
+          element: 'chart',
+          copyFrom: '/Sheet1/A1:D4',
+          placement: { type: 'after', target: '/Sheet1/table[1]' },
+          properties: {
+            title: 'Quarterly summary',
+            image: { resourcePath: 'assets/logo.png' }
+          },
+          overrideProtection: true,
+          destinationPath: '@documents/budget-with-chart.xlsx',
+          timeoutMs: 45_000,
+          reason: 'Add the quarterly summary chart'
+        },
         prepared: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           providerId: 'officecli',
           engineRevision: 'sha256:engine',
           access: 'fileWrite',
@@ -78,6 +95,8 @@ describe('Office frozen action projection', () => {
               force: true
             },
             destinationPath: '@documents/budget-with-chart.xlsx',
+            outputPath: null,
+            inputs: [],
             timeoutMs: 45_000
           },
           argv: [
@@ -88,65 +107,28 @@ describe('Office frozen action projection', () => {
             '--prop',
             'title=Quarterly summary'
           ],
-          paths: []
+          paths: [],
+          workspaceRevision: null,
+          inputBindings: []
         }
       }
     }
 
     expect(projectApproval(action)).toEqual({
-      request: {
-        operation: 'add',
-        filePath: 'budget.xlsx',
-        parent: '/Sheet1',
-        element: 'chart',
-        copyFrom: '/Sheet1/A1:D4',
-        placement: { type: 'after', target: '/Sheet1/table[1]' },
-        properties: {
-          title: 'Quarterly summary',
-          image: { resourcePath: 'assets/logo.png' }
-        },
-        overrideProtection: true,
-        destinationPath: '@documents/budget-with-chart.xlsx',
-        timeoutMs: 45_000
+      operation: 'add',
+      filePath: 'budget.xlsx',
+      parent: '/Sheet1',
+      element: 'chart',
+      copyFrom: '/Sheet1/A1:D4',
+      placement: { type: 'after', target: '/Sheet1/table[1]' },
+      properties: {
+        title: 'Quarterly summary',
+        image: { resourcePath: 'assets/logo.png' }
       },
+      overrideProtection: true,
+      destinationPath: '@documents/budget-with-chart.xlsx',
+      timeoutMs: 45_000,
       reason: 'Add the quarterly summary chart'
-    })
-  })
-
-  it('marks historical v3 requests without projecting legacy OfficeCLI arguments', () => {
-    const action: AgentProposedAction = {
-      type: 'office_operation',
-      officeOperation: {
-        schemaVersion: 3,
-        id: 'office-legacy',
-        approvalStatus: 'required',
-        reason: 'Render the historical workbook',
-        prepared: {
-          schemaVersion: 3,
-          providerId: 'officecli',
-          engineRevision: 'legacy-engine',
-          access: 'fileWrite',
-          request: {
-            documentKind: 'spreadsheet',
-            operation: 'view',
-            documentPath: 'budget.xlsx',
-            arguments: ['screenshot', '--pages', '1-5'],
-            outputPath: 'preview.png'
-          },
-          argv: ['view', 'budget.xlsx', 'screenshot', '--pages', '1-5', '-o', 'preview.png'],
-          paths: []
-        }
-      }
-    }
-
-    expect(projectApproval(action)).toEqual({
-      request: {
-        operation: 'view',
-        filePath: 'budget.xlsx',
-        legacyRequest: true,
-        outputPath: 'preview.png'
-      },
-      reason: 'Render the historical workbook'
     })
   })
 
@@ -154,12 +136,21 @@ describe('Office frozen action projection', () => {
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 4,
+        schemaVersion: 5,
         id: 'office-render',
         approvalStatus: 'required',
         reason: 'Render a five-slide contact sheet',
+        semanticArgs: {
+          operation: 'view',
+          filePath: 'deck.pptx',
+          mode: 'screenshot',
+          pages: [{ start: 1, end: 5 }],
+          grid: { mode: 'columns', columns: 3 },
+          outputPath: 'preview.png',
+          reason: 'Render a five-slide contact sheet'
+        },
         prepared: {
-          schemaVersion: 4,
+          schemaVersion: 5,
           providerId: 'officecli',
           engineRevision: 'sha256:engine',
           access: 'fileWrite',
@@ -173,23 +164,26 @@ describe('Office frozen action projection', () => {
               pages: [{ start: 1, end: 5 }],
               grid: { mode: 'columns', columns: 3 }
             },
-            outputPath: 'preview.png'
+            outputPath: 'preview.png',
+            destinationPath: null,
+            inputs: [],
+            timeoutMs: null
           },
           argv: ['view', 'deck.pptx', 'screenshot', '--grid', '3', '-o', 'preview.png'],
-          paths: []
+          paths: [],
+          workspaceRevision: null,
+          inputBindings: []
         }
       }
     }
 
     expect(projectApproval(action)).toEqual({
-      request: {
-        operation: 'view',
-        filePath: 'deck.pptx',
-        mode: 'screenshot',
-        pages: [{ start: 1, end: 5 }],
-        grid: { mode: 'columns', columns: 3 },
-        outputPath: 'preview.png'
-      },
+      operation: 'view',
+      filePath: 'deck.pptx',
+      mode: 'screenshot',
+      pages: [{ start: 1, end: 5 }],
+      grid: { mode: 'columns', columns: 3 },
+      outputPath: 'preview.png',
       reason: 'Render a five-slide contact sheet'
     })
   })

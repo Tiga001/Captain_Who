@@ -32,7 +32,8 @@
           "id": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "tool": "mcp__owned_fixture__echo_text",
           "args": {},
-          "approvalStatus": "required"
+          "approvalStatus": "required",
+          "reason": null
         },
         "summary": {
           "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",
@@ -80,6 +81,11 @@
       "external": true,
       "state": "running",
       "dispatchCertainty": "possibly_dispatched",
+      "outcome": null,
+      "isError": null,
+      "errorCode": null,
+      "durationMs": null,
+      "diagnostics": null,
       "outputTruncated": false
     }
   },
@@ -119,7 +125,8 @@
             "id": "tc1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "tool": "mcp__owned_fixture__echo_text",
             "args": {},
-            "approvalStatus": "required"
+            "approvalStatus": "required",
+            "reason": null
           },
           "summary": {
             "serverId": "ce18d23c-e74f-4e89-8695-ce1e7c60ec92",

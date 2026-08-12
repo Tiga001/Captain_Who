@@ -31,6 +31,53 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
 }
 
 #[test]
+fn resume_accepts_only_tool_provenance_from_the_frozen_registry() {
+    let registry = ToolRegistry::defaults_with_search(None);
+    let registered_call = AgentToolCall {
+        id: "registered-call".to_string(),
+        tool: "read_file".to_string(),
+        args: json!({ "path": "README.md" }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let mut registered = ConversationTraceRecorder::default();
+    registered.record_tool_call_with_identity(
+        &registered_call,
+        registry
+            .identity(&registered_call.tool)
+            .expect("default registry identity")
+            .clone(),
+    );
+    validate_resumed_tool_provenance(&registered, &registry).unwrap();
+
+    let unregistered_call = AgentToolCall {
+        id: "unregistered-call".to_string(),
+        tool: "hallucinated_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let mut unregistered = ConversationTraceRecorder::default();
+    unregistered.record_tool_call_with_identity(
+        &unregistered_call,
+        AgentToolIdentity::Unregistered {
+            tool_name: unregistered_call.tool.clone(),
+        },
+    );
+    assert!(validate_resumed_tool_provenance(&unregistered, &registry).is_err());
+
+    let mut spoofed = ConversationTraceRecorder::default();
+    spoofed.record_tool_call_with_identity(
+        &registered_call,
+        AgentToolIdentity::RuntimeExtension {
+            extension_id: "extension-spoof".to_string(),
+            tool_name: registered_call.tool.clone(),
+        },
+    );
+    assert!(validate_resumed_tool_provenance(&spoofed, &registry).is_err());
+}
+
+#[test]
 fn provider_profile_context_boundaries_fail_closed_without_translating_private_state() {
     use crate::image_generation::{CredentialStore, InMemoryCredentialStore};
     use crate::provider_continuation_store::ProviderContinuationBinding;
@@ -243,14 +290,18 @@ fn provider_profile_context_boundaries_fail_closed_without_translating_private_s
 #[test]
 fn deepseek_cancellation_closes_current_and_queued_calls_in_original_order() {
     let registry = ToolRegistry::defaults_with_search(None);
+    let first_call_id =
+        crate::llm::model_response_tool_call_id("run-deepseek-cancel", 0, 0, "cancel-call-1");
+    let second_call_id =
+        crate::llm::model_response_tool_call_id("run-deepseek-cancel", 0, 1, "cancel-call-2");
     let calls = vec![
         LlmToolCall {
-            id: "cancel-call-1".to_string(),
+            id: first_call_id.clone(),
             name: "read_file".to_string(),
             args: json!({ "path": "first.txt" }),
         },
         LlmToolCall {
-            id: "cancel-call-2".to_string(),
+            id: second_call_id.clone(),
             name: "read_file".to_string(),
             args: json!({ "path": "second.txt" }),
         },
@@ -330,16 +381,16 @@ fn deepseek_cancellation_closes_current_and_queued_calls_in_original_order() {
     assert_eq!(
         ordered,
         vec![
-            ("call", "cancel-call-1", None),
+            ("call", first_call_id.as_str(), None),
             (
                 "result",
-                "cancel-call-1",
+                first_call_id.as_str(),
                 Some(ConversationTraceToolResultStatus::Cancelled),
             ),
-            ("call", "cancel-call-2", None),
+            ("call", second_call_id.as_str(), None),
             (
                 "result",
-                "cancel-call-2",
+                second_call_id.as_str(),
                 Some(ConversationTraceToolResultStatus::Cancelled),
             ),
         ]
@@ -357,10 +408,10 @@ fn deepseek_cancellation_closes_current_and_queued_calls_in_original_order() {
     assert_eq!(
         event_order,
         vec![
-            ("call", "cancel-call-1"),
-            ("result", "cancel-call-1"),
-            ("call", "cancel-call-2"),
-            ("result", "cancel-call-2"),
+            ("call", first_call_id.as_str()),
+            ("result", first_call_id.as_str()),
+            ("call", second_call_id.as_str()),
+            ("result", second_call_id.as_str()),
         ]
     );
 }
@@ -477,11 +528,11 @@ fn exact_history_archive_precedes_model_and_checkpoint_projection() {
         "persisted model history must replay the exact live Model projection"
     );
     assert!(
-        gate.would_truncate(&call.id, false, &model_result),
+        gate.would_truncate_with_source(&call.id, false, &model_result, false),
         "the model fixture must exercise the central length gate"
     );
     assert!(
-        gate.would_truncate(&call.id, false, &raw),
+        gate.would_truncate_with_source(&call.id, false, &raw, false),
         "the checkpoint fixture must exercise the central length gate"
     );
     recorder.record_tool_result_with_archive(&call, &raw, metadata.clone());
@@ -1144,7 +1195,6 @@ fn command_dispatch_fixture(command: &str) -> (AgentToolCall, AgentProposedActio
             reason: None,
             observe: None,
             inputs: Vec::new(),
-            runtime: None,
             runtime_binding: None,
         },
     };
@@ -1922,15 +1972,19 @@ fn transient_events_are_emitted_without_entering_output_history() {
 
 #[test]
 fn context_window_preview_is_available_independently_of_indicator_events() {
-    let input = serde_json::from_value::<AgentChatInput>(serde_json::json!({
+    let mut input = serde_json::from_value::<AgentChatInput>(serde_json::json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
         "contextWindowTokens": 128000,
         "contextWindowIndicatorEnabled": false,
         "messages": []
     }))
     .unwrap();
+    input.provider_profile_config = Some(ProviderProfileConfig::generic_for_dialect(
+        ProviderProtocolDialect::OpenAiChatCompletions,
+    ));
 
     assert!(inspect_context_window(input).unwrap().is_some());
 }
@@ -1942,7 +1996,9 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         provider_configuration_revision: None,
         provider_connection_revision: None,
         search_connection_revision: None,
-        provider_profile_config: None,
+        provider_profile_config: Some(ProviderProfileConfig::generic_for_dialect(
+            ProviderProtocolDialect::OpenAiChatCompletions,
+        )),
         provider_protocol_key: None,
         model: "test-model".to_string(),
         model_capabilities: crate::ModelCapabilities::default(),
@@ -1967,6 +2023,29 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         skill_discovery: None,
         messages,
     }
+}
+
+fn freeze_runtime_test_generic_provider(input: &mut AgentChatInput, revision_label: &str) {
+    let dialect = match input.api_style.expect("runtime test API style") {
+        crate::protocol::AgentApiStyle::OpenAiCompatible => {
+            ProviderProtocolDialect::OpenAiChatCompletions
+        }
+        crate::protocol::AgentApiStyle::AnthropicCompatible => {
+            ProviderProtocolDialect::AnthropicMessages
+        }
+    };
+    let profile = ProviderProfileConfig::generic_for_dialect(dialect);
+    let revision = format!("provider-protocol-v1:{revision_label}");
+    let key = ProviderProtocolKey::new(
+        dialect,
+        &profile,
+        input.model.clone(),
+        Some(revision.clone()),
+    )
+    .expect("current runtime test Provider protocol key");
+    input.provider_configuration_revision = Some(revision);
+    input.provider_profile_config = Some(profile);
+    input.provider_protocol_key = Some(key);
 }
 
 #[tokio::test]
@@ -2015,7 +2094,7 @@ async fn runtime_rejects_unknown_frozen_provider_registration_before_transport_o
 
     let tool_executions = Arc::new(AtomicUsize::new(0));
     let tool_executions_for_executor = Arc::clone(&tool_executions);
-    let forbidden_executor: AgentHostActionExecutor = Arc::new(move |_, _| {
+    let forbidden_executor: AgentHostActionExecutor = Arc::new(move |_, _, _| {
         tool_executions_for_executor.fetch_add(1, Ordering::SeqCst);
         Err(AgentError::new(
             "tool executor must not run for an unknown Provider registration",
@@ -2699,6 +2778,7 @@ async fn empty_normal_completion_is_repaired_once_for_openai_and_anthropic() {
         input.api_url = format!("http://{address}/v1/messages");
         input.api_token = "test-token".to_string();
         input.api_style = Some(style);
+        freeze_runtime_test_generic_provider(&mut input, "empty-normal-completion");
         input.stream = Some(false);
         input.assistant_message_id = Some("assistant-empty-repair".to_string());
         input.context = Some(AgentRunContext {
@@ -4006,6 +4086,7 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
         input.api_url = format!("http://{address}/v1/messages");
         input.api_token = "test-token".to_string();
         input.api_style = Some(style);
+        freeze_runtime_test_generic_provider(&mut input, "image-capable-round-trip");
         input.stream = Some(false);
         input.model_capabilities.image_input = true;
         input.assistant_message_id = Some("assistant-image".to_string());
@@ -4281,14 +4362,96 @@ fn conversation_context_trace(
 }
 
 fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> AgentChatMessage {
+    let mut provider_tool_index = 0_u32;
+    let conversation_model_context_items = trace
+        .items
+        .iter()
+        .filter_map(|item| {
+            let sequence = item.sequence();
+            let projected = match item {
+                ConversationTurnTraceItem::AssistantNarration { content, .. } => {
+                    crate::ConversationModelContextItem {
+                        sequence,
+                        ordinal: 0,
+                        role: "assistant".to_string(),
+                        content: content.clone(),
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                        is_error: false,
+                    }
+                }
+                ConversationTurnTraceItem::UserGuidance { content, .. } => {
+                    crate::ConversationModelContextItem {
+                        sequence,
+                        ordinal: 0,
+                        role: "user".to_string(),
+                        content: content.clone(),
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                        is_error: false,
+                    }
+                }
+                ConversationTurnTraceItem::ToolCall {
+                    call_id,
+                    tool,
+                    operation,
+                    ..
+                } => {
+                    let identity = crate::AgentProviderToolCallIdentity {
+                        provider_tool_index,
+                        provider_call_id: call_id.clone(),
+                        runtime_call_id: call_id.clone(),
+                    };
+                    provider_tool_index = provider_tool_index.saturating_add(1);
+                    crate::ConversationModelContextItem {
+                        sequence,
+                        ordinal: 0,
+                        role: "assistant".to_string(),
+                        content: String::new(),
+                        tool_call_id: None,
+                        tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                            id: call_id.clone(),
+                            name: tool.clone(),
+                            args: operation.clone(),
+                            provider_identity: identity,
+                        }],
+                        is_error: false,
+                    }
+                }
+                ConversationTurnTraceItem::ToolResult {
+                    call_id,
+                    observation,
+                    success,
+                    ..
+                } => crate::ConversationModelContextItem {
+                    sequence,
+                    ordinal: 0,
+                    role: "tool".to_string(),
+                    content: observation.to_string(),
+                    tool_call_id: Some(call_id.clone()),
+                    tool_calls: Vec::new(),
+                    is_error: !success,
+                },
+                ConversationTurnTraceItem::CommandSessionLifecycle { .. } => return None,
+            };
+            Some(projected)
+        })
+        .collect();
     AgentChatMessage {
         message_id: Some(trace.assistant_message_id.clone()),
         role: "assistant".to_string(),
         content: content.to_string(),
         created_at: Some(2_000),
         conversation_turn_trace: Some(trace),
-        conversation_model_context_items: Vec::new(),
+        conversation_model_context_items,
     }
+}
+
+fn current_assistant_history_message(content: &str) -> AgentChatMessage {
+    traced_assistant_message(
+        content,
+        conversation_context_trace(ConversationTurnTraceTerminalStatus::Completed, Vec::new()),
+    )
 }
 
 fn full_conversation_context_snapshot(
@@ -4316,14 +4479,18 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         ConversationTurnTraceTerminalStatus::InProgress,
         vec![narration.clone()],
     );
-    let cursor = state.append_trace_items(&narrated_trace, &[], 0).unwrap();
+    let narrated_message = traced_assistant_message("", narrated_trace.clone());
+    let cursor = state
+        .append_trace_items(
+            &narrated_trace,
+            &narrated_message.conversation_model_context_items,
+            0,
+        )
+        .unwrap();
     assert_eq!(cursor, 1);
     assert_eq!(
         state.snapshot(),
-        full_conversation_context_snapshot(vec![
-            first_user.clone(),
-            traced_assistant_message("", narrated_trace.clone()),
-        ])
+        full_conversation_context_snapshot(vec![first_user.clone(), narrated_message,])
     );
 
     let context_call_id =
@@ -4333,7 +4500,9 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         sequence: 1,
         call_id: context_call_id.clone(),
         tool: "read_file".to_string(),
-        provenance: None,
+        provenance: crate::AgentToolIdentity::Builtin {
+            tool_name: "read_file".to_string(),
+        },
         operation: json!({ "path": "src/lib.rs" }),
         approval_status: AgentApprovalStatus::NotRequired,
         truncated: false,
@@ -4354,16 +4523,18 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         ConversationTurnTraceTerminalStatus::InProgress,
         vec![narration, call, result],
     );
+    let closed_message = traced_assistant_message("", closed_trace.clone());
     let cursor = state
-        .append_trace_items(&closed_trace, &[], cursor)
+        .append_trace_items(
+            &closed_trace,
+            &closed_message.conversation_model_context_items,
+            cursor,
+        )
         .unwrap();
     assert_eq!(cursor, 3);
     assert_eq!(
         state.snapshot(),
-        full_conversation_context_snapshot(vec![
-            first_user.clone(),
-            traced_assistant_message("", closed_trace.clone()),
-        ])
+        full_conversation_context_snapshot(vec![first_user.clone(), closed_message,])
     );
 
     let completed_trace = ConversationTurnTrace {
@@ -4372,7 +4543,13 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     };
     let final_content = "I updated the implementation and verified the tests.";
     state
-        .finalize_conversation_turn(&completed_trace, &[], cursor, final_content, Some(2_000))
+        .finalize_conversation_turn(
+            &completed_trace,
+            &traced_assistant_message("", completed_trace.clone()).conversation_model_context_items,
+            cursor,
+            final_content,
+            Some(2_000),
+        )
         .unwrap();
     assert_eq!(
         state.snapshot(),
@@ -4402,7 +4579,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
 fn runtime_shared_baseline_matches_full_context_assembly() {
     let input = conversation_context_input(vec![
         message("user", "First question"),
-        message("assistant", "First answer"),
+        current_assistant_history_message("First answer"),
         message("user", "Current question"),
     ]);
     let capabilities =
@@ -4434,7 +4611,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     const INSTRUCTIONS: &str = "SKILL_DYNAMIC_MARKER: inspect evidence before editing.";
     let mut input = conversation_context_input(vec![
         message("user", "First question"),
-        message("assistant", "First answer"),
+        current_assistant_history_message("First answer"),
         message("user", "Current question"),
     ]);
     input.skill_activation = Some(activated_skill(INSTRUCTIONS));
@@ -4479,7 +4656,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         .unwrap();
     let current_user_index = messages
         .iter()
-        .position(|message| message.content() == "Current question")
+        .position(|message| message.content().contains("Current question"))
         .unwrap();
     assert!(skill_index > current_user_index);
     assert!(!messages[0].content().contains(INSTRUCTIONS));
@@ -5121,6 +5298,7 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
     input.api_url = format!("http://{address}/v1/messages");
     input.api_token = "test-token".to_string();
     input.api_style = Some(crate::protocol::AgentApiStyle::AnthropicCompatible);
+    freeze_runtime_test_generic_provider(&mut input, "anthropic-user-skill-attachment");
     input.stream = Some(false);
     input.skill_activation = Some(activated_skill("ANTHROPIC_SKILL_MARKER"));
     input.attachments = vec![AgentInputAttachment {
@@ -5291,14 +5469,19 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         conversation_turn_trace: None,
         conversation_model_context_items: Vec::new(),
     };
-    let old_assistant = AgentChatMessage {
-        message_id: Some("assistant-old".to_string()),
-        role: "assistant".to_string(),
-        content: format!("OLD_ASSISTANT_MARKER {}", "y".repeat(60_000)),
-        created_at: None,
-        conversation_turn_trace: None,
-        conversation_model_context_items: Vec::new(),
-    };
+    let old_assistant_content = format!("OLD_ASSISTANT_MARKER {}", "y".repeat(60_000));
+    let mut old_assistant_trace = conversation_context_trace(
+        ConversationTurnTraceTerminalStatus::Completed,
+        vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: old_assistant_content.clone(),
+            truncated: false,
+        }],
+    );
+    old_assistant_trace.run_id = "run-old".to_string();
+    old_assistant_trace.conversation_id = "conversation-1".to_string();
+    old_assistant_trace.assistant_message_id = "assistant-old".to_string();
+    let old_assistant = traced_assistant_message(&old_assistant_content, old_assistant_trace);
     let current_user = AgentChatMessage {
         message_id: Some("user-current".to_string()),
         role: "user".to_string(),
@@ -5307,7 +5490,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         conversation_turn_trace: None,
         conversation_model_context_items: Vec::new(),
     };
-    let input = AgentChatInput {
+    let mut input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -5344,6 +5527,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         skill_discovery: None,
         messages: vec![old_user, old_assistant, current_user.clone()],
     };
+    freeze_runtime_test_generic_provider(&mut input, "durable-compaction-capacity");
     let durable_prefix = Arc::new(ContextCompactionPrefix {
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-runtime".to_string(),
@@ -5645,7 +5829,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let input = AgentChatInput {
+    let mut input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -5683,6 +5867,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
             conversation_model_context_items: Vec::new(),
         }],
     };
+    freeze_runtime_test_generic_provider(&mut input, "capacity-guard-initial");
 
     let error = AgentRuntime::default().send_chat(input).await.unwrap_err();
 
@@ -5812,7 +5997,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         )
         .await;
     });
-    let input = AgentChatInput {
+    let mut input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -5859,6 +6044,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         skill_discovery: None,
         messages: vec![message("user", "Read large.txt and summarize it")],
     };
+    freeze_runtime_test_generic_provider(&mut input, "capacity-guard-tool-results");
 
     let output = AgentRuntime::default().send_chat(input).await.unwrap();
     server.await.unwrap();
@@ -6167,7 +6353,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     let emitter: AgentEventEmitter = Arc::new(move |event| {
         captured_for_emitter.lock().unwrap().push(event);
     });
-    let input = AgentChatInput {
+    let mut input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -6214,6 +6400,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         skill_discovery: None,
         messages: vec![message("user", "create a preview")],
     };
+    freeze_runtime_test_generic_provider(&mut input, "write-file-preview-stream");
     let output = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
             input,
@@ -6451,7 +6638,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         }
     });
 
-    let base_input = AgentChatInput {
+    let mut base_input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -6498,6 +6685,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         skill_discovery: None,
         messages: vec![message("user", "collect evidence and write report.txt")],
     };
+    freeze_runtime_test_generic_provider(&mut base_input, "approval-resume");
     let waiting = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
             base_input.clone(),
@@ -6866,7 +7054,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
-    let input = AgentChatInput {
+    let mut input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         provider_configuration_revision: None,
@@ -6931,6 +7119,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             "Read the Skill reference, then prepare a report.",
         )],
     };
+    freeze_runtime_test_generic_provider(&mut input, "skill-resource-approval");
 
     let output = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
@@ -7530,6 +7719,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     const FIRST_RUN_ID: &str = "run-deepseek-checkpoint-abort";
     const SECOND_RUN_ID: &str = "run-deepseek-checkpoint-recovery";
     const MODEL_ID: &str = "deepseek-checkpoint-abort-model";
+    const PROVIDER_REVISION: &str = "provider-protocol-v1:deepseek-checkpoint-abort";
     const REASONING: &str = "Preserve this reasoning across the aborted grouped turn.";
 
     fn provider_tool_call(id: &str, name: &str, args: Value) -> Value {
@@ -7596,7 +7786,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
         ProviderProtocolDialect::OpenAiChatCompletions,
         &profile,
         MODEL_ID,
-        None,
+        Some(PROVIDER_REVISION.to_string()),
     )
     .unwrap();
 
@@ -7666,6 +7856,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     first_input.api_token = "test-token".to_string();
     first_input.provider_profile_config = Some(profile.clone());
     first_input.provider_protocol_key = Some(protocol.clone());
+    first_input.provider_configuration_revision = Some(PROVIDER_REVISION.to_string());
     first_input.model = MODEL_ID.to_string();
     first_input.stream = Some(false);
     first_input.assistant_message_id = Some(FIRST_ASSISTANT_ID.to_string());
@@ -7764,6 +7955,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     recovery_input.api_token = "test-token".to_string();
     recovery_input.provider_profile_config = Some(profile);
     recovery_input.provider_protocol_key = Some(protocol);
+    recovery_input.provider_configuration_revision = Some(PROVIDER_REVISION.to_string());
     recovery_input.model = MODEL_ID.to_string();
     recovery_input.stream = Some(false);
     recovery_input.assistant_message_id = Some(SECOND_ASSISTANT_ID.to_string());
@@ -8095,7 +8287,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
     let executor_protocol = provider_protocol.clone();
     let executor_side_effects = Arc::clone(&side_effects);
     let executor_checks = Arc::clone(&persisted_before_effect);
-    let host_executor: AgentHostActionExecutor = Arc::new(move |action, cancellation| {
+    let host_executor: AgentHostActionExecutor = Arc::new(move |action, _, cancellation| {
         if cancellation.is_cancelled() {
             return Err(AgentError::new("unexpected cancellation"));
         }
@@ -8305,7 +8497,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
     )];
     let forbidden_side_effects = Arc::new(AtomicUsize::new(0));
     let executor_forbidden_side_effects = Arc::clone(&forbidden_side_effects);
-    let forbidden_executor: AgentHostActionExecutor = Arc::new(move |action, _| {
+    let forbidden_executor: AgentHostActionExecutor = Arc::new(move |action, _, _| {
         executor_forbidden_side_effects.fetch_add(1, Ordering::SeqCst);
         let AgentProposedAction::Command { command } = action else {
             return Err(AgentError::new("expected command"));

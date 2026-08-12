@@ -648,3 +648,86 @@ fn anchored_record_validates_opaque_conversation_position() {
         Err(WorldStateError::InvalidEffectiveBeforeMessageId)
     ));
 }
+
+#[test]
+fn persisted_world_state_closure_rejects_nested_unknown_and_missing_fields() {
+    let base = WorldStateSnapshot::new(
+        "epoch-strict",
+        0,
+        vec![visible_section(
+            WorldStateSectionId::EffectivePermissions,
+            "ask",
+        )],
+    )
+    .unwrap();
+    let replacement = WorldStateSnapshot::new(
+        "epoch-strict",
+        1,
+        vec![visible_section(
+            WorldStateSectionId::EffectivePermissions,
+            "allow",
+        )],
+    )
+    .unwrap();
+    let anchored = AnchoredWorldStateRecord::new(
+        WorldStateRecord::Diff(WorldStateDiff::between(&base, &replacement).unwrap()),
+        Some("assistant-1".to_string()),
+    )
+    .unwrap();
+    let current = serde_json::to_value(&anchored).unwrap();
+    let restored: AnchoredWorldStateRecord = serde_json::from_value(current.clone()).unwrap();
+    restored.validate().unwrap();
+
+    let mut root_extra = current.clone();
+    root_extra["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AnchoredWorldStateRecord>(root_extra).is_err());
+
+    let mut record_extra = current.clone();
+    record_extra["record"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AnchoredWorldStateRecord>(record_extra).is_err());
+
+    let mut diff_extra = current.clone();
+    diff_extra["record"]["record"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AnchoredWorldStateRecord>(diff_extra).is_err());
+
+    let mut operation_extra = current.clone();
+    operation_extra["record"]["record"]["operations"][0]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AnchoredWorldStateRecord>(operation_extra).is_err());
+
+    let mut precondition_extra = current.clone();
+    precondition_extra["record"]["record"]["operations"][0]["previous"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AnchoredWorldStateRecord>(precondition_extra).is_err());
+
+    let mut missing_precondition_visibility = current.clone();
+    missing_precondition_visibility["record"]["record"]["operations"][0]["previous"]
+        .as_object_mut()
+        .unwrap()
+        .remove("visibility");
+    assert!(
+        serde_json::from_value::<AnchoredWorldStateRecord>(missing_precondition_visibility)
+            .is_err()
+    );
+
+    let removed = WorldStateSnapshot::new("epoch-strict", 1, Vec::new()).unwrap();
+    let removal = AnchoredWorldStateRecord::new(
+        WorldStateRecord::Diff(WorldStateDiff::between(&base, &removed).unwrap()),
+        None,
+    )
+    .unwrap();
+    let mut tombstone_extra = serde_json::to_value(removal).unwrap();
+    tombstone_extra["record"]["record"]["operations"][0]["tombstone"]["unexpected"] = json!(true);
+    assert!(serde_json::from_value::<AnchoredWorldStateRecord>(tombstone_extra).is_err());
+
+    let mut prelude = current;
+    prelude
+        .as_object_mut()
+        .unwrap()
+        .remove("effectiveBeforeMessageId");
+    assert!(
+        serde_json::from_value::<AnchoredWorldStateRecord>(prelude)
+            .unwrap()
+            .effective_before_message_id
+            .is_none(),
+        "a missing anchor is the current epoch-prelude representation"
+    );
+}

@@ -2376,10 +2376,6 @@ mod tests {
                 argv: vec![request.operation.cli_name().to_string()],
                 paths: Vec::new(),
                 input_bindings: Vec::new(),
-                document_precondition: None,
-                output_precondition: None,
-                destination_precondition: None,
-                resource_preconditions: Vec::new(),
             })
         }
 
@@ -2836,7 +2832,7 @@ mod tests {
                 .into_request()
                 .expect("typed model call should validate");
             assert_eq!(request.operation, expected);
-            assert_eq!(request.typed_parameters().unwrap().operation(), expected);
+            assert_eq!(request.typed_parameters().operation(), expected);
         }
     }
 
@@ -2912,8 +2908,7 @@ mod tests {
         .into_request()
         .unwrap();
 
-        let OfficeOperationParameters::Add { properties, .. } = request.typed_parameters().unwrap()
-        else {
+        let OfficeOperationParameters::Add { properties, .. } = request.typed_parameters() else {
             panic!("add must remain a typed add request");
         };
         assert_eq!(
@@ -2962,8 +2957,7 @@ mod tests {
             .into_request()
             .unwrap();
             assert_eq!(request.inputs.len(), 1);
-            let OfficeOperationParameters::Add { properties, .. } =
-                request.typed_parameters().unwrap()
+            let OfficeOperationParameters::Add { properties, .. } = request.typed_parameters()
             else {
                 panic!("insertImage must compile to add");
             };

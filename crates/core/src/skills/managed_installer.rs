@@ -247,38 +247,10 @@ impl ManagedSkillInstaller {
         request: &ManagedSkillUninstallRequest,
     ) -> Result<ManagedSkillMutationResult<ManagedSkillUninstallOutcome>, ManagedSkillInstallerError>
     {
-        self.uninstall_with_expectation(
-            request.installation_id(),
-            UninstallExpectation::InstallationRevision(request.expected_revision()),
-        )
-    }
-
-    /// Compatibility-only package-revision CAS uninstall.
-    ///
-    /// Unlike a service-layer receipt lookup followed by [`Self::uninstall`],
-    /// this method evaluates the legacy package revision and durably retires
-    /// the installation identity while holding the same writer transaction.
-    /// New callers should always prefer the exact lifecycle revision API.
-    pub fn uninstall_legacy(
-        &self,
-        request: &ManagedSkillLegacyUninstallRequest,
-    ) -> Result<ManagedSkillMutationResult<ManagedSkillUninstallOutcome>, ManagedSkillInstallerError>
-    {
-        self.uninstall_with_expectation(
-            request.installation_id(),
-            UninstallExpectation::PackageRevision(request.expected_package_revision()),
-        )
-    }
-
-    fn uninstall_with_expectation(
-        &self,
-        installation_id: &SkillInstallationId,
-        expectation: UninstallExpectation<'_>,
-    ) -> Result<ManagedSkillMutationResult<ManagedSkillUninstallOutcome>, ManagedSkillInstallerError>
-    {
+        let installation_id = request.installation_id();
         let transaction = self.begin_transaction()?;
         let Some(receipt) = load_receipt(&transaction.store, installation_id)? else {
-            // Every uninstall mode also retires an already-absent identity. This
+            // An uninstall also retires an already-absent identity. This
             // closes the crash window in which a previously deleted receipt
             // name was not durable and an old install retry could otherwise
             // resurrect it after restart.
@@ -287,26 +259,12 @@ impl ManagedSkillInstaller {
                 ManagedSkillUninstallOutcome::AlreadyAbsent,
             ));
         };
-        match expectation {
-            UninstallExpectation::InstallationRevision(expected_revision)
-                if receipt.installation_revision != *expected_revision =>
-            {
-                return Err(ManagedSkillInstallerError::RevisionConflict {
-                    installation_id: installation_id.clone(),
-                    expected_revision: expected_revision.clone(),
-                    actual_revision: receipt.installation_revision,
-                });
-            }
-            UninstallExpectation::PackageRevision(expected_revision)
-                if receipt.package.revision != *expected_revision =>
-            {
-                return Err(ManagedSkillInstallerError::LegacyPackageRevisionConflict {
-                    installation_id: installation_id.clone(),
-                    expected_revision: expected_revision.clone(),
-                    actual_revision: receipt.package.revision,
-                });
-            }
-            _ => {}
+        if receipt.installation_revision != *request.expected_revision() {
+            return Err(ManagedSkillInstallerError::RevisionConflict {
+                installation_id: installation_id.clone(),
+                expected_revision: request.expected_revision().clone(),
+                actual_revision: receipt.installation_revision,
+            });
         }
 
         transaction.retire_installation(installation_id, true)?;
@@ -361,10 +319,4 @@ impl ManagedSkillInstaller {
         installer.failpoint = Some(failpoint);
         installer
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum UninstallExpectation<'a> {
-    InstallationRevision(&'a SkillInstallationRevision),
-    PackageRevision(&'a SkillRevision),
 }

@@ -9,9 +9,8 @@ use super::acquisition_provenance::SkillInstallationProvenance;
 use super::installed::USER_INSTALLED_SKILL_SOURCE_ID;
 use super::managed_installer::{
     ManagedSkillInstallOutcome, ManagedSkillInstallRequest, ManagedSkillInstaller,
-    ManagedSkillInstallerError, ManagedSkillLegacyUninstallRequest, ManagedSkillMutationResult,
-    ManagedSkillUninstallOutcome, ManagedSkillUninstallRequest, ManagedSkillUpdateOutcome,
-    ManagedSkillUpdateRequest,
+    ManagedSkillInstallerError, ManagedSkillMutationResult, ManagedSkillUninstallOutcome,
+    ManagedSkillUninstallRequest, ManagedSkillUpdateOutcome, ManagedSkillUpdateRequest,
 };
 use super::managed_store::{InstalledSkillReceipt, ManagedSkillStore, ManagedStoreLoadError};
 use super::model::{
@@ -105,52 +104,6 @@ impl SkillInstallationService {
             package,
             provenance,
         )
-    }
-
-    /// Compatibility entry point that removes a receipt using package CAS.
-    ///
-    /// New callers should use [`Self::uninstall_exact`]. Immutable package
-    /// objects remain available for later safe garbage collection.
-    pub fn uninstall(
-        &self,
-        request: &SkillUninstallRequest,
-    ) -> Result<SkillInstallationMutation, SkillInstallationServiceError> {
-        let operation = SkillInstallationOperation::Uninstall;
-        let installation_id = self.installed_identity(operation, &request.skill_id)?;
-        let installer_request = ManagedSkillLegacyUninstallRequest::new(
-            installation_id.clone(),
-            request.expected_revision.clone(),
-        );
-        let result = match self.installer.uninstall_legacy(&installer_request) {
-            Ok(result) => result,
-            Err(ManagedSkillInstallerError::LegacyPackageRevisionConflict {
-                expected_revision,
-                actual_revision,
-                ..
-            }) => {
-                return Err(SkillInstallationServiceError::LegacyRevisionConflict {
-                    operation,
-                    installation_id,
-                    skill_id: request.skill_id.clone(),
-                    expected_revision,
-                    actual_revision,
-                });
-            }
-            Err(source) => {
-                return Err(SkillInstallationServiceError::Installer {
-                    operation,
-                    installation_id,
-                    skill_id: request.skill_id.clone(),
-                    source: Box::new(source),
-                });
-            }
-        };
-        Ok(Self::uninstall_mutation(
-            operation,
-            installation_id,
-            request.skill_id.clone(),
-            result,
-        ))
     }
 
     /// Removes an installation using its exact lifecycle CAS revision.
@@ -614,29 +567,6 @@ impl LocalSkillUpdateExactRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct SkillUninstallRequest {
-    skill_id: SkillId,
-    expected_revision: SkillRevision,
-}
-
-impl SkillUninstallRequest {
-    pub fn new(skill_id: SkillId, expected_revision: SkillRevision) -> Self {
-        Self {
-            skill_id,
-            expected_revision,
-        }
-    }
-
-    pub fn skill_id(&self) -> &SkillId {
-        &self.skill_id
-    }
-
-    pub fn expected_revision(&self) -> &SkillRevision {
-        &self.expected_revision
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct SkillUninstallExactRequest {
     skill_id: SkillId,
     expected_revision: SkillInstallationRevision,
@@ -889,8 +819,7 @@ pub enum SkillInstallationServiceError {
         skill_id: SkillId,
         source: Box<SkillPackagePreparationError>,
     },
-    /// Compatibility-only conflict for callers that still CAS on package
-    /// revision instead of the exact installation revision.
+    /// Package-revision conflict for the current local-update acquisition lane.
     LegacyRevisionConflict {
         operation: SkillInstallationOperation,
         installation_id: SkillInstallationId,
@@ -1026,7 +955,10 @@ mod tests {
         let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
 
         let install = service
-            .install_local_directory(&LocalSkillInstallRequest::new(installation_id, &local))
+            .install_local_directory(&LocalSkillInstallRequest::new(
+                installation_id.clone(),
+                &local,
+            ))
             .unwrap();
         assert_eq!(install.outcome(), SkillInstallationOutcome::Installed);
         let first = reader.list().unwrap().skills()[0].clone();
@@ -1056,12 +988,21 @@ mod tests {
         let activated = reader.activate(&[second.selection()]).unwrap();
         assert!(activated.skills()[0].instructions().contains("VERSION_TWO"));
 
+        let installation_revision = service
+            .read_installed_skill(&installation_id)
+            .unwrap()
+            .unwrap()
+            .installation_revision()
+            .clone();
         let uninstall_request =
-            SkillUninstallRequest::new(second.id().clone(), second.revision().clone());
-        let uninstall = service.uninstall(&uninstall_request).unwrap();
+            SkillUninstallExactRequest::new(second.id().clone(), installation_revision);
+        let uninstall = service.uninstall_exact(&uninstall_request).unwrap();
         assert_eq!(uninstall.outcome(), SkillInstallationOutcome::Uninstalled);
         assert_eq!(
-            service.uninstall(&uninstall_request).unwrap().outcome(),
+            service
+                .uninstall_exact(&uninstall_request)
+                .unwrap()
+                .outcome(),
             SkillInstallationOutcome::AlreadyAbsent
         );
         assert!(reader.list().unwrap().skills().is_empty());
@@ -1095,76 +1036,19 @@ mod tests {
 
         let workspace_id = SkillId::parse("workspace:project:local-auditor").unwrap();
         let error = service
-            .uninstall(&SkillUninstallRequest::new(
+            .uninstall_exact(&SkillUninstallExactRequest::new(
                 workspace_id,
-                SkillRevision::parse("revision").unwrap(),
+                SkillInstallationRevision::parse(format!(
+                    "skill-installation-sha256-v1:{}",
+                    "a".repeat(64)
+                ))
+                .unwrap(),
             ))
             .unwrap_err();
         assert!(matches!(
             error,
             SkillInstallationServiceError::InvalidInstalledSkill { .. }
         ));
-    }
-
-    #[test]
-    fn legacy_uninstall_preserves_conflict_shape_and_durably_retires_absent_ids() {
-        let fixture = tempdir().unwrap();
-        let store = fixture.path().join("store");
-        let local = fixture.path().join("local-skill");
-        write_local(&local, "LEGACY_UNINSTALL");
-        let service = SkillInstallationService::new(&store).unwrap();
-        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
-        let installed = service
-            .install_local_directory(&LocalSkillInstallRequest::new(
-                installation_id.clone(),
-                &local,
-            ))
-            .unwrap();
-        let actual_revision = installed.package_revision().unwrap().clone();
-        let wrong_revision = SkillRevision::parse("wrong-package-revision").unwrap();
-
-        let conflict = service
-            .uninstall(&SkillUninstallRequest::new(
-                installed.skill_id().clone(),
-                wrong_revision.clone(),
-            ))
-            .unwrap_err();
-        assert!(matches!(
-            &conflict,
-            SkillInstallationServiceError::LegacyRevisionConflict {
-                installation_id: conflict_id,
-                skill_id,
-                expected_revision,
-                actual_revision: conflict_actual,
-                ..
-            } if conflict_id == &installation_id
-                && skill_id == installed.skill_id()
-                && expected_revision == &wrong_revision
-                && conflict_actual == &actual_revision
-        ));
-        assert!(service
-            .read_installed_skill(&installation_id)
-            .unwrap()
-            .is_some());
-
-        let absent_id = SkillInstallationId::parse("11111111-2222-4333-8444-555555555555").unwrap();
-        let absent_skill_id = service.skill_id(&absent_id);
-        let absent_request = SkillUninstallRequest::new(absent_skill_id, actual_revision);
-        assert_eq!(
-            service.uninstall(&absent_request).unwrap().outcome(),
-            SkillInstallationOutcome::AlreadyAbsent
-        );
-        assert_eq!(
-            service.uninstall(&absent_request).unwrap().outcome(),
-            SkillInstallationOutcome::AlreadyAbsent
-        );
-        let retired_install = service
-            .install_local_directory(&LocalSkillInstallRequest::new(absent_id, &local))
-            .unwrap_err();
-        assert_eq!(
-            retired_install.installer_error().unwrap().code(),
-            super::super::managed_installer::ManagedSkillInstallerErrorCode::InstallationRetired
-        );
     }
 
     #[test]

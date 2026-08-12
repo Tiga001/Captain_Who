@@ -47,10 +47,10 @@ pub(crate) struct CommandSyntaxError {
 /// Evaluates a command using the same classifier used to populate proposal risk metadata.
 ///
 /// `RequireExplicitApproval` is a routing decision, not an execution failure: callers should
-/// surface an approval request and call [`run_authorized_command`] again with
-/// [`CommandAuthorizationSource::ExplicitUser`] only after the exact frozen action is approved.
+/// surface an approval request and start the exact frozen action through the Host command Session
+/// with [`CommandAuthorizationSource::ExplicitUser`] only after approval.
 ///
-/// This compatibility entry point performs command classification with unrestricted read scope.
+/// This context-free classifier uses unrestricted read scope.
 /// Runtime authorization should use [`evaluate_command_policy_with_context`] so permission and
 /// workspace/cwd scope are enforced together.
 ///

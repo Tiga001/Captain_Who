@@ -40,6 +40,12 @@ const storedSettings: ModelSettingsSnapshot = {
       inputPrice: '0',
       cachedInputPrice: '',
       outputPrice: '0',
+      providerProfileConfig: {
+        schemaVersion: 1,
+        profile: { id: 'generic_openai_chat', version: 1 },
+        reasoning: { mode: 'provider_default', effort: 'provider_default' }
+      },
+      providerProfileUpdate: { kind: 'unchanged' },
       enabled: true
     }
   ]
@@ -114,7 +120,7 @@ describe('ModelSettingsProvider hydration', () => {
       models: [
         {
           ...storedSettings.models[0],
-          providerProfileUpdate: { kind: 'select_generic' }
+          providerProfileUpdate: { kind: 'unchanged' }
         }
       ]
     })
@@ -199,13 +205,13 @@ describe('ModelSettingsProvider hydration', () => {
     ).toEqual({ kind: 'select_generic' })
     expect(
       savedModels.find((model) => model.id === 'generic-override')?.providerProfileUpdate
-    ).toBeUndefined()
+    ).toEqual({ kind: 'unchanged' })
     expect(
       savedModels.find((model) => model.id === 'deepseek-inherited')?.providerProfileUpdate
-    ).toBeUndefined()
+    ).toEqual({ kind: 'unchanged' })
     expect(
       savedModels.find((model) => model.id === 'unknown-inherited')?.providerProfileUpdate
-    ).toBeUndefined()
+    ).toEqual({ kind: 'unchanged' })
   })
 
   it('exposes only the Host-projected Provider Profile descriptors', async () => {

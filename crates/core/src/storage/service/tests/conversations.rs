@@ -1,229 +1,6 @@
 use super::*;
 
 #[test]
-fn conversation_load_rebuilds_mcp_timeline_items_at_their_trace_positions() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let conversation_id = "conversation-mcp-trace-order";
-    let assistant_message_id = "assistant-mcp-trace-order";
-    let run_id = "run-mcp-trace-order";
-    service
-        .save_conversation(ChatConversationRecord {
-            id: conversation_id.to_string(),
-            project_id: None,
-            model_id: Some("model-1".to_string()),
-            title: "MCP trace order".to_string(),
-            messages: vec![
-                ChatMessageRecord {
-                    id: "user-mcp-trace-order".to_string(),
-                    role: "user".to_string(),
-                    content: "Use two MCP tools.".to_string(),
-                    created_at: 1,
-                    status: Some("sent".to_string()),
-                    attachments: Vec::new(),
-                    agent_run_json: None,
-                    ui_state_json: None,
-                },
-                ChatMessageRecord {
-                    id: assistant_message_id.to_string(),
-                    role: "assistant".to_string(),
-                    content: "Done.".to_string(),
-                    created_at: 2,
-                    status: Some("sent".to_string()),
-                    attachments: Vec::new(),
-                    agent_run_json: Some(
-                        serde_json::json!({
-                            "runId": run_id,
-                            "status": "completed",
-                            "timeline": [
-                                {
-                                    "id": "stale-mcp-two",
-                                    "type": "mcp_tool_call",
-                                    "invocationId": "invocation-two"
-                                },
-                                {
-                                    "id": "legacy-without-trace-anchor",
-                                    "type": "mcp_tool_call",
-                                    "invocationId": "legacy-invocation"
-                                },
-                                {
-                                    "id": "stale-message",
-                                    "type": "message",
-                                    "content": "stale narration"
-                                },
-                                {
-                                    "id": "stale-mcp-one",
-                                    "type": "mcp_tool_call",
-                                    "invocationId": "invocation-one"
-                                },
-                                {
-                                    "id": "duplicate-mcp-one",
-                                    "type": "mcp_tool_call",
-                                    "invocationId": "invocation-one"
-                                }
-                            ],
-                            "mcpInvocations": [
-                                {
-                                    "callId": "call-mcp-one",
-                                    "invocationId": "invocation-one"
-                                },
-                                {
-                                    "callId": "call-mcp-one",
-                                    "invocationId": "invocation-one"
-                                },
-                                {
-                                    "callId": "call-mcp-two",
-                                    "invocationId": "invocation-two"
-                                },
-                                {
-                                    "callId": "call-without-trace",
-                                    "invocationId": "legacy-invocation"
-                                }
-                            ]
-                        })
-                        .to_string(),
-                    ),
-                    ui_state_json: None,
-                },
-            ],
-            created_at: 1,
-            updated_at: 2,
-            pinned_at: None,
-            archived_at: None,
-            unread_at: None,
-        })
-        .unwrap();
-
-    let successful_result =
-        |sequence: u64, call_id: &str, tool: &str| ConversationTurnTraceItem::ToolResult {
-            sequence,
-            call_id: call_id.to_string(),
-            tool: tool.to_string(),
-            status: crate::ConversationTraceToolResultStatus::Succeeded,
-            success: true,
-            observation: serde_json::json!({ "ok": true }),
-            approval_status: crate::AgentApprovalStatus::NotRequired,
-            error: None,
-            truncated: false,
-            archive: Default::default(),
-        };
-    let trace = ConversationTurnTrace {
-        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
-        run_id: run_id.to_string(),
-        conversation_id: conversation_id.to_string(),
-        assistant_message_id: assistant_message_id.to_string(),
-        terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
-        terminal_error: None,
-        truncated: false,
-        items: vec![
-            ConversationTurnTraceItem::AssistantNarration {
-                sequence: 0,
-                content: "Before first MCP.".to_string(),
-                truncated: false,
-            },
-            ConversationTurnTraceItem::ToolCall {
-                sequence: 1,
-                call_id: "call-mcp-one".to_string(),
-                tool: "mcp_tool_one".to_string(),
-                provenance: None,
-                operation: serde_json::json!({}),
-                approval_status: crate::AgentApprovalStatus::NotRequired,
-                truncated: false,
-            },
-            successful_result(2, "call-mcp-one", "mcp_tool_one"),
-            ConversationTurnTraceItem::AssistantNarration {
-                sequence: 3,
-                content: "Between MCP calls.".to_string(),
-                truncated: false,
-            },
-            ConversationTurnTraceItem::ToolCall {
-                sequence: 4,
-                call_id: "call-mcp-two".to_string(),
-                tool: "mcp_tool_two".to_string(),
-                provenance: None,
-                operation: serde_json::json!({}),
-                approval_status: crate::AgentApprovalStatus::NotRequired,
-                truncated: false,
-            },
-            successful_result(5, "call-mcp-two", "mcp_tool_two"),
-            ConversationTurnTraceItem::AssistantNarration {
-                sequence: 6,
-                content: "Before ordinary tool.".to_string(),
-                truncated: false,
-            },
-            ConversationTurnTraceItem::ToolCall {
-                sequence: 7,
-                call_id: "call-ordinary".to_string(),
-                tool: "read_file".to_string(),
-                provenance: None,
-                operation: serde_json::json!({ "path": "notes.txt" }),
-                approval_status: crate::AgentApprovalStatus::NotRequired,
-                truncated: false,
-            },
-            successful_result(8, "call-ordinary", "read_file"),
-            ConversationTurnTraceItem::AssistantNarration {
-                sequence: 9,
-                content: "After ordinary tool.".to_string(),
-                truncated: false,
-            },
-        ],
-    };
-    service
-        .replace_conversation_turn_trace(&trace, 2, 3)
-        .unwrap();
-
-    let loaded = service.load_conversation(conversation_id).unwrap().unwrap();
-    let assistant = loaded
-        .messages
-        .iter()
-        .find(|message| message.id == assistant_message_id)
-        .unwrap();
-    let run = serde_json::from_str::<serde_json::Value>(
-        assistant.agent_run_json.as_deref().expect("agent run"),
-    )
-    .unwrap();
-    let timeline = run["timeline"].as_array().unwrap();
-    let restored = timeline
-        .iter()
-        .map(|item| match item["type"].as_str().unwrap() {
-            "message" => format!("message:{}", item["content"].as_str().unwrap()),
-            "mcp_tool_call" => {
-                format!("mcp:{}", item["invocationId"].as_str().unwrap())
-            }
-            "tool_call" => format!("tool:{}", item["callId"].as_str().unwrap()),
-            other => panic!("unexpected timeline item type: {other}"),
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        restored,
-        vec![
-            "message:Before first MCP.",
-            "mcp:invocation-one",
-            "message:Between MCP calls.",
-            "mcp:invocation-two",
-            "message:Before ordinary tool.",
-            "tool:call-ordinary",
-            "message:After ordinary tool.",
-        ]
-    );
-    assert_eq!(
-        timeline
-            .iter()
-            .filter(|item| item["type"] == "mcp_tool_call")
-            .count(),
-        2,
-        "typed MCP timeline markers must be emitted once from durable trace anchors"
-    );
-    assert!(
-        timeline
-            .iter()
-            .all(|item| item["invocationId"] != "legacy-invocation"),
-        "an MCP presentation item without a durable trace anchor must fail closed"
-    );
-}
-
-#[test]
 fn deleting_conversation_and_project_removes_composer_drafts() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
@@ -347,6 +124,27 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             unread_at: None,
         })
         .unwrap();
+    let archive_provider_call_id = "provider-call-archive-source";
+    let archive_call_id = crate::llm::model_response_tool_call_id(
+        "run-archive-source",
+        0,
+        0,
+        archive_provider_call_id,
+    );
+    let history_provider_call_id = "provider-call-history-source";
+    let history_call_id = crate::llm::model_response_tool_call_id(
+        "run-archive-source",
+        0,
+        1,
+        history_provider_call_id,
+    );
+    let managed_provider_call_id = "provider-call-managed-source";
+    let managed_call_id = crate::llm::model_response_tool_call_id(
+        "run-archive-source",
+        0,
+        2,
+        managed_provider_call_id,
+    );
     let exact = "{\"content\":\"fork exact history\"}".repeat(20_000);
     let archive = service
         .archive_conversation_tool_result(
@@ -354,7 +152,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                 conversation_id: "conversation-archive-source".to_string(),
                 assistant_message_id: "assistant-archive-source".to_string(),
                 sequence: 1,
-                call_id: "call-archive-source".to_string(),
+                call_id: archive_call_id.clone(),
                 tool: "read_file".to_string(),
                 content_type: "application/json".to_string(),
                 content: exact.clone(),
@@ -374,7 +172,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                 conversation_id: "conversation-archive-source".to_string(),
                 assistant_message_id: "assistant-archive-source".to_string(),
                 sequence: 5,
-                call_id: "call-managed-source".to_string(),
+                call_id: managed_call_id.clone(),
                 tool: "run_command".to_string(),
                 content_type: "application/json".to_string(),
                 content: managed_running_exact.clone(),
@@ -431,16 +229,18 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
         items: vec![
             ConversationTurnTraceItem::ToolCall {
                 sequence: 0,
-                call_id: "call-archive-source".to_string(),
+                call_id: archive_call_id.clone(),
                 tool: "read_file".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "read_file".to_string(),
+                },
                 operation: serde_json::json!({ "path": "large.txt" }),
                 approval_status: crate::AgentApprovalStatus::NotRequired,
                 truncated: false,
             },
             ConversationTurnTraceItem::ToolResult {
                 sequence: 1,
-                call_id: "call-archive-source".to_string(),
+                call_id: archive_call_id.clone(),
                 tool: "read_file".to_string(),
                 status: crate::ConversationTraceToolResultStatus::Succeeded,
                 success: true,
@@ -459,16 +259,18 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             },
             ConversationTurnTraceItem::ToolCall {
                 sequence: 2,
-                call_id: "call-history-source".to_string(),
+                call_id: history_call_id.clone(),
                 tool: "conversation_history".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "conversation_history".to_string(),
+                },
                 operation: serde_json::json!({ "open": source_archive_open }),
                 approval_status: crate::AgentApprovalStatus::NotRequired,
                 truncated: false,
             },
             ConversationTurnTraceItem::ToolResult {
                 sequence: 3,
-                call_id: "call-history-source".to_string(),
+                call_id: history_call_id.clone(),
                 tool: "conversation_history".to_string(),
                 status: crate::ConversationTraceToolResultStatus::Succeeded,
                 success: true,
@@ -486,16 +288,18 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             },
             ConversationTurnTraceItem::ToolCall {
                 sequence: 4,
-                call_id: "call-managed-source".to_string(),
+                call_id: managed_call_id.clone(),
                 tool: "run_command".to_string(),
-                provenance: None,
+                provenance: crate::AgentToolIdentity::Builtin {
+                    tool_name: "run_command".to_string(),
+                },
                 operation: serde_json::json!({ "command": "python3 app.py" }),
                 approval_status: crate::AgentApprovalStatus::Approved,
                 truncated: false,
             },
             ConversationTurnTraceItem::ToolResult {
                 sequence: 5,
-                call_id: "call-managed-source".to_string(),
+                call_id: managed_call_id.clone(),
                 tool: "run_command".to_string(),
                 status: crate::ConversationTraceToolResultStatus::Succeeded,
                 success: true,
@@ -518,7 +322,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                 sequence: 6,
                 phase: crate::ConversationCommandSessionLifecyclePhase::Terminal,
                 session_id: managed_session_id.to_string(),
-                call_id: "call-managed-source".to_string(),
+                call_id: managed_call_id.clone(),
                 status: crate::AgentCommandSessionStatus::Exited,
                 exit_code: Some(0),
                 latest_sequence: 1,
@@ -543,10 +347,14 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             content: String::new(),
             tool_call_id: None,
             tool_calls: vec![crate::AgentContextCheckpointToolCall {
-                id: "call-archive-source".to_string(),
+                id: archive_call_id.clone(),
                 name: "read_file".to_string(),
                 args: serde_json::json!({ "path": "large.txt" }),
-                provider_identity: None,
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: archive_provider_call_id.to_string(),
+                    runtime_call_id: archive_call_id.clone(),
+                },
             }],
             is_error: false,
         },
@@ -555,7 +363,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             ordinal: 0,
             role: "tool".to_string(),
             content: r#"{"ok":true,"result":{"content":"EXACT_FORK_MODEL_MARKER"}}"#.to_string(),
-            tool_call_id: Some("call-archive-source".to_string()),
+            tool_call_id: Some(archive_call_id.clone()),
             tool_calls: Vec::new(),
             is_error: false,
         },
@@ -566,10 +374,14 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             content: String::new(),
             tool_call_id: None,
             tool_calls: vec![crate::AgentContextCheckpointToolCall {
-                id: "call-history-source".to_string(),
+                id: history_call_id.clone(),
                 name: "conversation_history".to_string(),
                 args: serde_json::json!({ "open": source_archive_open }),
-                provider_identity: None,
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: history_provider_call_id.to_string(),
+                    runtime_call_id: history_call_id.clone(),
+                },
             }],
             is_error: false,
         },
@@ -585,7 +397,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                 }
             })
             .to_string(),
-            tool_call_id: Some("call-history-source".to_string()),
+            tool_call_id: Some(history_call_id.clone()),
             tool_calls: Vec::new(),
             is_error: false,
         },
@@ -596,10 +408,14 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             content: String::new(),
             tool_call_id: None,
             tool_calls: vec![crate::AgentContextCheckpointToolCall {
-                id: "call-managed-source".to_string(),
+                id: managed_call_id.clone(),
                 name: "run_command".to_string(),
                 args: serde_json::json!({ "command": "python3 app.py" }),
-                provider_identity: None,
+                provider_identity: crate::AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: managed_provider_call_id.to_string(),
+                    runtime_call_id: managed_call_id.clone(),
+                },
             }],
             is_error: false,
         },
@@ -608,7 +424,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             ordinal: 0,
             role: "tool".to_string(),
             content: managed_running_exact.clone(),
-            tool_call_id: Some("call-managed-source".to_string()),
+            tool_call_id: Some(managed_call_id.clone()),
             tool_calls: Vec::new(),
             is_error: false,
         },
@@ -628,12 +444,13 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
         .unwrap();
 
     let forked = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-archive-request".to_string(),
-            source_conversation_id: "conversation-archive-source".to_string(),
-            through_assistant_message_id: "assistant-archive-source".to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-archive-request",
+            "conversation-archive-source",
+            "assistant-archive-source",
+        ))
+        .unwrap()
+        .conversation;
     let forked_assistant = forked.messages.last().unwrap();
     let forked_trace = service
         .get_conversation_turn_trace(&forked_assistant.id)
@@ -770,7 +587,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     for (archive_ref, expected_call_id, expected_content) in [
         (
             forked_managed_running_ref,
-            "call-managed-source",
+            managed_call_id.as_str(),
             managed_running_exact.as_str(),
         ),
         (
@@ -804,12 +621,13 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     }
 
     let recursively_forked = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-archive-recursive-request".to_string(),
-            source_conversation_id: forked.id.clone(),
-            through_assistant_message_id: forked_assistant.id.clone(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-archive-recursive-request",
+            forked.id.clone(),
+            forked_assistant.id.clone(),
+        ))
+        .unwrap()
+        .conversation;
     let recursive_assistant = recursively_forked.messages.last().unwrap();
     let recursive_trace = service
         .get_conversation_turn_trace(&recursive_assistant.id)
@@ -843,7 +661,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     assert_eq!(
         recursive_call_ids,
         vec![
-            "call-managed-source".to_string(),
+            managed_call_id,
             "command-session:cmd_000000000000000000000000000000a1".to_string(),
         ]
     );
@@ -884,13 +702,13 @@ fn conversation_fork_blocks_source_wide_active_command_without_mutating_it() {
         .unwrap();
 
     let error = service
-        .fork_conversation_view(ForkConversationInput {
-            request_id: "fork-active-command-request".to_string(),
-            source_conversation_id: "conversation-active-fork".to_string(),
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-active-command-request",
+            "conversation-active-fork",
             // The active command belongs to a later turn. Fork admission is intentionally scoped
             // to the complete source conversation, not only the copied prefix.
-            through_assistant_message_id: "assistant-active-fork-1".to_string(),
-        })
+            "assistant-active-fork-1",
+        ))
         .unwrap_err();
     assert_eq!(
         error,
@@ -976,12 +794,13 @@ fn conversation_fork_blocks_source_wide_active_command_without_mutating_it() {
     }
 
     let forked = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-after-command-settlement".to_string(),
-            source_conversation_id: "conversation-active-fork".to_string(),
-            through_assistant_message_id: "assistant-active-fork-1".to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-after-command-settlement",
+            "conversation-active-fork",
+            "assistant-active-fork-1",
+        ))
+        .unwrap()
+        .conversation;
     assert_eq!(forked.messages.len(), 2);
 
     create_fork_test_command_session(
@@ -992,12 +811,13 @@ fn conversation_fork_blocks_source_wide_active_command_without_mutating_it() {
         50,
     );
     let idempotent_retry = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-after-command-settlement".to_string(),
-            source_conversation_id: "conversation-active-fork".to_string(),
-            through_assistant_message_id: "assistant-active-fork-1".to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-after-command-settlement",
+            "conversation-active-fork",
+            "assistant-active-fork-1",
+        ))
+        .unwrap()
+        .conversation;
     assert_eq!(idempotent_retry.id, forked.id);
 }
 
@@ -1038,7 +858,9 @@ fn fork_commit_rechecks_active_commands_before_writing_any_target_state() {
                         sequence: 0,
                         call_id: "call-fork-race".to_string(),
                         tool: "read_file".to_string(),
-                        provenance: None,
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "read_file".to_string(),
+                        },
                         operation: serde_json::json!({ "path": "large.txt" }),
                         approval_status: crate::AgentApprovalStatus::NotRequired,
                         truncated: false,
@@ -1071,12 +893,12 @@ fn fork_commit_rechecks_active_commands_before_writing_any_target_state() {
         .unwrap();
 
     let mut connection = service.state.connection().unwrap();
-    let plan = crate::storage::conversation_fork_repository::build_fork_plan(
+    let plan = crate::storage::conversation_fork_repository::build_fork_plan_at_point(
         &connection,
-        &ForkConversationInput {
-            request_id: "fork-race-request".to_string(),
-            source_conversation_id: "conversation-fork-race".to_string(),
-            through_assistant_message_id: "assistant-fork-race-1".to_string(),
+        "fork-race-request",
+        "conversation-fork-race",
+        &ConversationForkPoint::AssistantReply {
+            assistant_message_id: "assistant-fork-race-1".to_string(),
         },
         40,
     )
@@ -1413,12 +1235,13 @@ fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks(
     }
 
     let first_fork = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-turn-diffs-through-second".to_string(),
-            source_conversation_id: source_conversation_id.to_string(),
-            through_assistant_message_id: "assistant-turn-2".to_string(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-turn-diffs-through-second",
+            source_conversation_id,
+            "assistant-turn-2",
+        ))
+        .unwrap()
+        .conversation;
     assert_eq!(first_fork.messages.len(), 4);
     let forked_assistants = first_fork
         .messages
@@ -1493,12 +1316,13 @@ fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks(
     }
 
     let recursive_fork = service
-        .fork_conversation(ForkConversationInput {
-            request_id: "fork-turn-diffs-recursively".to_string(),
-            source_conversation_id: first_fork.id.clone(),
-            through_assistant_message_id: forked_assistants[0].id.clone(),
-        })
-        .unwrap();
+        .fork_conversation_request_view(assistant_reply_fork_request(
+            "fork-turn-diffs-recursively",
+            first_fork.id.clone(),
+            forked_assistants[0].id.clone(),
+        ))
+        .unwrap()
+        .conversation;
     assert_eq!(recursive_fork.messages.len(), 2);
     let recursive_latest = service
         .load_latest_agent_turn_diff(&recursive_fork.id, "project-1")
@@ -1529,13 +1353,12 @@ fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
     current.permission_mode = "full".to_string();
     current.permission_mode_version =
         crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION;
-    current.queued_messages_json =
-        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#.to_string();
+    current.queued_messages_json = r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide","attachments":[],"modelId":"model-default","permissionMode":"full","projectId":null,"skills":[],"status":"pending","createdAt":1}]"#.to_string();
     let current = service.save_composer_draft(current).unwrap();
     assert_eq!(current.permission_mode, "full");
     assert_eq!(
         current.queued_messages_json,
-        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#
+        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide","attachments":[],"modelId":"model-default","permissionMode":"full","projectId":null,"skills":[],"status":"pending","createdAt":1}]"#
     );
 
     let stored = service.load_composer_drafts().unwrap();
@@ -1561,7 +1384,71 @@ fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
             .find(|draft| draft.scope_id == "current")
             .unwrap()
             .queued_messages_json,
-        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#
+        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide","attachments":[],"modelId":"model-default","permissionMode":"full","projectId":null,"skills":[],"status":"pending","createdAt":1}]"#
+    );
+}
+
+#[test]
+fn composer_draft_save_rejects_non_current_nested_payloads() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+
+    let serialized = serde_json::to_value(composer_draft("draft-wire", None, "draft")).unwrap();
+    for missing in ["modelId", "projectId"] {
+        let mut incomplete = serialized.clone();
+        incomplete.as_object_mut().unwrap().remove(missing);
+        assert!(serde_json::from_value::<ComposerDraftRecord>(incomplete).is_err());
+    }
+
+    let mut missing_queue_fields = composer_draft("draft-missing-queue", None, "draft");
+    missing_queue_fields.queued_messages_json =
+        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#.to_string();
+    assert_eq!(
+        service
+            .save_composer_draft(missing_queue_fields)
+            .unwrap_err(),
+        "stored_composer_draft_malformed"
+    );
+
+    let mut extra_attachment_field = composer_draft("draft-extra-attachment", None, "draft");
+    extra_attachment_field.attachments_json = r#"[{"id":"attachment-1","kind":"file","name":"empty.txt","sizeBytes":0,"encoding":"utf8","data":"","future":true}]"#.to_string();
+    assert_eq!(
+        service
+            .save_composer_draft(extra_attachment_field)
+            .unwrap_err(),
+        "stored_composer_draft_malformed"
+    );
+
+    let mut malformed_skill = composer_draft("draft-malformed-skill", None, "draft");
+    malformed_skill.skills_json =
+        r#"[{"id":"missing-source-shape","revision":"revision"}]"#.to_string();
+    assert_eq!(
+        service.save_composer_draft(malformed_skill).unwrap_err(),
+        "stored_composer_draft_malformed"
+    );
+}
+
+#[test]
+fn composer_draft_load_rejects_a_corrupt_current_row_instead_of_filtering_items() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let connection = rusqlite::Connection::open(fixture.root.join("storage.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO composer_drafts (
+                scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+                attachments_json, skills_json, queued_messages_json, updated_at
+             ) VALUES (?1, '', 'default', ?2, NULL, NULL, '[]', '[]', '[{}]', 1)",
+            rusqlite::params![
+                "draft-corrupt-load",
+                crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(
+        service.load_composer_drafts().unwrap_err(),
+        "stored_composer_draft_malformed"
     );
 }
 

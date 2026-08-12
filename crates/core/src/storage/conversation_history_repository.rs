@@ -740,7 +740,9 @@ mod tests {
                     sequence: 0,
                     call_id: "call-1".to_string(),
                     tool: "read_file".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "read_file".to_string(),
+                    },
                     operation: json!({ "path": "README.md" }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -819,7 +821,9 @@ mod tests {
                     sequence: 0,
                     call_id: "command-call".to_string(),
                     tool: "run_command".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "run_command".to_string(),
+                    },
                     operation: json!({ "command": "server" }),
                     approval_status: AgentApprovalStatus::Approved,
                     truncated: false,

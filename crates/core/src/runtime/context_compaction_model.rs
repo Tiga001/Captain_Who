@@ -174,11 +174,13 @@ impl AgentContextCompactionModelGenerator {
         );
 
         let dialect = ProviderProtocolDialect::from(self.api_style);
-        let provider_profile =
-            ProviderProfileConfig::resolve(self.provider_profile_config.as_ref(), dialect)
-                .map_err(|error| {
-                    AgentError::new(format!("上下文压缩 Provider 配置无效：{error}"))
-                })?;
+        let provider_profile = self
+            .provider_profile_config
+            .clone()
+            .ok_or_else(|| AgentError::new("上下文压缩缺少冻结的 Provider 配置。"))?;
+        provider_profile
+            .validate_for_dialect(dialect)
+            .map_err(|error| AgentError::new(format!("上下文压缩 Provider 配置无效：{error}")))?;
         let provider_protocol = match self.provider_protocol_key.as_ref() {
             Some(key) => key.clone(),
             None => ProviderProtocolKey::new(
@@ -619,14 +621,25 @@ mod tests {
     }
 
     fn chat_input(api_url: String, api_style: AgentApiStyle) -> AgentChatInput {
+        let dialect = ProviderProtocolDialect::from(api_style);
+        let provider_profile = ProviderProfileConfig::generic_for_dialect(dialect);
+        let provider_configuration_revision =
+            Some(format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()));
+        let provider_protocol_key = ProviderProtocolKey::new(
+            dialect,
+            &provider_profile,
+            "summary-model",
+            provider_configuration_revision.clone(),
+        )
+        .unwrap();
         AgentChatInput {
             api_url,
             api_token: "secret-token".to_string(),
-            provider_configuration_revision: None,
+            provider_configuration_revision,
             provider_connection_revision: None,
             search_connection_revision: None,
-            provider_profile_config: None,
-            provider_protocol_key: None,
+            provider_profile_config: Some(provider_profile),
+            provider_protocol_key: Some(provider_protocol_key),
             model: "summary-model".to_string(),
             model_capabilities: crate::ModelCapabilities::default(),
             api_style: Some(api_style),
@@ -986,7 +999,8 @@ mod tests {
                 effort: crate::provider_profile::ReasoningEffort::High,
             },
         };
-        input.provider_configuration_revision = Some("configuration-1".to_string());
+        input.provider_configuration_revision =
+            Some(format!("provider-protocol-v1:{}", uuid::Uuid::new_v4()));
         input.provider_protocol_key = Some(
             ProviderProtocolKey::new(
                 ProviderProtocolDialect::OpenAiChatCompletions,
@@ -1181,7 +1195,7 @@ mod tests {
             .finish_generation(
                 request,
                 LlmChatResponse {
-                    assistant_turn: crate::llm::LlmAssistantTurn::from_legacy(
+                    assistant_turn: crate::llm::LlmAssistantTurn::from_split_projection(
                         "An incomplete summary",
                         Vec::new(),
                     ),
@@ -1227,7 +1241,7 @@ mod tests {
             .finish_generation(
                 request,
                 LlmChatResponse {
-                    assistant_turn: crate::llm::LlmAssistantTurn::from_legacy(
+                    assistant_turn: crate::llm::LlmAssistantTurn::from_split_projection(
                         format!("\n{content}\n"),
                         Vec::new(),
                     ),

@@ -3,8 +3,6 @@ use super::*;
 mod execution_context;
 mod file_authorization;
 
-#[cfg(test)]
-pub(super) use execution_context::command_output_observer;
 pub(super) use execution_context::AutoApprovedActionContext;
 pub(super) use file_authorization::authorize_structured_file_write;
 
@@ -37,9 +35,26 @@ impl AgentService {
             skill_resources,
         )
         .with_notifications(notifications);
-        Arc::new(move |action, cancellation_token| {
+        Arc::new(move |action, checkpoint, cancellation_token| {
             let mut refreshed = context.clone();
             if let AgentProposedAction::McpToolCall { approval } = action {
+                let Some(checkpoint) = checkpoint else {
+                    service.invalidate_mcp_pending_payload(&AgentProposedAction::McpToolCall {
+                        approval: approval.clone(),
+                    });
+                    return Err(AgentError::structured(
+                        "mcp.auto_checkpoint_missing",
+                        "The automatic MCP invocation is missing its frozen run checkpoint.",
+                        serde_json::json!({
+                            "type": "mcp_tool",
+                            "code": "autoCheckpointMissing",
+                            "retryable": false,
+                            "dispatchCertainty": "definitely_not_dispatched",
+                        }),
+                    ));
+                };
+                refreshed.agent_input =
+                    agent_input_with_run_checkpoint(&refreshed.agent_input, &checkpoint);
                 let Some(runtime) = runtime.as_ref() else {
                     service.invalidate_mcp_pending_payload(&AgentProposedAction::McpToolCall {
                         approval: approval.clone(),
@@ -752,46 +767,14 @@ impl AgentService {
                         Err(error) => failed_command_result(&command_for_error, error, None),
                     }
                 } else {
-                    // Production Agent commands have one ownership path: a durable managed
-                    // Session bound to the conversation and assistant message. Missing identity
-                    // is a host invariant violation, not permission to fall back to the old
-                    // wait-until-exit adapter and silently change process lifetime semantics.
-                    #[cfg(not(test))]
-                    {
-                        failed_command_result(
-                            &command_for_error,
-                            "run_command 缺少持久会话身份，命令未启动。".to_string(),
-                            None,
-                        )
-                    }
-                    // A small number of Core Server unit tests exercise the action-audit layer in
-                    // isolation and intentionally omit conversation identity. Keep their finite,
-                    // synchronous harness explicit and compile it out of production builds.
-                    #[cfg(test)]
-                    {
-                        run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
-                            workspace_root.as_deref(),
-                            &command,
-                            permissions,
-                            CommandAuthorizationSource::Automatic,
-                            cancellation_token.clone(),
-                            None,
-                            self.artifact_runtime.as_deref(),
-                            Some(&file_input_context),
-                            None,
-                        )
-                        .unwrap_or_else(|error| {
-                            let policy_evaluation = error.policy_evaluation().cloned();
-                            let artifact_observation = error.artifact_observation().cloned();
-                            let mut result = failed_command_result(
-                                &command_for_error,
-                                error.to_string(),
-                                policy_evaluation,
-                            );
-                            result.artifact_observation = artifact_observation;
-                            result
-                        })
-                    }
+                    // Every command is owned by one durable Session bound to the conversation and
+                    // assistant message. Missing identity is a Host invariant violation and must
+                    // fail before process creation.
+                    failed_command_result(
+                        &command_for_error,
+                        "run_command 缺少持久会话身份，命令未启动。".to_string(),
+                        None,
+                    )
                 };
                 let command_succeeded = command_result.error.is_none()
                     && !command_result.timed_out
@@ -1302,70 +1285,6 @@ impl AgentService {
             }
         }
     }
-}
-
-/// Executes only the command frozen in the backend-owned pending-action snapshot.
-///
-/// The approval endpoint accepts an action id rather than a replacement command. Keeping snapshot
-/// selection and the `ExplicitUser` authorization source together at this boundary prevents a
-/// caller from turning approval of one command into execution of another.
-#[cfg(test)]
-pub(super) fn run_explicitly_approved_command_from_snapshot(
-    record: &PendingActionRecord,
-    cancellation_token: AgentCancellationToken,
-    action_cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
-    run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
-        record,
-        cancellation_token,
-        action_cancel_flag,
-        None,
-        None,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
-    record: &PendingActionRecord,
-    cancellation_token: AgentCancellationToken,
-    action_cancel_flag: Option<Arc<AtomicBool>>,
-    artifact_runtime: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeProvider>,
-    file_inputs: Option<&AgentFileInputExecutionContext>,
-) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
-    run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
-        record,
-        cancellation_token,
-        action_cancel_flag,
-        artifact_runtime,
-        file_inputs,
-        None,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtime_and_output_observer(
-    record: &PendingActionRecord,
-    cancellation_token: AgentCancellationToken,
-    action_cancel_flag: Option<Arc<AtomicBool>>,
-    artifact_runtime: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeProvider>,
-    file_inputs: Option<&AgentFileInputExecutionContext>,
-    output_observer: Option<ProcessOutputObserver>,
-) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
-    let AgentProposedAction::Command { command } = &record.snapshot.action else {
-        return Err("待审批操作不包含可执行命令。".to_string().into());
-    };
-    let workspace_root = workspace_root_optional(&record.agent_input);
-    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer(
-        workspace_root.as_deref(),
-        command,
-        permissions_from_input(&record.agent_input),
-        CommandAuthorizationSource::ExplicitUser,
-        cancellation_token,
-        action_cancel_flag,
-        artifact_runtime,
-        file_inputs,
-        output_observer,
-    )
 }
 
 pub(super) fn cancelled_file_write_outcome_is_durable_or_unknown(

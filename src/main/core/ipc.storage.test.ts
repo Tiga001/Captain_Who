@@ -40,29 +40,14 @@ describe('conversation fork IPC', () => {
     expect(forkConversation).toHaveBeenCalledWith(input)
   })
 
-  it('keeps the legacy assistant cutoff wire-compatible', async () => {
-    const forkConversation = vi.fn().mockResolvedValue({ id: 'conversation-legacy' })
-    const handler = registerForkHandler(forkConversation)
-    const input = {
-      requestId: 'conversation-fork-request-1',
-      sourceConversationId: 'conversation-1',
-      throughAssistantMessageId: 'assistant-1'
-    }
-
-    await expect(handler({} as IpcMainInvokeEvent, input)).resolves.toEqual({
-      ok: true,
-      value: { id: 'conversation-legacy' }
-    })
-    expect(forkConversation).toHaveBeenCalledWith(input)
-  })
-
-  it('rejects ambiguous dual fork points before calling Core', async () => {
+  it('rejects the retired assistant cutoff before calling Core', async () => {
     const forkConversation = vi.fn()
     const handler = registerForkHandler(forkConversation)
 
     await expect(
       handler({} as IpcMainInvokeEvent, {
-        ...forkInput,
+        requestId: forkInput.requestId,
+        sourceConversationId: forkInput.sourceConversationId,
         throughAssistantMessageId: 'assistant-1'
       })
     ).resolves.toEqual({

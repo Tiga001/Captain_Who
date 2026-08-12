@@ -25,7 +25,7 @@ fn llm_debug_projections_never_expose_provider_or_tool_payloads() {
         tools: Vec::new(),
     };
     let response = LlmChatResponse {
-        assistant_turn: LlmAssistantTurn::from_legacy(CANARY, vec![tool_call.clone()]),
+        assistant_turn: LlmAssistantTurn::from_split_projection(CANARY, vec![tool_call.clone()]),
         usage: None,
         finish_reason: None,
     };
@@ -50,10 +50,12 @@ use crate::context::{
     ContextRetention, ContextScope, ContextSource,
 };
 use crate::conversation_trace::{
-    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    render_tool_observation, ConversationTraceRecorder, ConversationTurnTraceTerminalStatus,
 };
-use crate::protocol::{AgentApprovalStatus, AgentChatMessage, AgentToolSafety};
+use crate::protocol::{
+    AgentApprovalStatus, AgentChatMessage, AgentProviderToolCallIdentity, AgentToolCall,
+    AgentToolIdentity, AgentToolResult, AgentToolSafety,
+};
 use crate::provider_profile::{
     ProviderProfileRef, ReasoningEffort, ReasoningMode, ReasoningPolicy,
 };
@@ -228,54 +230,102 @@ fn chat_message(role: &str, content: &str) -> AgentChatMessage {
 
 fn traced_chat_message(content: &str) -> AgentChatMessage {
     let call_id = historical_trace_call_id();
+    let call = AgentToolCall {
+        id: call_id.clone(),
+        tool: "read_file".to_string(),
+        args: json!({ "path": "src/lib.rs", "startLine": 1 }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let result = AgentToolResult {
+        exact_archive_file: None,
+        call_id: call_id.clone(),
+        tool: "read_file".to_string(),
+        ok: true,
+        result: Some(json!({
+            "path": "src/lib.rs",
+            "startLine": 1,
+            "endLine": 20,
+            "truncated": false
+        })),
+        error: None,
+    };
+    let mut recorder = ConversationTraceRecorder::default();
+    recorder
+        .record_narration("I will inspect src/lib.rs.")
+        .expect("current history narration");
+    let call_sequence = recorder
+        .record_tool_call_with_identity(
+            &call,
+            AgentToolIdentity::Builtin {
+                tool_name: "read_file".to_string(),
+            },
+        )
+        .expect("current history Tool Call");
+    recorder
+        .record_model_tool_call_message(
+            call_sequence,
+            0,
+            &LlmMessage::assistant(
+                "",
+                vec![LlmToolCall {
+                    id: call.id.clone(),
+                    name: call.tool.clone(),
+                    args: call.args.clone(),
+                }],
+            ),
+            AgentProviderToolCallIdentity {
+                provider_tool_index: 0,
+                provider_call_id: "provider-call-1".to_string(),
+                runtime_call_id: call.id.clone(),
+            },
+        )
+        .expect("current history Provider/Runtime identity");
+    let result_sequence = recorder
+        .record_tool_result(&call, &result)
+        .expect("current history Tool Result");
+    recorder
+        .record_model_message(
+            result_sequence,
+            0,
+            &LlmMessage::tool_result(call.id.clone(), render_tool_observation(&result), false),
+        )
+        .expect("current history Tool Result model context");
+    let (_, conversation_model_context_items, _, _) = recorder.checkpoint();
+    let conversation_turn_trace = recorder.finish(
+        "historical-run-1",
+        "conversation-1",
+        "assistant-history",
+        ConversationTurnTraceTerminalStatus::Completed,
+        None,
+    );
     AgentChatMessage {
         message_id: Some("assistant-history".to_string()),
         role: "assistant".to_string(),
         content: content.to_string(),
         created_at: None,
-        conversation_turn_trace: Some(ConversationTurnTrace {
-            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
-            run_id: "historical-run-1".to_string(),
-            conversation_id: "conversation-1".to_string(),
-            assistant_message_id: "assistant-1".to_string(),
-            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
-            terminal_error: None,
-            truncated: false,
-            items: vec![
-                ConversationTurnTraceItem::AssistantNarration {
-                    sequence: 10,
-                    content: "I will inspect src/lib.rs.".to_string(),
-                    truncated: false,
-                },
-                ConversationTurnTraceItem::ToolCall {
-                    sequence: 11,
-                    call_id: call_id.clone(),
-                    tool: "read_file".to_string(),
-                    provenance: None,
-                    operation: json!({ "path": "src/lib.rs", "startLine": 1 }),
-                    approval_status: AgentApprovalStatus::NotRequired,
-                    truncated: false,
-                },
-                ConversationTurnTraceItem::ToolResult {
-                    sequence: 12,
-                    call_id,
-                    tool: "read_file".to_string(),
-                    status: ConversationTraceToolResultStatus::Succeeded,
-                    success: true,
-                    observation: json!({
-                        "path": "src/lib.rs",
-                        "startLine": 1,
-                        "endLine": 20,
-                        "truncated": false
-                    }),
-                    approval_status: AgentApprovalStatus::NotRequired,
-                    error: None,
-                    truncated: false,
-                    archive: Default::default(),
-                },
-            ],
-        }),
-        conversation_model_context_items: Vec::new(),
+        conversation_turn_trace: Some(conversation_turn_trace),
+        conversation_model_context_items,
+    }
+}
+
+fn traced_narration_chat_message(message_id: &str, content: &str) -> AgentChatMessage {
+    let recorder = ConversationTraceRecorder::default();
+    let (_, conversation_model_context_items, _, _) = recorder.checkpoint();
+    let conversation_turn_trace = recorder.finish(
+        "historical-narration-run",
+        "conversation-1",
+        message_id,
+        ConversationTurnTraceTerminalStatus::Completed,
+        None,
+    );
+    AgentChatMessage {
+        message_id: Some(message_id.to_string()),
+        role: "assistant".to_string(),
+        content: content.to_string(),
+        created_at: None,
+        conversation_turn_trace: Some(conversation_turn_trace),
+        conversation_model_context_items,
     }
 }
 
@@ -524,9 +574,7 @@ async fn cancellation_during_rate_limit_backoff_prevents_the_second_request() {
     assert!(started.elapsed() < Duration::from_millis(500));
     assert!(events.iter().all(|event| !matches!(
         event,
-        LlmStreamEvent::AttemptReset { reason }
-            | LlmStreamEvent::Retrying { reason, .. }
-            if reason.contains(CANARY)
+        LlmStreamEvent::AttemptReset { reason } if reason.contains(CANARY)
     )));
 }
 
@@ -1596,7 +1644,8 @@ fn builds_anthropic_mcp_namespace_tool_payload_without_internal_catalog_fields()
 fn assembled_context_preserves_order_across_provider_payloads() {
     let mut timestamped_history = chat_message("user", "Earlier question");
     timestamped_history.created_at = Some(0);
-    let mut timestamped_answer = chat_message("assistant", "Earlier answer");
+    let mut timestamped_answer =
+        traced_narration_chat_message("assistant-timestamped", "Earlier answer");
     timestamped_answer.created_at = Some(1_000);
     let mut timestamped_current = chat_message("user", "Continue the edit");
     timestamped_current.created_at = Some(2_000);
@@ -1667,15 +1716,19 @@ fn assembled_context_preserves_order_across_provider_payloads() {
         expected_timestamped_history
     );
     assert_eq!(openai["messages"][2]["content"], "Earlier answer");
+    assert!(openai["messages"][3]["content"]
+        .as_str()
+        .unwrap()
+        .contains("historical_agent_activity_terminal"));
     assert_eq!(
-        openai["messages"][3]["content"],
+        openai["messages"][4]["content"],
         expected_timestamped_current
     );
     assert_eq!(
-        openai["messages"][4]["tool_calls"][0]["id"],
+        openai["messages"][5]["tool_calls"][0]["id"],
         "call-context-1"
     );
-    assert_eq!(openai["messages"][5]["role"], "tool");
+    assert_eq!(openai["messages"][6]["role"], "tool");
 
     let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
     assert_eq!(anthropic["system"], "System rules");
@@ -1687,6 +1740,10 @@ fn assembled_context_preserves_order_across_provider_payloads() {
         anthropic["messages"][1]["content"][0]["text"],
         "Earlier answer"
     );
+    assert!(anthropic["messages"][1]["content"][1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("historical_agent_activity_terminal"));
     assert_eq!(
         anthropic["messages"][2]["content"][0]["text"],
         expected_timestamped_current
@@ -1966,7 +2023,7 @@ fn provider_tool_call_ids_preserve_the_byte_boundary_and_short_duplicates() {
             args: forged_provider_call.args.clone(),
         },
     );
-    let forged = LlmAssistantTurn::from_legacy("", vec![forged_provider_call])
+    let forged = LlmAssistantTurn::from_split_projection("", vec![forged_provider_call])
         .with_runtime_tool_bindings(vec![forged_binding])
         .unwrap_err();
     assert_eq!(forged.code(), Some("agent.invalid_provider_tool_call_id"));
@@ -2268,7 +2325,7 @@ fn extracts_openai_and_anthropic_usage() {
 }
 
 #[test]
-fn generic_adapters_project_complete_multi_tool_turn_to_legacy_wire_order() {
+fn generic_adapters_project_complete_multi_tool_turn_to_split_wire_order() {
     for api_style in [
         AgentApiStyle::OpenAiCompatible,
         AgentApiStyle::AnthropicCompatible,
@@ -2482,7 +2539,7 @@ fn generic_adapters_project_interleaved_image_and_runtime_extension_to_legal_wir
 }
 
 #[test]
-fn generic_adapters_preserve_legacy_grouped_multi_tool_wire_shape() {
+fn generic_adapters_preserve_grouped_multi_tool_split_wire_shape() {
     for api_style in [
         AgentApiStyle::OpenAiCompatible,
         AgentApiStyle::AnthropicCompatible,
@@ -3303,7 +3360,7 @@ fn deepseek_tool_history_without_a_compatible_continuation_requires_a_boundary()
         name: provider_call.name.clone(),
         args: provider_call.args.clone(),
     };
-    let legacy_turn = LlmAssistantTurn::from_legacy("", vec![provider_call.clone()])
+    let split_turn = LlmAssistantTurn::from_split_projection("", vec![provider_call.clone()])
         .with_runtime_tool_bindings(vec![LlmRuntimeToolCallBinding::new(
             0,
             &provider_call,
@@ -3319,7 +3376,7 @@ fn deepseek_tool_history_without_a_compatible_continuation_requires_a_boundary()
         temperature: 0.0,
         stream: false,
         messages: vec![
-            LlmMessage::from_assistant_turn(legacy_turn),
+            LlmMessage::from_assistant_turn(split_turn),
             LlmMessage::tool_result(runtime_call.id, "result", false),
         ],
         tools: vec![tool_definition()],

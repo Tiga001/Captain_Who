@@ -78,9 +78,8 @@ impl std::fmt::Debug for ProviderContinuationRef {
 /// definitions. Tools remain registered consistently for prompt-cache
 /// stability and enforce unsupported capabilities at execution time.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelCapabilities {
-    #[serde(default)]
     pub image_input: bool,
 }
 
@@ -91,10 +90,8 @@ pub struct AgentChatInput {
     pub api_token: String,
     /// Opaque Host-only identity of this model's effective provider wire protocol.
     ///
-    /// The legacy field name is retained for checkpoint compatibility. Existing databases seed
-    /// the per-model identity from the prior broad settings revision; later effective protocol
-    /// changes rotate it independently. This field never crosses normal Serde boundaries or
-    /// provider payloads.
+    /// This is the current per-model `provider-protocol-v1` revision. Effective wire changes rotate
+    /// it independently. It never crosses normal Serde boundaries or provider payloads.
     #[serde(skip)]
     pub provider_configuration_revision: Option<String>,
     /// Host-only stable identity of this model's effective endpoint/token pair. It is kept
@@ -104,18 +101,16 @@ pub struct AgentChatInput {
     /// Host-only stable identity of the effective search mode/credential pair.
     #[serde(skip)]
     pub search_connection_revision: Option<String>,
-    /// Host-only provider protocol configuration. Legacy/direct inputs leave this unset and
-    /// runtime preparation resolves the Generic profile for the effective API dialect.
+    /// Host-only provider protocol configuration frozen before runtime preparation.
     #[serde(skip)]
     pub provider_profile_config: Option<ProviderProfileConfig>,
     /// Host-only immutable provenance for provider-owned assistant state. Hosts freeze this before
-    /// a run; direct legacy callers may omit it and let runtime preparation derive a Generic key.
+    /// a run; current direct Core callers may omit the key and derive it from the required Profile.
     #[serde(skip)]
     pub provider_protocol_key: Option<ProviderProtocolKey>,
     pub model: String,
     /// Resolved by the backend from the selected model configuration and kept
     /// immutable across approval pause/resume for this logical run.
-    #[serde(default)]
     pub model_capabilities: ModelCapabilities,
     pub api_style: Option<AgentApiStyle>,
     #[serde(default)]
@@ -171,10 +166,9 @@ impl std::fmt::Debug for AgentChatInput {
 }
 
 #[derive(Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillActivation {
     pub activation_revision: String,
-    #[serde(default)]
     pub skills: Vec<AgentActivatedSkill>,
 }
 
@@ -189,7 +183,7 @@ impl std::fmt::Debug for AgentSkillActivation {
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentActivatedSkill {
     pub id: String,
     pub name: String,
@@ -197,7 +191,6 @@ pub struct AgentActivatedSkill {
     pub source: String,
     pub instructions: String,
     /// Exact verified SKILL.md source size used for aggregate activation policy enforcement.
-    #[serde(default)]
     pub source_bytes: u64,
     /// Lightweight discovery hint for the run-scoped Resource Runtime. The
     /// resource index and bytes remain behind the host capability.
@@ -206,7 +199,7 @@ pub struct AgentActivatedSkill {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentActivatedSkillResources {
     pub root_uri: String,
     pub resource_count: u64,
@@ -257,8 +250,18 @@ fn default_true() -> bool {
     true
 }
 
+pub(crate) fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentExtensionSnapshot {
     pub extension_id: String,
     pub version: u32,
@@ -267,10 +270,10 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 7 additionally carries ordered, opaque references to Provider continuation state.
+/// Version 7 carries ordered, opaque references to Provider continuation state.
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
-/// reasoning are never serialized into the checkpoint. Earlier checkpoints cannot prove that a
-/// retained tool-bearing Provider turn is replayable and are rejected at the approval boundary.
+/// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
+/// the approval boundary.
 pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -283,7 +286,7 @@ pub struct AgentRunToolSetCheckpoint {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRunCheckpoint {
     pub version: u32,
     pub run_id: String,
@@ -295,13 +298,13 @@ pub struct AgentRunCheckpoint {
     /// These calls had no prepared one-time invocation identity and therefore cannot be resumed
     /// safely. Raw calls and arguments are deliberately absent; restore emits only a fixed Host
     /// diagnostic instructing the model to prepare new calls after the approved continuation.
-    #[serde(default)]
     pub deferred_external_tool_call_count: u32,
     pub suppressed_narration: bool,
     pub extension_snapshots: Vec<AgentExtensionSnapshot>,
     /// Exact model-facing and execution-authorizing Tool contract for the response being paused.
     pub tool_set: AgentRunToolSetCheckpoint,
     /// Backend execution authority frozen at the approval boundary.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub run_context: Option<AgentRunContext>,
     /// Provider-neutral capabilities frozen for the same logical run.
     pub model_capabilities: ModelCapabilities,
@@ -315,34 +318,27 @@ pub struct AgentRunCheckpoint {
     /// Ordered, payload-free handles for every Provider continuation retained by this checkpoint.
     /// The Host must resolve and validate every handle before executing an approved tool or
     /// sending another Provider request.
-    #[serde(default)]
     pub provider_continuation_refs: Vec<ProviderContinuationRef>,
     /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
     /// epoch; it never reconstructs authority from rendered model context.
     pub run_world_state: WorldStateSnapshot,
     /// Approval-record identity. MCP uses an application UUID independent of the provider Tool
-    /// Call identity; legacy and built-in checkpoints omit this field and use
-    /// `pending_tool_call_id`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Call identity. Built-in checkpoints may omit this field and use `pending_tool_call_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_action_id: Option<String>,
     pub pending_tool_call_id: String,
-    #[serde(default)]
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
     /// Bounded, replay-safe projection of the active run's uncompressed model timeline.
     ///
     /// Process-only MCP arguments may be redacted even when the current in-memory model loop
-    /// retains them. Older checkpoints omit this field and remain readable; their durable trace
-    /// is used as the compatibility fallback.
-    #[serde(default)]
+    /// retains them.
     pub conversation_model_context_items: Vec<ConversationModelContextItem>,
-    #[serde(default)]
     pub next_conversation_trace_sequence: u64,
-    #[serde(default)]
     pub conversation_trace_truncated: bool,
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentContextCheckpointItem {
     pub role: String,
     pub content: String,
@@ -356,7 +352,7 @@ pub struct AgentContextCheckpointItem {
     pub retention: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<AgentContextCheckpointGroup>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<AgentContextCheckpointOrigin>,
 }
 
@@ -380,21 +376,21 @@ impl std::fmt::Debug for AgentContextCheckpointItem {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentContextCheckpointOrigin {
     pub kind: String,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentContextCheckpointImage {
     pub mime_type: String,
     pub data_base64: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentContextCheckpointToolCall {
     /// Application-owned opaque identity shared by execution, audit, persistence, and model I/O.
     ///
@@ -402,10 +398,12 @@ pub struct AgentContextCheckpointToolCall {
     pub id: String,
     pub name: String,
     pub args: Value,
-    /// Optional provider/runtime identity projection. Historical Generic items may omit it; a v6
-    /// approval-boundary batch carries the authoritative ordered mapping on the checkpoint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_identity: Option<AgentProviderToolCallIdentity>,
+    /// Exact provider/runtime identity frozen when the Assistant Tool Call entered model context.
+    ///
+    /// A provider-neutral split projection still has an explicit identity whose provider and
+    /// runtime IDs are equal. Persisted context must never reconstruct this mapping from position
+    /// or a rendered tool name.
+    pub provider_identity: AgentProviderToolCallIdentity,
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -437,14 +435,14 @@ impl std::fmt::Debug for AgentAssistantTurnCheckpointIdentity {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentContextCheckpointGroup {
     pub id: String,
     pub kind: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentQueuedToolCallCheckpoint {
     pub call: AgentContextCheckpointToolCall,
     pub assistant_content: String,
@@ -456,7 +454,6 @@ pub struct AgentQueuedToolCallCheckpoint {
     /// combines `skills_activate` with other calls, those other calls must be closed with a fixed
     /// guard result and re-evaluated after the Skill instructions are available. Persisting the
     /// bit prevents an approval/restart boundary from turning a deferred call into a side effect.
-    #[serde(default)]
     pub deferred_by_skill_activation: bool,
 }
 
@@ -723,14 +720,12 @@ pub enum AgentPatchPermission {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPermissions {
     pub read: AgentReadPermission,
     pub write: AgentWritePermission,
     pub command: AgentCommandPermission,
-    #[serde(default)]
     pub command_safety: AgentCommandSafetyPolicy,
-    #[serde(default)]
     pub patch: AgentPatchPermission,
 }
 
@@ -769,7 +764,7 @@ pub enum AgentPromptDetailLevel {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPromptPreferences {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_mode: Option<AgentPromptWorkMode>,
@@ -807,27 +802,32 @@ pub struct AgentApprovalDecision {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRunContext {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub conversation_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub project_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub workspace: Option<AgentWorkspaceContext>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment_library: Option<AgentAttachmentLibraryContext>,
-    #[serde(default)]
     pub permissions: AgentPermissions,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentWorkspaceContext {
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub project_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub display_name: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub root_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentAttachmentLibraryContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_path: Option<String>,
@@ -835,14 +835,12 @@ pub struct AgentAttachmentLibraryContext {
     pub conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
-    #[serde(default)]
     pub conversation_attachments: Vec<AgentAttachmentReference>,
-    #[serde(default)]
     pub project_attachments: Vec<AgentAttachmentReference>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentAttachmentReference {
     pub id: String,
     pub conversation_id: String,
@@ -1140,7 +1138,8 @@ pub enum AgentToolSafety {
 #[serde(
     tag = "type",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum AgentToolIdentity {
     Builtin {
@@ -1153,13 +1152,21 @@ pub enum AgentToolIdentity {
     Mcp {
         provenance: AgentMcpToolProvenance,
     },
+    /// Model-authored name that was not present in the frozen trusted registry.
+    ///
+    /// This identity exists only so rejected calls remain fully attributable in durable audit.
+    /// It never grants execution, approval, checkpoint, or resume authority.
+    Unregistered {
+        tool_name: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum AgentMcpServerScope {
     Builtin,
@@ -1175,7 +1182,7 @@ pub enum AgentMcpServerScope {
 /// remaining typed fields and revalidates the config epoch/revision, digest and Catalog identity
 /// at the Host boundary.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpToolProvenance {
     pub server_id: String,
     pub scope: AgentMcpServerScope,
@@ -1240,7 +1247,7 @@ pub enum AgentMcpApprovalMode {
 /// user-private value. The full argument object only crosses the non-serializable Host preparation
 /// boundary and is never reconstructed from this summary.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpArgumentSummary {
     pub encoded_bytes: u64,
     pub top_level_property_count: u64,
@@ -1260,7 +1267,7 @@ pub struct AgentMcpArgumentSummary {
 /// IDs. Routing continues to use typed provenance; `arguments_digest` binds a separately sealed
 /// payload without placing the payload itself in Protocol, events, traces, or checkpoints.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpToolInvocationIdentity {
     /// Approval-record identity used for user decisions and pending-action CAS.
     ///
@@ -1277,7 +1284,7 @@ pub struct AgentMcpToolInvocationIdentity {
 
 /// Renderer-safe summary of a pending external MCP Tool approval.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpToolApprovalSummary {
     pub server_id: String,
     pub server_display_name: String,
@@ -1286,9 +1293,8 @@ pub struct AgentMcpToolApprovalSummary {
     pub model_tool_name: String,
     /// Bounded model-authored explanation stored independently from Server arguments.
     ///
-    /// Legacy pending approvals may not contain this field. It is never reconstructed from raw
-    /// MCP arguments and is never sent to the MCP Server.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// It is never reconstructed from raw MCP arguments and is never sent to the MCP Server.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub display_reason: Option<String>,
     pub arguments: AgentMcpArgumentSummary,
     pub risk: AgentMcpToolRisk,
@@ -1298,8 +1304,7 @@ pub struct AgentMcpToolApprovalSummary {
 /// Safe, non-secret persistence capability frozen for one MCP approval payload.
 ///
 /// This marker is part of the approval's authenticated identity. It never contains an opaque
-/// payload reference, ciphertext, credential reference, or key material. A missing marker from a
-/// legacy record defaults fail-closed to `ProcessOnly`, which cannot be recovered after restart.
+/// payload reference, ciphertext, credential reference, or key material.
 #[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMcpApprovalPayloadPersistence {
@@ -1314,7 +1319,7 @@ pub enum AgentMcpApprovalPayloadPersistence {
 /// arguments are delivered separately to `McpToolInvoker::prepare_approval` and must be sealed by
 /// the Host before this action is published.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpToolApproval {
     pub identity: AgentMcpToolInvocationIdentity,
     pub call: AgentToolCall,
@@ -1322,7 +1327,6 @@ pub struct AgentMcpToolApproval {
     pub approval_mode: AgentMcpApprovalMode,
     /// Frozen Host payload capability. This is safe to persist and present, but does not expose
     /// the payload's location or encrypted representation.
-    #[serde(default)]
     pub payload_persistence: AgentMcpApprovalPayloadPersistence,
     pub created_at: i64,
     pub expires_at: i64,
@@ -1426,7 +1430,7 @@ pub struct AgentMcpInvocationDiagnostics {
 /// user-provided sensitive text, and must only be rendered as plain text or persisted through the
 /// explicitly allowlisted chat projection.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentMcpToolInvocationEvent {
     pub action_id: String,
     pub invocation_id: String,
@@ -1438,24 +1442,24 @@ pub struct AgentMcpToolInvocationEvent {
     /// Bounded model-authored explanation copied from the frozen approval summary.
     ///
     /// This is never reconstructed from raw MCP arguments and is never forwarded to the Server.
-    /// It remains untrusted display text and legacy lifecycle records may not contain it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// It remains untrusted display text.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub display_reason: Option<String>,
     pub external: bool,
     pub state: AgentMcpToolInvocationState,
     pub dispatch_certainty: AgentMcpDispatchCertainty,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub outcome: Option<AgentMcpToolInvocationOutcome>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub is_error: Option<bool>,
     /// Bounded Host-classified code only; never a Server message or transport diagnostic.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub error_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub duration_ms: Option<u64>,
     pub output_truncated: bool,
-    /// Size-only and Host-classified diagnostics. Legacy events may omit this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Size-only and Host-classified diagnostics.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub diagnostics: Option<AgentMcpInvocationDiagnostics>,
 }
 
@@ -1600,7 +1604,7 @@ pub fn is_valid_agent_office_reason(reason: &str) -> bool {
 /// plan and immutable preconditions; executable paths and environment values
 /// are deliberately excluded from the persisted action.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentOfficeOperationRequest {
     pub schema_version: u32,
     pub id: String,
@@ -1795,7 +1799,7 @@ pub enum AgentCommandRiskLevel {
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentToolCall {
     /// Application-owned opaque identity shared by the call's entire lifecycle.
     ///
@@ -1806,7 +1810,7 @@ pub struct AgentToolCall {
     pub tool: String,
     pub args: Value,
     pub approval_status: AgentApprovalStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub reason: Option<String>,
 }
 
@@ -1955,15 +1959,15 @@ pub struct AgentImageGenerationResult {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDiffProposal {
     pub id: String,
     pub operation: AgentPatchOperation,
     pub file_path: String,
     pub patch: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub base_revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub summary: Option<String>,
     pub approval_status: AgentApprovalStatus,
 }
@@ -2019,15 +2023,15 @@ pub struct AgentFileWritePreview {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentFileWriteProposal {
     pub id: String,
     pub draft_id: String,
     pub mode: AgentFileWriteMode,
     pub file_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub base_revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub summary: Option<String>,
     pub additions: u64,
     pub deletions: u64,
@@ -2099,7 +2103,7 @@ pub enum AgentCommandArtifactObservationKind {
 /// and validation hints, not write authorization. The trusted host validates every path against
 /// the current permission snapshot; this request cannot widen it.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactObservationRequest {
     pub kinds: Vec<AgentCommandArtifactObservationKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2172,7 +2176,7 @@ pub enum AgentCommandArtifactValidationStatus {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactValidation {
     pub status: AgentCommandArtifactValidationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2182,7 +2186,7 @@ pub struct AgentCommandArtifactValidation {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactMetadata {
     pub size_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2191,7 +2195,7 @@ pub struct AgentCommandArtifactMetadata {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactChange {
     pub kind: AgentCommandArtifactChangeKind,
     pub artifact_kind: AgentCommandArtifactKind,
@@ -2208,7 +2212,7 @@ pub struct AgentCommandArtifactChange {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandExpectedArtifactOutcome {
     pub requested_path: String,
     pub outcome: AgentCommandExpectedArtifactOutcomeKind,
@@ -2223,7 +2227,7 @@ pub struct AgentCommandExpectedArtifactOutcome {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactSnapshotCoverage {
     pub roots_scanned: u64,
     pub directory_entries_scanned: u64,
@@ -2233,17 +2237,14 @@ pub struct AgentCommandArtifactSnapshotCoverage {
     pub bytes_hashed: u64,
     pub symlinks_skipped: u64,
     pub excluded_directories: u64,
-    #[serde(default)]
     pub duration_ms: u64,
-    #[serde(default)]
     pub time_budget_exceeded: bool,
-    #[serde(default)]
     pub cancelled: bool,
     pub truncated: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactObservationCoverage {
     pub workspace_included: bool,
     pub expected_output_count: u64,
@@ -2253,7 +2254,7 @@ pub struct AgentCommandArtifactObservationCoverage {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactObservationWarning {
     pub phase: AgentCommandArtifactObservationPhase,
     pub code: String,
@@ -2263,53 +2264,31 @@ pub struct AgentCommandArtifactObservationWarning {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandArtifactObservation {
     pub schema_version: u32,
     pub status: AgentCommandArtifactObservationStatus,
     /// Unified completeness flag for model, UI, audit, and checkpoint consumers.
     ///
-    /// This remains redundant with `status` on purpose. It is absent on schema versions before
-    /// v3, so old persisted partial observations cannot be reserialized with a conflicting
-    /// `partial=false` default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub partial: Option<bool>,
+    /// This remains redundant with `status` on purpose and is required by schema v3.
+    pub partial: bool,
     /// Stable backend reason codes explaining why `partial` is true.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_reasons: Vec<String>,
     /// Office files considered across the before and after snapshots.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scanned: Option<u64>,
+    pub scanned: u64,
     /// Change records included in this observation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub returned: Option<u64>,
+    pub returned: u64,
     /// Known change records omitted by the bounded report projection.
     ///
     /// A partial snapshot can additionally have an unknown unobserved suffix; `partial` and
     /// `stopReasons` prevent this known count from being mistaken for complete coverage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub omitted: Option<u64>,
+    pub omitted: u64,
     pub coverage: AgentCommandArtifactObservationCoverage,
     pub changes: Vec<AgentCommandArtifactChange>,
-    #[serde(default)]
     pub changes_truncated: bool,
-    #[serde(default)]
     pub changes_omitted: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expected_outputs: Vec<AgentCommandExpectedArtifactOutcome>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<AgentCommandArtifactObservationWarning>,
-}
-
-/// Selects a host-owned runtime for one frozen command request.
-///
-/// This is a resolver hint, not an authorization capability. The original
-/// logical command is still evaluated by the normal command policy before the
-/// provider is consulted.
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum AgentCommandRuntimeProvider {
-    ManagedArtifact,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -2333,21 +2312,6 @@ pub enum AgentCommandRuntimeProfile {
     Spreadsheets,
     Presentations,
     Pdf,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentCommandRuntimePackageRequirement {
-    pub name: String,
-    pub version: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentCommandRuntimeRequest {
-    pub provider: AgentCommandRuntimeProvider,
-    pub kind: AgentCommandRuntimeKind,
-    pub required_packages: Vec<AgentCommandRuntimePackageRequirement>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -2416,28 +2380,23 @@ pub struct AgentCommandRuntimeResolution {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandRequest {
     pub id: String,
     pub command: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub timeout_ms: Option<u64>,
     pub approval_status: AgentApprovalStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub risk_level: Option<AgentCommandRiskLevel>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub observe: Option<AgentCommandArtifactObservationRequest>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<AgentFileInputBinding>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    /// Legacy exact-package request retained only so old pending actions can be deserialized and
-    /// retired safely. New model calls never populate this field and the host never executes it.
-    pub runtime: Option<AgentCommandRuntimeRequest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub runtime_binding: Option<Box<AgentCommandRuntimeBinding>>,
 }
 
@@ -2447,15 +2406,15 @@ pub struct AgentCommandRequest {
 /// The source is a logical `skill://` URI. Managed-store paths and resource
 /// bytes never cross the runtime action protocol.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillMaterializationRequest {
     pub id: String,
     pub source_uri: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub source_prefix: Option<String>,
     pub destination: String,
     pub approval_status: AgentApprovalStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub reason: Option<String>,
 }
 
@@ -2490,7 +2449,7 @@ pub struct AgentSkillScriptRequirements {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillDependencyCheck {
     pub kind: AgentSkillDependencyKind,
     pub name: String,
@@ -2500,7 +2459,7 @@ pub struct AgentSkillDependencyCheck {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillScriptPreflightReport {
     pub status: AgentSkillScriptPreflightStatus,
     pub interpreter: AgentSkillScriptInterpreter,
@@ -2519,7 +2478,7 @@ pub struct AgentSkillScriptPreflightReport {
 /// identify immutable package bytes; arguments remain a structured argv and
 /// are never converted to a shell command.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillScriptRequest {
     pub id: String,
     pub script_uri: String,
@@ -2528,15 +2487,13 @@ pub struct AgentSkillScriptRequest {
     pub resource_path: String,
     pub resource_digest: String,
     pub interpreter: AgentSkillScriptInterpreter,
-    #[serde(default)]
     pub args: Vec<String>,
-    #[serde(default)]
     pub requirements: AgentSkillScriptRequirements,
     pub preflight: AgentSkillScriptPreflightReport,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub timeout_ms: Option<u64>,
     pub approval_status: AgentApprovalStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub reason: Option<String>,
 }
 
@@ -2587,7 +2544,7 @@ pub const AGENT_SKILL_INSTALLATION_SCHEMA_VERSION: u32 = 1;
 /// such as preparation IDs, destination paths and warning acknowledgements deliberately stays
 /// behind `install_ref` in the Host application service.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillInstallationPreview {
     pub name: String,
     pub description: String,
@@ -2604,7 +2561,7 @@ pub struct AgentSkillInstallationPreview {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillInstallationResourceSummary {
     pub total: u64,
     pub references: u64,
@@ -2614,7 +2571,7 @@ pub struct AgentSkillInstallationResourceSummary {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillInstallationWarning {
     pub code: String,
     pub message: String,
@@ -2622,7 +2579,7 @@ pub struct AgentSkillInstallationWarning {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkillInstallationRequest {
     pub schema_version: u32,
     pub id: String,
@@ -2636,7 +2593,8 @@ pub struct AgentSkillInstallationRequest {
 #[serde(
     tag = "type",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum AgentProposedAction {
     ToolCall {
@@ -2733,8 +2691,6 @@ pub enum AgentEvent {
         provider_code: Option<String>,
         delay_ms: u64,
         retry_at: u64,
-        /// Legacy compatibility only. Renderer Host parsing drops this field.
-        reason: String,
     },
     ToolInputProgress {
         run_id: String,
@@ -3404,18 +3360,23 @@ mod tests {
     }
 
     #[test]
-    fn model_capabilities_are_camel_case_and_legacy_agent_inputs_fail_closed() {
-        let mut input = serde_json::from_value::<AgentChatInput>(json!({
+    fn model_capabilities_are_required_and_use_current_camel_case_shape() {
+        let missing = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
             "model": "text-only-model",
             "messages": []
+        }));
+        assert!(missing.is_err());
+
+        let input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "text-only-model",
+            "modelCapabilities": { "imageInput": true },
+            "messages": []
         }))
         .unwrap();
-
-        assert!(!input.model_capabilities.image_input);
-
-        input.model_capabilities.image_input = true;
         let serialized = serde_json::to_value(&input).unwrap();
         assert_eq!(serialized["modelCapabilities"]["imageInput"], true);
         assert!(serialized.get("model_capabilities").is_none());
@@ -3431,6 +3392,7 @@ mod tests {
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": CANARY,
             "model": "test-model",
+            "modelCapabilities": { "imageInput": false },
             "searchConfig": {
                 "mode": "tavily",
                 "tavilyApiKey": CANARY
@@ -3460,19 +3422,194 @@ mod tests {
     }
 
     #[test]
-    fn command_safety_policy_defaults_to_guarded_for_legacy_permissions() {
-        let permissions: AgentPermissions = serde_json::from_value(json!({
+    fn current_permissions_require_explicit_command_safety_policy() {
+        let missing = serde_json::from_value::<AgentPermissions>(json!({
             "read": "all",
             "write": "all",
             "command": "auto_approve",
             "patch": "auto_approve"
+        }));
+        assert!(missing.is_err());
+
+        let permissions: AgentPermissions = serde_json::from_value(json!({
+            "read": "all",
+            "write": "all",
+            "command": "auto_approve",
+            "commandSafety": "guarded",
+            "patch": "auto_approve"
         }))
         .unwrap();
-
         assert_eq!(
             permissions.command_safety,
             AgentCommandSafetyPolicy::Guarded
         );
+    }
+
+    #[test]
+    fn command_artifact_observation_v3_is_total_and_rejects_unknown_fields() {
+        let current = AgentCommandArtifactObservation {
+            schema_version: AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+            status: AgentCommandArtifactObservationStatus::Complete,
+            partial: false,
+            stop_reasons: Vec::new(),
+            scanned: 1,
+            returned: 0,
+            omitted: 0,
+            coverage: AgentCommandArtifactObservationCoverage {
+                workspace_included: true,
+                expected_output_count: 0,
+                additional_root_count: 0,
+                before: AgentCommandArtifactSnapshotCoverage::default(),
+                after: AgentCommandArtifactSnapshotCoverage::default(),
+            },
+            changes: Vec::new(),
+            changes_truncated: false,
+            changes_omitted: 0,
+            expected_outputs: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let canonical = serde_json::to_value(&current).unwrap();
+        let decoded: AgentCommandArtifactObservation =
+            serde_json::from_value(canonical.clone()).unwrap();
+        assert_eq!(decoded, current);
+
+        for field in [
+            "partial",
+            "stopReasons",
+            "scanned",
+            "returned",
+            "omitted",
+            "changesTruncated",
+            "changesOmitted",
+            "expectedOutputs",
+            "warnings",
+        ] {
+            let mut missing = canonical.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AgentCommandArtifactObservation>(missing).is_err(),
+                "current artifact observation field {field} is required"
+            );
+        }
+
+        let mut extra = canonical;
+        extra
+            .as_object_mut()
+            .unwrap()
+            .insert("executionAuthority".to_string(), json!(true));
+        assert!(serde_json::from_value::<AgentCommandArtifactObservation>(extra).is_err());
+    }
+
+    #[test]
+    fn persisted_action_nested_settings_reject_unknown_fields() {
+        let mut observation = json!({
+            "kinds": ["office"],
+            "expectedOutputs": [],
+            "additionalRoots": []
+        });
+        observation["executionAuthority"] = true.into();
+        assert!(
+            serde_json::from_value::<AgentCommandArtifactObservationRequest>(observation).is_err()
+        );
+
+        let mut preflight = json!({
+            "status": "ready",
+            "interpreter": "python3",
+            "interpreterVersion": "3.13",
+            "dependencies": [{
+                "kind": "command",
+                "name": "python3",
+                "status": "available",
+                "version": "3.13"
+            }],
+            "runtimeFingerprint": "sha256:current"
+        });
+        preflight["dependencies"][0]["runtimeBinding"] = json!({});
+        assert!(serde_json::from_value::<AgentSkillScriptPreflightReport>(preflight).is_err());
+
+        let installation = json!({
+            "schemaVersion": AGENT_SKILL_INSTALLATION_SCHEMA_VERSION,
+            "id": "install-1",
+            "installRef": "private-ref",
+            "preview": {
+                "name": "example",
+                "description": "Example Skill",
+                "sourceSummary": {},
+                "resolvedRevision": "revision-1",
+                "fileCount": 1,
+                "totalBytes": 10,
+                "resourceSummary": {
+                    "total": 1,
+                    "references": 0,
+                    "assets": 0,
+                    "scripts": 0,
+                    "bytes": 10
+                },
+                "containsScripts": false,
+                "warnings": [{
+                    "code": "review",
+                    "message": "Review source",
+                    "requiresAcknowledgement": true
+                }],
+                "compatibility": "compatible",
+                "operation": "install",
+                "impact": "Adds one Skill"
+            },
+            "approvalStatus": "required",
+            "expiresAt": 100
+        });
+        serde_json::from_value::<AgentSkillInstallationRequest>(installation.clone()).unwrap();
+        for path in ["preview", "resourceSummary", "warning"] {
+            let mut extra = installation.clone();
+            match path {
+                "preview" => extra["preview"]["runtimeBinding"] = json!({}),
+                "resourceSummary" => {
+                    extra["preview"]["resourceSummary"]["runtimeBinding"] = json!({})
+                }
+                "warning" => extra["preview"]["warnings"][0]["runtimeBinding"] = json!({}),
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<AgentSkillInstallationRequest>(extra).is_err(),
+                "nested {path} must reject extra fields"
+            );
+        }
+    }
+
+    #[test]
+    fn current_skill_activation_requires_total_skill_snapshots() {
+        let activation = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:current".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: "bundled:documents".to_string(),
+                name: "documents".to_string(),
+                revision: "skill-sha256-v1:current".to_string(),
+                source: "bundled".to_string(),
+                instructions: "Use the current instructions.".to_string(),
+                source_bytes: 29,
+                resources: None,
+            }],
+        };
+        let canonical = serde_json::to_value(&activation).unwrap();
+        serde_json::from_value::<AgentSkillActivation>(canonical.clone()).unwrap();
+
+        let mut missing_skills = canonical.clone();
+        missing_skills.as_object_mut().unwrap().remove("skills");
+        assert!(serde_json::from_value::<AgentSkillActivation>(missing_skills).is_err());
+
+        let mut missing_source_bytes = canonical.clone();
+        missing_source_bytes["skills"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceBytes");
+        assert!(serde_json::from_value::<AgentSkillActivation>(missing_source_bytes).is_err());
+
+        let mut extra = canonical;
+        extra["skills"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("runtimeBinding".to_string(), json!({}));
+        assert!(serde_json::from_value::<AgentSkillActivation>(extra).is_err());
     }
 
     #[test]
@@ -3572,7 +3709,6 @@ mod tests {
             provider_code: Some("rate_limit_exceeded".to_string()),
             delay_ms: 5_000,
             retry_at: 1_800_000_005_000,
-            reason: "模型服务请求过于频繁。".to_string(),
         })
         .unwrap();
 
@@ -3583,5 +3719,6 @@ mod tests {
         assert_eq!(retry["retryAt"], 1_800_000_005_000_u64);
         assert_eq!(retry["attempt"], 2);
         assert_eq!(retry["maxAttempts"], 6);
+        assert!(retry.get("reason").is_none());
     }
 }

@@ -10,6 +10,7 @@ function toolCall(id: string, tool: AgentToolCall['tool']): AgentToolCall {
     approvalStatus: 'not_required',
     args: {},
     id,
+    reason: null,
     tool
   }
 }

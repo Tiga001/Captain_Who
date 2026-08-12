@@ -127,7 +127,7 @@ impl AgentService {
                     &model_context_logs,
                     context_compaction_summary.as_ref(),
                     &[],
-                )
+                )?
             }
             None => Vec::new(),
         };
@@ -349,7 +349,7 @@ impl AgentService {
             &model_context_logs,
             context_compaction_summary.as_ref(),
             &[],
-        );
+        )?;
         preview_input.context_compaction_summary = context_compaction_summary;
         preview_input.world_state_records =
             load_conversation_world_state(&self.storage, conversation_id)?;
@@ -732,7 +732,9 @@ mod capability_tests {
             sequence: 0,
             call_id: "call-capability-trace".to_string(),
             tool: "read_file".to_string(),
-            provenance: None,
+            provenance: mycopilot_core::AgentToolIdentity::Builtin {
+                tool_name: "read_file".to_string(),
+            },
             operation: serde_json::json!({ "path": "README.md" }),
             approval_status: AgentApprovalStatus::Required,
             truncated: false,

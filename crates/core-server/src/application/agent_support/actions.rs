@@ -170,27 +170,69 @@ pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
     }
 }
 
-pub(crate) fn tool_call_for_action(action: &AgentProposedAction) -> AgentToolCall {
+fn frozen_action_call_metadata(
+    action: &AgentProposedAction,
+) -> (
+    String,
+    String,
+    mycopilot_core::AgentApprovalStatus,
+    Option<String>,
+) {
     match action {
-        AgentProposedAction::ToolCall { call } => call.clone(),
-        AgentProposedAction::McpToolCall { approval } => approval.call.clone(),
-        AgentProposedAction::Diff { diff } => diff_tool_call(diff),
-        AgentProposedAction::FileWrite { file_write } => file_write_tool_call(file_write),
-        AgentProposedAction::Command { command } => command_tool_call(command),
-        AgentProposedAction::SkillMaterialization { materialization } => {
-            skill_materialization_tool_call(materialization)
-        }
-        AgentProposedAction::SkillScript { script } => skill_script_tool_call(script),
-        AgentProposedAction::OfficeOperation { office_operation } => {
-            office_operation_tool_call(office_operation)
-        }
-        AgentProposedAction::SkillInstallation { installation } => AgentToolCall {
-            id: installation.id.clone(),
-            tool: "skills_commit_install".to_string(),
-            args: json!({ "installRef": installation.install_ref }),
-            approval_status: installation.approval_status,
-            reason: Some("Install the frozen inspected Skill package.".to_string()),
-        },
+        AgentProposedAction::ToolCall { call } => (
+            call.id.clone(),
+            call.tool.clone(),
+            call.approval_status,
+            call.reason.clone(),
+        ),
+        AgentProposedAction::McpToolCall { approval } => (
+            approval.call.id.clone(),
+            approval.call.tool.clone(),
+            approval.call.approval_status,
+            approval.call.reason.clone(),
+        ),
+        AgentProposedAction::Diff { diff } => (
+            diff.id.clone(),
+            "apply_patch".to_string(),
+            diff.approval_status,
+            diff.summary.clone(),
+        ),
+        AgentProposedAction::FileWrite { file_write } => (
+            file_write.id.clone(),
+            "write_file".to_string(),
+            file_write.approval_status,
+            file_write.summary.clone(),
+        ),
+        AgentProposedAction::Command { command } => (
+            command.id.clone(),
+            "run_command".to_string(),
+            command.approval_status,
+            command.reason.clone(),
+        ),
+        AgentProposedAction::SkillMaterialization { materialization } => (
+            materialization.id.clone(),
+            "skills_materialize_resource".to_string(),
+            materialization.approval_status,
+            materialization.reason.clone(),
+        ),
+        AgentProposedAction::SkillScript { script } => (
+            script.id.clone(),
+            "skills_run_script".to_string(),
+            script.approval_status,
+            script.reason.clone(),
+        ),
+        AgentProposedAction::OfficeOperation { office_operation } => (
+            office_operation.id.clone(),
+            office_tool_name(office_operation.prepared.request.document_kind).to_string(),
+            office_operation.approval_status,
+            Some(office_operation.reason.clone()),
+        ),
+        AgentProposedAction::SkillInstallation { installation } => (
+            installation.id.clone(),
+            "skills_commit_install".to_string(),
+            installation.approval_status,
+            Some("Install the frozen inspected Skill package.".to_string()),
+        ),
     }
 }
 
@@ -199,121 +241,6 @@ pub(crate) fn office_tool_name(kind: mycopilot_core::office::OfficeDocumentKind)
         mycopilot_core::office::OfficeDocumentKind::Document => "office_document",
         mycopilot_core::office::OfficeDocumentKind::Spreadsheet => "office_spreadsheet",
         mycopilot_core::office::OfficeDocumentKind::Presentation => "office_presentation",
-    }
-}
-
-pub(crate) fn office_operation_tool_call(
-    office_operation: &mycopilot_core::AgentOfficeOperationRequest,
-) -> AgentToolCall {
-    let request = &office_operation.prepared.request;
-    AgentToolCall {
-        id: office_operation.id.clone(),
-        tool: office_tool_name(request.document_kind).to_string(),
-        args: office_operation.semantic_args.clone(),
-        approval_status: office_operation.approval_status,
-        reason: Some(office_operation.reason.clone()),
-    }
-}
-
-pub(crate) fn skill_script_tool_call(script: &AgentSkillScriptRequest) -> AgentToolCall {
-    AgentToolCall {
-        id: script.id.clone(),
-        tool: "skills_run_script".to_string(),
-        args: json!({
-            "scriptUri": script.script_uri,
-            "interpreter": script.interpreter,
-            "args": script.args,
-            "requirements": script.requirements,
-            "timeoutMs": script.timeout_ms,
-            "reason": script.reason,
-        }),
-        approval_status: script.approval_status,
-        reason: script.reason.clone(),
-    }
-}
-
-pub(crate) fn skill_materialization_tool_call(
-    materialization: &AgentSkillMaterializationRequest,
-) -> AgentToolCall {
-    AgentToolCall {
-        id: materialization.id.clone(),
-        tool: "skills_materialize_resource".to_string(),
-        args: json!({
-            "sourceUri": materialization.source_uri,
-            "sourcePrefix": materialization.source_prefix,
-            "destination": materialization.destination,
-            "reason": materialization.reason,
-        }),
-        approval_status: materialization.approval_status,
-        reason: materialization.reason.clone(),
-    }
-}
-
-pub(crate) fn file_write_tool_call(file_write: &AgentFileWriteProposal) -> AgentToolCall {
-    AgentToolCall {
-        id: file_write.id.clone(),
-        tool: "write_file".to_string(),
-        args: json!({
-            "phase": "finish",
-            "draftId": file_write.draft_id,
-            "summary": file_write.summary
-        }),
-        approval_status: file_write.approval_status,
-        reason: file_write.summary.clone(),
-    }
-}
-
-pub(crate) fn diff_tool_call(diff: &AgentDiffProposal) -> AgentToolCall {
-    AgentToolCall {
-        id: diff.id.clone(),
-        tool: "apply_patch".to_string(),
-        args: json!({
-            "operation": diff.operation,
-            "filePath": diff.file_path.clone(),
-            "patch": diff.patch.clone(),
-            "baseRevision": diff.base_revision.clone(),
-            "summary": diff.summary.clone()
-        }),
-        approval_status: diff.approval_status,
-        reason: diff.summary.clone(),
-    }
-}
-
-pub(crate) fn command_tool_call(command: &AgentCommandRequest) -> AgentToolCall {
-    let model_runtime_profile = command.runtime_binding.as_ref().and_then(|binding| {
-        (binding.profile != mycopilot_core::AgentCommandRuntimeProfile::Pdf)
-            .then_some(binding.profile)
-    });
-    let mut args = json!({
-        "command": command.command.clone(),
-        "cwd": command.cwd.clone(),
-        "reason": command.reason.clone(),
-        "observe": command.observe.clone(),
-        "inputs": command.inputs.iter().map(|binding| serde_json::json!({
-            "mountPath": binding.mount_path,
-            "path": mycopilot_core::file_input::model_path_for_agent_file_input_ref(&binding.source),
-        })).collect::<Vec<_>>()
-    });
-    if let Some(profile) = model_runtime_profile {
-        args.as_object_mut()
-            .expect("command tool args are an object")
-            .insert("runtimeProfile".to_string(), json!(profile));
-    }
-    // Retained only when reconstructing a legacy pending action so startup recovery can retire it
-    // explicitly. New frozen bindings do not expose a null or exact runtime authority field.
-    if command.runtime_binding.is_none() {
-        if let Some(runtime) = command.runtime.as_ref() {
-            args.as_object_mut()
-                .expect("command tool args are an object")
-                .insert("runtime".to_string(), json!(runtime));
-        }
-    }
-    AgentToolCall {
-        id: command.id.clone(),
-        tool: "run_command".to_string(),
-        args,
-        approval_status: command.approval_status,
-        reason: command.reason.clone(),
     }
 }
 
@@ -326,14 +253,15 @@ pub(crate) fn command_tool_call(command: &AgentCommandRequest) -> AgentToolCall 
 pub(crate) fn tool_call_for_pending_record(
     record: &PendingActionRecord,
 ) -> Result<AgentToolCall, String> {
-    let fallback = tool_call_for_action(&record.snapshot.action);
-    let Some(checkpoint) = record.agent_input.resume_checkpoint.as_ref() else {
-        return Ok(fallback);
-    };
-    // A few legacy/development fixtures did not persist context items. Keep their previous
-    // reconstruction path; production checkpoints always contain the pending assistant call.
+    let (action_call_id, action_tool_name, approval_status, reason) =
+        frozen_action_call_metadata(&record.snapshot.action);
+    let checkpoint = record
+        .agent_input
+        .resume_checkpoint
+        .as_ref()
+        .ok_or_else(|| "待审批操作缺少冻结运行检查点，无法安全恢复。".to_string())?;
     if checkpoint.context_items.is_empty() {
-        return Ok(fallback);
+        return Err("待审批运行检查点缺少精确模型上下文，无法安全恢复。".to_string());
     }
     let mut matching_calls = checkpoint
         .context_items
@@ -348,8 +276,8 @@ pub(crate) fn tool_call_for_pending_record(
     }
     if record.snapshot.tool_call_id.as_deref() != Some(call.id.as_str())
         || call.name != record.snapshot.tool_name
-        || call.id != fallback.id
-        || call.name != fallback.tool
+        || call.id != action_call_id
+        || call.name != action_tool_name
     {
         return Err("待审批运行检查点中的原始 ToolCall 与冻结 action 不一致。".to_string());
     }
@@ -364,8 +292,8 @@ pub(crate) fn tool_call_for_pending_record(
         id: call.id.clone(),
         tool: call.name.clone(),
         args: call.args.clone(),
-        approval_status: fallback.approval_status,
-        reason: fallback.reason,
+        approval_status,
+        reason,
     })
 }
 

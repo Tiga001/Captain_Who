@@ -444,7 +444,9 @@ mod tests {
                     sequence: 0,
                     call_id: "call-1".to_string(),
                     tool: "office_document".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "office_document".to_string(),
+                    },
                     operation: args.clone(),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -465,7 +467,9 @@ mod tests {
                     sequence: 2,
                     call_id: "call-2".to_string(),
                     tool: "office_document".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "office_document".to_string(),
+                    },
                     operation: json!({"operation": "insertImage", "reason": "retry"}),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,
@@ -512,7 +516,9 @@ mod tests {
                     sequence: 0,
                     call_id: operation.id.clone(),
                     tool: operation.tool.clone(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: operation.tool.clone(),
+                    },
                     operation: operation.args.clone(),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

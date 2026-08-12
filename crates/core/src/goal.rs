@@ -56,7 +56,7 @@ impl ConversationGoalStatus {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationGoal {
     pub goal_id: String,
     pub conversation_id: String,
@@ -77,7 +77,7 @@ pub const CONVERSATION_GOAL_REVISION_SCHEMA_VERSION: u32 = 1;
 /// and verify one semantic change. The folded `ConversationGoal` remains the only projection sent
 /// to the model.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationGoalRevisionEvent {
     Initial {
         goal: ConversationGoal,
@@ -109,16 +109,13 @@ impl ConversationGoalRevisionEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationGoalRevision {
     pub schema_version: u32,
     pub conversation_id: String,
     pub goal_id: String,
     pub sequence: u64,
-    /// Legacy rows imported from the pre-journal current-state table have no attributable actor.
-    /// All new semantic writes must identify either the model or the user.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor: Option<ConversationGoalMutationActor>,
+    pub actor: ConversationGoalMutationActor,
     pub event: ConversationGoalRevisionEvent,
     pub created_at: i64,
 }
@@ -214,7 +211,6 @@ pub fn fold_conversation_goal_revisions(
             || revision.conversation_id != folded.conversation_id
             || revision.goal_id != folded.goal_id
             || revision.sequence != expected_sequence
-            || revision.actor.is_none()
         {
             return Err(AgentError::new(
                 "Goal revision journal 的身份、顺序、版本或 actor 无效。",
@@ -339,5 +335,38 @@ mod tests {
             CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS
         )
         .fits(&rendered));
+    }
+
+    #[test]
+    fn current_goal_revision_rejects_missing_actor_and_nested_unknown_fields() {
+        let revision = serde_json::json!({
+            "schemaVersion": CONVERSATION_GOAL_REVISION_SCHEMA_VERSION,
+            "conversationId": "conversation-1",
+            "goalId": "goal-1",
+            "sequence": 1,
+            "actor": "user",
+            "event": {
+                "type": "initial",
+                "goal": {
+                    "goalId": "goal-1",
+                    "conversationId": "conversation-1",
+                    "objective": "Finish the current schema.",
+                    "sourceMessageId": "message-1",
+                    "status": "active",
+                    "createdAt": 1,
+                    "updatedAt": 1
+                }
+            },
+            "createdAt": 1
+        });
+        assert!(serde_json::from_value::<ConversationGoalRevision>(revision.clone()).is_ok());
+
+        let mut missing_actor = revision.clone();
+        missing_actor.as_object_mut().unwrap().remove("actor");
+        assert!(serde_json::from_value::<ConversationGoalRevision>(missing_actor).is_err());
+
+        let mut nested_extra = revision;
+        nested_extra["event"]["goal"]["retiredCompatibilityField"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<ConversationGoalRevision>(nested_extra).is_err());
     }
 }

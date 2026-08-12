@@ -14,7 +14,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderToolExchangeSemantics {
-    LegacySplit,
+    SplitToolExchange,
     ExactProviderGrouped,
 }
 
@@ -26,7 +26,7 @@ pub enum ProviderPrivateReplaySemantics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderContextProjectionSemantics {
-    LegacyEffectiveCalls,
+    GenericEffectiveCalls,
     ExactProviderTurn,
 }
 
@@ -44,7 +44,7 @@ pub enum ProviderPartialTraceSemantics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderToolCallSourceSemantics {
-    LegacyTextFallbackAllowed,
+    TextFallbackAllowed,
     ProviderNativeOnly,
 }
 
@@ -116,12 +116,12 @@ pub struct ProviderRuntimeCapabilities {
 impl ProviderRuntimeCapabilities {
     const fn generic() -> Self {
         Self {
-            tool_exchange: ProviderToolExchangeSemantics::LegacySplit,
+            tool_exchange: ProviderToolExchangeSemantics::SplitToolExchange,
             private_replay: ProviderPrivateReplaySemantics::None,
-            context_projection: ProviderContextProjectionSemantics::LegacyEffectiveCalls,
+            context_projection: ProviderContextProjectionSemantics::GenericEffectiveCalls,
             usage: ProviderUsageSemantics::StandardAdditive,
             partial_trace: ProviderPartialTraceSemantics::IncrementalBaseline,
-            tool_call_source: ProviderToolCallSourceSemantics::LegacyTextFallbackAllowed,
+            tool_call_source: ProviderToolCallSourceSemantics::TextFallbackAllowed,
             terminal_batch: ProviderTerminalBatchSemantics::IndependentCalls,
             same_turn_skill_activation:
                 ProviderSameTurnSkillActivationSemantics::FilterUnactivatedSiblings,
@@ -606,7 +606,7 @@ mod tests {
         .runtime_capabilities();
         assert_eq!(
             generic.tool_exchange(),
-            ProviderToolExchangeSemantics::LegacySplit
+            ProviderToolExchangeSemantics::SplitToolExchange
         );
         assert_eq!(
             generic.private_replay(),
@@ -614,7 +614,7 @@ mod tests {
         );
         assert_eq!(
             generic.context_projection(),
-            ProviderContextProjectionSemantics::LegacyEffectiveCalls
+            ProviderContextProjectionSemantics::GenericEffectiveCalls
         );
         assert_eq!(generic.usage(), ProviderUsageSemantics::StandardAdditive);
         assert_eq!(
@@ -623,7 +623,7 @@ mod tests {
         );
         assert_eq!(
             generic.tool_call_source(),
-            ProviderToolCallSourceSemantics::LegacyTextFallbackAllowed
+            ProviderToolCallSourceSemantics::TextFallbackAllowed
         );
         assert_eq!(
             generic.terminal_batch(),
@@ -688,9 +688,9 @@ mod tests {
     #[test]
     fn lifecycle_axes_do_not_inherit_tool_exchange_or_private_replay() {
         let independently_enabled = ProviderRuntimeCapabilities {
-            tool_exchange: ProviderToolExchangeSemantics::LegacySplit,
+            tool_exchange: ProviderToolExchangeSemantics::SplitToolExchange,
             private_replay: ProviderPrivateReplaySemantics::None,
-            context_projection: ProviderContextProjectionSemantics::LegacyEffectiveCalls,
+            context_projection: ProviderContextProjectionSemantics::GenericEffectiveCalls,
             usage: ProviderUsageSemantics::StandardAdditive,
             partial_trace: ProviderPartialTraceSemantics::IncrementalBaseline,
             tool_call_source: ProviderToolCallSourceSemantics::ProviderNativeOnly,
@@ -716,7 +716,7 @@ mod tests {
             context_projection: ProviderContextProjectionSemantics::ExactProviderTurn,
             usage: ProviderUsageSemantics::CompletionIncludesReasoning,
             partial_trace: ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
-            tool_call_source: ProviderToolCallSourceSemantics::LegacyTextFallbackAllowed,
+            tool_call_source: ProviderToolCallSourceSemantics::TextFallbackAllowed,
             terminal_batch: ProviderTerminalBatchSemantics::IndependentCalls,
             same_turn_skill_activation:
                 ProviderSameTurnSkillActivationSemantics::FilterUnactivatedSiblings,

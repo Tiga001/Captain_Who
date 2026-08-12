@@ -1,36 +1,155 @@
 use super::*;
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PendingActionResumeCheckpointProjection {
-    model: String,
-    api_style: Option<AgentApiStyle>,
-    resume_checkpoint: Option<PendingActionReconciliationCheckpointProjection>,
-    /// Startup reconciliation only needs to prove that a continuation is absent. Parsing the
-    /// full runtime continuation would unnecessarily couple legacy cleanup to the latest schema.
-    tool_continuation: Option<serde_json::Value>,
+#[derive(Debug)]
+struct DurablePendingTraceSnapshot {
+    snapshot: crate::ConversationTraceSnapshot,
+    call: AgentToolCall,
+    provenance: crate::AgentToolIdentity,
 }
 
-/// Narrow, credential-free checkpoint view used only by startup reconciliation.
+/// Loads the canonical durable recovery identity for one pending row.
 ///
-/// A real approval resume is decoded by core-server's versioned, deny-unknown persisted DTO and
-/// remains fail-closed. Reconciliation instead settles or retires already durable rows, so it
-/// deliberately reads only the identities and trace prefix required for that proof. New Provider
-/// Profile fields and unrelated runtime checkpoint fields are ignored, while old v5 rows remain
-/// inspectable.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PendingActionReconciliationCheckpointProjection {
-    run_id: String,
-    pending_tool_call_id: String,
-    #[serde(default)]
-    conversation_trace_items: Vec<ConversationTurnTraceItem>,
-    #[serde(default)]
-    conversation_model_context_items: Vec<ConversationModelContextItem>,
-    #[serde(default)]
-    next_conversation_trace_sequence: u64,
-    #[serde(default)]
-    conversation_trace_truncated: bool,
+/// The pending resume envelope is deliberately not consulted. Startup terminalization needs only
+/// the immutable trace, its exact staged Provider/Runtime ToolCall model item, and the row owner
+/// identity. A malformed private resume payload can therefore be scrubbed without becoming an
+/// alternate source of Tool identity.
+fn load_durable_pending_trace_snapshot(
+    connection: &rusqlite::Connection,
+    record: &AgentPendingActionRecord,
+    require_open_call: bool,
+) -> Result<DurablePendingTraceSnapshot, String> {
+    let conversation_id = record
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "pending action requires a conversation owner".to_string())?;
+    let assistant_message_id = record
+        .assistant_message_id
+        .as_deref()
+        .ok_or_else(|| "pending action requires an Assistant owner".to_string())?;
+    let trace =
+        conversation_trace_repository::get_trace_for_message(connection, assistant_message_id)
+            .map_err(storage_error)?
+            .ok_or_else(|| "pending action requires a durable ConversationTurnTrace".to_string())?;
+    trace
+        .validate()
+        .map_err(|_| "pending action durable ConversationTurnTrace is invalid".to_string())?;
+    if trace.run_id != record.run_id
+        || trace.conversation_id != conversation_id
+        || trace.assistant_message_id != assistant_message_id
+        || trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress
+    {
+        return Err("pending action durable ConversationTurnTrace identity is inconsistent".into());
+    }
+
+    let row_call_id = record
+        .tool_call_id
+        .as_deref()
+        .ok_or_else(|| "pending action requires a ToolCall identity".to_string())?;
+    let matching_calls = trace
+        .items
+        .iter()
+        .filter_map(|item| {
+            let ConversationTurnTraceItem::ToolCall {
+                sequence,
+                call_id,
+                tool,
+                provenance,
+                operation,
+                approval_status,
+                ..
+            } = item
+            else {
+                return None;
+            };
+            (call_id == row_call_id).then(|| {
+                let closed = trace.items.iter().any(|candidate| {
+                matches!(candidate, ConversationTurnTraceItem::ToolResult { call_id: result_id, .. } if result_id == call_id)
+                });
+                (
+                    *sequence,
+                    AgentToolCall {
+                        id: call_id.clone(),
+                        tool: tool.clone(),
+                        args: operation.clone(),
+                        approval_status: *approval_status,
+                        reason: operation
+                            .get("reason")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string),
+                    },
+                    provenance.clone(),
+                    !closed,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let [(call_sequence, call, provenance, call_is_open)] = matching_calls.as_slice() else {
+        return Err("pending action requires exactly one matching durable ToolCall".to_string());
+    };
+    let unrelated_open_call = trace.items.iter().any(|item| {
+        let ConversationTurnTraceItem::ToolCall { call_id, .. } = item else {
+            return false;
+        };
+        call_id != row_call_id
+            && !trace.items.iter().any(|candidate| {
+                matches!(candidate, ConversationTurnTraceItem::ToolResult { call_id: result_id, .. } if result_id == call_id)
+            })
+    });
+    if record.tool_name != call.tool || unrelated_open_call {
+        return Err("pending action row does not match its durable open ToolCall".to_string());
+    }
+    if require_open_call && !call_is_open {
+        return Err("pending action requires exactly one durable open ToolCall".to_string());
+    }
+
+    let model_context_items = conversation_model_context_repository::get_log_for_message(
+        connection,
+        assistant_message_id,
+    )
+    .map_err(storage_error)?
+    .map(|log| log.items)
+    .ok_or_else(|| "pending action requires a durable model-context log".to_string())?;
+    crate::conversation_trace::validate_model_context_prefix(&trace, &model_context_items)
+        .map_err(|_| "pending action durable model-context log is invalid".to_string())?;
+    let exact_open_model_items = model_context_items
+        .iter()
+        .filter(|item| {
+            item.sequence == *call_sequence
+                && item.role == "assistant"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.len() == 1
+                && item.tool_calls[0].id == call.id
+                && item.tool_calls[0].name == call.tool
+        })
+        .count();
+    if exact_open_model_items != 1 {
+        return Err(
+            "pending action requires the exact durable Provider/Runtime ToolCall identity"
+                .to_string(),
+        );
+    }
+    if !call_is_open {
+        trace
+            .validate_complete_model_context(&model_context_items)
+            .map_err(|_| "pending action closed model-context log is incomplete".to_string())?;
+    }
+    let next_sequence = trace
+        .items
+        .last()
+        .map(ConversationTurnTraceItem::sequence)
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| "pending action durable trace sequence is exhausted".to_string())?;
+    Ok(DurablePendingTraceSnapshot {
+        snapshot: crate::ConversationTraceSnapshot {
+            items: trace.items,
+            model_context_items,
+            next_sequence,
+            truncated: trace.truncated,
+        },
+        call: call.clone(),
+        provenance: provenance.clone(),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,15 +363,16 @@ fn valid_mcp_terminal_transition(
     }
 }
 
-pub(super) fn is_valid_pending_successor(
+fn is_valid_pending_successor(
+    connection: &rusqlite::Connection,
     interrupted: &AgentPendingActionRecord,
     candidate: &AgentPendingActionRecord,
-) -> bool {
+) -> Result<bool, String> {
     if !is_pending_successor_candidate(interrupted, candidate) {
-        return false;
+        return Ok(false);
     }
     let Ok(action) = serde_json::from_str::<AgentProposedAction>(&candidate.action_json) else {
-        return false;
+        return Ok(false);
     };
     let action_id = match &action {
         AgentProposedAction::ToolCall { call } => call.id.as_str(),
@@ -268,46 +388,42 @@ pub(super) fn is_valid_pending_successor(
         AgentProposedAction::SkillInstallation { installation } => installation.id.as_str(),
     };
     if candidate.tool_call_id.as_deref() != Some(action_id) {
-        return false;
+        return Ok(false);
     }
-    let Ok(input) = serde_json::from_str::<PendingActionResumeCheckpointProjection>(
-        &candidate.agent_input_json,
-    ) else {
-        return false;
+    let Some(assistant_message_id) = candidate.assistant_message_id.as_deref() else {
+        return Ok(false);
     };
-    let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
-        return false;
+    let Some(trace) =
+        conversation_trace_repository::get_trace_for_message(connection, assistant_message_id)
+            .map_err(storage_error)?
+    else {
+        return Ok(false);
     };
-    if checkpoint.run_id != candidate.run_id || checkpoint.pending_tool_call_id != action_id {
-        return false;
+    if trace.run_id != candidate.run_id
+        || trace.conversation_id != candidate.conversation_id.as_deref().unwrap_or_default()
+        || trace.assistant_message_id != assistant_message_id
+    {
+        return Ok(false);
     }
     let Some(parent_call_id) = interrupted.tool_call_id.as_deref() else {
-        return false;
+        return Ok(false);
     };
-    let parent_result_sequence =
-        checkpoint
-            .conversation_trace_items
-            .iter()
-            .find_map(|item| match item {
-                ConversationTurnTraceItem::ToolResult {
-                    sequence, call_id, ..
-                } if call_id == parent_call_id => Some(sequence.to_owned()),
-                _ => None,
-            });
-    let child_call_sequence =
-        checkpoint
-            .conversation_trace_items
-            .iter()
-            .find_map(|item| match item {
-                ConversationTurnTraceItem::ToolCall {
-                    sequence, call_id, ..
-                } if call_id == action_id => Some(sequence.to_owned()),
-                _ => None,
-            });
-    matches!(
+    let parent_result_sequence = trace.items.iter().find_map(|item| match item {
+        ConversationTurnTraceItem::ToolResult {
+            sequence, call_id, ..
+        } if call_id == parent_call_id => Some(sequence.to_owned()),
+        _ => None,
+    });
+    let child_call_sequence = trace.items.iter().find_map(|item| match item {
+        ConversationTurnTraceItem::ToolCall {
+            sequence, call_id, ..
+        } if call_id == action_id => Some(sequence.to_owned()),
+        _ => None,
+    });
+    Ok(matches!(
         (parent_result_sequence, child_call_sequence),
         (Some(parent), Some(child)) if parent < child
-    )
+    ))
 }
 
 pub(super) fn is_pending_successor_candidate(
@@ -319,312 +435,6 @@ pub(super) fn is_pending_successor_candidate(
         && candidate.run_id == interrupted.run_id
         && candidate.conversation_id == interrupted.conversation_id
         && candidate.assistant_message_id == interrupted.assistant_message_id
-}
-
-/// Repairs the split-commit shape produced by older manual file-effect execution paths.
-///
-/// Those versions could commit a truthful terminal audit before the pending target and paired
-/// trace. The audit is authoritative only after it matches the frozen pending action and the
-/// suspended checkpoint. Recovery never re-executes the command; it only republishes the exact
-/// durable ToolResult inside the caller's startup-reconciliation transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LegacyManualFileEffectRecovery {
-    NotApplicable,
-    Recovered(String),
-    /// A write-ahead terminal target proves that effects may have occurred, but the remaining
-    /// audit/trace evidence cannot prove the exact result. The lifecycle row may be retired, while
-    /// `list_unsettled_file_effects` must keep the effect as a deletion blocker.
-    Unverifiable,
-}
-
-fn recover_legacy_manual_file_effect_terminal_settlement(
-    connection: &rusqlite::Connection,
-    pending: &AgentPendingActionRecord,
-    recovered_at: i64,
-) -> Result<LegacyManualFileEffectRecovery, String> {
-    if !matches!(
-        (pending.action_type.as_str(), pending.tool_name.as_str()),
-        ("command", "run_command")
-            | ("skill_materialization", "skills_materialize_resource")
-            | ("skill_script", "skills_run_script")
-            | ("office_operation", "office_document")
-            | ("office_operation", "office_spreadsheet")
-            | ("office_operation", "office_presentation")
-    ) {
-        return Ok(LegacyManualFileEffectRecovery::NotApplicable);
-    }
-
-    let has_terminal_target = matches!(
-        pending.target_status.as_deref(),
-        Some("completed" | "failed" | "cancelled")
-    );
-
-    let Some(audit) =
-        agent_action_audit_repository::load_action_audit_record(connection, &pending.action_id)
-            .map_err(storage_error)?
-    else {
-        return Ok(if has_terminal_target {
-            LegacyManualFileEffectRecovery::Unverifiable
-        } else {
-            LegacyManualFileEffectRecovery::NotApplicable
-        });
-    };
-    if !matches!(audit.status.as_str(), "completed" | "failed" | "cancelled") {
-        if matches!(
-            audit.status.as_str(),
-            "pending" | "approved" | "executing" | "cancellation_requested"
-        ) {
-            return Ok(if has_terminal_target {
-                LegacyManualFileEffectRecovery::Unverifiable
-            } else {
-                LegacyManualFileEffectRecovery::NotApplicable
-            });
-        }
-        if has_terminal_target {
-            return Ok(LegacyManualFileEffectRecovery::Unverifiable);
-        }
-        return Err(format!(
-            "启动对账发现人工命令 {} 的 audit 状态无效：{}",
-            pending.action_id, audit.status
-        ));
-    }
-
-    let validation = (|| {
-        let completed_at = audit.completed_at.ok_or_else(|| {
-            format!(
-                "启动对账发现人工命令 {} 的 terminal audit 缺少 completed_at。",
-                pending.action_id
-            )
-        })?;
-        let tool_result = serde_json::from_str::<AgentToolResult>(
-            audit.tool_result_json.as_deref().ok_or_else(|| {
-                format!(
-                    "启动对账发现人工命令 {} 的 terminal audit 缺少 ToolResult。",
-                    pending.action_id
-                )
-            })?,
-        )
-        .map_err(|error| {
-            format!(
-                "启动对账无法解析人工命令 {} 的 terminal ToolResult：{error}",
-                pending.action_id
-            )
-        })?;
-        let trace = recovered_manual_file_effect_trace(pending, &tool_result)?;
-
-        // Reuse the live settlement validators so startup recovery cannot accept a weaker identity
-        // or terminal payload than a normal post-execution commit.
-        validate_manual_file_effect_settlement_request(
-            &audit,
-            &pending.status,
-            &audit.status,
-            &trace,
-            completed_at,
-        )
-        .map_err(|error| {
-            format!(
-                "启动对账拒绝恢复人工命令 {} 的 terminal audit：{error}",
-                pending.action_id
-            )
-        })?;
-        validate_manual_file_effect_settlement_identity(
-            pending,
-            &audit,
-            &pending.status,
-            &audit.status,
-            &trace,
-        )
-        .map_err(|error| {
-            format!(
-                "启动对账发现人工命令 {} 的 terminal audit 身份冲突：{error}",
-                pending.action_id
-            )
-        })?;
-        Ok::<_, String>((completed_at, trace))
-    })();
-    let (completed_at, trace) = match validation {
-        Ok(validated) => validated,
-        Err(_) if has_terminal_target => {
-            return Ok(LegacyManualFileEffectRecovery::Unverifiable);
-        }
-        Err(error) => return Err(error),
-    };
-
-    let affected = pending_action_repository::set_pending_action_target_status(
-        connection,
-        &pending.action_id,
-        &pending.status,
-        &audit.status,
-        recovered_at,
-    )
-    .map_err(storage_error)?;
-    if affected != 1 {
-        return Err(format!(
-            "启动对账无法修复人工命令 {} 的目标终态。",
-            pending.action_id
-        ));
-    }
-    let durable_trace = conversation_trace_repository::get_trace_for_message(
-        connection,
-        &trace.assistant_message_id,
-    )
-    .map_err(storage_error)?;
-    match manual_settlement_trace_state(durable_trace.as_ref(), &trace) {
-        ManualSettlementTraceState::Absent | ManualSettlementTraceState::BeforeBoundary => {
-            conversation_trace_repository::commit_trace_in_connection(
-                connection,
-                &trace,
-                pending.created_at,
-                recovered_at.max(completed_at),
-            )
-            .map_err(storage_error)?;
-        }
-        ManualSettlementTraceState::AtBoundary | ManualSettlementTraceState::Advanced => {}
-        ManualSettlementTraceState::Diverged(reason) => {
-            if has_terminal_target {
-                return Ok(LegacyManualFileEffectRecovery::Unverifiable);
-            }
-            return Err(format!(
-                "启动对账发现人工命令 {} 的 durable trace 冲突：{reason}",
-                pending.action_id
-            ));
-        }
-    }
-
-    Ok(LegacyManualFileEffectRecovery::Recovered(audit.status))
-}
-
-fn recovered_manual_file_effect_trace(
-    pending: &AgentPendingActionRecord,
-    tool_result: &AgentToolResult,
-) -> Result<ConversationTurnTrace, String> {
-    let input =
-        serde_json::from_str::<PendingActionResumeCheckpointProjection>(&pending.agent_input_json)
-            .map_err(|error| {
-                format!(
-                    "启动对账无法解析人工命令 {} 的冻结续跑输入：{error}",
-                    pending.action_id
-                )
-            })?;
-    if input.tool_continuation.is_some() {
-        return Err(format!(
-            "启动对账发现人工命令 {} 的冻结输入已包含 ToolResult continuation。",
-            pending.action_id
-        ));
-    }
-    let checkpoint = input.resume_checkpoint.as_ref().ok_or_else(|| {
-        format!(
-            "启动对账无法恢复人工命令 {}：冻结输入缺少运行检查点。",
-            pending.action_id
-        )
-    })?;
-    let call_id = pending.tool_call_id.as_deref().ok_or_else(|| {
-        format!(
-            "启动对账无法恢复人工命令 {}：pending action 缺少 tool call id。",
-            pending.action_id
-        )
-    })?;
-    let action =
-        serde_json::from_str::<AgentProposedAction>(&pending.action_json).map_err(|error| {
-            format!(
-                "启动对账无法解析人工文件副作用 {} 的冻结 action：{error}",
-                pending.action_id
-            )
-        })?;
-    let (_, expected_tool, expected_call_id, _) = manual_file_effect_identity(&action)?;
-    if checkpoint.run_id != pending.run_id
-        || checkpoint.pending_tool_call_id != call_id
-        || tool_result.call_id != call_id
-        || tool_result.tool != expected_tool
-        || expected_call_id != call_id
-        || pending.tool_name != expected_tool
-    {
-        return Err(format!(
-            "启动对账发现人工命令 {} 的 checkpoint、pending action 与 ToolResult 身份不一致。",
-            pending.action_id
-        ));
-    }
-    if checkpoint.conversation_trace_items.iter().any(
-        |item| matches!(item, ConversationTurnTraceItem::ToolResult { call_id: result_id, .. } if result_id == call_id),
-    ) {
-        return Err(format!(
-            "启动对账发现人工命令 {} 的冻结检查点已经包含待恢复 ToolResult。",
-            pending.action_id
-        ));
-    }
-
-    let matching_calls = checkpoint
-        .conversation_trace_items
-        .iter()
-        .filter_map(|item| match item {
-            ConversationTurnTraceItem::ToolCall {
-                call_id: candidate,
-                tool,
-                operation,
-                ..
-            } if candidate == call_id => Some((tool, operation)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if matching_calls.len() != 1 {
-        return Err(format!(
-            "启动对账无法恢复人工命令 {}：冻结检查点必须包含唯一的原始 ToolCall。",
-            pending.action_id
-        ));
-    }
-    let (tool, operation) = matching_calls[0];
-    let reason =
-        validate_frozen_manual_file_effect_tool_call(&pending.action_id, &action, tool, operation)?;
-
-    let call = AgentToolCall {
-        id: call_id.to_string(),
-        tool: expected_tool,
-        args: operation.clone(),
-        approval_status: crate::AgentApprovalStatus::Approved,
-        reason,
-    };
-    let conversation_id = pending.conversation_id.as_deref().ok_or_else(|| {
-        format!(
-            "启动对账无法恢复人工命令 {}：缺少 conversation id。",
-            pending.action_id
-        )
-    })?;
-    let assistant_message_id = pending.assistant_message_id.as_deref().ok_or_else(|| {
-        format!(
-            "启动对账无法恢复人工命令 {}：缺少 assistant message id。",
-            pending.action_id
-        )
-    })?;
-    // Legacy split recovery has no pre-existing Exact Archive. Small results can still be rebuilt
-    // through the central Gate byte-for-byte; an oversized result fails closed here and remains
-    // `Unverifiable` rather than reintroducing an unbounded model-context item.
-    let archive = crate::ConversationHistoryArchiveTraceMetadata::default();
-    let model_observation = crate::project_persisted_continuation_observation(
-        &input.model,
-        "",
-        input.api_style,
-        tool_result,
-        &archive,
-    )
-    .map_err(|error| {
-        format!(
-            "启动对账无法安全恢复人工命令 {} 的模型结果：{error}",
-            pending.action_id
-        )
-    })?;
-    let snapshot =
-        crate::conversation_trace::conversation_trace_snapshot_from_reconciliation_checkpoint(
-            checkpoint.conversation_trace_items.clone(),
-            checkpoint.conversation_model_context_items.clone(),
-            checkpoint.next_conversation_trace_sequence,
-            checkpoint.conversation_trace_truncated,
-            &call,
-            tool_result,
-            Some(assistant_message_id),
-            &model_observation,
-            archive,
-        );
-    Ok(snapshot.in_progress_trace(&pending.run_id, conversation_id, assistant_message_id))
 }
 
 fn validate_frozen_manual_file_effect_tool_call(
@@ -875,6 +685,44 @@ fn manual_command_has_resolved_terminal_session(
     .map_err(storage_error)
 }
 
+fn validated_mcp_approval_for_durable_call(
+    record: &AgentPendingActionRecord,
+    durable: &DurablePendingTraceSnapshot,
+) -> Option<crate::AgentMcpToolApproval> {
+    let action = serde_json::from_str::<crate::AgentProposedAction>(&record.action_json).ok()?;
+    let crate::AgentProposedAction::McpToolCall { approval } = action else {
+        return None;
+    };
+    let identity = &approval.identity;
+    let provenance = &identity.provenance;
+    let crate::AgentToolIdentity::Mcp {
+        provenance: durable_provenance,
+    } = &durable.provenance
+    else {
+        return None;
+    };
+    let expected_storage_id = format!(
+        "v2:{}:{}:{}",
+        identity.run_id.len(),
+        identity.run_id,
+        identity.action_id
+    );
+    (record.action_id == expected_storage_id
+        && identity.run_id == record.run_id
+        && identity.call_id == durable.call.id
+        && record.tool_call_id.as_deref() == Some(identity.call_id.as_str())
+        && record.tool_name == provenance.model_tool_name
+        && approval.call.id == identity.call_id
+        && approval.call.tool == provenance.model_tool_name
+        && approval.summary.server_id == provenance.server_id
+        && approval.summary.scope == provenance.scope
+        && approval.summary.raw_tool_name == provenance.raw_tool_name
+        && approval.summary.model_tool_name == provenance.model_tool_name
+        && *durable_provenance == *provenance
+        && approval.summary.external)
+        .then_some(*approval)
+}
+
 fn terminalize_mcp_action_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     request: &McpActionTerminalizationRequest,
@@ -895,34 +743,41 @@ fn terminalize_mcp_action_in_transaction(
     if record.action_type != "mcp_tool_call" {
         return Err("MCP terminalization rejected a non-MCP action".to_string());
     }
-    let approval = match serde_json::from_str::<crate::AgentProposedAction>(&record.action_json)
-        .map_err(|_| "MCP terminalization rejected an invalid typed action".to_string())?
-    {
-        crate::AgentProposedAction::McpToolCall { approval } => approval,
-        _ => return Err("MCP terminalization rejected a non-MCP action body".to_string()),
-    };
-    let identity = &approval.identity;
-    let provenance = &identity.provenance;
-    let expected_storage_id = format!(
-        "v2:{}:{}:{}",
-        identity.run_id.len(),
-        identity.run_id,
-        identity.action_id
-    );
-    if record.action_id != expected_storage_id
-        || identity.run_id != record.run_id
-        || record.tool_call_id.as_deref() != Some(identity.call_id.as_str())
-        || record.tool_name != provenance.model_tool_name
-        || approval.call.id != identity.call_id
-        || approval.call.tool != provenance.model_tool_name
-        || approval.summary.server_id != provenance.server_id
-        || approval.summary.scope != provenance.scope
-        || approval.summary.raw_tool_name != provenance.raw_tool_name
-        || approval.summary.model_tool_name != provenance.model_tool_name
-        || !approval.summary.external
-    {
-        return Err("MCP terminalization rejected a drifted typed action identity".to_string());
+    let durable = load_durable_pending_trace_snapshot(transaction, &record, true)?;
+    if !matches!(durable.provenance, crate::AgentToolIdentity::Mcp { .. }) {
+        return Err("MCP terminalization requires durable MCP Tool provenance".to_string());
     }
+    // A malformed or drifted public action must still be safely retired and scrubbed. Only a
+    // fully validated typed action is allowed to update the Renderer-safe MCP lifecycle.
+    let approval = validated_mcp_approval_for_durable_call(&record, &durable);
+    let conversation_id = record
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "MCP terminalization requires a conversation owner".to_string())?;
+    let assistant_message_id = record
+        .assistant_message_id
+        .as_deref()
+        .ok_or_else(|| "MCP terminalization requires an Assistant owner".to_string())?;
+    let rejection_status = matches!(
+        request.outcome,
+        McpStartupActionTerminalOutcome::Rejected | McpStartupActionTerminalOutcome::Cancelled
+    )
+    .then_some(crate::AgentApprovalStatus::Rejected);
+    let terminal_trace_status = if request.outcome == McpStartupActionTerminalOutcome::Cancelled {
+        crate::ConversationTurnTraceTerminalStatus::Cancelled
+    } else {
+        crate::ConversationTurnTraceTerminalStatus::Failed
+    };
+    let terminal =
+        crate::conversation_trace::terminal_conversation_trace_from_snapshot_with_tool_approval(
+            durable.snapshot,
+            &record.run_id,
+            conversation_id,
+            assistant_message_id,
+            terminal_trace_status,
+            request.outcome.safe_reason(),
+            rejection_status,
+        )?;
 
     let terminal_status = request.outcome.pending_status();
     let run_status = request.outcome.run_status();
@@ -982,23 +837,23 @@ fn terminalize_mcp_action_in_transaction(
         )
         .map_err(storage_error)?;
 
-    if let (Some(conversation_id), Some(message_id)) = (
-        record.conversation_id.as_deref(),
-        record.assistant_message_id.as_deref(),
-    ) {
-        chat_repository::update_message_run_terminal_state(
-            transaction,
-            conversation_id,
-            message_id,
-            Some(request.outcome.message_status()),
-            run_status,
-            updated_at,
-        )
-        .map_err(storage_error)?;
+    chat_repository::update_message_run_terminal_state(
+        transaction,
+        conversation_id,
+        assistant_message_id,
+        &record.run_id,
+        Some(request.outcome.message_status()),
+        run_status,
+        updated_at,
+    )
+    .map_err(storage_error)?;
+    if let Some(approval) = approval.as_ref() {
+        let identity = &approval.identity;
+        let provenance = &identity.provenance;
         chat_repository::update_message_mcp_invocation_terminal_state(
             transaction,
             conversation_id,
-            message_id,
+            assistant_message_id,
             &chat_repository::McpInvocationTerminalProjection {
                 action_id: &identity.action_id,
                 invocation_id: &identity.invocation_id,
@@ -1017,6 +872,20 @@ fn terminalize_mcp_action_in_transaction(
         )
         .map_err(storage_error)?;
     }
+    conversation_trace_repository::commit_trace_in_connection(
+        transaction,
+        &terminal.trace,
+        record.created_at,
+        updated_at,
+    )
+    .map_err(storage_error)?;
+    conversation_model_context_repository::commit_items_in_connection(
+        transaction,
+        conversation_id,
+        assistant_message_id,
+        &terminal.model_context_items,
+    )
+    .map_err(storage_error)?;
     transaction
         .execute(
             "
@@ -1223,6 +1092,144 @@ impl StorageService {
         Ok(requests.len())
     }
 
+    /// Safely retires one current pending row whose private action/resume projection cannot be
+    /// decoded or authenticated at startup.
+    ///
+    /// The durable trace and staged Provider/Runtime ToolCall identity remain the sole execution
+    /// authority. `pending`/`approved` rows are known not to have dispatched; `executing` rows are
+    /// conservatively classified outcome-unknown. No Tool is invoked by this path.
+    pub fn retire_unsupported_or_malformed_pending_agent_action_on_startup(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        let (error_code, reason) = match expected_status {
+            "pending" | "approved" => (
+                "agent.pending_action_unsupported_or_malformed",
+                "The pending action could not be safely restored and was retired before dispatch.",
+            ),
+            "executing" => (
+                "agent.pending_action_outcome_unknown",
+                "The pending action crossed its durable dispatch boundary, but its outcome is unknown and it was not replayed.",
+            ),
+            _ => return Err("invalid malformed pending-action retirement status".to_string()),
+        };
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let Some(record) = pending_action_repository::load_pending_action(&transaction, action_id)
+            .map_err(storage_error)?
+        else {
+            return Ok(false);
+        };
+        if record.status != expected_status || record.target_status.is_some() {
+            return Ok(false);
+        }
+        let durable = load_durable_pending_trace_snapshot(
+            &transaction,
+            &record,
+            expected_status != "executing",
+        )?;
+        let conversation_id = record
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "malformed pending action requires a conversation owner".to_string())?;
+        let assistant_message_id = record
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "malformed pending action requires an Assistant owner".to_string())?;
+        let terminal = crate::terminal_conversation_trace_from_snapshot(
+            durable.snapshot,
+            &record.run_id,
+            conversation_id,
+            assistant_message_id,
+            crate::ConversationTurnTraceTerminalStatus::Failed,
+            reason,
+        )?;
+
+        let affected = transaction
+            .execute(
+                "
+                UPDATE agent_pending_actions
+                SET status = 'failed',
+                    target_status = 'failed',
+                    action_json = '{}',
+                    agent_input_json = '{}',
+                    updated_at = ?3
+                WHERE action_id = ?1
+                  AND status = ?2
+                  AND target_status IS NULL
+                ",
+                rusqlite::params![action_id, expected_status, updated_at],
+            )
+            .map_err(storage_error)?;
+        if affected != 1 {
+            return Ok(false);
+        }
+        transaction
+            .execute(
+                "
+                UPDATE agent_action_audit
+                SET status = 'failed',
+                    action_json = '{}',
+                    patch_result_json = NULL,
+                    command_result_json = NULL,
+                    tool_result_json = NULL,
+                    error = ?2,
+                    blocked_reason = ?3,
+                    completed_at = COALESCE(completed_at, ?4)
+                WHERE action_id = ?1
+                ",
+                rusqlite::params![action_id, error_code, reason, updated_at],
+            )
+            .map_err(storage_error)?;
+        transaction
+            .execute(
+                "DELETE FROM mcp_approval_payload_envelopes WHERE action_id = ?1",
+                [action_id],
+            )
+            .map_err(storage_error)?;
+        chat_repository::update_message_run_terminal_state(
+            &transaction,
+            conversation_id,
+            assistant_message_id,
+            &record.run_id,
+            Some("error"),
+            "failed",
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        conversation_trace_repository::commit_trace_in_connection(
+            &transaction,
+            &terminal.trace,
+            record.created_at,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        conversation_model_context_repository::commit_items_in_connection(
+            &transaction,
+            conversation_id,
+            assistant_message_id,
+            &terminal.model_context_items,
+        )
+        .map_err(storage_error)?;
+        transaction
+            .execute(
+                "
+                UPDATE agent_usage_records
+                SET status = 'failed', error = ?2, completed_at = ?3
+                WHERE run_id = ?1
+                  AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')
+                ",
+                rusqlite::params![record.run_id, error_code, updated_at],
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(true)
+    }
+
     pub fn list_unsettled_file_effects(&self) -> Result<Vec<AgentUnsettledFileEffect>, String> {
         let connection = self.state.connection()?;
         let candidates = agent_action_audit_repository::list_unsettled_file_effects(&connection)
@@ -1342,8 +1349,6 @@ impl StorageService {
     ) -> Result<Vec<AgentPendingActionRecord>, String> {
         const INTERRUPTION_REASON: &str =
             "The application exited after approval; process outcome is unknown and was not replayed.";
-        const RECOVERED_FILE_EFFECT_INTERRUPTION_REASON: &str =
-            "The approved file-producing action result was recovered, but the application exited before the agent continuation completed.";
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let interrupted = pending_action_repository::list_interrupted_actions(&transaction)
@@ -1387,25 +1392,9 @@ impl StorageService {
                 }
                 _ => None,
             };
-            let recovered_file_effect = recover_legacy_manual_file_effect_terminal_settlement(
-                &transaction,
-                record,
-                updated_at,
-            )?;
-            let recovered_file_effect_status = match &recovered_file_effect {
-                LegacyManualFileEffectRecovery::Recovered(status) => Some(status.as_str()),
-                LegacyManualFileEffectRecovery::NotApplicable
-                | LegacyManualFileEffectRecovery::Unverifiable => None,
-            };
-            let reconciled_status = match (
-                record.target_status.as_deref(),
-                recovered_file_effect_status,
-            ) {
-                (_, Some(status)) => status,
-                (Some(status @ ("completed" | "failed" | "rejected" | "cancelled")), None) => {
-                    status
-                }
-                (None, None) => {
+            let reconciled_status = match record.target_status.as_deref() {
+                Some(status @ ("completed" | "failed" | "rejected" | "cancelled")) => status,
+                None => {
                     let affected = pending_action_repository::set_pending_action_target_status(
                         &transaction,
                         &record.action_id,
@@ -1416,13 +1405,13 @@ impl StorageService {
                     .map_err(storage_error)?;
                     if affected != 1 {
                         return Err(format!(
-                            "启动对账无法为旧待审批操作 {} 写入 failed 目标终态。",
+                            "启动对账无法为中断的待审批操作 {} 写入 failed 目标终态。",
                             record.action_id
                         ));
                     }
                     "failed"
                 }
-                (Some(status), None) => {
+                Some(status) => {
                     return Err(format!(
                         "启动对账发现待审批操作 {} 的目标终态无效：{status}",
                         record.action_id
@@ -1451,22 +1440,23 @@ impl StorageService {
                         && is_pending_successor_candidate(record, candidate)
                 })
                 .collect::<Vec<_>>();
-            let valid_successors = successor_candidates
-                .iter()
-                .copied()
-                .filter(|candidate| is_valid_pending_successor(record, candidate))
-                .collect::<Vec<_>>();
+            let mut valid_successors = Vec::new();
+            for candidate in successor_candidates.iter().copied() {
+                if is_valid_pending_successor(&transaction, record, candidate)? {
+                    valid_successors.push(candidate);
+                }
+            }
             if valid_successors.len() > 1 {
                 return Err(format!(
                     "启动对账发现 action {} 存在多个合法待审批后继。",
                     record.action_id
                 ));
             }
-            for candidate in successor_candidates
-                .iter()
-                .copied()
-                .filter(|candidate| !is_valid_pending_successor(record, candidate))
-            {
+            for candidate in successor_candidates.iter().copied().filter(|candidate| {
+                !valid_successors
+                    .iter()
+                    .any(|valid| valid.action_id == candidate.action_id)
+            }) {
                 let target_affected = pending_action_repository::set_pending_action_target_status(
                     &transaction,
                     &candidate.action_id,
@@ -1543,6 +1533,40 @@ impl StorageService {
                 durable_run_status.as_deref(),
                 Some("completed" | "failed" | "cancelled")
             ) {
+                let assistant_message_id =
+                    record.assistant_message_id.as_deref().ok_or_else(|| {
+                        format!(
+                            "启动对账发现终态 run {} 缺少 Assistant owner。",
+                            record.run_id
+                        )
+                    })?;
+                let trace = conversation_trace_repository::get_trace_for_message(
+                    &transaction,
+                    assistant_message_id,
+                )
+                .map_err(storage_error)?
+                .ok_or_else(|| {
+                    format!(
+                        "启动对账发现终态 run {} 缺少 ConversationTurnTrace。",
+                        record.run_id
+                    )
+                })?;
+                let model_context_items =
+                    conversation_model_context_repository::get_log_for_message(
+                        &transaction,
+                        assistant_message_id,
+                    )
+                    .map_err(storage_error)?
+                    .map(|log| log.items)
+                    .unwrap_or_default();
+                trace
+                    .validate_complete_model_context(&model_context_items)
+                    .map_err(|error| {
+                        format!(
+                            "启动对账发现终态 run {} 的模型历史不完整：{error}",
+                            record.run_id
+                        )
+                    })?;
                 transaction
                     .execute(
                         "UPDATE agent_usage_records
@@ -1554,14 +1578,53 @@ impl StorageService {
                     .map_err(storage_error)?;
                 continue;
             }
-            if let (Some(conversation_id), Some(message_id)) = (
-                record.conversation_id.as_deref(),
-                record.assistant_message_id.as_deref(),
-            ) {
+            {
+                let conversation_id = record.conversation_id.as_deref().ok_or_else(|| {
+                    format!(
+                        "启动对账无法终结 run {}：缺少 conversation owner。",
+                        record.run_id
+                    )
+                })?;
+                let message_id = record.assistant_message_id.as_deref().ok_or_else(|| {
+                    format!(
+                        "启动对账无法终结 run {}：缺少 Assistant owner。",
+                        record.run_id
+                    )
+                })?;
+                let durable = load_durable_pending_trace_snapshot(&transaction, record, false)
+                    .map_err(|error| {
+                        format!(
+                            "启动对账无法终结 run {} 的 durable ToolCall：{error}",
+                            record.run_id
+                        )
+                    })?;
+                let terminal = crate::terminal_conversation_trace_from_snapshot(
+                    durable.snapshot,
+                    &record.run_id,
+                    conversation_id,
+                    message_id,
+                    crate::ConversationTurnTraceTerminalStatus::Failed,
+                    INTERRUPTION_REASON,
+                )?;
+                conversation_trace_repository::commit_trace_in_connection(
+                    &transaction,
+                    &terminal.trace,
+                    record.created_at,
+                    updated_at,
+                )
+                .map_err(storage_error)?;
+                conversation_model_context_repository::commit_items_in_connection(
+                    &transaction,
+                    conversation_id,
+                    message_id,
+                    &terminal.model_context_items,
+                )
+                .map_err(storage_error)?;
                 chat_repository::update_message_run_terminal_state(
                     &transaction,
                     conversation_id,
                     message_id,
+                    &record.run_id,
                     Some("error"),
                     "failed",
                     updated_at,
@@ -1574,18 +1637,7 @@ impl StorageService {
                      SET status = 'failed', error = ?2, completed_at = ?3
                      WHERE run_id = ?1
                        AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
-                    rusqlite::params![
-                        record.run_id,
-                        if matches!(
-                            recovered_file_effect,
-                            LegacyManualFileEffectRecovery::Recovered(_)
-                        ) {
-                            RECOVERED_FILE_EFFECT_INTERRUPTION_REASON
-                        } else {
-                            INTERRUPTION_REASON
-                        },
-                        updated_at
-                    ],
+                    rusqlite::params![record.run_id, INTERRUPTION_REASON, updated_at],
                 )
                 .map_err(storage_error)?;
         }
@@ -1690,36 +1742,12 @@ impl StorageService {
         Ok(trace_changed)
     }
 
-    /// Atomically settles a manually approved file-producing action across every durable
-    /// representation.
+    /// Atomically settles a manually approved file-producing action and its exact bounded model
+    /// projection across every durable representation.
     ///
-    /// The action audit, pending-action target, and paired ToolResult trace form one recovery
-    /// boundary. Retrying the exact same bundle is idempotent; a different identity or terminal
-    /// result fails closed without changing any of the three records.
-    pub fn commit_pending_agent_action_audited_result_trace(
-        &self,
-        terminal_audit: &AgentActionAuditRecord,
-        expected_pending_status: &str,
-        target_status: &str,
-        trace: &ConversationTurnTrace,
-        committed_at: i64,
-    ) -> Result<AgentPendingActionResultCommitOutcome, String> {
-        self.commit_pending_agent_action_audited_result_trace_with_model_context(
-            terminal_audit,
-            expected_pending_status,
-            target_status,
-            trace,
-            &[],
-            committed_at,
-        )
-    }
-
-    /// Same settlement boundary as [`Self::commit_pending_agent_action_audited_result_trace`],
-    /// additionally committing the exact bounded model projection in the same transaction.
-    ///
-    /// The compatibility wrapper above remains for callers that have no model projection (for
-    /// example, legacy data tests). New runtime settlement paths must use this method so a crash
-    /// cannot leave an approved ToolResult visible only through the lossy trace fallback.
+    /// The action audit, pending-action target, paired ToolResult trace, and model projection form
+    /// one recovery boundary. Retrying the exact same bundle is idempotent; a different identity
+    /// or terminal result fails closed without changing any durable representation.
     pub fn commit_pending_agent_action_audited_result_trace_with_model_context(
         &self,
         terminal_audit: &AgentActionAuditRecord,
@@ -2415,11 +2443,7 @@ fn validate_manual_command_result_projection(
         .result
         .as_ref()
         .expect("canonical command ToolResult always contains execution evidence");
-    let legacy_execution = serde_json::to_value(command_result)
-        .map_err(|error| format!("cannot serialize legacy command execution: {error}"))?;
-    if tool_result.result.as_ref() == Some(execution)
-        || tool_result.result.as_ref() == Some(&legacy_execution)
-    {
+    if tool_result.result.as_ref() == Some(execution) {
         if tool_result.ok != canonical.ok || tool_result.error != canonical.error {
             return Err(
                 "manual command ToolResult terminal outcome differs from its execution evidence"
@@ -2481,7 +2505,7 @@ fn validate_manual_command_result_projection(
             .is_none()
         || !matches!(
             wrapper.get("execution"),
-            Some(value) if value == execution || value == &legacy_execution
+            Some(value) if value == execution
         )
         || target_status != "failed"
         || tool_result.ok

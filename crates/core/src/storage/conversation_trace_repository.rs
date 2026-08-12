@@ -943,7 +943,9 @@ mod tests {
                     sequence: 1,
                     call_id: "call-1".to_string(),
                     tool: "read_file".to_string(),
-                    provenance: None,
+                    provenance: crate::AgentToolIdentity::Builtin {
+                        tool_name: "read_file".to_string(),
+                    },
                     operation: json!({ "path": "src/lib.rs", "startLine": 1, "endLine": 20 }),
                     approval_status: AgentApprovalStatus::NotRequired,
                     truncated: false,

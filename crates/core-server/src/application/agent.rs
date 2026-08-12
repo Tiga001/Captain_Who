@@ -24,11 +24,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider};
-#[cfg(test)]
-use mycopilot_core::command::{
-    run_authorized_command_with_artifact_runtime_and_inputs_with_output_observer,
-    CommandExecutionError, ProcessOutputObserver,
-};
 use mycopilot_core::command::{
     AgentCommandExecutionResult, CommandAuthorizationSource, CommandRunGuard, CommandRunState,
 };
@@ -68,13 +63,14 @@ use mycopilot_core::{
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_context_configuration_revision,
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
+    conversation_trace_snapshot_with_recovered_tool_result,
     create_conversation_context_state_with_host_services, failed_conversation_trace_without_items,
     inspect_context_window_with_tool_projection, mcp_tool_invocation_event,
     mcp_tool_result_from_approved_invocation, mcp_tool_result_from_rejected_approval,
     mcp_tool_result_size_summary, next_run_id, prepare_context_window_tool_projection,
     project_persisted_continuation_for_archive, project_persisted_continuation_for_model,
     project_persisted_continuation_observation, send_chat_with_host_services,
-    terminalize_interrupted_conversation_trace, AgentApprovalDecision, AgentApprovalDecisionStatus,
+    terminal_conversation_trace_from_snapshot, AgentApprovalDecision, AgentApprovalDecisionStatus,
     AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput,
     AgentContextBaseline, AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
     AgentContextCompactionGenerationOutput, AgentContextCompactionGenerationRequest,
@@ -1216,14 +1212,35 @@ impl AgentService {
                     )
                 }
             };
-            let recovered =
-                mycopilot_core::conversation_trace_with_recovered_tool_result(&trace, &result)
-                    .map_err(|error| {
-                        format!("failed to append interrupted image ToolResult audit: {error}")
-                    })?;
+            let model_context_items = self
+                .storage
+                .get_conversation_model_context_log(&trace.assistant_message_id)?
+                .ok_or_else(|| {
+                    "failed to recover interrupted image ToolResult: immutable model context is missing"
+                        .to_string()
+                })?
+                .items;
+            let recovered = conversation_trace_snapshot_with_recovered_tool_result(
+                &trace,
+                model_context_items,
+                &result,
+            )
+            .map_err(|error| {
+                format!("failed to append interrupted image ToolResult audit: {error}")
+            })?;
+            let recovered_trace = recovered.in_progress_audit_trace(
+                &trace.run_id,
+                &trace.conversation_id,
+                &trace.assistant_message_id,
+            );
             let committed_at = now_ms();
             self.storage
-                .append_in_progress_conversation_turn_trace(&recovered, committed_at, committed_at)
+                .append_in_progress_conversation_turn_trace_and_apply_guidances(
+                    &recovered_trace,
+                    &recovered.model_context_items,
+                    committed_at,
+                    committed_at,
+                )
                 .map_err(|error| {
                     format!("failed to persist interrupted image ToolResult audit: {error}")
                 })?;

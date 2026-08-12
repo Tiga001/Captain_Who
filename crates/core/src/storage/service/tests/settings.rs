@@ -13,7 +13,9 @@ fn revision_test_settings() -> ModelSettingsRecord {
             api_token_override: None,
             supports_image: false,
             context_window_tokens: Some(128_000),
-            provider_profile_config: None,
+            provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ),
             input_price: "0".to_string(),
             cached_input_price: String::new(),
             output_price: "0".to_string(),
@@ -24,24 +26,19 @@ fn revision_test_settings() -> ModelSettingsRecord {
 
 fn renderer_save_request(
     settings: &ModelSettingsRecord,
-    update: Option<serde_json::Value>,
+    update: serde_json::Value,
     previous_model_id: Option<&str>,
-    include_legacy_profile_echo: bool,
 ) -> ModelSettingsSaveRequest {
     let mut value = serde_json::to_value(settings).unwrap();
     let model = value["models"][0].as_object_mut().unwrap();
-    if !include_legacy_profile_echo {
-        model.remove("providerProfileConfig");
-    }
-    if let Some(update) = update {
-        model.insert("providerProfileUpdate".to_string(), update);
-    }
-    if let Some(previous_model_id) = previous_model_id {
-        model.insert(
-            "previousModelId".to_string(),
-            serde_json::Value::String(previous_model_id.to_string()),
-        );
-    }
+    model.remove("providerProfileConfig");
+    model.insert("providerProfileUpdate".to_string(), update);
+    model.insert(
+        "previousModelId".to_string(),
+        previous_model_id
+            .map(|value| serde_json::Value::String(value.to_string()))
+            .unwrap_or(serde_json::Value::Null),
+    );
     serde_json::from_value(value).unwrap()
 }
 
@@ -53,20 +50,19 @@ fn registered_profile_selection_is_host_versioned_normalized_and_authoritative()
     let saved = service
         .save_model_settings_request(renderer_save_request(
             &settings,
-            Some(serde_json::json!({
+            serde_json::json!({
                 "kind": "select_registered_profile",
                 "profileId": "deepseek_v4_chat",
                 "settings": {
                     "kind": "deepseek_v4_chat",
                     "reasoning": {"mode": "disabled", "effort": "max"}
                 }
-            })),
+            }),
             None,
-            false,
         ))
         .unwrap();
 
-    let config = saved.models[0].provider_profile_config.as_ref().unwrap();
+    let config = &saved.models[0].provider_profile_config;
     assert_eq!(
         config.profile,
         crate::ProviderProfileRef::deepseek_v4_chat()
@@ -90,16 +86,15 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     let initial = service
         .save_model_settings_request(renderer_save_request(
             &settings,
-            Some(serde_json::json!({
+            serde_json::json!({
                 "kind": "select_registered_profile",
                 "profileId": "deepseek_v4_chat",
                 "settings": {
                     "kind": "deepseek_v4_chat",
                     "reasoning": {"mode": "enabled", "effort": "high"}
                 }
-            })),
+            }),
             None,
-            false,
         ))
         .unwrap();
     let initial_revision = service
@@ -114,7 +109,11 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     metadata.models[0].supports_image = true;
     metadata.models[0].input_price = "2".to_string();
     service
-        .save_model_settings_request(renderer_save_request(&metadata, None, None, false))
+        .save_model_settings_request(renderer_save_request(
+            &metadata,
+            serde_json::json!({"kind": "unchanged"}),
+            None,
+        ))
         .unwrap();
     assert_eq!(
         service
@@ -128,16 +127,15 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
     let changed = service
         .save_model_settings_request(renderer_save_request(
             &metadata,
-            Some(serde_json::json!({
+            serde_json::json!({
                 "kind": "select_registered_profile",
                 "profileId": "deepseek_v4_chat",
                 "settings": {
                     "kind": "deepseek_v4_chat",
                     "reasoning": {"mode": "enabled", "effort": "max"}
                 }
-            })),
+            }),
             None,
-            false,
         ))
         .unwrap();
     let changed_snapshot = service.load_model_settings_snapshot().unwrap().unwrap();
@@ -146,12 +144,7 @@ fn authoritative_profile_updates_rotate_only_effective_wire_changes() {
         initial_revision
     );
     assert_eq!(
-        changed.models[0]
-            .provider_profile_config
-            .as_ref()
-            .unwrap()
-            .reasoning
-            .effort,
+        changed.models[0].provider_profile_config.reasoning.effort,
         crate::ReasoningEffort::Max
     );
 }
@@ -165,18 +158,13 @@ fn select_generic_resolves_from_the_effective_anthropic_dialect() {
     let saved = service
         .save_model_settings_request(renderer_save_request(
             &settings,
-            Some(serde_json::json!({"kind": "select_generic"})),
+            serde_json::json!({"kind": "select_generic"}),
             None,
-            false,
         ))
         .unwrap();
 
     assert_eq!(
-        saved.models[0]
-            .provider_profile_config
-            .as_ref()
-            .unwrap()
-            .profile,
+        saved.models[0].provider_profile_config.profile,
         crate::ProviderProfileRef::generic_for_dialect(
             crate::ProviderProtocolDialect::AnthropicMessages
         )
@@ -188,14 +176,14 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
     let fixture = StorageFixture::new();
     let service = fixture.service();
     let mut settings = revision_test_settings();
-    settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::generic_for_dialect(
-            crate::ProviderProtocolDialect::OpenAiChatCompletions,
-        ));
+    settings.models[0].provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
+        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+    );
     service.save_model_settings(settings.clone()).unwrap();
 
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
-    let unchanged = renderer_save_request(&settings, None, None, true);
+    let unchanged =
+        renderer_save_request(&settings, serde_json::json!({"kind": "unchanged"}), None);
     assert!(service.save_model_settings_request(unchanged).is_err());
     assert_eq!(
         service.load_model_settings().unwrap().unwrap().api_url,
@@ -205,18 +193,12 @@ fn unchanged_explicit_generic_fails_on_dialect_change_until_generic_is_reselecte
     let saved = service
         .save_model_settings_request(renderer_save_request(
             &settings,
-            Some(serde_json::json!({"kind": "select_generic"})),
+            serde_json::json!({"kind": "select_generic"}),
             None,
-            false,
         ))
         .unwrap();
     assert_eq!(
-        saved.models[0]
-            .provider_profile_config
-            .as_ref()
-            .unwrap()
-            .profile
-            .id,
+        saved.models[0].provider_profile_config.profile.id,
         crate::ProviderProfileId::GenericAnthropicMessages
     );
 }
@@ -284,7 +266,9 @@ fn provider_connection_revisions_follow_only_each_models_effective_connection() 
         api_token_override: Some("override-token".to_string()),
         supports_image: false,
         context_window_tokens: Some(128_000),
-        provider_profile_config: None,
+        provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+            crate::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
         input_price: "0".to_string(),
         cached_input_price: String::new(),
         output_price: "0".to_string(),
@@ -296,10 +280,9 @@ fn provider_connection_revisions_follow_only_each_models_effective_connection() 
     settings.api_token = "rotated-global-token".to_string();
     settings.models[0].display_name = "Metadata-only rename".to_string();
     settings.models[1].input_price = "1.25".to_string();
-    settings.models[1].provider_profile_config =
-        Some(crate::ProviderProfileConfig::generic_for_dialect(
-            crate::ProviderProtocolDialect::OpenAiChatCompletions,
-        ));
+    settings.models[1].provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
+        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+    );
     service.save_model_settings(settings.clone()).unwrap();
     let after_global_change = service.load_model_settings_snapshot().unwrap().unwrap();
 
@@ -336,10 +319,9 @@ fn profile_price_and_search_edits_rotate_only_their_owned_connection_identity() 
     service.save_model_settings(settings.clone()).unwrap();
     let initial = service.load_model_settings_snapshot().unwrap().unwrap();
 
-    settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::generic_for_dialect(
-            crate::ProviderProtocolDialect::OpenAiChatCompletions,
-        ));
+    settings.models[0].provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
+        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+    );
     settings.models[0].output_price = "7.5".to_string();
     service.save_model_settings(settings.clone()).unwrap();
     let metadata_edit = service.load_model_settings_snapshot().unwrap().unwrap();
@@ -349,7 +331,7 @@ fn profile_price_and_search_edits_rotate_only_their_owned_connection_identity() 
     );
     assert_eq!(
         initial.provider_protocol_revisions, metadata_edit.provider_protocol_revisions,
-        "omitted Generic and explicit Generic are the same effective protocol"
+        "an equivalent explicit Generic profile must preserve the protocol identity"
     );
     assert_eq!(
         initial.search_connection_revision,
@@ -386,7 +368,9 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
         api_token_override: Some("other-token".to_string()),
         supports_image: false,
         context_window_tokens: Some(64_000),
-        provider_profile_config: None,
+        provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+            crate::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
         input_price: "0".to_string(),
         cached_input_price: String::new(),
         output_price: "0".to_string(),
@@ -407,7 +391,7 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
         Some("https://other-changed.example/v1/chat/completions".to_string());
     settings.models[1].api_token_override = Some("other-changed-token".to_string());
     settings.models[1].provider_profile_config =
-        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+        crate::ProviderProfileConfig::deepseek_v4_default();
     service.save_model_settings(settings.clone()).unwrap();
     let metadata_and_other_model = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_eq!(
@@ -420,7 +404,7 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
     );
 
     settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+        crate::ProviderProfileConfig::deepseek_v4_default();
     service.save_model_settings(settings.clone()).unwrap();
     let deepseek_default = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_ne!(
@@ -431,7 +415,7 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
     let mut thinking = crate::ProviderProfileConfig::deepseek_v4_default();
     thinking.reasoning.mode = crate::ReasoningMode::Enabled;
     thinking.reasoning.effort = crate::ReasoningEffort::High;
-    settings.models[0].provider_profile_config = Some(thinking);
+    settings.models[0].provider_profile_config = thinking;
     service.save_model_settings(settings.clone()).unwrap();
     let deepseek_thinking = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_ne!(
@@ -450,10 +434,9 @@ fn provider_protocol_revision_tracks_only_the_selected_models_effective_wire_con
     );
 
     settings.api_url = "https://api.anthropic.com/v1/messages".to_string();
-    settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::generic_for_dialect(
-            crate::ProviderProtocolDialect::AnthropicMessages,
-        ));
+    settings.models[0].provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
+        crate::ProviderProtocolDialect::AnthropicMessages,
+    );
     service.save_model_settings(settings.clone()).unwrap();
     let endpoint_and_dialect_changed = service.load_model_settings_snapshot().unwrap().unwrap();
     assert_ne!(
@@ -481,35 +464,31 @@ fn provider_profile_config_round_trips_through_model_storage() {
     let service = fixture.service();
     let mut settings = revision_test_settings();
     settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+        crate::ProviderProfileConfig::deepseek_v4_default();
 
     service.save_model_settings(settings).unwrap();
     let stored = service.load_model_settings().unwrap().unwrap();
 
     assert_eq!(
         stored.models[0].provider_profile_config,
-        Some(crate::ProviderProfileConfig::deepseek_v4_default())
+        crate::ProviderProfileConfig::deepseek_v4_default()
     );
 }
 
 #[test]
-fn legacy_client_omission_preserves_an_existing_explicit_provider_profile() {
+fn save_wire_requires_an_explicit_profile_update() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
-    let mut explicit = revision_test_settings();
-    explicit.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::deepseek_v4_default());
-    service.save_model_settings(explicit).unwrap();
+    service
+        .save_model_settings(revision_test_settings())
+        .unwrap();
 
-    let legacy_payload = revision_test_settings();
-    assert!(legacy_payload.models[0].provider_profile_config.is_none());
-    service.save_model_settings(legacy_payload).unwrap();
-
-    let stored = service.load_model_settings().unwrap().unwrap();
-    assert_eq!(
-        stored.models[0].provider_profile_config,
-        Some(crate::ProviderProfileConfig::deepseek_v4_default())
-    );
+    let mut payload = serde_json::to_value(revision_test_settings()).unwrap();
+    payload["models"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("providerProfileConfig");
+    assert!(serde_json::from_value::<ModelSettingsSaveRequest>(payload).is_err());
 }
 
 #[test]
@@ -518,13 +497,12 @@ fn explicit_generic_profile_can_replace_a_provider_specific_profile() {
     let service = fixture.service();
     let mut settings = revision_test_settings();
     settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::deepseek_v4_default());
+        crate::ProviderProfileConfig::deepseek_v4_default();
     service.save_model_settings(settings.clone()).unwrap();
 
-    settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::generic_for_dialect(
-            crate::ProviderProtocolDialect::OpenAiChatCompletions,
-        ));
+    settings.models[0].provider_profile_config = crate::ProviderProfileConfig::generic_for_dialect(
+        crate::ProviderProtocolDialect::OpenAiChatCompletions,
+    );
     service.save_model_settings(settings.clone()).unwrap();
 
     let stored = service.load_model_settings().unwrap().unwrap();
@@ -551,7 +529,7 @@ fn unsupported_persisted_provider_profile_remains_visible_but_cannot_resolve() {
         .unwrap();
 
     let loaded = service.load_model_settings().unwrap().unwrap();
-    let config = loaded.models[0].provider_profile_config.as_ref().unwrap();
+    let config = &loaded.models[0].provider_profile_config;
     assert_eq!(config.profile.id.as_str(), "future_profile");
     assert_eq!(config.profile.version, 1);
     assert!(config.validate().is_err());
@@ -584,16 +562,14 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
     let mut price_edit = loaded.clone();
     price_edit.models[0].input_price = "3.5".to_string();
     let saved = service
-        .save_model_settings_request(renderer_save_request(&price_edit, None, None, true))
+        .save_model_settings_request(renderer_save_request(
+            &price_edit,
+            serde_json::json!({"kind": "unchanged"}),
+            None,
+        ))
         .unwrap();
     assert_eq!(
-        saved.models[0]
-            .provider_profile_config
-            .as_ref()
-            .unwrap()
-            .profile
-            .id
-            .as_str(),
+        saved.models[0].provider_profile_config.profile.id.as_str(),
         "future_profile"
     );
     assert_eq!(
@@ -611,40 +587,17 @@ fn unsupported_profile_survives_unrelated_save_and_model_id_rename() {
     let renamed = service
         .save_model_settings_request(renderer_save_request(
             &renamed,
-            None,
+            serde_json::json!({"kind": "unchanged"}),
             Some("revision-model"),
-            true,
         ))
         .unwrap();
     assert_eq!(
         renamed.models[0]
             .provider_profile_config
-            .as_ref()
-            .unwrap()
             .profile
             .id
             .as_str(),
         "future_profile"
-    );
-}
-
-#[test]
-fn old_profile_echo_cannot_change_host_authoritative_version() {
-    let fixture = StorageFixture::new();
-    let service = fixture.service();
-    let mut settings = revision_test_settings();
-    settings.models[0].provider_profile_config =
-        Some(crate::ProviderProfileConfig::deepseek_v4_default());
-    service.save_model_settings(settings.clone()).unwrap();
-
-    let mut request = serde_json::to_value(&settings).unwrap();
-    request["models"][0]["providerProfileConfig"]["profile"]["version"] =
-        serde_json::Value::from(99);
-    let request = serde_json::from_value::<ModelSettingsSaveRequest>(request).unwrap();
-    assert!(service.save_model_settings_request(request).is_err());
-    assert_eq!(
-        service.load_model_settings().unwrap().unwrap().models[0].provider_profile_config,
-        settings.models[0].provider_profile_config
     );
 }
 
@@ -693,16 +646,15 @@ fn registered_selection_rejects_unknown_profiles_and_incompatible_dialects() {
     let settings = revision_test_settings();
     let unknown = renderer_save_request(
         &settings,
-        Some(serde_json::json!({
+        serde_json::json!({
             "kind": "select_registered_profile",
             "profileId": "future_profile",
             "settings": {
                 "kind": "deepseek_v4_chat",
                 "reasoning": {"mode": "provider_default", "effort": "provider_default"}
             }
-        })),
+        }),
         None,
-        false,
     );
     assert!(service.save_model_settings_request(unknown).is_err());
 
@@ -710,16 +662,15 @@ fn registered_selection_rejects_unknown_profiles_and_incompatible_dialects() {
     anthropic.api_url = "https://api.anthropic.com/v1/messages".to_string();
     let incompatible = renderer_save_request(
         &anthropic,
-        Some(serde_json::json!({
+        serde_json::json!({
             "kind": "select_registered_profile",
             "profileId": "deepseek_v4_chat",
             "settings": {
                 "kind": "deepseek_v4_chat",
                 "reasoning": {"mode": "provider_default", "effort": "provider_default"}
             }
-        })),
+        }),
         None,
-        false,
     );
     assert!(service.save_model_settings_request(incompatible).is_err());
     assert!(service.load_model_settings().unwrap().is_none());
@@ -761,7 +712,9 @@ fn rejects_invalid_model_prices_without_overwriting_saved_settings() {
             api_token_override: None,
             supports_image: false,
             context_window_tokens: Some(128_000),
-            provider_profile_config: None,
+            provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ),
             input_price: "0.01".to_string(),
             cached_input_price: String::new(),
             output_price: "0.02".to_string(),
@@ -800,7 +753,9 @@ fn rejects_zero_context_window_without_overwriting_saved_settings() {
             api_token_override: None,
             supports_image: false,
             context_window_tokens: Some(128_000),
-            provider_profile_config: None,
+            provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ),
             input_price: "0.01".to_string(),
             cached_input_price: String::new(),
             output_price: "0.02".to_string(),
@@ -833,7 +788,9 @@ fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
             api_token_override: Some("model-token".to_string()),
             supports_image: false,
             context_window_tokens: Some(128_000),
-            provider_profile_config: None,
+            provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
+                crate::ProviderProtocolDialect::OpenAiChatCompletions,
+            ),
             input_price: "0.01".to_string(),
             cached_input_price: String::new(),
             output_price: "0.02".to_string(),
