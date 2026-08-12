@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   parseStorageForkConversationErrorData,
-  parseStorageForkConversationRequest
+  parseStorageForkConversationRequest,
+  parseStorageModelSettingsValidationErrorData
 } from './storageParsers'
 
 const valid = {
@@ -85,6 +86,35 @@ describe('storage protocol parsers', () => {
   ])('rejects malformed or oversized recovery data %#', (value) => {
     expect(() => parseStorageForkConversationErrorData(value)).toThrow(
       'Invalid storage fork conversation error data'
+    )
+  })
+})
+
+describe('model settings validation error parser', () => {
+  const duplicate = {
+    kind: 'model_settings_validation',
+    code: 'duplicate_model_id',
+    modelId: 'deepseek-v4-flash'
+  } as const
+
+  it('accepts only the bounded duplicate-model recovery contract', () => {
+    expect(parseStorageModelSettingsValidationErrorData(duplicate)).toEqual(duplicate)
+    const maximumWidthId = '😀'.repeat(512)
+    expect(
+      parseStorageModelSettingsValidationErrorData({ ...duplicate, modelId: maximumWidthId })
+    ).toEqual({ ...duplicate, modelId: maximumWidthId })
+  })
+
+  it.each([
+    null,
+    { ...duplicate, kind: 'database_error' },
+    { ...duplicate, code: 'invalid_price' },
+    { ...duplicate, modelId: '' },
+    { ...duplicate, modelId: '😀'.repeat(513) },
+    { ...duplicate, sql: 'private schema detail' }
+  ])('rejects malformed, oversized, or expanded error data %#', (value) => {
+    expect(() => parseStorageModelSettingsValidationErrorData(value)).toThrow(
+      'Invalid storage model settings validation error data'
     )
   })
 })

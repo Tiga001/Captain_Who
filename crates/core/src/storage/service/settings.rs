@@ -3,7 +3,7 @@ use super::*;
 pub(super) const MAX_SKILL_ENABLEMENT_ID_BYTES: usize = 16 * 1024;
 
 pub(super) fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<(), String> {
-    validate_model_settings_fields(settings)?;
+    validate_model_settings_fields(settings).map_err(|error| error.to_string())?;
     for model in &settings.models {
         let model_id = model.id.trim();
         model
@@ -14,36 +14,41 @@ pub(super) fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<
     Ok(())
 }
 
-fn validate_model_settings_fields(settings: &ModelSettingsRecord) -> Result<(), String> {
+fn validate_model_settings_fields(
+    settings: &ModelSettingsRecord,
+) -> Result<(), ModelSettingsSaveError> {
     let mut model_ids = HashSet::new();
     for model in &settings.models {
         let model_id = model.id.trim();
         if model_id.is_empty() {
-            return Err("模型 ID 不能为空。".to_string());
+            return Err("模型 ID 不能为空。".to_string().into());
         }
         if !model_ids.insert(model_id) {
-            return Err(format!("模型 ID 重复：{model_id}"));
+            return Err(ModelSettingsSaveError::DuplicateModelId {
+                model_id: model_id.to_string(),
+            });
         }
         if model.context_window_tokens == Some(0) {
-            return Err(format!("模型 {model_id} 的上下文窗口必须大于 0。"));
+            return Err(format!("模型 {model_id} 的上下文窗口必须大于 0。").into());
         }
         model.connection_override()?;
         if !usage_repository::is_valid_price_per_1k(&model.input_price) {
-            return Err(format!(
-                "模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。"
-            ));
+            return Err(
+                format!("模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。").into(),
+            );
         }
         if !model.cached_input_price.trim().is_empty()
             && !usage_repository::is_valid_price_per_1k(&model.cached_input_price)
         {
             return Err(format!(
                 "模型 {model_id} 的缓存命中输入价格必须留空，或填写大于或等于 0 的有效数字。"
-            ));
+            )
+            .into());
         }
         if !usage_repository::is_valid_price_per_1k(&model.output_price) {
-            return Err(format!(
-                "模型 {model_id} 的输出价格必须是大于或等于 0 的有效数字。"
-            ));
+            return Err(
+                format!("模型 {model_id} 的输出价格必须是大于或等于 0 的有效数字。").into(),
+            );
         }
     }
     Ok(())
@@ -164,7 +169,7 @@ impl StorageService {
     pub fn save_model_settings_request(
         &self,
         request: ModelSettingsSaveRequest,
-    ) -> Result<ModelSettingsRecord, String> {
+    ) -> Result<ModelSettingsRecord, ModelSettingsSaveError> {
         let mut connection = self.state.connection()?;
         let existing =
             config_repository::load_model_settings(&mut connection).map_err(storage_error)?;
@@ -186,7 +191,7 @@ impl StorageService {
                 .unwrap_or(&requested.id)
                 .trim();
             if source_model_id.is_empty() {
-                return Err("原模型 ID 不能为空。".to_string());
+                return Err("原模型 ID 不能为空。".to_string().into());
             }
             let existing_model = existing.as_ref().and_then(|settings| {
                 settings
@@ -195,11 +200,11 @@ impl StorageService {
                     .find(|candidate| candidate.id == source_model_id)
             });
             if requested.previous_model_id.is_some() && existing_model.is_none() {
-                return Err(format!("未找到要编辑的原模型：{source_model_id}"));
+                return Err(format!("未找到要编辑的原模型：{source_model_id}").into());
             }
             if existing_model.is_some() && !matched_existing_ids.insert(source_model_id.to_string())
             {
-                return Err(format!("原模型 ID 被重复引用：{source_model_id}"));
+                return Err(format!("原模型 ID 被重复引用：{source_model_id}").into());
             }
             let preserved = existing_model.map(|model| model.provider_profile_config.clone());
             let effective_api_url = requested
@@ -255,9 +260,9 @@ impl StorageService {
         validate_model_settings_fields(&settings)?;
 
         config_repository::save_model_settings(&mut connection, settings).map_err(storage_error)?;
-        config_repository::load_model_settings(&mut connection)
+        Ok(config_repository::load_model_settings(&mut connection)
             .map_err(storage_error)?
-            .ok_or_else(|| "模型设置保存后无法重新加载。".to_string())
+            .ok_or_else(|| "模型设置保存后无法重新加载。".to_string())?)
     }
 
     pub fn load_agent_prompt_preferences(&self) -> Result<AgentPromptPreferencesRecord, String> {

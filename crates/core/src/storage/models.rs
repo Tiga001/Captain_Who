@@ -160,6 +160,35 @@ impl std::fmt::Debug for ModelSettingsSaveRequest {
     }
 }
 
+/// Failure from the authoritative model-settings mutation boundary.
+///
+/// Only variants carrying an explicit recovery contract may cross the Host boundary. `Other`
+/// retains the internal diagnostic for local callers while Core Server must redact it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelSettingsSaveError {
+    DuplicateModelId { model_id: String },
+    Other(String),
+}
+
+impl std::fmt::Display for ModelSettingsSaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateModelId { model_id } => {
+                write!(formatter, "模型 ID 重复：{model_id}")
+            }
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ModelSettingsSaveError {}
+
+impl From<String> for ModelSettingsSaveError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 /// Host-only snapshot of model settings and the opaque identity of the exact saved revision.
 ///
 /// `configuration_revision` is deliberately not part of [`ModelSettingsRecord`], which is also

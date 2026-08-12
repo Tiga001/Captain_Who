@@ -1402,8 +1402,8 @@ export const zhCNTranslations = {
   'configuration.invalidPrice': '请输入大于或等于 0 的有效价格',
   'configuration.loadFailed': '模型配置加载失败',
   'configuration.saveFailed': '模型配置保存失败',
-  'configuration.saveFailedSafe':
-    '无法保存模型配置。已恢复上次成功保存的设置，请检查 API 厂商是否与 API 类型兼容后重试。',
+  'configuration.saveFailedSafe': '无法保存模型配置。已恢复上次成功保存的设置，请重试。',
+  'configuration.duplicateModelId': '已存在模型「{modelId}」，请使用其他模型 ID。',
   'configuration.saving': '保存中…',
   'configuration.supportsImageInput': '支持图像输入',
   'configuration.more': '更多',

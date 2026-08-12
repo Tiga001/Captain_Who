@@ -1,7 +1,8 @@
 import type {
   StorageConversationForkPoint,
   StorageForkConversationErrorData,
-  StorageForkConversationRequest
+  StorageForkConversationRequest,
+  StorageModelSettingsValidationErrorData
 } from './storage'
 import {
   expectEnum,
@@ -16,6 +17,7 @@ import {
 const MAX_CONVERSATION_ID_BYTES = 512 * 4
 const MAX_FORK_IDENTIFIER_BYTES = 512 * 4
 const MAX_ACTIVE_COMMAND_SESSIONS = 512
+const MAX_MODEL_ID_BYTES = 512 * 4
 
 function expectBoundedForkIdentifier(value: unknown, context: string): string {
   const identifier = expectNonEmptyString(value, context)
@@ -103,5 +105,27 @@ export function parseStorageForkConversationErrorData(
     code: expectEnum(record.code, ['active_command_session'] as const, `${context}.code`),
     conversationId,
     activeSessionCount
+  }
+}
+
+export function parseStorageModelSettingsValidationErrorData(
+  value: unknown
+): StorageModelSettingsValidationErrorData {
+  const context = 'storage model settings validation error data'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['kind', 'code', 'modelId'] as const, context)
+
+  const modelId = expectNonEmptyString(record.modelId, `${context}.modelId`)
+  if (new TextEncoder().encode(modelId).byteLength > MAX_MODEL_ID_BYTES) {
+    throw invalidProtocolValue(
+      `${context}.modelId`,
+      `must not exceed ${MAX_MODEL_ID_BYTES} UTF-8 bytes`
+    )
+  }
+
+  return {
+    kind: expectEnum(record.kind, ['model_settings_validation'] as const, `${context}.kind`),
+    code: expectEnum(record.code, ['duplicate_model_id'] as const, `${context}.code`),
+    modelId
   }
 }

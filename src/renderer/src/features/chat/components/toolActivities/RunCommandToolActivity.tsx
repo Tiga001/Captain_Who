@@ -358,6 +358,7 @@ export function RunCommandToolActivity({
       }
       isPending={isPending}
       label={label}
+      revealDetailsOnOpen
     >
       {hasDetails && (
         <div className="agent-activity__details run-command-activity__details">

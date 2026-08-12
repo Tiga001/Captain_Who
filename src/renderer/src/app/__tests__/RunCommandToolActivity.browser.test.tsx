@@ -121,6 +121,54 @@ describe('RunCommandToolActivity', () => {
     expect(window.getComputedStyle(commandBlock!).whiteSpace).toBe('pre')
   })
 
+  it('scrolls newly expanded command details above the composer boundary', async () => {
+    const call: AgentToolCall = {
+      approvalStatus: 'approved',
+      reason: null,
+      args: { command: 'pnpm check', reason: '运行检查' },
+      id: 'bottom-command',
+      tool: 'run_command'
+    }
+    const result: AgentToolResult = {
+      callId: call.id,
+      ok: true,
+      result: { status: 'exited', exitCode: 0, stdout: 'done\n', stderr: '' },
+      tool: 'run_command'
+    }
+    const screen = await render(
+      <div className="chat-conversation-page__messages">
+        <RunCommandToolActivity call={call} result={result} />
+      </div>
+    )
+    const scrollContainer = screen.container.querySelector<HTMLElement>(
+      '.chat-conversation-page__messages'
+    )!
+    const disclosure = screen.container.querySelector<HTMLDetailsElement>(
+      '.agent-activity--run-command'
+    )!
+    const scrollTo = vi.fn()
+
+    Object.defineProperties(scrollContainer, {
+      clientHeight: { configurable: true, value: 600 },
+      scrollHeight: { configurable: true, value: 1400 },
+      scrollTop: { configurable: true, writable: true, value: 200 }
+    })
+    scrollContainer.scrollTo = scrollTo
+    scrollContainer.getBoundingClientRect = () => ({ top: 0, bottom: 600, height: 600 }) as DOMRect
+    disclosure.getBoundingClientRect = () =>
+      ({
+        top: 430,
+        bottom: disclosure.open ? 780 : 470,
+        height: disclosure.open ? 350 : 40
+      }) as DOMRect
+
+    await userEvent.click(screen.container.querySelector('summary')!)
+
+    await vi.waitFor(() => {
+      expect(scrollTo).toHaveBeenCalledWith({ behavior: 'smooth', top: 396 })
+    })
+  })
+
   it('renders bounded live output before the final ToolResult arrives', async () => {
     const call: AgentToolCall = {
       approvalStatus: 'approved',

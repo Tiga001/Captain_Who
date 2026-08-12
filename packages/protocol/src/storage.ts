@@ -111,6 +111,13 @@ export interface StorageModelSettingsUpdateRecord extends Omit<
   models: StorageModelConfigUpdateRecord[]
 }
 
+/** Safe, renderer-visible rejection from the authoritative model-settings save boundary. */
+export interface StorageModelSettingsValidationErrorData {
+  kind: 'model_settings_validation'
+  code: 'duplicate_model_id'
+  modelId: string
+}
+
 export interface StorageProjectRecord {
   id: string
   name: string

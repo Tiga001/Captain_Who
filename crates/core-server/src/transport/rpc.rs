@@ -55,6 +55,35 @@ where
     }
 }
 
+pub(crate) fn model_settings_save_response<T>(
+    id: JsonRpcId,
+    result: Result<T, mycopilot_core::storage::models::ModelSettingsSaveError>,
+) -> Value
+where
+    T: Serialize,
+{
+    use mycopilot_core::storage::models::ModelSettingsSaveError;
+    use mycopilot_protocol_rs::StorageModelSettingsValidationErrorData;
+
+    match result {
+        Ok(value) => response_success(id, value),
+        Err(ModelSettingsSaveError::DuplicateModelId { model_id }) => {
+            let data = StorageModelSettingsValidationErrorData::duplicate_model_id(model_id);
+            serde_json::to_value(error_with_data(
+                Some(id),
+                -32000,
+                "Model settings validation failed.",
+                serde_json::to_value(data)
+                    .expect("model settings validation error data must serialize"),
+            ))
+            .expect("model settings validation JSON-RPC error response must serialize")
+        }
+        Err(ModelSettingsSaveError::Other(_)) => {
+            response_error(Some(id), -32000, "Model settings could not be saved.")
+        }
+    }
+}
+
 pub(crate) fn conversation_fork_response<T>(
     id: JsonRpcId,
     result: Result<T, mycopilot_core::storage::conversation_fork_repository::ConversationForkError>,

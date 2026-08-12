@@ -116,7 +116,7 @@ pub(crate) fn handle_request(
             if result.is_ok() {
                 agent_service.invalidate_all_conversation_context_states();
             }
-            storage_response(request.id, result)
+            model_settings_save_response(request.id, result)
         }
         STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD => {
             storage_response(request.id, storage.load_agent_prompt_preferences())

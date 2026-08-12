@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import { HostInvocationError } from '@mycopilot/host-api'
 import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
 import type { ModelConfig } from '../../config/modelConfig'
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => ({
+    t: (key: string) => (key === 'configuration.duplicateModelId' ? `${key}:{modelId}` : key)
+  })
 }))
 
 const { ModelForm } = await import('../../features/settings/pages/configuration/ModelForm')
@@ -290,5 +293,34 @@ describe('ModelForm Provider Profile controls', () => {
       )
       .toBeVisible()
     expect(document.body.textContent).not.toContain('raw provider payload')
+  })
+
+  it('shows the bounded duplicate model id without exposing Core diagnostics', async () => {
+    const onSave = vi.fn().mockRejectedValue(
+      new HostInvocationError({
+        message: 'Model settings validation failed.',
+        code: -32000,
+        data: {
+          kind: 'model_settings_validation',
+          code: 'duplicate_model_id',
+          modelId: 'deepseek-v4-flash'
+        }
+      })
+    )
+    const screen = await render(
+      <ModelForm
+        model={model}
+        providerProfileDescriptors={descriptors}
+        onCancel={vi.fn()}
+        onSave={onSave}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'configuration.save' }).click()
+
+    await expect
+      .element(screen.getByRole('alert'))
+      .toHaveTextContent('configuration.duplicateModelId:deepseek-v4-flash')
+    expect(document.body.textContent).not.toContain('Model settings validation failed.')
   })
 })

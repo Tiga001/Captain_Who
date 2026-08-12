@@ -43,6 +43,66 @@ fn renderer_save_request(
 }
 
 #[test]
+fn duplicate_model_id_is_a_typed_validation_error_with_the_trimmed_id() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let settings = revision_test_settings();
+    let mut request = renderer_save_request(
+        &settings,
+        serde_json::json!({"kind": "select_generic"}),
+        None,
+    );
+    request.models[0].id = "  duplicate-model  ".to_string();
+    request.models.push(request.models[0].clone());
+
+    let error = service.save_model_settings_request(request).unwrap_err();
+    assert_eq!(
+        error,
+        ModelSettingsSaveError::DuplicateModelId {
+            model_id: "duplicate-model".to_string(),
+        }
+    );
+    assert!(service.load_model_settings().unwrap().is_none());
+}
+
+#[test]
+fn renaming_a_model_onto_an_existing_id_returns_the_typed_collision() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut settings = revision_test_settings();
+    let mut second = settings.models[0].clone();
+    second.id = "existing-model".to_string();
+    second.display_name = "Existing Model".to_string();
+    settings.models.push(second);
+    service.save_model_settings(settings.clone()).unwrap();
+
+    let mut value = serde_json::to_value(&settings).unwrap();
+    let models = value["models"].as_array_mut().unwrap();
+    for model in models.iter_mut() {
+        let model = model.as_object_mut().unwrap();
+        model.remove("providerProfileConfig");
+        model.insert(
+            "providerProfileUpdate".to_string(),
+            serde_json::json!({"kind": "select_generic"}),
+        );
+        model.insert("previousModelId".to_string(), serde_json::Value::Null);
+    }
+    models[0]["id"] = serde_json::json!("existing-model");
+    models[0]["previousModelId"] = serde_json::json!("revision-model");
+    let request: ModelSettingsSaveRequest = serde_json::from_value(value).unwrap();
+
+    assert_eq!(
+        service.save_model_settings_request(request).unwrap_err(),
+        ModelSettingsSaveError::DuplicateModelId {
+            model_id: "existing-model".to_string(),
+        }
+    );
+    let unchanged = service.load_model_settings().unwrap().unwrap();
+    assert_eq!(unchanged.models[0].id, "revision-model");
+    assert_eq!(unchanged.models[1].id, "existing-model");
+}
+
+#[test]
 fn registered_profile_selection_is_host_versioned_normalized_and_authoritative() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

@@ -1,4 +1,5 @@
 import { StrictMode } from 'react'
+import { HostInvocationError } from '@mycopilot/host-api'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { ModelSettingsSnapshot } from '../../features/storage/storageClient'
@@ -21,7 +22,9 @@ vi.mock('../../components/toast/ToastContext', () => ({
 }))
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => ({
+    t: (key: string) => (key === 'configuration.duplicateModelId' ? `${key}:{modelId}` : key)
+  })
 }))
 
 const { ModelSettingsProvider, useModelSettings } =
@@ -309,7 +312,17 @@ describe('ModelSettingsProvider hydration', () => {
       ]
     }
     service.loadModelSettings.mockResolvedValue(settingsWithTwoModels)
-    service.saveModelSettings.mockRejectedValue(new Error('duplicate model id'))
+    service.saveModelSettings.mockRejectedValue(
+      new HostInvocationError({
+        message: 'Model settings validation failed.',
+        code: -32000,
+        data: {
+          kind: 'model_settings_validation',
+          code: 'duplicate_model_id',
+          modelId: 'model-b'
+        }
+      })
+    )
 
     const screen = await render(
       <ModelSettingsProvider>
@@ -326,6 +339,9 @@ describe('ModelSettingsProvider hydration', () => {
       expect.objectContaining({ id: 'model-b', displayName: 'Model B' })
     ])
     await expect.element(screen.getByTestId('model-ids')).toHaveTextContent('model-a,model-b')
+    expect(service.showToast).toHaveBeenCalledWith('configuration.duplicateModelId:model-b', {
+      durationMs: 5000
+    })
   })
 
   it('recovers from a transient core-server read failure', async () => {

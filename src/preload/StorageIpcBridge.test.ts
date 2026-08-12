@@ -26,13 +26,14 @@ describe('Storage IPC bridge', () => {
     const invoke = vi
       .fn()
       .mockResolvedValueOnce(descriptors)
-      .mockResolvedValueOnce(authoritativeSettings)
+      .mockResolvedValueOnce({ ok: true, value: authoritativeSettings })
     const bridge = createStorageIpcBridge({ invoke } as unknown as Pick<IpcRenderer, 'invoke'>)
 
     await expect(bridge.loadProviderProfileUiDescriptors()).resolves.toBe(descriptors)
-    await expect(bridge.saveModelSettings(authoritativeSettings)).resolves.toBe(
-      authoritativeSettings
-    )
+    await expect(bridge.saveModelSettings(authoritativeSettings)).resolves.toEqual({
+      ok: true,
+      value: authoritativeSettings
+    })
     expect(invoke).toHaveBeenNthCalledWith(1, 'host:storage.loadProviderProfileUiDescriptors')
     expect(invoke).toHaveBeenNthCalledWith(
       2,

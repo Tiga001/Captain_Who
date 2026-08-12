@@ -100,7 +100,9 @@ export async function loadProviderProfileUiDescriptors(): Promise<ProviderProfil
 export async function saveModelSettings(
   settings: ModelSettingsSaveDraft
 ): Promise<ModelSettingsSnapshot> {
-  const saved = await hostClient.storage.saveModelSettings(mapModelSettingsToStorage(settings))
+  const saved = unwrapHostInvocation(
+    await hostClient.storage.saveModelSettings(mapModelSettingsToStorage(settings))
+  )
   const normalized = mapModelSettingsFromStorage(saved)
   if (!normalized) {
     throw new Error('Host returned an empty model settings snapshot after save')

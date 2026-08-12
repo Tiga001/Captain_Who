@@ -1467,7 +1467,9 @@ export const enUSTranslations = {
   'configuration.loadFailed': 'Failed to load model settings',
   'configuration.saveFailed': 'Failed to save model settings',
   'configuration.saveFailedSafe':
-    'Unable to save the model settings. The last successfully saved settings were restored; check that the provider matches the API type and try again.',
+    'Unable to save the model settings. The last successfully saved settings were restored; please try again.',
+  'configuration.duplicateModelId':
+    'A model with ID "{modelId}" already exists. Please use a different model ID.',
   'configuration.saving': 'Saving…',
   'configuration.supportsImageInput': 'Supports image input',
   'configuration.more': 'More',

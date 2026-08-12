@@ -135,7 +135,9 @@ export interface OfficeHostApi {
 export interface StorageHostApi {
   loadModelSettings(): Promise<StorageModelSettingsRecord | null>
   loadProviderProfileUiDescriptors(): Promise<ProviderProfileUiDescriptor[]>
-  saveModelSettings(settings: StorageModelSettingsUpdateRecord): Promise<StorageModelSettingsRecord>
+  saveModelSettings(
+    settings: StorageModelSettingsUpdateRecord
+  ): Promise<HostInvocationResult<StorageModelSettingsRecord>>
   loadAgentPromptPreferences(): Promise<StorageAgentPromptPreferencesRecord>
   saveAgentPromptPreferences(
     preferences: StorageAgentPromptPreferencesRecord

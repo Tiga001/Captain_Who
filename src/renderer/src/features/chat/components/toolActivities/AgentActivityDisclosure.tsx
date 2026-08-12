@@ -11,6 +11,37 @@ interface AgentActivityDisclosureProps {
   iconBadgeTone?: 'danger' | 'blocked'
   isPending?: boolean
   label: string
+  revealDetailsOnOpen?: boolean
+}
+
+function revealExpandedDetails(activity: HTMLDetailsElement) {
+  const scrollContainer = activity.closest<HTMLElement>('.chat-conversation-page__messages')
+  if (!scrollContainer) return
+
+  window.requestAnimationFrame(() => {
+    const containerRect = scrollContainer.getBoundingClientRect()
+    const activityRect = activity.getBoundingClientRect()
+    const viewportInset = 16
+    const visibleBottom = containerRect.bottom - viewportInset
+    const bottomOverflow = activityRect.bottom - visibleBottom
+    if (bottomOverflow <= 0) return
+
+    const availableHeight = Math.max(0, containerRect.height - viewportInset * 2)
+    const scrollDelta =
+      activityRect.height <= availableHeight
+        ? bottomOverflow
+        : Math.max(0, activityRect.top - containerRect.top - viewportInset)
+    const maximumScrollTop = Math.max(
+      0,
+      scrollContainer.scrollHeight - scrollContainer.clientHeight
+    )
+
+    // Expanded command details can grow below the message viewport; keep them above the composer.
+    scrollContainer.scrollTo({
+      behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+      top: Math.min(maximumScrollTop, scrollContainer.scrollTop + scrollDelta)
+    })
+  })
 }
 
 export function AgentActivityDisclosure({
@@ -22,7 +53,8 @@ export function AgentActivityDisclosure({
   iconBadge,
   iconBadgeTone,
   isPending = false,
-  label
+  label,
+  revealDetailsOnOpen = false
 }: AgentActivityDisclosureProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen)
   const activityClassName = ['agent-activity', className].filter(Boolean).join(' ')
@@ -55,7 +87,11 @@ export function AgentActivityDisclosure({
   return (
     <details
       className={activityClassName}
-      onToggle={(event) => setIsOpen(event.currentTarget.open)}
+      onToggle={(event) => {
+        const details = event.currentTarget
+        setIsOpen(details.open)
+        if (details.open && revealDetailsOnOpen) revealExpandedDetails(details)
+      }}
       open={isOpen}
     >
       <summary>

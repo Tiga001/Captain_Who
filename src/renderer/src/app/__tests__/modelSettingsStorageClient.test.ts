@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { HostInvocationError } from '@mycopilot/host-api'
 import type { StorageModelSettingsRecord } from '@mycopilot/protocol'
 
 const storage = vi.hoisted(() => ({
@@ -43,7 +44,10 @@ const authoritativeSettings: StorageModelSettingsRecord = {
 beforeEach(() => {
   storage.loadModelSettings.mockReset()
   storage.loadProviderProfileUiDescriptors.mockReset()
-  storage.saveModelSettings.mockReset().mockResolvedValue(authoritativeSettings)
+  storage.saveModelSettings.mockReset().mockResolvedValue({
+    ok: true,
+    value: authoritativeSettings
+  })
 })
 
 describe('model settings storage client', () => {
@@ -116,5 +120,35 @@ describe('model settings storage client', () => {
     storage.loadProviderProfileUiDescriptors.mockResolvedValue(descriptors)
 
     await expect(loadProviderProfileUiDescriptors()).resolves.toBe(descriptors)
+  })
+
+  it('restores a typed duplicate-model error from the Host envelope', async () => {
+    const data = {
+      kind: 'model_settings_validation',
+      code: 'duplicate_model_id',
+      modelId: 'deepseek-v4-flash'
+    } as const
+    storage.saveModelSettings.mockResolvedValue({
+      ok: false,
+      error: {
+        message: 'Model settings validation failed.',
+        code: -32000,
+        data
+      }
+    })
+
+    try {
+      await saveModelSettings({
+        apiUrl: '',
+        apiToken: '',
+        searchMode: 'disabled',
+        tavilyApiKey: '',
+        models: []
+      })
+      expect.fail('a failed Host envelope must reject the Renderer client')
+    } catch (error) {
+      expect(error).toBeInstanceOf(HostInvocationError)
+      expect(error).toMatchObject({ code: -32000, data })
+    }
   })
 })

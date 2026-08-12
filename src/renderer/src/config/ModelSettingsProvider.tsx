@@ -10,6 +10,8 @@ import {
 import type { ModelSettingsSnapshot } from '../features/storage/storageClient'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import { useFrontendConfig } from './FrontendConfigProvider'
+import { formatTranslation } from './translationFormat'
+import { classifyModelSettingsSaveError } from '../features/settings/pages/configuration/modelSettingsErrors'
 import {
   INITIAL_MODEL_SAVE_DRAFTS,
   isModelConnectionAvailable,
@@ -105,16 +107,23 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
           }
           return authoritativeSettings
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (latestSaveRevisionRef.current === revision) {
             const lastSuccessfulSettings = lastSuccessfulSettingsRef.current
             if (lastSuccessfulSettings) {
               applySettings(lastSuccessfulSettings)
             }
             const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
-            presentToast(translate('configuration.saveFailed'), { durationMs: 5000 })
+            const classified = classifyModelSettingsSaveError(error)
+            const message =
+              classified.code === 'duplicate_model_id'
+                ? formatTranslation(translate, 'configuration.duplicateModelId', {
+                    modelId: classified.modelId
+                  })
+                : translate('configuration.saveFailed')
+            presentToast(message, { durationMs: 5000 })
           }
-          throw new Error('Model settings could not be saved')
+          throw error
         })
 
       saveQueueRef.current = save.then(

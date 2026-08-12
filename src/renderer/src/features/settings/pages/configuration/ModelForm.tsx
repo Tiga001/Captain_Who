@@ -2,6 +2,7 @@ import { useMemo, useState, type FormEvent } from 'react'
 import { ChevronDown } from 'lucide-react'
 import type { ProviderProfileUiDescriptor } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
+import { formatTranslation } from '../../../../config/translationFormat'
 import { DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS } from '../../../../config/modelConfig'
 import { SettingsSelect } from '../../components/SettingsSelect'
 import type { SettingsSelectOption } from '../../components/SettingsSelect'
@@ -18,6 +19,7 @@ import {
   type DeepSeekProviderSettingsDraft
 } from './providerSettingsEditors'
 import { SecretInput } from './SecretInput'
+import { classifyModelSettingsSaveError, type ModelSettingsSaveError } from './modelSettingsErrors'
 
 interface ModelFormProps {
   model?: ModelConfig
@@ -82,7 +84,7 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
   const [providerProfile, setProviderProfile] = useState(initialProviderProfile)
   const [isProviderSettingsOpen, setProviderSettingsOpen] = useState(false)
   const [isSaving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState(false)
+  const [saveError, setSaveError] = useState<ModelSettingsSaveError | null>(null)
   const [isAdvancedOpen, setIsAdvancedOpen] = useState(
     Boolean(
       initialValues.apiUrlOverride.trim() ||
@@ -145,7 +147,7 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
     event.preventDefault()
     if (!canSave || isSaving) return
     setSaving(true)
-    setSaveError(false)
+    setSaveError(null)
     try {
       await onSave({
         ...values,
@@ -163,13 +165,13 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
         outputPrice: values.outputPrice.trim() || '0',
         providerProfileUpdate: providerProfile.update
       })
-    } catch {
+    } catch (error) {
       // The settings provider restores the last Host-authoritative snapshot and presents the
       // sanitized failure. Restore this local draft too, without reflecting raw Provider details.
       setValues(initialValues)
       setProviderProfile(initialProviderProfile)
       setProviderSettingsOpen(false)
-      setSaveError(true)
+      setSaveError(classifyModelSettingsSaveError(error))
     } finally {
       setSaving(false)
     }
@@ -449,7 +451,11 @@ export function ModelForm({ model, providerProfileDescriptors, onCancel, onSave 
 
       {saveError && (
         <p className="model-form-field-error" role="alert">
-          {t('configuration.saveFailedSafe')}
+          {saveError.code === 'duplicate_model_id'
+            ? formatTranslation(t, 'configuration.duplicateModelId', {
+                modelId: saveError.modelId
+              })
+            : t('configuration.saveFailedSafe')}
         </p>
       )}
 

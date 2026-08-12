@@ -148,9 +148,75 @@ describe('model settings IPC', () => {
     await expect(handlers.get('host:storage.loadProviderProfileUiDescriptors')?.({})).resolves.toBe(
       descriptors
     )
-    await expect(handlers.get('host:storage.saveModelSettings')?.({}, settings)).resolves.toBe(
-      settings
-    )
+    await expect(handlers.get('host:storage.saveModelSettings')?.({}, settings)).resolves.toEqual({
+      ok: true,
+      value: settings
+    })
     expect(coreServer.saveModelSettings).toHaveBeenCalledWith(settings)
+  })
+
+  it('projects only the bounded duplicate-model validation error', async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const data = {
+      kind: 'model_settings_validation',
+      code: 'duplicate_model_id',
+      modelId: 'deepseek-v4-flash'
+    }
+    const coreServer = {
+      saveModelSettings: vi.fn().mockRejectedValue(
+        Object.assign(new Error('模型 ID 重复：deepseek-v4-flash'), {
+          code: -32000,
+          data
+        })
+      )
+    }
+    registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
+
+    await expect(
+      handlers.get('host:storage.saveModelSettings')?.({}, { models: [] })
+    ).resolves.toEqual({
+      ok: false,
+      error: {
+        message: 'Model settings validation failed.',
+        code: -32000,
+        data
+      }
+    })
+  })
+
+  it.each([
+    new Error('SQLITE_BUSY: private storage path'),
+    Object.assign(new Error('duplicate with expanded private data'), {
+      code: -32000,
+      data: {
+        kind: 'model_settings_validation',
+        code: 'duplicate_model_id',
+        modelId: 'model-a',
+        apiToken: 'private-token'
+      }
+    })
+  ])('redacts unknown or malformed model-settings failures', async (failure) => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ipcMain = {
+      handle: vi.fn((channel: string, handler: (...args: unknown[]) => unknown) => {
+        handlers.set(channel, handler)
+      }),
+      on: vi.fn()
+    }
+    const coreServer = { saveModelSettings: vi.fn().mockRejectedValue(failure) }
+    registerStorageIpc(ipcMain as never, coreServer as never, {} as never)
+
+    await expect(
+      handlers.get('host:storage.saveModelSettings')?.({}, { models: [] })
+    ).resolves.toEqual({
+      ok: false,
+      error: { message: 'Model settings save failed.' }
+    })
   })
 })

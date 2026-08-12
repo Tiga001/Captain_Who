@@ -7,6 +7,7 @@ import {
 import {
   parseStorageForkConversationErrorData,
   parseStorageForkConversationRequest,
+  parseStorageModelSettingsValidationErrorData,
   type StorageImageFileRecord,
   type StorageProjectRecord
 } from '@mycopilot/protocol'
@@ -37,7 +38,7 @@ export function registerStorageIpc(
     coreServer.loadProviderProfileUiDescriptors()
   )
   ipcMain.handle(HOST_CHANNELS.storage.saveModelSettings, (_event, settings) =>
-    coreServer.saveModelSettings(settings)
+    captureModelSettingsSaveInvocation(() => coreServer.saveModelSettings(settings))
   )
   ipcMain.handle(HOST_CHANNELS.storage.loadAgentPromptPreferences, () =>
     coreServer.loadAgentPromptPreferences()
@@ -137,6 +138,34 @@ async function captureConversationForkInvocation<T>(
     return {
       ok: false,
       error: { message: 'Conversation fork failed.' }
+    }
+  }
+}
+
+/**
+ * Projects only the narrow validation recovery contract that model-settings UI can act on.
+ * Core diagnostics, connection details, and provider responses never cross into Renderer.
+ */
+async function captureModelSettingsSaveInvocation<T>(
+  operation: () => Promise<T>
+): Promise<HostInvocationResult<T>> {
+  const result = await captureHostInvocation(operation)
+  if (result.ok) return result
+
+  try {
+    const data = parseStorageModelSettingsValidationErrorData(result.error.data)
+    return {
+      ok: false,
+      error: {
+        message: 'Model settings validation failed.',
+        ...(result.error.code === undefined ? {} : { code: result.error.code }),
+        data
+      }
+    }
+  } catch {
+    return {
+      ok: false,
+      error: { message: 'Model settings save failed.' }
     }
   }
 }
