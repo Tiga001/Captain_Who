@@ -318,6 +318,54 @@ CREATE TABLE projects (
             pinned_at INTEGER,
             updated_at INTEGER NOT NULL
         );
+CREATE TABLE agent_templates (
+            template_id TEXT PRIMARY KEY CHECK (
+                typeof(template_id) = 'text'
+                AND length(CAST(template_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            project_id TEXT NOT NULL,
+            machine_key TEXT NOT NULL CHECK (
+                length(CAST(machine_key AS BLOB)) BETWEEN 1 AND 64
+                AND machine_key = lower(machine_key)
+                AND substr(machine_key, 1, 1) GLOB '[a-z]'
+                AND machine_key NOT GLOB '*[^a-z0-9_-]*'
+            ),
+            name TEXT NOT NULL CHECK (
+                length(CAST(name AS BLOB)) BETWEEN 1 AND 256
+                AND name = trim(name)
+            ),
+            description TEXT NOT NULL CHECK (
+                length(CAST(description AS BLOB)) <= 4096
+            ),
+            instructions TEXT NOT NULL CHECK (
+                length(CAST(instructions AS BLOB)) BETWEEN 1 AND 65536
+                AND instructions = trim(instructions)
+            ),
+            model_config_id TEXT NOT NULL CHECK (
+                length(CAST(model_config_id AS BLOB)) BETWEEN 1 AND 512
+                AND model_config_id = trim(model_config_id)
+            ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            UNIQUE(project_id, machine_key),
+            UNIQUE(project_id, name),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+CREATE TRIGGER prevent_agent_template_identity_update
+        BEFORE UPDATE OF template_id, project_id, machine_key, schema_version, created_at
+        ON agent_templates
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent template identity is immutable');
+        END;
+CREATE TRIGGER validate_agent_template_revision_update
+        BEFORE UPDATE ON agent_templates
+        WHEN NEW.revision != OLD.revision + 1 OR NEW.updated_at <= OLD.updated_at
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid Agent template revision transition');
+        END;
 CREATE TABLE conversations (
             id TEXT PRIMARY KEY,
             project_id TEXT,
@@ -650,12 +698,660 @@ CREATE TABLE agent_file_draft_operations (
             PRIMARY KEY (draft_id, sequence),
             FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
         );
+CREATE TABLE agent_nodes (
+            agent_id TEXT PRIMARY KEY CHECK (
+                typeof(agent_id) = 'text'
+                AND length(CAST(agent_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            root_agent_id TEXT NOT NULL CHECK (
+                length(CAST(root_agent_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            root_conversation_id TEXT NOT NULL CHECK (
+                length(CAST(root_conversation_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            parent_agent_id TEXT CHECK (
+                parent_agent_id IS NULL
+                OR length(CAST(parent_agent_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            conversation_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(conversation_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            project_id TEXT,
+            creation_request_id TEXT NOT NULL CHECK (
+                length(CAST(creation_request_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            task_name TEXT NOT NULL CHECK (
+                length(CAST(task_name AS BLOB)) BETWEEN 1 AND 256
+                AND task_name = trim(task_name)
+            ),
+            task_path TEXT NOT NULL CHECK (
+                length(CAST(task_path AS BLOB)) BETWEEN 1 AND 2048
+                AND substr(task_path, 1, 1) = '/'
+                AND task_path = trim(task_path)
+            ),
+            template_id_snapshot TEXT,
+            template_project_id_snapshot TEXT,
+            template_machine_key_snapshot TEXT,
+            template_name_snapshot TEXT,
+            template_description_snapshot TEXT,
+            template_instructions_snapshot TEXT,
+            template_revision_snapshot INTEGER,
+            template_model_config_id_snapshot TEXT,
+            model_config_id_snapshot TEXT,
+            model_display_name_snapshot TEXT,
+            model_supports_image_snapshot INTEGER CHECK (
+                model_supports_image_snapshot IS NULL
+                OR model_supports_image_snapshot IN (0, 1)
+            ),
+            model_context_window_tokens_snapshot INTEGER CHECK (
+                model_context_window_tokens_snapshot IS NULL
+                OR model_context_window_tokens_snapshot > 0
+            ),
+            model_settings_revision_snapshot TEXT,
+            provider_connection_revision_snapshot TEXT,
+            provider_protocol_revision_snapshot TEXT,
+            lifecycle TEXT NOT NULL CHECK (
+                lifecycle IN ('active', 'archived', 'disabled')
+            ),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            UNIQUE(agent_id, root_agent_id),
+            UNIQUE(agent_id, root_agent_id, root_conversation_id),
+            UNIQUE(root_agent_id, creation_request_id),
+            UNIQUE(root_agent_id, task_name),
+            UNIQUE(root_agent_id, task_path),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+            FOREIGN KEY (root_agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (parent_agent_id, root_agent_id, root_conversation_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id, root_conversation_id)
+                ON DELETE RESTRICT,
+            FOREIGN KEY (root_conversation_id) REFERENCES conversations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE RESTRICT,
+            CHECK (
+                (
+                    parent_agent_id IS NULL
+                    AND agent_id = root_agent_id
+                    AND conversation_id = root_conversation_id
+                    AND task_path = '/root'
+                ) OR (
+                    parent_agent_id IS NOT NULL
+                    AND agent_id != root_agent_id
+                    AND conversation_id != root_conversation_id
+                    AND model_config_id_snapshot IS NOT NULL
+                )
+            ),
+            CHECK (
+                (
+                    template_id_snapshot IS NULL
+                    AND template_project_id_snapshot IS NULL
+                    AND template_machine_key_snapshot IS NULL
+                    AND template_name_snapshot IS NULL
+                    AND template_description_snapshot IS NULL
+                    AND template_instructions_snapshot IS NULL
+                    AND template_revision_snapshot IS NULL
+                    AND template_model_config_id_snapshot IS NULL
+                ) OR (
+                    template_id_snapshot IS NOT NULL
+                    AND template_project_id_snapshot IS NOT NULL
+                    AND template_machine_key_snapshot IS NOT NULL
+                    AND template_name_snapshot IS NOT NULL
+                    AND template_description_snapshot IS NOT NULL
+                    AND template_instructions_snapshot IS NOT NULL
+                    AND template_revision_snapshot > 0
+                    AND template_model_config_id_snapshot IS NOT NULL
+                )
+            ),
+            CHECK (
+                (
+                    model_config_id_snapshot IS NULL
+                    AND model_display_name_snapshot IS NULL
+                    AND model_supports_image_snapshot IS NULL
+                    AND model_context_window_tokens_snapshot IS NULL
+                    AND model_settings_revision_snapshot IS NULL
+                    AND provider_connection_revision_snapshot IS NULL
+                    AND provider_protocol_revision_snapshot IS NULL
+                ) OR (
+                    model_config_id_snapshot IS NOT NULL
+                    AND model_display_name_snapshot IS NOT NULL
+                    AND model_supports_image_snapshot IS NOT NULL
+                    AND model_context_window_tokens_snapshot > 0
+                    AND model_settings_revision_snapshot IS NOT NULL
+                    AND provider_connection_revision_snapshot IS NOT NULL
+                    AND provider_protocol_revision_snapshot IS NOT NULL
+                )
+            )
+        );
+CREATE UNIQUE INDEX agent_nodes_root_conversation_identity
+            ON agent_nodes(root_conversation_id)
+            WHERE parent_agent_id IS NULL;
+CREATE INDEX agent_nodes_parent
+            ON agent_nodes(root_agent_id, parent_agent_id, created_at, agent_id);
+CREATE INDEX agent_nodes_conversation
+            ON agent_nodes(conversation_id);
+CREATE TRIGGER validate_agent_node_project_insert
+        BEFORE INSERT ON agent_nodes
+        WHEN (
+            (
+                SELECT project_id FROM conversations WHERE id = NEW.conversation_id
+            ) IS NOT NEW.project_id
+            OR NEW.project_id IS NOT (
+                SELECT project_id FROM conversations WHERE id = NEW.root_conversation_id
+            )
+        ) OR (
+            NEW.template_id_snapshot IS NOT NULL
+            AND NEW.template_project_id_snapshot IS NOT (
+                SELECT project_id FROM conversations WHERE id = NEW.root_conversation_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent conversation project must match its root');
+        END;
+CREATE TRIGGER validate_child_agent_conversation_fresh_insert
+        BEFORE INSERT ON agent_nodes
+        WHEN NEW.parent_agent_id IS NOT NULL AND (
+            EXISTS (
+                SELECT 1 FROM messages WHERE conversation_id = NEW.conversation_id
+            ) OR EXISTS (
+                SELECT 1 FROM conversation_turn_traces
+                WHERE conversation_id = NEW.conversation_id
+            ) OR EXISTS (
+                SELECT 1 FROM agent_pending_actions
+                WHERE conversation_id = NEW.conversation_id
+            ) OR EXISTS (
+                SELECT 1 FROM agent_action_audit
+                WHERE conversation_id = NEW.conversation_id
+            ) OR EXISTS (
+                SELECT 1 FROM agent_command_sessions
+                WHERE conversation_id = NEW.conversation_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Low-level child Agent binding requires a fresh execution-free conversation');
+        END;
+CREATE TRIGGER validate_child_agent_conversation_model_insert
+        BEFORE INSERT ON agent_nodes
+        WHEN NEW.parent_agent_id IS NOT NULL
+          AND (
+              SELECT model_id FROM conversations WHERE id = NEW.conversation_id
+          ) IS NOT NEW.model_config_id_snapshot
+        BEGIN
+            SELECT RAISE(ABORT, 'Child Agent conversation model must match its frozen model snapshot');
+        END;
+CREATE TRIGGER validate_agent_node_parent_path_insert
+        BEFORE INSERT ON agent_nodes
+        WHEN NEW.parent_agent_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM agent_nodes AS parent
+            WHERE parent.agent_id = NEW.parent_agent_id
+              AND parent.root_agent_id = NEW.root_agent_id
+              AND parent.lifecycle = 'active'
+              AND length(NEW.task_path) > length(parent.task_path) + 1
+              AND substr(NEW.task_path, 1, length(parent.task_path) + 1)
+                    = parent.task_path || '/'
+              AND instr(
+                    substr(NEW.task_path, length(parent.task_path) + 2), '/'
+                  ) = 0
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent task path must be one active-parent segment');
+        END;
+CREATE TRIGGER validate_agent_node_template_snapshot_insert
+        BEFORE INSERT ON agent_nodes
+        WHEN NEW.template_id_snapshot IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM agent_templates AS template
+            WHERE template.template_id = NEW.template_id_snapshot
+              AND template.project_id = NEW.template_project_id_snapshot
+              AND template.machine_key = NEW.template_machine_key_snapshot
+              AND template.name = NEW.template_name_snapshot
+              AND template.description = NEW.template_description_snapshot
+              AND template.instructions = NEW.template_instructions_snapshot
+              AND template.revision = NEW.template_revision_snapshot
+              AND template.model_config_id = NEW.template_model_config_id_snapshot
+              AND template.enabled = 1
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent template snapshot is stale or unavailable');
+        END;
+CREATE TRIGGER prevent_agent_node_identity_update
+        BEFORE UPDATE OF
+            agent_id, schema_version, root_agent_id, root_conversation_id, parent_agent_id,
+            conversation_id, project_id, creation_request_id, task_name, task_path,
+            template_id_snapshot, template_project_id_snapshot, template_machine_key_snapshot,
+            template_name_snapshot, template_description_snapshot, template_instructions_snapshot,
+            template_revision_snapshot, template_model_config_id_snapshot,
+            model_config_id_snapshot, model_display_name_snapshot,
+            model_supports_image_snapshot, model_context_window_tokens_snapshot,
+            model_settings_revision_snapshot, provider_connection_revision_snapshot,
+            provider_protocol_revision_snapshot, created_at
+        ON agent_nodes
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent node identity and creation snapshot are immutable');
+        END;
+CREATE TRIGGER validate_agent_node_lifecycle_update
+        BEFORE UPDATE OF lifecycle, revision, updated_at ON agent_nodes
+        WHEN NOT (
+            NEW.revision = OLD.revision + 1
+            AND NEW.updated_at > OLD.updated_at
+            AND (
+                NEW.lifecycle = OLD.lifecycle
+                OR NEW.lifecycle IN ('active', 'archived', 'disabled')
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid Agent lifecycle revision transition');
+        END;
+CREATE TRIGGER prevent_agent_lifecycle_deactivation_with_pending_wake
+        BEFORE UPDATE OF lifecycle ON agent_nodes
+        WHEN NEW.lifecycle != 'active'
+          AND EXISTS (
+              SELECT 1 FROM agent_wake_requests
+              WHERE (agent_id = OLD.agent_id OR requester_agent_id = OLD.agent_id)
+                AND status IN ('queued', 'claimed', 'running', 'waiting_for_approval')
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent has an unsettled wake request');
+        END;
+CREATE TRIGGER prevent_agent_lifecycle_deactivation_with_pending_mailbox
+        BEFORE UPDATE OF lifecycle ON agent_nodes
+        WHEN NEW.lifecycle != 'active'
+          AND EXISTS (
+              SELECT 1 FROM agent_mailbox_messages
+              WHERE (sender_agent_id = OLD.agent_id OR recipient_agent_id = OLD.agent_id)
+                AND delivery_status != 'acknowledged'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent has an unsettled mailbox message');
+        END;
+CREATE TRIGGER prevent_agent_lifecycle_deactivation_with_active_children
+        BEFORE UPDATE OF lifecycle ON agent_nodes
+        WHEN NEW.lifecycle != 'active'
+          AND EXISTS (
+              SELECT 1 FROM agent_nodes
+              WHERE parent_agent_id = OLD.agent_id AND lifecycle = 'active'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent has an active child');
+        END;
+CREATE TRIGGER validate_agent_lifecycle_activation_parent
+        BEFORE UPDATE OF lifecycle ON agent_nodes
+        WHEN NEW.lifecycle = 'active'
+          AND OLD.lifecycle != 'active'
+          AND OLD.parent_agent_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_nodes
+              WHERE agent_id = OLD.parent_agent_id
+                AND root_agent_id = OLD.root_agent_id
+                AND lifecycle = 'active'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent parent must be active before child activation');
+        END;
+CREATE TRIGGER prevent_agent_bound_conversation_project_update
+        BEFORE UPDATE OF project_id ON conversations
+        WHEN NEW.project_id IS NOT OLD.project_id
+          AND EXISTS (
+              SELECT 1 FROM agent_nodes
+              WHERE conversation_id = OLD.id OR root_conversation_id = OLD.id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent-bound conversation project is immutable');
+        END;
+CREATE TRIGGER prevent_child_agent_conversation_model_update
+        BEFORE UPDATE OF model_id ON conversations
+        WHEN NEW.model_id IS NOT OLD.model_id
+          AND EXISTS (
+              SELECT 1 FROM agent_nodes
+              WHERE conversation_id = OLD.id
+                AND parent_agent_id IS NOT NULL
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Child Agent conversation model is immutable');
+        END;
+CREATE TABLE agent_mailbox_messages (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(message_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            root_agent_id TEXT NOT NULL,
+            sender_agent_id TEXT NOT NULL,
+            recipient_agent_id TEXT NOT NULL,
+            request_id TEXT NOT NULL CHECK (
+                length(CAST(request_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            kind TEXT NOT NULL CHECK (kind IN ('task', 'message', 'followup', 'result')),
+            content TEXT NOT NULL CHECK (
+                length(CAST(content AS BLOB)) BETWEEN 1 AND 1048576
+            ),
+            projection_message_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(projection_message_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            delivery_status TEXT NOT NULL CHECK (
+                delivery_status IN ('queued', 'claimed', 'acknowledged')
+            ),
+            claim_token TEXT,
+            lease_expires_at INTEGER,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            claimed_at INTEGER,
+            acknowledged_at INTEGER,
+            UNIQUE(sender_agent_id, request_id),
+            UNIQUE(message_id, root_agent_id, sender_agent_id, recipient_agent_id),
+            FOREIGN KEY (sender_agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (recipient_agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            CHECK (sender_agent_id != recipient_agent_id),
+            CHECK (
+                (delivery_status = 'queued'
+                    AND claim_token IS NULL
+                    AND lease_expires_at IS NULL
+                    AND claimed_at IS NULL
+                    AND acknowledged_at IS NULL)
+                OR (delivery_status = 'claimed'
+                    AND claim_token IS NOT NULL
+                    AND lease_expires_at IS NOT NULL
+                    AND lease_expires_at > claimed_at
+                    AND claimed_at IS NOT NULL
+                    AND acknowledged_at IS NULL)
+                OR (delivery_status = 'acknowledged'
+                    AND claim_token IS NOT NULL
+                    AND lease_expires_at IS NOT NULL
+                    AND claimed_at IS NOT NULL
+                    AND acknowledged_at IS NOT NULL)
+            )
+        );
+CREATE TRIGGER validate_agent_mailbox_active_participants_insert
+        BEFORE INSERT ON agent_mailbox_messages
+        WHEN (
+            SELECT lifecycle FROM agent_nodes WHERE agent_id = NEW.sender_agent_id
+        ) != 'active' OR (
+            SELECT lifecycle FROM agent_nodes WHERE agent_id = NEW.recipient_agent_id
+        ) != 'active'
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox participants must be active');
+        END;
+CREATE INDEX agent_mailbox_recipient_pending
+            ON agent_mailbox_messages(recipient_agent_id, delivery_status, sequence);
+CREATE UNIQUE INDEX agent_mailbox_claim_token_identity
+            ON agent_mailbox_messages(claim_token)
+            WHERE claim_token IS NOT NULL;
+CREATE UNIQUE INDEX agent_mailbox_one_claimed_per_recipient
+            ON agent_mailbox_messages(recipient_agent_id)
+            WHERE delivery_status = 'claimed';
+CREATE TRIGGER validate_agent_mailbox_projection_identity_insert
+        BEFORE INSERT ON agent_mailbox_messages
+        WHEN EXISTS (
+            SELECT 1 FROM messages WHERE id = NEW.projection_message_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox projection identity is already in use');
+        END;
+CREATE TRIGGER prevent_agent_mailbox_identity_update
+        BEFORE UPDATE OF
+            sequence, message_id, schema_version, root_agent_id, sender_agent_id, recipient_agent_id,
+            request_id, kind, content, projection_message_id, created_at
+        ON agent_mailbox_messages
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox identity and payload are immutable');
+        END;
+CREATE TRIGGER validate_agent_mailbox_delivery_transition
+        BEFORE UPDATE OF delivery_status ON agent_mailbox_messages
+        WHEN NEW.delivery_status != OLD.delivery_status AND NOT (
+            (OLD.delivery_status = 'queued' AND NEW.delivery_status = 'claimed')
+            OR (OLD.delivery_status = 'claimed'
+                AND NEW.delivery_status IN ('queued', 'acknowledged'))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'illegal Agent mailbox delivery transition');
+        END;
+CREATE TRIGGER prevent_agent_mailbox_claim_reassignment
+        BEFORE UPDATE OF claim_token ON agent_mailbox_messages
+        WHEN OLD.claim_token IS NOT NULL
+          AND NEW.claim_token IS NOT OLD.claim_token
+          AND NEW.delivery_status != 'queued'
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox claim token is immutable while claimed');
+        END;
+CREATE TRIGGER validate_agent_mailbox_lease_update
+        BEFORE UPDATE OF lease_expires_at ON agent_mailbox_messages
+        WHEN OLD.delivery_status = 'claimed'
+          AND NEW.delivery_status = 'claimed'
+          AND NEW.lease_expires_at IS NOT OLD.lease_expires_at
+          AND (
+              NEW.claim_token IS NOT OLD.claim_token
+              OR NEW.lease_expires_at IS NULL
+              OR NEW.lease_expires_at <= OLD.lease_expires_at
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox lease renewal must advance for the same claim');
+        END;
+CREATE TRIGGER prevent_agent_mailbox_claim_time_rewrite
+        BEFORE UPDATE OF claimed_at ON agent_mailbox_messages
+        WHEN OLD.claimed_at IS NOT NULL
+          AND NEW.claimed_at IS NOT OLD.claimed_at
+          AND NEW.delivery_status != 'queued'
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox claim time is immutable while claimed');
+        END;
+CREATE TRIGGER prevent_agent_mailbox_acknowledgement_rewrite
+        BEFORE UPDATE OF delivery_status, claim_token, lease_expires_at, claimed_at, acknowledged_at
+        ON agent_mailbox_messages
+        WHEN OLD.delivery_status = 'acknowledged' AND (
+            NEW.delivery_status IS NOT OLD.delivery_status
+            OR NEW.claim_token IS NOT OLD.claim_token
+            OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
+            OR NEW.claimed_at IS NOT OLD.claimed_at
+            OR NEW.acknowledged_at IS NOT OLD.acknowledged_at
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox acknowledgement is immutable');
+        END;
+CREATE TABLE agent_wake_requests (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            wake_id TEXT NOT NULL UNIQUE CHECK (
+                length(CAST(wake_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            root_agent_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            requester_agent_id TEXT NOT NULL,
+            request_id TEXT NOT NULL CHECK (
+                length(CAST(request_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            source_agent_message_id TEXT,
+            status TEXT NOT NULL CHECK (status IN (
+                'queued', 'claimed', 'running', 'waiting_for_approval',
+                'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown'
+            )),
+            claim_token TEXT,
+            lease_expires_at INTEGER,
+            result_message_id TEXT UNIQUE,
+            terminal_error TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            claimed_at INTEGER,
+            started_at INTEGER,
+            completed_at INTEGER,
+            UNIQUE(requester_agent_id, request_id),
+            UNIQUE(source_agent_message_id),
+            FOREIGN KEY (agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (requester_agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (
+                source_agent_message_id, root_agent_id, requester_agent_id, agent_id
+            ) REFERENCES agent_mailbox_messages(
+                message_id, root_agent_id, sender_agent_id, recipient_agent_id
+            ) ON DELETE RESTRICT,
+            FOREIGN KEY (
+                result_message_id, root_agent_id, agent_id, requester_agent_id
+            ) REFERENCES agent_mailbox_messages(
+                message_id, root_agent_id, sender_agent_id, recipient_agent_id
+            ) ON DELETE RESTRICT,
+            CHECK (agent_id != requester_agent_id),
+            CHECK (
+                (status = 'queued'
+                    AND claim_token IS NULL
+                    AND lease_expires_at IS NULL
+                    AND claimed_at IS NULL
+                    AND started_at IS NULL
+                    AND completed_at IS NULL)
+                OR (status = 'claimed'
+                    AND claim_token IS NOT NULL
+                    AND lease_expires_at IS NOT NULL
+                    AND lease_expires_at > claimed_at
+                    AND claimed_at IS NOT NULL
+                    AND started_at IS NULL
+                    AND completed_at IS NULL)
+                OR (status IN ('running', 'waiting_for_approval')
+                    AND claim_token IS NOT NULL
+                    AND lease_expires_at IS NOT NULL
+                    AND lease_expires_at > claimed_at
+                    AND claimed_at IS NOT NULL
+                    AND started_at IS NOT NULL
+                    AND completed_at IS NULL)
+                OR (status IN ('completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown')
+                    AND completed_at IS NOT NULL)
+            ),
+            CHECK (
+                result_message_id IS NULL
+                OR status IN ('completed', 'failed', 'interrupted', 'outcome_unknown')
+            ),
+            CHECK (
+                terminal_error IS NULL
+                OR status IN ('failed', 'interrupted', 'outcome_unknown')
+            )
+        );
+CREATE TRIGGER validate_agent_wake_active_target_insert
+        BEFORE INSERT ON agent_wake_requests
+        WHEN NOT EXISTS (
+            SELECT 1 FROM agent_nodes
+            WHERE agent_id = NEW.agent_id
+              AND root_agent_id = NEW.root_agent_id
+              AND lifecycle = 'active'
+        ) OR (
+            NEW.source_agent_message_id IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM agent_mailbox_messages
+                WHERE message_id = NEW.source_agent_message_id
+                  AND delivery_status = 'acknowledged'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake target must be active and its source delivered');
+        END;
+CREATE UNIQUE INDEX agent_wake_one_active_turn
+            ON agent_wake_requests(agent_id)
+            WHERE status IN ('claimed', 'running', 'waiting_for_approval');
+CREATE INDEX agent_wake_dispatch_queue
+            ON agent_wake_requests(status, sequence);
+CREATE UNIQUE INDEX agent_wake_claim_token_identity
+            ON agent_wake_requests(claim_token)
+            WHERE claim_token IS NOT NULL;
+CREATE TRIGGER prevent_agent_wake_identity_update
+        BEFORE UPDATE OF
+            sequence, wake_id, schema_version, root_agent_id, agent_id, requester_agent_id,
+            request_id, source_agent_message_id, created_at
+        ON agent_wake_requests
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake identity is immutable');
+        END;
+CREATE TRIGGER validate_agent_wake_transition
+        BEFORE UPDATE OF status ON agent_wake_requests
+        WHEN NEW.status != OLD.status AND NOT (
+            (OLD.status = 'queued' AND NEW.status IN ('claimed', 'cancelled'))
+            OR (OLD.status = 'claimed' AND NEW.status IN (
+                'queued', 'running', 'interrupted', 'cancelled', 'outcome_unknown'
+            ))
+            OR (OLD.status = 'running' AND NEW.status IN (
+                'waiting_for_approval', 'completed', 'failed', 'interrupted',
+                'cancelled', 'outcome_unknown'
+            ))
+            OR (OLD.status = 'waiting_for_approval' AND NEW.status IN (
+                'running', 'completed', 'failed', 'interrupted',
+                'cancelled', 'outcome_unknown'
+            ))
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'illegal Agent wake transition');
+        END;
+CREATE TRIGGER prevent_agent_wake_claim_reassignment
+        BEFORE UPDATE OF claim_token ON agent_wake_requests
+        WHEN OLD.claim_token IS NOT NULL
+          AND NEW.claim_token IS NOT OLD.claim_token
+          AND NEW.status != 'queued'
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake claim token is immutable while active');
+        END;
+CREATE TRIGGER validate_agent_wake_lease_update
+        BEFORE UPDATE OF lease_expires_at ON agent_wake_requests
+        WHEN OLD.status IN ('claimed', 'running', 'waiting_for_approval')
+          AND NEW.status IN ('claimed', 'running', 'waiting_for_approval')
+          AND NEW.lease_expires_at IS NOT OLD.lease_expires_at
+          AND (
+              NEW.claim_token IS NOT OLD.claim_token
+              OR NEW.lease_expires_at IS NULL
+              OR NEW.lease_expires_at <= OLD.lease_expires_at
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake lease renewal must advance for the same claim');
+        END;
+CREATE TRIGGER validate_agent_wake_result_kind
+        BEFORE UPDATE OF result_message_id ON agent_wake_requests
+        WHEN NEW.result_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_mailbox_messages
+              WHERE message_id = NEW.result_message_id AND kind = 'result'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake result must reference a result mailbox message');
+        END;
+CREATE TRIGGER prevent_agent_wake_claim_time_rewrite
+        BEFORE UPDATE OF claimed_at ON agent_wake_requests
+        WHEN OLD.claimed_at IS NOT NULL
+          AND NEW.claimed_at IS NOT OLD.claimed_at
+          AND NEW.status = OLD.status
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake claim time is immutable within a state');
+        END;
+CREATE TRIGGER prevent_agent_wake_start_time_rewrite
+        BEFORE UPDATE OF started_at ON agent_wake_requests
+        WHEN OLD.started_at IS NOT NULL
+          AND NEW.started_at IS NOT OLD.started_at
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake start time is immutable');
+        END;
+CREATE TRIGGER prevent_agent_wake_terminal_rewrite
+        BEFORE UPDATE OF
+            status, claim_token, lease_expires_at, result_message_id, terminal_error,
+            claimed_at, started_at, completed_at
+        ON agent_wake_requests
+        WHEN OLD.status IN (
+            'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown'
+        ) AND (
+            NEW.status IS NOT OLD.status
+            OR NEW.claim_token IS NOT OLD.claim_token
+            OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
+            OR NEW.result_message_id IS NOT OLD.result_message_id
+            OR NEW.terminal_error IS NOT OLD.terminal_error
+            OR NEW.claimed_at IS NOT OLD.claimed_at
+            OR NEW.started_at IS NOT OLD.started_at
+            OR NEW.completed_at IS NOT OLD.completed_at
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake terminal fact is immutable');
+        END;
 CREATE TABLE messages (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             status TEXT,
+            input_origin_kind TEXT CHECK (
+                input_origin_kind IS NULL OR input_origin_kind IN ('human', 'agent')
+            ),
+            input_origin_agent_id TEXT,
+            source_agent_message_id TEXT UNIQUE,
             agent_run_json TEXT CHECK (
                 agent_run_json IS NULL OR json_valid(agent_run_json)
             ),
@@ -664,8 +1360,131 @@ CREATE TABLE messages (
             ),
             created_at INTEGER NOT NULL,
             position INTEGER NOT NULL,
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (input_origin_agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (source_agent_message_id)
+                REFERENCES agent_mailbox_messages(message_id) ON DELETE RESTRICT,
+            CHECK (
+                (input_origin_kind IS NULL
+                    AND input_origin_agent_id IS NULL
+                    AND source_agent_message_id IS NULL)
+                OR (input_origin_kind = 'human'
+                    AND role = 'user'
+                    AND input_origin_agent_id IS NULL
+                    AND source_agent_message_id IS NULL)
+                OR (input_origin_kind = 'agent'
+                    AND role = 'user'
+                    AND input_origin_agent_id IS NOT NULL
+                    AND source_agent_message_id IS NOT NULL)
+            )
         );
+CREATE TRIGGER validate_agent_message_projection_insert
+        BEFORE INSERT ON messages
+        WHEN NEW.input_origin_kind = 'agent'
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM agent_mailbox_messages AS mailbox
+                INNER JOIN agent_nodes AS recipient
+                    ON recipient.agent_id = mailbox.recipient_agent_id
+                WHERE mailbox.message_id = NEW.source_agent_message_id
+                  AND mailbox.sender_agent_id = NEW.input_origin_agent_id
+                  AND mailbox.projection_message_id = NEW.id
+                  AND mailbox.content = NEW.content
+                  AND mailbox.delivery_status = 'claimed'
+                  AND recipient.conversation_id = NEW.conversation_id
+            ) THEN RAISE(ABORT, 'invalid Agent mailbox message projection') END;
+        END;
+CREATE TRIGGER prevent_human_input_to_child_agent
+        BEFORE INSERT ON messages
+        WHEN NEW.role = 'user'
+          AND (NEW.input_origin_kind IS NULL OR NEW.input_origin_kind = 'human')
+          AND EXISTS (
+              SELECT 1 FROM agent_nodes
+              WHERE conversation_id = NEW.conversation_id
+                AND parent_agent_id IS NOT NULL
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Child Agent conversations accept only Agent-origin input');
+        END;
+CREATE TRIGGER prevent_human_input_update_to_child_agent
+        BEFORE UPDATE OF role, input_origin_kind, input_origin_agent_id, source_agent_message_id
+        ON messages
+        WHEN NEW.role = 'user'
+          AND (NEW.input_origin_kind IS NULL OR NEW.input_origin_kind = 'human')
+          AND EXISTS (
+              SELECT 1 FROM agent_nodes
+              WHERE conversation_id = NEW.conversation_id
+                AND parent_agent_id IS NOT NULL
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Child Agent conversations accept only Agent-origin input');
+        END;
+CREATE TRIGGER validate_agent_message_projection_update
+        BEFORE UPDATE OF
+            id, conversation_id, role, content, input_origin_kind,
+            input_origin_agent_id, source_agent_message_id
+        ON messages
+        WHEN NEW.input_origin_kind = 'agent'
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM agent_mailbox_messages AS mailbox
+                INNER JOIN agent_nodes AS recipient
+                    ON recipient.agent_id = mailbox.recipient_agent_id
+                WHERE mailbox.message_id = NEW.source_agent_message_id
+                  AND mailbox.sender_agent_id = NEW.input_origin_agent_id
+                  AND mailbox.projection_message_id = NEW.id
+                  AND mailbox.content = NEW.content
+                  AND mailbox.delivery_status IN ('claimed', 'acknowledged')
+                  AND recipient.conversation_id = NEW.conversation_id
+            ) THEN RAISE(ABORT, 'invalid Agent mailbox message projection') END;
+        END;
+CREATE TRIGGER prevent_agent_message_projection_rewrite
+        BEFORE UPDATE OF
+            id, conversation_id, role, content, status, input_origin_kind,
+            input_origin_agent_id, source_agent_message_id, created_at, position
+        ON messages
+        WHEN OLD.input_origin_kind = 'agent' AND (
+            NEW.id IS NOT OLD.id
+            OR NEW.conversation_id IS NOT OLD.conversation_id
+            OR NEW.role IS NOT OLD.role
+            OR NEW.content IS NOT OLD.content
+            OR NEW.status IS NOT OLD.status
+            OR NEW.input_origin_kind IS NOT OLD.input_origin_kind
+            OR NEW.input_origin_agent_id IS NOT OLD.input_origin_agent_id
+            OR NEW.source_agent_message_id IS NOT OLD.source_agent_message_id
+            OR NEW.created_at IS NOT OLD.created_at
+            OR NEW.position IS NOT OLD.position
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent message projection is immutable');
+        END;
+CREATE TRIGGER prevent_agent_message_projection_delete
+        BEFORE DELETE ON messages
+        WHEN OLD.input_origin_kind = 'agent'
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent message projection is immutable');
+        END;
+CREATE TRIGGER prevent_agent_message_projection_ui_rewrite
+        BEFORE UPDATE OF agent_run_json, ui_state_json ON messages
+        WHEN OLD.input_origin_kind = 'agent' AND (
+            NEW.agent_run_json IS NOT OLD.agent_run_json
+            OR NEW.ui_state_json IS NOT OLD.ui_state_json
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent input projection cannot carry mutable run UI state');
+        END;
+CREATE TRIGGER validate_agent_mailbox_acknowledgement
+        BEFORE UPDATE OF delivery_status ON agent_mailbox_messages
+        WHEN NEW.delivery_status = 'acknowledged' AND NOT EXISTS (
+            SELECT 1 FROM messages
+            WHERE source_agent_message_id = OLD.message_id
+              AND id = OLD.projection_message_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox acknowledgement requires its projection');
+        END;
 CREATE TABLE conversation_turn_traces (
             assistant_message_id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
@@ -1190,6 +2009,16 @@ CREATE TABLE conversation_forks (
             FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
             FOREIGN KEY (target_message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
+CREATE TRIGGER prevent_agent_bound_conversation_fork_insert
+        BEFORE INSERT ON conversation_forks
+        WHEN EXISTS (
+            SELECT 1 FROM agent_nodes
+            WHERE conversation_id = NEW.source_conversation_id
+               OR conversation_id = NEW.target_conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent-bound conversations require collaboration-owned forking');
+        END;
 CREATE TABLE conversation_context_adaptation_requirements (
             conversation_id TEXT PRIMARY KEY,
             schema_version INTEGER NOT NULL CHECK (schema_version = 1),

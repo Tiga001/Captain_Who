@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 3;
+pub const STORAGE_SCHEMA_VERSION: i32 = 4;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:a757cbd73bfa720a40d36d6ec2c4827bc71255496b4da90f6868c731fc1ac46e";
+    "sha256:477de03f9d63de083258fe77d5f4d9c9f26783daf7465fd51ebae66c5e0e8853";
 
 /// Opens the single supported development schema.
 ///
@@ -141,6 +141,60 @@ mod tests {
 
         for required_object in [
             "models",
+            "agent_templates",
+            "prevent_agent_template_identity_update",
+            "validate_agent_template_revision_update",
+            "agent_nodes",
+            "agent_nodes_root_conversation_identity",
+            "agent_nodes_parent",
+            "agent_nodes_conversation",
+            "validate_agent_node_project_insert",
+            "validate_child_agent_conversation_fresh_insert",
+            "validate_child_agent_conversation_model_insert",
+            "validate_agent_node_parent_path_insert",
+            "validate_agent_node_template_snapshot_insert",
+            "prevent_agent_node_identity_update",
+            "validate_agent_node_lifecycle_update",
+            "prevent_agent_lifecycle_deactivation_with_pending_wake",
+            "prevent_agent_lifecycle_deactivation_with_pending_mailbox",
+            "prevent_agent_lifecycle_deactivation_with_active_children",
+            "validate_agent_lifecycle_activation_parent",
+            "prevent_agent_bound_conversation_project_update",
+            "prevent_child_agent_conversation_model_update",
+            "agent_mailbox_messages",
+            "validate_agent_mailbox_active_participants_insert",
+            "agent_mailbox_recipient_pending",
+            "agent_mailbox_claim_token_identity",
+            "agent_mailbox_one_claimed_per_recipient",
+            "validate_agent_mailbox_projection_identity_insert",
+            "prevent_agent_mailbox_identity_update",
+            "validate_agent_mailbox_delivery_transition",
+            "prevent_agent_mailbox_claim_reassignment",
+            "validate_agent_mailbox_lease_update",
+            "prevent_agent_mailbox_claim_time_rewrite",
+            "prevent_agent_mailbox_acknowledgement_rewrite",
+            "agent_wake_requests",
+            "validate_agent_wake_active_target_insert",
+            "agent_wake_one_active_turn",
+            "agent_wake_dispatch_queue",
+            "agent_wake_claim_token_identity",
+            "prevent_agent_wake_identity_update",
+            "validate_agent_wake_transition",
+            "prevent_agent_wake_claim_reassignment",
+            "validate_agent_wake_lease_update",
+            "validate_agent_wake_result_kind",
+            "prevent_agent_wake_claim_time_rewrite",
+            "prevent_agent_wake_start_time_rewrite",
+            "prevent_agent_wake_terminal_rewrite",
+            "validate_agent_message_projection_insert",
+            "prevent_human_input_to_child_agent",
+            "prevent_human_input_update_to_child_agent",
+            "validate_agent_message_projection_update",
+            "prevent_agent_message_projection_rewrite",
+            "prevent_agent_message_projection_delete",
+            "prevent_agent_message_projection_ui_rewrite",
+            "validate_agent_mailbox_acknowledgement",
+            "prevent_agent_bound_conversation_fork_insert",
             "conversation_turn_traces",
             "provider_continuations",
             "context_compaction_summaries",
@@ -295,6 +349,97 @@ mod tests {
             .to_string()
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert_eq!(read_schema_version(&connection).unwrap(), 999);
+    }
+
+    #[test]
+    fn a_v3_database_requires_reset_without_rewriting_the_fixture() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v3.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE legacy_v3_sentinel (
+                         id TEXT PRIMARY KEY,
+                         payload TEXT NOT NULL
+                     );
+                     INSERT INTO legacy_v3_sentinel (id, payload)
+                     VALUES ('sentinel', 'must remain byte-for-byte visible');
+                     PRAGMA user_version = 3;",
+                )
+                .unwrap();
+        }
+
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error
+            .to_string()
+            .contains("expected schema version 4, found 3"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 3);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        let payload: String = connection
+            .query_row(
+                "SELECT payload FROM legacy_v3_sentinel WHERE id = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(payload, "must remain byte-for-byte visible");
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE name = 'agent_nodes'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn legacy_human_messages_may_omit_the_structured_origin_columns() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (
+                     id, project_id, model_id, title, created_at, updated_at,
+                     pinned_at, archived_at, unread_at
+                 ) VALUES ('legacy-conversation', NULL, NULL, 'Legacy', 1, 1, NULL, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status,
+                     agent_run_json, ui_state_json, created_at, position
+                 ) VALUES (
+                     'legacy-user', 'legacy-conversation', 'user', 'hello', 'sent',
+                     NULL, NULL, 1, 0
+                 )",
+                [],
+            )
+            .unwrap();
+
+        let stored: (String, Option<String>, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT role, input_origin_kind, input_origin_agent_id, source_agent_message_id
+                 FROM messages WHERE id = 'legacy-user'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, ("user".to_string(), None, None, None));
     }
 
     #[test]

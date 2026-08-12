@@ -394,6 +394,95 @@ fn generic_agent_service_startup_does_not_require_provider_continuation_credenti
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_provider_request(&mut stream).await;
+        write_provider_stream(
+            &mut stream,
+            json!({ "role": "assistant", "content": "Persisted root answer." }),
+            "stop",
+        )
+        .await;
+        request
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_provider_profile_fixture(
+        &storage,
+        &format!("http://{address}/v1/chat/completions"),
+        None,
+    );
+    let service =
+        AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
+            .unwrap();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut input = turn_input("model-1");
+    input.conversation_id = Some("conversation-root-characterization".to_string());
+    input.user_message_id = Some("user-root-characterization".to_string());
+    input.assistant_message_id = Some("assistant-root-characterization".to_string());
+    input.title = Some("Root turn characterization".to_string());
+
+    let turn = service
+        .start_conversation_turn(input, notifications)
+        .unwrap();
+    assert_eq!(turn.event_name, AGENT_EVENT_NAME);
+    assert_eq!(turn.conversation_id, "conversation-root-characterization");
+    assert_eq!(turn.user_message_id, "user-root-characterization");
+    assert_eq!(turn.assistant_message_id, "assistant-root-characterization");
+
+    let events = collect_until_done(&mut receiver).await;
+    let done = events.last().unwrap();
+    assert_eq!(done["params"]["runId"], turn.run_id);
+    assert_eq!(done["params"]["status"], "completed", "{events:?}");
+
+    // `turn.rs` gates terminal publication on the atomic message/trace commit. A successful read
+    // immediately after Done therefore characterizes the public durability boundary relied on by
+    // future root and child Turn orchestration.
+    let conversation = storage
+        .load_conversation(&turn.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation.model_id.as_deref(), Some("model-1"));
+    assert_eq!(conversation.title, "Root turn characterization");
+    assert_eq!(conversation.messages.len(), 2);
+    let user = &conversation.messages[0];
+    assert_eq!(user.id, turn.user_message_id);
+    assert_eq!(user.role, "user");
+    assert_eq!(user.content, "Verify the frozen provider profile");
+    assert_eq!(user.status.as_deref(), Some("sent"));
+    let assistant = &conversation.messages[1];
+    assert_eq!(assistant.id, turn.assistant_message_id);
+    assert_eq!(assistant.role, "assistant");
+    assert_eq!(assistant.content, "Persisted root answer.");
+    assert_eq!(assistant.status.as_deref(), Some("sent"));
+
+    let trace = storage
+        .get_conversation_turn_trace(&turn.assistant_message_id)
+        .unwrap()
+        .expect("completed root Turn has a durable terminal trace");
+    assert_eq!(trace.run_id, turn.run_id);
+    assert_eq!(trace.conversation_id, turn.conversation_id);
+    assert_eq!(trace.assistant_message_id, turn.assistant_message_id);
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Completed
+    );
+
+    let provider_request = model_server.await.unwrap();
+    let provider_messages = provider_request["messages"].as_array().unwrap();
+    assert!(provider_messages.iter().any(|message| {
+        message["role"] == "user"
+            && message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Verify the frozen provider profile"))
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unavailable_provider_vault_keeps_generic_and_deepseek_text_only_runs_available() {
     for (scenario, profile) in [
         ("generic", None),

@@ -86,6 +86,56 @@ fn deleting_conversation_and_project_removes_composer_drafts() {
 }
 
 #[test]
+fn graph_bound_conversation_and_project_deletes_fail_before_existing_cleanup_side_effects() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(conversation(
+            "conversation-graph-root",
+            Some("project-1"),
+            "message-graph-root",
+        ))
+        .unwrap();
+    service
+        .save_composer_draft(composer_draft(
+            "conversation-graph-root",
+            Some("project-1"),
+            "must remain",
+        ))
+        .unwrap();
+    service
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: "agent-graph-root".to_string(),
+            conversation_id: "conversation-graph-root".to_string(),
+            creation_request_id: "ensure-agent-graph-root".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+
+    assert!(service
+        .delete_conversation("conversation-graph-root")
+        .unwrap_err()
+        .contains("persistent Agent tree"));
+    assert!(service
+        .delete_project("project-1")
+        .unwrap_err()
+        .contains("persistent Agent tree"));
+    assert!(service
+        .load_conversation("conversation-graph-root")
+        .unwrap()
+        .is_some());
+    assert!(service
+        .get_agent_node("agent-graph-root")
+        .unwrap()
+        .is_some());
+    assert!(service
+        .load_composer_drafts()
+        .unwrap()
+        .iter()
+        .any(|draft| draft.scope_id == "conversation-graph-root"));
+}
+
+#[test]
 fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

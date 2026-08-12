@@ -185,6 +185,21 @@ pub(crate) fn build_fork_plan_at_point(
     created_at: i64,
 ) -> Result<ConversationForkPlan, ConversationForkError> {
     validate_fork_point_input(request_id, source_conversation_id, fork_point)?;
+    let source_is_agent_bound = connection
+        .query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM agent_nodes WHERE conversation_id = ?1
+             )",
+            [source_conversation_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(database_error)?;
+    if source_is_agent_bound {
+        return Err(ConversationForkError::Other(
+            "Persistent Agent conversations must be forked through the collaboration service."
+                .to_string(),
+        ));
+    }
     ensure_no_active_command_sessions(connection, source_conversation_id)?;
     let source = chat_repository::get_conversation(connection, source_conversation_id)
         .map_err(database_error)?

@@ -66,3 +66,9 @@ through Main/Preload allowlists.
 
 The complete implementation and extension contract is documented in
 [MCP v1 development and security boundaries](mcp.md).
+
+## Multi-Agent coordination
+
+Multi-Agent coordination is a persistent Agent parent-child tree outside the existing Agent Loop;
+it is not a generic workflow graph. Its domain, Mailbox projection, dependency, lifecycle, deletion
+and rollout contracts are documented in [Multi-Agent Architecture](multi-agent-architecture.md).

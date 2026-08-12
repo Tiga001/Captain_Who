@@ -28,6 +28,8 @@ impl StorageService {
                 .map_err(storage_error)?;
         {
             let transaction = connection.transaction().map_err(storage_error)?;
+            agent_graph_repository::ensure_project_unbound(&transaction, project_id)
+                .map_err(|error| error.to_string())?;
             usage_repository::roll_up_deleted_usage_for_project(&transaction, project_id, now_ms())
                 .map_err(storage_error)?;
             pending_action_repository::delete_pending_actions_for_project(&transaction, project_id)
@@ -565,6 +567,8 @@ impl StorageService {
                 .map_err(storage_error)?;
         {
             let transaction = connection.transaction().map_err(storage_error)?;
+            agent_graph_repository::ensure_conversation_unbound(&transaction, conversation_id)
+                .map_err(|error| error.to_string())?;
             usage_repository::roll_up_deleted_usage_for_conversation(
                 &transaction,
                 conversation_id,

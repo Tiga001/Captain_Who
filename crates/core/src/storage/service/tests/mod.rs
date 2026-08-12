@@ -3,6 +3,7 @@ use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ComposerDraftRecord,
     ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
 };
+use crate::EnsureRootAgentInput;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod attachments;

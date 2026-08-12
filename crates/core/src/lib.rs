@@ -1,3 +1,4 @@
+mod agent_graph;
 pub mod artifact_runtime;
 mod cancellation;
 pub mod command;
@@ -31,6 +32,15 @@ mod turn_diff;
 mod usage;
 pub mod world_state;
 
+pub use agent_graph::{
+    AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
+    AgentMailboxKind, AgentMailboxMessageRecord, AgentModelSelectionSnapshot, AgentNodeRecord,
+    AgentTemplateError, AgentTemplateModelUnavailableReason, AgentTemplateRecord,
+    AgentTemplateSnapshot, AgentWakeRequestRecord, AgentWakeStatus, ConversationMessageOrigin,
+    CreateAgentNodeInput, CreateAgentTemplateInput, EnqueueAgentMessageInput,
+    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentWakeWithResultInput, IdempotentCreate,
+    ResolvedAgentTemplateForSpawn, UpdateAgentTemplateInput, AGENT_GRAPH_SCHEMA_VERSION,
+};
 pub use cancellation::AgentCancellationToken;
 pub use context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
