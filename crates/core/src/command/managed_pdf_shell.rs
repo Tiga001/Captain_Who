@@ -588,41 +588,235 @@ fn parse_rg(
     if args.is_empty() {
         return Err("Managed PDF Shell 的 rg 调用缺少搜索参数。".to_string());
     }
-    const REJECTED_RG_OPTIONS: &[&str] = &[
-        "--pre",
-        "--pre-glob",
-        "--hostname-bin",
-        "--generate",
-        "--config-path",
-    ];
-    for (argument, range) in args {
-        validate_static_argument(argument, variables)?;
-        let resolved = if pdf_input_mount(argument).is_some() {
-            argument.as_str()
+    let mut index = 0;
+    let mut options_open = true;
+    let mut has_pattern = false;
+    let mut uses_explicit_patterns = false;
+    while index < args.len() {
+        let (argument, range) = &args[index];
+        let resolved = resolve_user_variable(argument, variables)?;
+        if options_open && resolved == "--" {
+            reject_indirect_rg_option(argument)?;
+            options_open = false;
+            index += 1;
+            continue;
+        }
+        if options_open && resolved.starts_with('-') && resolved != "-" {
+            reject_indirect_rg_option(argument)?;
+            match classify_rg_option(resolved)? {
+                RgOption::Switch => {
+                    index += 1;
+                }
+                RgOption::NumberInline { option, value } => {
+                    validate_rg_number(option, value)?;
+                    index += 1;
+                }
+                RgOption::NumberNext { option } => {
+                    let Some((value, _)) = args.get(index + 1) else {
+                        return Err(format!("Managed PDF Shell 的 rg 选项 `{option}` 缺少值。"));
+                    };
+                    if value.contains('$') {
+                        return Err(format!(
+                            "Managed PDF Shell 的 rg 选项 `{option}` 必须直接给出静态整数值。"
+                        ));
+                    }
+                    validate_rg_number(option, value)?;
+                    index += 2;
+                }
+                RgOption::PatternInline(pattern) => {
+                    if has_pattern && !uses_explicit_patterns {
+                        return Err(
+                            "Managed PDF Shell 的 rg 不能混用位置正则与 `-e/--regexp`；请把每个正则都写成 `-e PATTERN`。"
+                                .to_string(),
+                        );
+                    }
+                    validate_rg_pattern(pattern, variables)?;
+                    has_pattern = true;
+                    uses_explicit_patterns = true;
+                    index += 1;
+                }
+                RgOption::PatternNext { option } => {
+                    if has_pattern && !uses_explicit_patterns {
+                        return Err(
+                            "Managed PDF Shell 的 rg 不能混用位置正则与 `-e/--regexp`；请把每个正则都写成 `-e PATTERN`。"
+                                .to_string(),
+                        );
+                    }
+                    let Some((pattern, _)) = args.get(index + 1) else {
+                        return Err(format!(
+                            "Managed PDF Shell 的 rg 选项 `{option}` 缺少正则。"
+                        ));
+                    };
+                    validate_rg_pattern(pattern, variables)?;
+                    has_pattern = true;
+                    uses_explicit_patterns = true;
+                    index += 2;
+                }
+            }
+            continue;
+        }
+        if !has_pattern {
+            validate_rg_pattern(argument, variables)?;
+            has_pattern = true;
         } else {
-            resolve_user_variable(argument, variables)?
-        };
-        if simple_variable_name(argument).is_some() && resolved.starts_with('-') {
-            return Err(
-                "Managed PDF Shell 不允许通过变量间接提供 rg 选项；请直接写出受支持的选项。"
-                    .to_string(),
-            );
+            push_rg_path(argument, range.clone(), variables, operands)?;
         }
-        if REJECTED_RG_OPTIONS
-            .iter()
-            .any(|option| resolved == *option || resolved.starts_with(&format!("{option}=")))
-        {
-            return Err(format!(
-                "Managed PDF Shell 的 rg 不允许可能启动程序或加载额外配置的选项 `{resolved}`。"
-            ));
-        }
-        if let Some(input) = parse_input_operand(argument, range.clone(), false, variables)? {
-            operands.push(input);
-        } else if looks_like_path(resolved) {
-            validate_private_path(resolved, ManagedPathUse::Read)?;
-        }
+        index += 1;
+    }
+    if !has_pattern {
+        return Err("Managed PDF Shell 的 rg 调用缺少搜索正则。".to_string());
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RgOption<'a> {
+    Switch,
+    NumberInline { option: &'a str, value: &'a str },
+    NumberNext { option: &'a str },
+    PatternInline(&'a str),
+    PatternNext { option: &'a str },
+}
+
+fn classify_rg_option(argument: &str) -> Result<RgOption<'_>, String> {
+    const SWITCHES: &[&str] = &[
+        "-n",
+        "--line-number",
+        "-i",
+        "--ignore-case",
+        "-s",
+        "--case-sensitive",
+        "-S",
+        "--smart-case",
+        "-w",
+        "--word-regexp",
+        "-F",
+        "--fixed-strings",
+        "-H",
+        "--with-filename",
+        "-I",
+        "--no-filename",
+        "--heading",
+        "--no-heading",
+    ];
+    if SWITCHES.contains(&argument)
+        || argument.strip_prefix('-').is_some_and(|cluster| {
+            cluster.len() > 1
+                && cluster
+                    .chars()
+                    .all(|flag| matches!(flag, 'n' | 'i' | 's' | 'S' | 'w' | 'F' | 'H' | 'I'))
+        })
+    {
+        return Ok(RgOption::Switch);
+    }
+    for (short, long) in [
+        ("-A", "--after-context"),
+        ("-B", "--before-context"),
+        ("-C", "--context"),
+        ("-m", "--max-count"),
+    ] {
+        if argument == short || argument == long {
+            return Ok(RgOption::NumberNext { option: argument });
+        }
+        if let Some(value) = argument
+            .strip_prefix(short)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(RgOption::NumberInline {
+                option: short,
+                value,
+            });
+        }
+        if let Some(value) = argument
+            .strip_prefix(long)
+            .and_then(|value| value.strip_prefix('='))
+        {
+            return Ok(RgOption::NumberInline {
+                option: long,
+                value,
+            });
+        }
+    }
+    if argument == "-e" || argument == "--regexp" {
+        return Ok(RgOption::PatternNext { option: argument });
+    }
+    if let Some(pattern) = argument
+        .strip_prefix("-e")
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(RgOption::PatternInline(pattern));
+    }
+    if let Some(pattern) = argument.strip_prefix("--regexp=") {
+        return Ok(RgOption::PatternInline(pattern));
+    }
+    if argument == "-f"
+        || argument.starts_with("-f")
+        || argument == "--file"
+        || argument.starts_with("--file=")
+    {
+        return Err(
+            "Managed PDF Shell 不支持 rg 的 pattern-file 选项；请使用 `-e PATTERN` 直接提供有界正则。"
+                .to_string(),
+        );
+    }
+    Err(format!(
+        "Managed PDF Shell 不支持 rg 选项 `{argument}`；请使用行号、大小写、上下文、max-count 或 `-e/--regexp` 等受管搜索选项。"
+    ))
+}
+
+fn reject_indirect_rg_option(argument: &str) -> Result<(), String> {
+    if argument.contains('$') {
+        return Err(
+            "Managed PDF Shell 不允许通过变量间接提供 rg 选项；请直接写出受支持的选项。"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_rg_number(option: &str, value: &str) -> Result<(), String> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_| format!("Managed PDF Shell 的 rg 选项 `{option}` 必须使用非负整数值。"))?;
+    let maximum = if matches!(option, "-m" | "--max-count") {
+        10_000
+    } else {
+        1_000
+    };
+    if parsed > maximum {
+        return Err(format!(
+            "Managed PDF Shell 的 rg 选项 `{option}` 不能超过 {maximum}。"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rg_pattern(pattern: &str, variables: &BTreeMap<String, String>) -> Result<(), String> {
+    if pdf_input_mount(pattern).is_some() {
+        return Err("Managed PDF Shell 的 rg 搜索正则不能引用文件输入路径。".to_string());
+    }
+    // Shell surface validation already rejected unquoted expansion syntax. Resolve only a static
+    // user variable here; a regex is data, not a filesystem path, so dots, slashes and glob-like
+    // regex metacharacters must never enter path validation.
+    let _ = resolve_user_variable(pattern, variables)?;
+    Ok(())
+}
+
+fn push_rg_path(
+    argument: &str,
+    range: Range<usize>,
+    variables: &BTreeMap<String, String>,
+    operands: &mut Vec<ManagedPdfInputOperand>,
+) -> Result<(), String> {
+    validate_static_argument(argument, variables)?;
+    if let Some(input) = parse_input_operand(argument, range, false, variables)? {
+        operands.push(input);
+        return Ok(());
+    }
+    validate_private_path(
+        resolve_user_variable(argument, variables)?,
+        ManagedPathUse::Read,
+    )
 }
 
 fn parse_positionals<'a>(
@@ -846,10 +1040,6 @@ fn simple_variable_name(value: &str) -> Option<&str> {
         })
 }
 
-fn looks_like_path(value: &str) -> bool {
-    value.contains('/') || value.starts_with('.') || Path::new(value).extension().is_some()
-}
-
 #[derive(Clone, Copy)]
 enum ManagedPathUse {
     Read,
@@ -1055,6 +1245,68 @@ mod tests {
             plan.implicit_workspace_inputs(),
             vec!["manual one.pdf".to_string(), "second.pdf".to_string()]
         );
+    }
+
+    #[test]
+    fn rg_regex_roles_do_not_misclassify_patterns_as_paths() {
+        for command in [
+            r#"pdftotext -layout "$MYCOPILOT_INPUT_ROOT/AspenPolymer-Unit Operations and Reaction Models.pdf" - | rg -n -i -C 4 --max-count 30 "defining polymer|polymer component|define.*polymer""#,
+            r#"python -c 'print(1)' | rg -e 'foo/bar\\.pdf' -e 'other.*pattern'"#,
+            r#"python -c 'print(1)' | rg --regexp='(polymer|oligomer)[- /].*'"#,
+            r#"python -c 'print(1)' | rg -- '-leading-pattern'"#,
+            r#"python -c 'print(1)' | rg -ni -C4 --max-count=30 'define.*polymer'"#,
+            r#"rg -e 'needle.*value' extracted.txt"#,
+            r#"rg needle -- file-without-extension"#,
+        ] {
+            assert!(
+                parse_managed_pdf_shell(command).unwrap().is_some(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn rg_compilation_preserves_regex_bytes() {
+        let input_root = TempDir::new().unwrap();
+        let command = r#"python -c 'print(1)' | rg -n -e 'define.*polymer|foo/bar\\.pdf'"#;
+        let plan = parse_managed_pdf_shell(command).unwrap().unwrap();
+        let compiled = plan
+            .compile(
+                None,
+                &ManagedPdfShellCompileTools {
+                    python: Path::new("/managed/python"),
+                    pdf_cli: Path::new("/managed/pdf-runtime-cli.py"),
+                    ripgrep: Path::new("/managed/rg"),
+                    input_root: input_root.path(),
+                },
+            )
+            .unwrap();
+        assert!(compiled.contains("'define.*polymer|foo/bar\\\\.pdf'"));
+    }
+
+    #[test]
+    fn rg_role_parser_rejects_ambiguous_options_and_unsafe_paths() {
+        for command in [
+            "rg -n",
+            "rg --max-count 30",
+            "rg -e",
+            "rg -f patterns.txt extracted.txt",
+            "rg --file=patterns.txt extracted.txt",
+            "rg --pre helper needle extracted.txt",
+            "rg --search-zip needle extracted.txt",
+            "rg -niC4 needle extracted.txt",
+            "rg -C -1 needle extracted.txt",
+            "rg --context=1001 needle extracted.txt",
+            "rg possible-path -e needle extracted.txt",
+            "rg /etc/passwd -e needle",
+            "rg ../outside.txt -e needle",
+            "rg manual.pdf -e needle",
+            "rg needle /etc/passwd",
+            "rg needle ../outside.txt",
+            "OPTION=-n; rg \"$OPTION\" needle extracted.txt",
+        ] {
+            assert!(parse_managed_pdf_shell(command).is_err(), "{command}");
+        }
     }
 
     #[test]
