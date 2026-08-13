@@ -47,7 +47,7 @@ use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
     ModelRequestPurpose, ModelRequestToolSetObservation,
 };
-use crate::prompts::build_system_prompt;
+use crate::prompts::build_system_prompt_with_collaboration;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowSnapshot,
@@ -3850,6 +3850,7 @@ fn replace_runtime_attachment_library(
     library: crate::protocol::AgentAttachmentLibraryContext,
 ) {
     let context = run_context.get_or_insert_with(|| AgentRunContext {
+        collaboration_identity: None,
         conversation_id: None,
         project_id: None,
         workspace: None,

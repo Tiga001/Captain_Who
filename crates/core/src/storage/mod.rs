@@ -6,6 +6,7 @@ pub mod agent_template_repository;
 pub mod attachment_repository;
 pub mod chat_repository;
 pub mod chat_search_repository;
+pub(crate) mod child_context_snapshot_repository;
 pub(crate) mod command_session_receipt_payload;
 pub mod composer_draft_repository;
 pub mod config_repository;

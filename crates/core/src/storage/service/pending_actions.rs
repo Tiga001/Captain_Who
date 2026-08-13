@@ -1695,6 +1695,138 @@ impl StorageService {
         Ok(())
     }
 
+    /// Atomically retires a claimed action when its model continuation cannot reach Runtime.
+    ///
+    /// The action executor has already persisted `expected_target_status` before this boundary.
+    /// The exact target is therefore part of the CAS: a stale continuation cannot overwrite a
+    /// newer decision. Pending lifecycle, assistant/run terminal state, trace/model context and
+    /// usage become visible together or remain entirely unchanged for recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fail_claimed_agent_action_continuation(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        expected_target_status: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        failure_message: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+        completed_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+    ) -> Result<(), String> {
+        if !matches!(expected_status, "approved" | "executing" | "rejected") {
+            return Err(format!(
+                "pre-Runtime continuation failure requires approved/executing/rejected status, got {expected_status}"
+            ));
+        }
+        if !matches!(
+            expected_target_status,
+            "rejected" | "cancelled" | "completed" | "failed"
+        ) {
+            return Err(format!(
+                "pre-Runtime continuation failure requires a terminal target, got {expected_target_status}"
+            ));
+        }
+        if trace.conversation_id != conversation_id
+            || trace.assistant_message_id != assistant_message_id
+            || trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::Failed
+            || trace.terminal_error.as_deref() != Some(failure_message)
+        {
+            return Err(
+                "pre-Runtime continuation failure trace identity, status or error is invalid"
+                    .to_string(),
+            );
+        }
+        trace
+            .validate_complete_model_context(model_context_items)
+            .map_err(|error| {
+                format!("pre-Runtime continuation model context is invalid: {error}")
+            })?;
+        if let Some(usage) = usage {
+            if usage.run_id != trace.run_id
+                || usage.conversation_id != conversation_id
+                || usage.message_id != assistant_message_id
+                || usage.status.as_deref() != Some("failed")
+                || usage.error.as_deref() != Some(failure_message)
+            {
+                return Err(
+                    "pre-Runtime continuation usage does not match the terminal Turn failure"
+                        .to_string(),
+                );
+            }
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let affected = pending_action_repository::fail_claimed_action_continuation(
+            &transaction,
+            action_id,
+            &trace.run_id,
+            conversation_id,
+            assistant_message_id,
+            expected_status,
+            expected_target_status,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "pre-Runtime continuation failure lost its pending-action CAS: actionId={action_id}, expectedStatus={expected_status}, expectedTargetStatus={expected_target_status}"
+            ));
+        }
+        chat_repository::update_message_status_and_content(
+            &transaction,
+            conversation_id,
+            assistant_message_id,
+            failure_message,
+            Some("error"),
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        chat_repository::update_message_run_terminal_state(
+            &transaction,
+            conversation_id,
+            assistant_message_id,
+            &trace.run_id,
+            Some("error"),
+            "failed",
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        conversation_trace_repository::commit_trace_in_connection(
+            &transaction,
+            trace,
+            completed_at,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        conversation_model_context_repository::commit_items_in_connection(
+            &transaction,
+            conversation_id,
+            assistant_message_id,
+            model_context_items,
+        )
+        .map_err(storage_error)?;
+        let durable_model_context_items =
+            conversation_model_context_repository::get_log_for_message(
+                &transaction,
+                assistant_message_id,
+            )
+            .map_err(storage_error)?
+            .map(|log| log.items)
+            .unwrap_or_default();
+        trace
+            .validate_complete_model_context(&durable_model_context_items)
+            .map_err(|error| format!("terminal Assistant model context is incomplete: {error}"))?;
+        if let Some(usage) = usage {
+            usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)
+    }
+
     /// Atomically records a pending action's durable outcome and its paired in-progress trace.
     ///
     /// A tool result must not become a terminal pending-action fact without also closing the

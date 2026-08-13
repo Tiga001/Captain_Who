@@ -152,7 +152,7 @@ pub(super) fn assemble_context_preview(
     timeline: DurableConversationTimeline,
     skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
     skill_activation: Option<AgentSkillActivation>,
-    _context: Option<&AgentRunContext>,
+    context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<crate::context::AssembledContext> {
@@ -171,7 +171,11 @@ pub(super) fn assemble_context_preview(
         })
     {
         return ContextAssembler::assemble_with_timing(ContextAssemblyInput {
-            system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
+            system_prompt: build_system_prompt_with_collaboration(
+                prompt_preferences,
+                tool_definitions,
+                context.and_then(|context| context.collaboration_identity.as_ref()),
+            ),
             compaction_summary,
             world_state_records,
             goal,
@@ -186,7 +190,11 @@ pub(super) fn assemble_context_preview(
     Ok(crate::context::AssembledContext {
         frame: ContextFrame::new(vec![ContextItem::text(
             LlmMessageRole::System,
-            build_system_prompt(prompt_preferences, tool_definitions),
+            build_system_prompt_with_collaboration(
+                prompt_preferences,
+                tool_definitions,
+                context.and_then(|context| context.collaboration_identity.as_ref()),
+            ),
             ContextSource::BackendSystemPrompt,
             ContextScope::Run,
             ContextRetention::Retained,
@@ -553,7 +561,7 @@ fn assemble_initial_context_with_skill_overlays(
     initial_run_world_state: Option<crate::WorldStateSnapshot>,
     skills: InitialSkillOverlays,
     attachment_context: AttachmentContext,
-    _context: Option<&AgentRunContext>,
+    context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<ContextFrame> {
@@ -564,7 +572,11 @@ fn assemble_initial_context_with_skill_overlays(
         messages,
     } = timeline;
     ContextAssembler::assemble(ContextAssemblyInput {
-        system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
+        system_prompt: build_system_prompt_with_collaboration(
+            prompt_preferences,
+            tool_definitions,
+            context.and_then(|context| context.collaboration_identity.as_ref()),
+        ),
         compaction_summary,
         world_state_records,
         goal,

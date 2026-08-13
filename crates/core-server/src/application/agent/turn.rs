@@ -1,433 +1,147 @@
 use super::*;
 
 impl AgentService {
+    /// Public transport adapter. Renderer input can only create a human/root Turn; trusted Agent
+    /// wakes use the crate-private `AgentTurnStart::AgentWake` variant.
     pub fn start_conversation_turn(
         &self,
         input: AgentConversationTurnInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
-        // Conversation run admission and Provider-transition admission share one Host lock. This
-        // closes the race where both paths could pass their read-only checks before either became
-        // visible in `active_runs`/`provider_transitions`.
+        self.execute_turn(
+            AgentTurnStart::HumanRoot(HumanRootTurnStart::new(input)),
+            notifications,
+        )
+    }
+
+    pub(super) fn start_human_root_turn(
+        &self,
+        mut input: AgentConversationTurnInput,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        // Normalize all identities before admission. In particular, a new Conversation must be
+        // visible to the same one-Turn reservation used by an existing Conversation.
+        let conversation_id = normalized_optional(input.conversation_id.as_deref())
+            .unwrap_or_else(|| create_id("conversation"));
+        let user_message_id = normalized_optional(input.user_message_id.as_deref())
+            .unwrap_or_else(|| create_id("message"));
+        let assistant_message_id = normalized_optional(input.assistant_message_id.as_deref())
+            .unwrap_or_else(|| create_id("message"));
+        input.conversation_id = Some(conversation_id.clone());
+        input.user_message_id = Some(user_message_id.clone());
+        input.assistant_message_id = Some(assistant_message_id.clone());
+
+        // Conversation Turn admission and Provider-transition admission share one Host lock. The
+        // process reservation is installed before prepare writes any message; the empty durable
+        // in-progress trace committed by the executor is the cross-restart source of truth.
         let _admission = self
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if self.is_project_deleting(input.project_id.as_deref())
-            || self.is_conversation_deleting(input.conversation_id.as_deref())
+            || self.is_conversation_deleting(Some(&conversation_id))
         {
             return Err("项目或会话正在移除，无法开始新的 agent 运行。"
                 .to_string()
                 .into());
         }
-        if input
-            .conversation_id
-            .as_deref()
-            .is_some_and(|conversation_id| {
-                self.provider_transitions
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .contains_key(conversation_id)
-            })
+        if let Some(agent) = self
+            .storage
+            .get_agent_node_by_conversation(&conversation_id)
+            .map_err(|error| error.to_string())?
+        {
+            if agent.parent_agent_id.is_some() {
+                return Err(
+                    "用户只能启动根 Agent；子 Agent Conversation 是只读观察视图。"
+                        .to_string()
+                        .into(),
+                );
+            }
+            if agent.lifecycle != mycopilot_core::AgentLifecycle::Active {
+                return Err("根 Agent 当前不可用，不能开始新的运行。".to_string().into());
+            }
+        }
+        if self
+            .provider_transitions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(&conversation_id)
         {
             return Err("当前会话正在压缩历史并切换模型，请稍后再发送。"
                 .to_string()
                 .into());
         }
-        if let Some(conversation_id) = input
-            .conversation_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            self.ensure_provider_transition_ready_for_send(conversation_id, &input.model_id)?;
-        }
-        let run_id = next_run_id();
-        let cancellation_token = AgentCancellationToken::new();
-        self.register_cancellation(&run_id, cancellation_token.clone());
-
-        let prepared = match prepare_conversation_turn(&self.storage, &self.skills, input, &run_id)
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                return Err(error);
-            }
-        };
-        let mcp_tools = self.capture_mcp_tool_runtime(&prepared.agent_input);
-        // A new turn may append a Conversation World State diff without changing the stable
-        // system/tool configuration revision. Drop the measured conversation cache so the next
-        // baseline is rebuilt with that exact durable record before the user message it governs.
-        self.invalidate_conversation_context_state(&prepared.output.conversation_id);
-        let context_window_tool_projection = match self.context_window_tool_projection_with_mcp(
-            &prepared.agent_input,
-            prepared.skill_resources.as_ref().map(Arc::clone),
-            mcp_tools.clone(),
-        ) {
-            Ok(projection) => RunContextToolProjection::new(projection),
-            Err(error) => {
-                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                return Err(error.into());
-            }
-        };
-        self.register_usage_context(&run_id, prepared.usage_context.clone());
-        if self.is_agent_input_scope_deleting(&prepared.agent_input) {
-            self.discard_usage_context(&run_id);
-            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-            return Err("项目或会话正在移除，无法开始新的 agent 运行。"
+        if user_message_id == assistant_message_id {
+            return Err("userMessageId 与 assistantMessageId 必须不同。"
                 .to_string()
                 .into());
         }
-        let steer_input = self.register_active_run_control(
-            &run_id,
-            &prepared.output.conversation_id,
-            &prepared.output.assistant_message_id,
-            prepared
-                .agent_input
-                .context
-                .as_ref()
-                .and_then(|context| context.project_id.as_deref()),
-            prepared.agent_input.model_capabilities,
-        );
-        initialize_turn_diff_best_effort(
+        let (previous_conversation, expected_revision) =
+            self.storage.load_conversation_for_turn(&conversation_id)?;
+        self.ensure_provider_transition_ready_for_send(&conversation_id, &input.model_id)?;
+        if previous_conversation.is_some()
+            && self.storage.conversation_revision(&conversation_id)? != expected_revision
+        {
+            return Err("Conversation 在模型兼容预检期间发生变化，请重试本轮。"
+                .to_string()
+                .into());
+        }
+        if previous_conversation.as_ref().is_some_and(|conversation| {
+            conversation
+                .messages
+                .iter()
+                .any(|message| message.id == user_message_id || message.id == assistant_message_id)
+        }) {
+            return Err("本轮消息 ID 已存在，不能覆盖既有 Conversation 历史。"
+                .to_string()
+                .into());
+        }
+        let previous_world_state_was_empty = self
+            .storage
+            .list_active_conversation_world_state_records(&conversation_id)?
+            .is_empty();
+
+        let run_id = next_run_id();
+        self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
+        let cancellation_token = AgentCancellationToken::new();
+        self.register_cancellation(&run_id, cancellation_token.clone());
+
+        let prepared = match prepare_reserved_human_turn(
             &self.storage,
-            &prepared.agent_input,
+            &self.skills,
+            input,
             &run_id,
-            &prepared.output.conversation_id,
-            &prepared.output.assistant_message_id,
-        );
+            previous_conversation.clone(),
+            expected_revision,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                let rollback = PreparedTurnRollback::Human {
+                    user_message_id: user_message_id.clone(),
+                    previous: previous_conversation.clone(),
+                    previous_world_state_was_empty,
+                };
+                return Err(self.rollback_prepared_initial_turn(
+                    &conversation_id,
+                    &assistant_message_id,
+                    Some(&run_id),
+                    &rollback,
+                    error,
+                ));
+            }
+        };
 
-        let output = prepared.output.clone();
-        let service = self.clone();
-        let worker_run_id = run_id.clone();
-        let worker_conversation_id = output.conversation_id.clone();
-        let worker_assistant_message_id = output.assistant_message_id.clone();
-        let worker_assistant_created_at = output.assistant_message.created_at;
-        let pending_agent_input = prepared.agent_input.clone();
-        let skill_resources = prepared.skill_resources.clone();
-        let mcp_tools = mcp_tools.clone();
-        let context_window_tool_projection = context_window_tool_projection.clone();
-
-        tokio::spawn(async move {
-            let emitter_notifications = notifications.clone();
-            let emitter_service = service.clone();
-            let emitter_conversation_id = worker_conversation_id.clone();
-            let emitter_assistant_message_id = worker_assistant_message_id.clone();
-            let emitter_agent_input = pending_agent_input.clone();
-            let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
-            let emitter_terminal_event_gate = terminal_event_gate.clone();
-            let pending_store_failure = Arc::new(Mutex::new(None::<String>));
-            let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
-            let emitter: AgentEventEmitter = Arc::new(move |event| {
-                if let AgentEvent::ApprovalRequired {
-                    run_id,
-                    action,
-                    checkpoint,
-                } = &event
-                {
-                    if let Err(error) = emitter_service.close_active_run_steering(
-                        run_id,
-                        AgentSteerRunRejectionCode::RunNotSteerable,
-                        "The agent run is waiting for approval and no longer accepts guidance.",
-                        &emitter_notifications,
-                    ) {
-                        emitter_service.invalidate_mcp_pending_payload(action);
-                        emitter_terminal_event_gate.discard();
-                        *emitter_pending_store_failure
-                            .lock()
-                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                        return;
-                    }
-                    let mut agent_input =
-                        agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
-                    if let Err(error) =
-                        emitter_service.refresh_agent_input_attachment_library(&mut agent_input)
-                    {
-                        emitter_service.invalidate_mcp_pending_payload(action);
-                        emitter_terminal_event_gate.discard();
-                        *emitter_pending_store_failure
-                            .lock()
-                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                        return;
-                    }
-                    match emitter_service.store_pending_action(
-                        run_id,
-                        &emitter_conversation_id,
-                        &emitter_assistant_message_id,
-                        action.as_ref().clone(),
-                        agent_input,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => return,
-                        Err(error) => {
-                            emitter_service.invalidate_mcp_pending_payload(action);
-                            emitter_terminal_event_gate.discard();
-                            *emitter_pending_store_failure
-                                .lock()
-                                .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                            return;
-                        }
-                    }
-                }
-                if emitter_pending_store_failure
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .is_some()
-                {
-                    return;
-                }
-                let event = emitter_service.project_cumulative_usage_onto_event(event);
-                if let Some(event) = emitter_terminal_event_gate.route(event) {
-                    let _ = emitter_notifications.send(agent_event_notification(event));
-                }
-            });
-
-            let host_executor = service.host_action_executor(
-                pending_agent_input.clone(),
-                worker_run_id.clone(),
-                Some(worker_conversation_id.clone()),
-                Some(worker_assistant_message_id.clone()),
-                skill_resources.clone(),
-                notifications.clone(),
-            );
-            let trace_observer = service.trace_observer(
-                &worker_run_id,
-                &worker_conversation_id,
-                &worker_assistant_message_id,
-                worker_assistant_created_at,
-                pending_agent_input.clone(),
-                context_window_tool_projection.clone(),
-                notifications.clone(),
-            );
-            let context_compaction_services = service.context_compaction_services(
-                &worker_run_id,
-                &worker_conversation_id,
-                &worker_assistant_message_id,
-                pending_agent_input.clone(),
-                context_window_tool_projection.clone(),
-                notifications.clone(),
-            );
-            let model_request_observer = service.model_request_observer(
-                &worker_run_id,
-                &worker_conversation_id,
-                &worker_assistant_message_id,
-            );
-            let context_window_observer = pending_agent_input
-                .context_window_indicator_enabled
-                .then(|| {
-                    service.context_window_observer(
-                        &worker_run_id,
-                        &worker_conversation_id,
-                        &pending_agent_input.model,
-                        notifications.clone(),
-                    )
-                });
-            let mut host_services = AgentRuntimeHostServices::new()
-                .with_host_actions(host_executor, service.storage.clone())
-                .with_command_session_executor(Arc::new(service.command_sessions.clone()))
-                .with_office_engine(service.office_engine.clone())
-                .with_trace_observer(trace_observer)
-                .with_model_request_observer(model_request_observer)
-                .with_context_compaction(context_compaction_services);
-            if let Some(provider_continuation_vault) = service.provider_continuation_vault.as_ref()
-            {
-                host_services = host_services
-                    .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));
-            }
-            if let Some(context_window_observer) = context_window_observer {
-                host_services = host_services.with_context_window_observer(context_window_observer);
-            }
-            if let Some(image_generation_execution) = service.image_generation_execution.clone() {
-                host_services =
-                    host_services.with_image_generation_execution(image_generation_execution);
-            }
-            if let Some(skill_installation_prepare) = service.skill_installation_prepare.clone() {
-                host_services =
-                    host_services.with_skill_installation_prepare(skill_installation_prepare);
-            }
-            if let Some(skill_installation) = service.skill_installation.clone() {
-                host_services = host_services.with_skill_installation_commit(skill_installation);
-            }
-            host_services = host_services.with_skill_activation_resolver(
-                model_skill_activation_resolver(service.storage.clone(), service.skills.clone()),
-            );
-            host_services = host_services.with_steer_input(steer_input.clone());
-            if let Some(resources) = skill_resources {
-                host_services = host_services.with_skill_resources(resources);
-            }
-            if let Some(resolver) = service.artifact_runtime.clone() {
-                host_services = host_services.with_command_runtime_profile_resolver(resolver);
-            }
-            if let Some(mcp_tools) = mcp_tools {
-                host_services = host_services.with_mcp_tools(mcp_tools);
-            }
-            let result = send_chat_with_host_services(
-                prepared.agent_input,
-                worker_run_id.clone(),
-                emitter,
-                cancellation_token.clone(),
-                host_services,
-            )
-            .await;
-            let result = match pending_store_failure
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take()
-            {
-                Some(error) => {
-                    terminal_event_gate.discard();
-                    Err(pending_action_persistence_error(error))
-                }
-                None => result,
-            };
-            let close_message = match &result {
-                Ok(output) if output.status == AgentRunStatus::WaitingForApproval => {
-                    "The agent run is waiting for approval and no longer accepts guidance."
-                }
-                _ => "The agent run has finished and no longer accepts guidance.",
-            };
-            let result = match service.unregister_active_run_control(
-                &worker_run_id,
-                &steer_input,
-                AgentSteerRunRejectionCode::RunNotSteerable,
-                close_message,
-                &notifications,
-            ) {
-                Ok(()) => result,
-                Err(error) => {
-                    terminal_event_gate.discard();
-                    Err(AgentError::new(format!(
-                        "无法关闭用户引导通道并持久化剩余引导：{error}"
-                    )))
-                }
-            };
-            let keep_trace_snapshot = matches!(
-                &result,
-                Ok(output) if output.status == AgentRunStatus::WaitingForApproval
-            );
-
-            let deletion_lifecycle = service
-                .deletion_lifecycle
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if deletion_lifecycle.contains_input(&pending_agent_input) {
-                drop(deletion_lifecycle);
-                service.discard_usage_context(&worker_run_id);
-                service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
-                return;
-            }
-
-            match result {
-                Ok(mut agent_output) => {
-                    let committed_durable_context = is_terminal_run_status(agent_output.status);
-                    let persisted = service.persist_final_assistant_output(
-                        &worker_conversation_id,
-                        &worker_assistant_message_id,
-                        &mut agent_output,
-                    );
-                    if persisted.is_ok() && committed_durable_context {
-                        service.emit_terminal_context_window_snapshot(
-                            &notifications,
-                            &pending_agent_input,
-                            &worker_run_id,
-                            &worker_conversation_id,
-                            &worker_assistant_message_id,
-                            if agent_output.status == AgentRunStatus::Cancelled {
-                                ""
-                            } else {
-                                &agent_output.content
-                            },
-                        );
-                    } else if let Err(error) = &persisted {
-                        service.discard_usage_context(&worker_run_id);
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(worker_run_id.clone()),
-                            message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
-                            recoverable: true,
-                            code: Some("conversation_trace_persistence_failed".to_string()),
-                            details: None,
-                        }));
-                    }
-                    if persisted.is_ok() && committed_durable_context {
-                        emit_terminal_events_after_persistence(
-                            &notifications,
-                            &terminal_event_gate,
-                            &agent_output,
-                        );
-                    }
-                }
-                Err(error) => {
-                    terminal_event_gate.discard();
-                    let usage = error.usage().cloned();
-                    let code = error.code().map(ToString::to_string);
-                    let details = error.details().cloned();
-                    let message = error.to_string();
-                    let conversation_turn_trace =
-                        error.conversation_turn_trace().cloned().unwrap_or_else(|| {
-                            failed_conversation_trace_without_items(
-                                &worker_run_id,
-                                &worker_conversation_id,
-                                &worker_assistant_message_id,
-                                &message,
-                            )
-                        });
-                    let persisted = service.persist_assistant_error(
-                        &worker_conversation_id,
-                        &worker_assistant_message_id,
-                        &message,
-                        usage.clone(),
-                        &conversation_turn_trace,
-                    );
-                    let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
-                    if persisted.is_ok() {
-                        service.emit_terminal_context_window_snapshot(
-                            &notifications,
-                            &pending_agent_input,
-                            &worker_run_id,
-                            &worker_conversation_id,
-                            &worker_assistant_message_id,
-                            &message,
-                        );
-                    } else if let Err(error) = &persisted {
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(worker_run_id.clone()),
-                            message: format!(
-                                "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
-                            ),
-                            recoverable: true,
-                            code: Some("conversation_trace_persistence_failed".to_string()),
-                            details: None,
-                        }));
-                    }
-                    if persisted.is_ok() {
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(worker_run_id.clone()),
-                            message: message.clone(),
-                            recoverable: false,
-                            code,
-                            details,
-                        }));
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Done {
-                            run_id: worker_run_id.clone(),
-                            success: false,
-                            status: Some(AgentRunStatus::Failed),
-                            content: Some(message),
-                            usage: cumulative_usage,
-                            finish_reason: None,
-                            proposed_actions: Vec::new(),
-                        }));
-                    }
-                }
-            }
-
-            drop(deletion_lifecycle);
-            if !keep_trace_snapshot {
-                service.discard_trace_snapshot(&worker_run_id);
-                service.discard_exact_running_context_window_snapshot(&worker_run_id);
-            }
-            service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
-        });
-
-        Ok(output)
+        self.launch_prepared_initial_turn(
+            prepared,
+            cancellation_token,
+            notifications,
+            PreparedTurnRollback::Human {
+                user_message_id,
+                previous: previous_conversation,
+                previous_world_state_was_empty,
+            },
+        )
     }
 }

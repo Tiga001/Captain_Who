@@ -1588,6 +1588,7 @@ mod tests {
 
     fn context(storage: Arc<StorageService>, conversation_id: &str) -> ToolExecutionContext {
         ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some(conversation_id.to_string()),
             project_id: None,
             workspace: None,

@@ -438,6 +438,7 @@ pub fn commit_provider_transition_with_receipt(
     observation: &ModelRequestObservation,
     expected_current_model_id: Option<&str>,
     expected_conversation_updated_at: i64,
+    expected_conversation_revision: i64,
     target_model_id: &str,
     expected_target_provider_protocol_revision: &str,
 ) -> Result<(ContextCompactionSummary, i64), ContextCompactionRepositoryError> {
@@ -462,6 +463,7 @@ pub fn commit_provider_transition_with_receipt(
         &expected_prefix.conversation_id,
         expected_current_model_id,
         expected_conversation_updated_at,
+        expected_conversation_revision,
         target_model_id,
         expected_target_provider_protocol_revision,
     )?;
@@ -543,23 +545,35 @@ fn validate_provider_transition_compare_and_set(
     conversation_id: &str,
     expected_current_model_id: Option<&str>,
     expected_conversation_updated_at: i64,
+    expected_conversation_revision: i64,
     target_model_id: &str,
     expected_target_provider_protocol_revision: &str,
 ) -> Result<(), ContextCompactionRepositoryError> {
     let current = transaction
         .query_row(
-            "SELECT model_id, updated_at FROM conversations WHERE id = ?1",
+            "SELECT model_id, updated_at, revision FROM conversations WHERE id = ?1",
             [conversation_id],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((current_model_id, current_updated_at)) = current else {
+    let Some((current_model_id, current_updated_at, current_revision)) = current else {
         return Err(ContextCompactionRepositoryError::Stale(
             "Provider transition 的目标会话已不存在。".to_string(),
         ));
     };
     if current_model_id.as_deref() != expected_current_model_id
         || current_updated_at != expected_conversation_updated_at
+        || current_revision != expected_conversation_revision
+        || !crate::storage::provider_transition_repository::graph_allows_provider_transition_commit(
+            transaction,
+            conversation_id,
+        )?
     {
         return Err(ContextCompactionRepositoryError::Stale(
             "Provider transition 期间会话 head 或当前模型已变化。".to_string(),

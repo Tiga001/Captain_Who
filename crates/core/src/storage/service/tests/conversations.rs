@@ -1,6 +1,512 @@
 use super::*;
 
 #[test]
+fn rollback_turn_preparation_removes_only_the_exact_empty_provisional_trace_and_messages() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let previous = conversation("conversation-turn-rollback", None, "message-existing");
+    service.save_conversation(previous.clone()).unwrap();
+    let mut prepared = previous.clone();
+    prepared.model_id = Some("model-2".to_string());
+    prepared.updated_at = 10;
+    prepared.messages.extend([
+        ChatMessageRecord {
+            id: "message-provisional-user".to_string(),
+            role: "user".to_string(),
+            content: "provisional".to_string(),
+            created_at: 9,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ChatMessageRecord {
+            id: "message-provisional-assistant".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 10,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+    ]);
+    service.save_conversation(prepared).unwrap();
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-provisional",
+        "conversation-turn-rollback",
+        "message-provisional-assistant",
+    );
+    service
+        .append_in_progress_conversation_turn_trace(&trace, 10, 10)
+        .unwrap();
+
+    service
+        .rollback_conversation_turn_preparation(
+            "conversation-turn-rollback",
+            "message-provisional-user",
+            "message-provisional-assistant",
+            Some("run-provisional"),
+            Some(&previous),
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(
+            service
+                .load_conversation("conversation-turn-rollback")
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(previous).unwrap()
+    );
+    assert!(service
+        .get_conversation_turn_trace("message-provisional-assistant")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn rollback_turn_preparation_refuses_to_delete_a_nonempty_or_foreign_trace() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let previous = conversation("conversation-turn-rollback-foreign", None, "existing");
+    service.save_conversation(previous.clone()).unwrap();
+    let mut prepared = previous.clone();
+    prepared.messages.push(ChatMessageRecord {
+        id: "assistant-foreign".to_string(),
+        role: "assistant".to_string(),
+        content: "Thinking...".to_string(),
+        created_at: 2,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    service.save_conversation(prepared).unwrap();
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-owner",
+        "conversation-turn-rollback-foreign",
+        "assistant-foreign",
+    );
+    service
+        .append_in_progress_conversation_turn_trace(&trace, 2, 2)
+        .unwrap();
+
+    let error = service
+        .rollback_agent_wake_turn_preparation(
+            "conversation-turn-rollback-foreign",
+            "assistant-foreign",
+            Some("run-not-owner"),
+            &previous,
+            true,
+        )
+        .unwrap_err();
+    assert!(error.contains("owned by another run"), "{error}");
+    assert!(service
+        .get_conversation_turn_trace("assistant-foreign")
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        service
+            .load_conversation("conversation-turn-rollback-foreign")
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn rollback_removes_only_provisional_facts_and_preserves_concurrent_metadata() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let previous = conversation(
+        "conversation-turn-rollback-meta",
+        None,
+        "message-existing-meta",
+    );
+    service.save_conversation(previous.clone()).unwrap();
+    let mut prepared = previous;
+    prepared.model_id = Some("model-2".to_string());
+    prepared.updated_at = 10;
+    prepared.messages.extend([
+        ChatMessageRecord {
+            id: "message-provisional-meta-user".to_string(),
+            role: "user".to_string(),
+            content: "provisional".to_string(),
+            created_at: 9,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ChatMessageRecord {
+            id: "message-provisional-meta-assistant".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 10,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+    ]);
+    service.save_conversation(prepared).unwrap();
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-provisional-meta",
+        "conversation-turn-rollback-meta",
+        "message-provisional-meta-assistant",
+    );
+    service
+        .append_in_progress_conversation_turn_trace(&trace, 10, 10)
+        .unwrap();
+
+    let mut concurrent = service
+        .load_conversation_metas()
+        .unwrap()
+        .into_iter()
+        .find(|conversation| conversation.id == "conversation-turn-rollback-meta")
+        .unwrap();
+    concurrent.title = "Pinned while preparing".to_string();
+    concurrent.pinned_at = Some(11);
+    concurrent.updated_at = 11;
+    service.save_conversation_meta(concurrent).unwrap();
+
+    service
+        .rollback_conversation_turn_preparation(
+            "conversation-turn-rollback-meta",
+            "message-provisional-meta-user",
+            "message-provisional-meta-assistant",
+            Some("run-provisional-meta"),
+            Some(&conversation(
+                "conversation-turn-rollback-meta",
+                None,
+                "message-existing-meta",
+            )),
+            true,
+        )
+        .unwrap();
+
+    let current = service
+        .load_conversation("conversation-turn-rollback-meta")
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.title, "Pinned while preparing");
+    assert_eq!(current.pinned_at, Some(11));
+    assert_eq!(current.updated_at, 11);
+    assert_eq!(current.model_id.as_deref(), Some("model-2"));
+    assert_eq!(current.messages.len(), 1);
+    assert_eq!(current.messages[0].id, "message-existing-meta");
+    assert!(service
+        .get_conversation_turn_trace("message-provisional-meta-assistant")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_check() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let base = conversation("conversation-stale-turn-admission", None, "message-base");
+    service.save_conversation(base.clone()).unwrap();
+    let (_, initial_revision) = service
+        .load_conversation_for_turn("conversation-stale-turn-admission")
+        .unwrap();
+
+    let mut candidate_a = base.clone();
+    candidate_a.messages.extend([
+        ChatMessageRecord {
+            id: "user-candidate-a".to_string(),
+            role: "user".to_string(),
+            content: "candidate a".to_string(),
+            created_at: 2,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ChatMessageRecord {
+            id: "assistant-candidate-a".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 3,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+    ]);
+    candidate_a.updated_at = 3;
+    let trace_a = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-candidate-a",
+        &candidate_a.id,
+        "assistant-candidate-a",
+    );
+    service
+        .save_conversation_and_begin_turn(
+            candidate_a.clone(),
+            initial_revision,
+            None,
+            &trace_a,
+            3,
+            3,
+        )
+        .unwrap();
+    let (_, active_revision) = service
+        .load_conversation_for_turn("conversation-stale-turn-admission")
+        .unwrap();
+
+    // Candidate B was built from the same stale pre-A snapshot. A full-save implementation that
+    // checks uniqueness only after replacing messages would cascade-delete A's trace and win.
+    let mut candidate_b = base;
+    candidate_b.messages.extend([
+        ChatMessageRecord {
+            id: "user-candidate-b".to_string(),
+            role: "user".to_string(),
+            content: "candidate b".to_string(),
+            created_at: 2,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ChatMessageRecord {
+            id: "assistant-candidate-b".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 3,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+    ]);
+    candidate_b.updated_at = 3;
+    let trace_b = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-candidate-b",
+        &candidate_b.id,
+        "assistant-candidate-b",
+    );
+    let error = service
+        .save_conversation_and_begin_turn(candidate_b, active_revision, None, &trace_b, 3, 3)
+        .unwrap_err();
+    assert!(error.contains("active durable Turn"), "{error}");
+
+    let current = service
+        .load_conversation("conversation-stale-turn-admission")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(current).unwrap(),
+        serde_json::to_value(candidate_a).unwrap()
+    );
+    let traces = service
+        .list_conversation_turn_traces("conversation-stale-turn-admission")
+        .unwrap();
+    assert_eq!(traces, vec![trace_a]);
+    assert!(service
+        .get_conversation_turn_trace("assistant-candidate-b")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(conversation(
+            "conversation-completed-turn-cas",
+            None,
+            "message-base",
+        ))
+        .unwrap();
+    let (base, initial_revision) = service
+        .load_conversation_for_turn("conversation-completed-turn-cas")
+        .unwrap();
+    let base = base.unwrap();
+
+    let mut candidate_a = base.clone();
+    candidate_a.messages.extend([
+        ChatMessageRecord {
+            id: "user-completed-a".to_string(),
+            role: "user".to_string(),
+            content: "candidate a".to_string(),
+            created_at: 2,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ChatMessageRecord {
+            id: "assistant-completed-a".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 3,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+    ]);
+    candidate_a.updated_at = 3;
+    let trace_a = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-completed-a",
+        &candidate_a.id,
+        "assistant-completed-a",
+    );
+    service
+        .save_conversation_and_begin_turn(candidate_a, initial_revision, None, &trace_a, 3, 3)
+        .unwrap();
+    let terminal_a = crate::completed_conversation_trace_without_items(
+        "run-completed-a",
+        "conversation-completed-turn-cas",
+        "assistant-completed-a",
+    );
+    service
+        .finalize_chat_message_with_conversation_trace_and_usage(
+            "conversation-completed-turn-cas",
+            "assistant-completed-a",
+            "candidate a complete",
+            Some("sent"),
+            "completed",
+            &terminal_a,
+            3,
+            4,
+            None,
+        )
+        .unwrap();
+    assert!(service
+        .list_conversation_turn_traces("conversation-completed-turn-cas")
+        .unwrap()
+        .iter()
+        .all(|trace| {
+            trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress
+        }));
+    let completed_a = service
+        .load_conversation("conversation-completed-turn-cas")
+        .unwrap()
+        .unwrap();
+
+    // Host B loaded `base` before A began. A has already released the active trace, so only the
+    // durable Conversation revision can stop B from replacing A's completed messages.
+    let mut stale_candidate_b = base;
+    stale_candidate_b.messages.extend([
+        ChatMessageRecord {
+            id: "user-stale-b".to_string(),
+            role: "user".to_string(),
+            content: "candidate b".to_string(),
+            created_at: 2,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ChatMessageRecord {
+            id: "assistant-stale-b".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 3,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+    ]);
+    stale_candidate_b.updated_at = 3;
+    let trace_b = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-stale-b",
+        &stale_candidate_b.id,
+        "assistant-stale-b",
+    );
+    let error = service
+        .save_conversation_and_begin_turn(stale_candidate_b, initial_revision, None, &trace_b, 3, 3)
+        .unwrap_err();
+    assert!(error.contains("Conversation changed"), "{error}");
+    assert_eq!(
+        serde_json::to_value(
+            service
+                .load_conversation("conversation-completed-turn-cas")
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(completed_a).unwrap()
+    );
+    assert!(service
+        .get_conversation_turn_trace("assistant-stale-b")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn turn_commit_rechecks_graph_identity_and_lifecycle_inside_the_write_transaction() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-turn-graph-fence";
+    service
+        .save_conversation(conversation(conversation_id, None, "message-graph-fence"))
+        .unwrap();
+    let root = service
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: "agent-turn-graph-fence".to_string(),
+            conversation_id: conversation_id.to_string(),
+            creation_request_id: "ensure-turn-graph-fence".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap()
+        .record()
+        .clone();
+    let (snapshot, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
+    let mut candidate = snapshot.unwrap();
+    candidate.messages.push(ChatMessageRecord {
+        id: "assistant-graph-fence".to_string(),
+        role: "assistant".to_string(),
+        content: "Thinking...".to_string(),
+        created_at: 2,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-graph-fence",
+        conversation_id,
+        "assistant-graph-fence",
+    );
+
+    // Lifecycle changes do not rewrite the Conversation row itself. Admission must nevertheless
+    // re-read the bound Agent under the same IMMEDIATE transaction as the Turn write.
+    service
+        .transition_agent_lifecycle(
+            &root.agent_id,
+            root.revision,
+            crate::AgentLifecycle::Active,
+            crate::AgentLifecycle::Disabled,
+        )
+        .unwrap();
+    let error = service
+        .save_conversation_and_begin_turn(candidate, revision, None, &trace, 2, 2)
+        .unwrap_err();
+    assert!(error.contains("active root Agent"), "{error}");
+    assert!(service
+        .get_conversation_turn_trace("assistant-graph-fence")
+        .unwrap()
+        .is_none());
+    assert!(service
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap()
+        .messages
+        .iter()
+        .all(|message| message.id != "assistant-graph-fence"));
+}
+
+#[test]
 fn deleting_conversation_and_project_removes_composer_drafts() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

@@ -867,7 +867,23 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
     api_style: crate::protocol::AgentApiStyle,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<String> {
-    let system_prompt = build_system_prompt(input.prompt_preferences.as_ref(), tool_definitions);
+    if let Some(identity) = input
+        .context
+        .as_ref()
+        .and_then(|context| context.collaboration_identity.as_ref())
+    {
+        identity.validate().map_err(|error| {
+            AgentError::new(format!("Collaboration identity is invalid: {error}"))
+        })?;
+    }
+    let system_prompt = build_system_prompt_with_collaboration(
+        input.prompt_preferences.as_ref(),
+        tool_definitions,
+        input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref()),
+    );
     let provider_dialect = crate::provider_profile::ProviderProtocolDialect::from(api_style);
     let provider_profile_config = input
         .provider_profile_config

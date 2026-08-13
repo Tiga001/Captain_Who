@@ -273,6 +273,15 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
         "conversation-delete-owner",
         "assistant-delete",
     );
+    // A Conversation has exactly one durable in-progress Turn. Settle the first interrupted
+    // continuation before constructing the second historical owner in this deletion fixture.
+    assert_eq!(
+        service
+            .reconcile_interrupted_pending_agent_actions(41)
+            .unwrap()
+            .len(),
+        1
+    );
     persist_settled_manual_command(
         &service,
         "receipt-retain",
@@ -286,7 +295,7 @@ fn deleting_owner_message_atomically_retires_settled_file_effect_receipts() {
             .reconcile_interrupted_pending_agent_actions(42)
             .unwrap()
             .len(),
-        2
+        1
     );
     assert!(service.list_unsettled_file_effects().unwrap().is_empty());
 

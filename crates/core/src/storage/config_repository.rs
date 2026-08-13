@@ -2,7 +2,7 @@ use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord, ModelSettin
 use crate::storage::now_ms;
 use crate::{ProviderProfileConfig, ProviderProtocolDialect};
 use rusqlite::types::Type;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -21,7 +21,20 @@ pub fn load_model_settings_snapshot(
     connection: &mut Connection,
 ) -> rusqlite::Result<Option<ModelSettingsSnapshot>> {
     let transaction = connection.transaction()?;
-    let settings = transaction
+    let snapshot = load_model_settings_snapshot_in_connection(&transaction)?;
+    transaction.commit()?;
+    Ok(snapshot)
+}
+
+/// Loads one coherent model catalog through an existing transaction/connection.
+///
+/// Collaboration spawn uses this entry point while holding its `BEGIN IMMEDIATE` transaction so
+/// model/template resolution and the immutable child snapshot cannot observe different catalog
+/// revisions. Ordinary callers should continue to use [`load_model_settings_snapshot`].
+pub(crate) fn load_model_settings_snapshot_in_connection(
+    connection: &Connection,
+) -> rusqlite::Result<Option<ModelSettingsSnapshot>> {
+    let settings = connection
         .query_row(
             "
             SELECT
@@ -57,7 +70,6 @@ pub fn load_model_settings_snapshot(
         search_connection_revision,
     )) = settings
     else {
-        transaction.commit()?;
         return Ok(None);
     };
     if !is_model_settings_revision(&configuration_revision) {
@@ -71,8 +83,7 @@ pub fn load_model_settings_snapshot(
         models,
         provider_connection_revisions,
         provider_protocol_revisions,
-    } = load_models(&transaction)?;
-    transaction.commit()?;
+    } = load_models(connection)?;
     Ok(Some(ModelSettingsSnapshot {
         settings: ModelSettingsRecord {
             api_url,
@@ -248,7 +259,7 @@ struct LoadedModels {
     provider_protocol_revisions: BTreeMap<String, String>,
 }
 
-fn load_models(connection: &Transaction<'_>) -> rusqlite::Result<LoadedModels> {
+fn load_models(connection: &Connection) -> rusqlite::Result<LoadedModels> {
     let mut statement = connection.prepare(
         "
         SELECT

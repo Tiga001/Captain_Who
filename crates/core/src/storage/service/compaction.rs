@@ -178,6 +178,7 @@ impl StorageService {
         observation: &ModelRequestObservation,
         expected_current_model_id: Option<&str>,
         expected_conversation_updated_at: i64,
+        expected_conversation_revision: i64,
         target_model_id: &str,
         expected_target_provider_protocol_revision: &str,
     ) -> Result<Option<(ContextCompactionSummary, i64)>, String> {
@@ -190,6 +191,7 @@ impl StorageService {
             observation,
             expected_current_model_id,
             expected_conversation_updated_at,
+            expected_conversation_revision,
             target_model_id,
             expected_target_provider_protocol_revision,
         ) {

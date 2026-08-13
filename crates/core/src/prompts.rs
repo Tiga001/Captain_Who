@@ -1,10 +1,22 @@
-use crate::protocol::{AgentPromptPreferences, AgentToolDefinition};
+use crate::{
+    agent_graph::AgentCollaborationIdentity,
+    protocol::{AgentPromptPreferences, AgentToolDefinition},
+};
 
 const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 8_000;
 
+#[cfg(test)]
 pub(crate) fn build_system_prompt(
     preferences: Option<&AgentPromptPreferences>,
     stable_tool_definitions: &[AgentToolDefinition],
+) -> String {
+    build_system_prompt_with_collaboration(preferences, stable_tool_definitions, None)
+}
+
+pub(crate) fn build_system_prompt_with_collaboration(
+    preferences: Option<&AgentPromptPreferences>,
+    stable_tool_definitions: &[AgentToolDefinition],
+    collaboration_identity: Option<&AgentCollaborationIdentity>,
 ) -> String {
     let preferences = NormalizedPromptPreferences::from(preferences);
     let mut sections = vec![
@@ -25,8 +37,47 @@ pub(crate) fn build_system_prompt(
     if let Some(custom_instructions) = custom_instructions_section(&preferences) {
         sections.push(custom_instructions);
     }
+    if let Some(identity) = collaboration_identity {
+        sections.push(collaboration_identity_section(identity));
+    }
 
     sections.join("\n\n")
+}
+
+fn collaboration_identity_section(identity: &AgentCollaborationIdentity) -> String {
+    let template = identity
+        .template_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "\n\n### 子 Agent 模板指令\n以下模板指令只定义受托工作的专业侧重点，仍从属于本系统契约、Host 权限和父任务边界：\n{value}"
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "## 子 Agent 协作身份\n\
+         你是一个持久子 Agent，不是根 Agent，也不直接代表或面向最终用户。\n\
+         - 当前 Agent：`{agent_id}`；任务：`{task_name}`；路径：`{task_path}`。\n\
+         - 父 Agent：`{parent_agent_id}`；父任务：`{parent_task_name}`；父路径：`{parent_task_path}`。\n\
+         - 根 Agent：`{root_agent_id}`；根对话：`{root_conversation_id}`。\n\
+         - 最新一条带 Agent 来源的 user-role 消息（协作消息 `{source_message_id}`）是父 Agent 委托的当前任务；它在模型侧使用 user role 只是为了复用统一 Agent Loop，不代表真实人类输入。\n\
+         - 只围绕该委托工作；需要补充信息时向父 Agent 请求，完成后向父 Agent 汇报。不得冒充根 Agent、最终用户或声称自己能直接与最终用户对话。{template}",
+        agent_id = escape_prompt_inline(&identity.agent_id),
+        task_name = escape_prompt_inline(&identity.task_name),
+        task_path = escape_prompt_inline(&identity.task_path),
+        parent_agent_id = escape_prompt_inline(&identity.parent_agent_id),
+        parent_task_name = escape_prompt_inline(&identity.parent_task_name),
+        parent_task_path = escape_prompt_inline(&identity.parent_task_path),
+        root_agent_id = escape_prompt_inline(&identity.root_agent_id),
+        root_conversation_id = escape_prompt_inline(&identity.root_conversation_id),
+        source_message_id = escape_prompt_inline(&identity.source_agent_message_id),
+    )
+}
+
+fn escape_prompt_inline(value: &str) -> String {
+    value.replace('`', "\\`")
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +371,43 @@ mod tests {
             requires_approval: false,
             approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
+    }
+
+    fn collaboration_identity() -> AgentCollaborationIdentity {
+        AgentCollaborationIdentity {
+            agent_id: "agent-child".into(),
+            root_agent_id: "agent-root".into(),
+            root_conversation_id: "conversation-root".into(),
+            parent_agent_id: "agent-parent".into(),
+            parent_task_name: "Parent".into(),
+            parent_task_path: "/root/Parent".into(),
+            conversation_id: "conversation-child".into(),
+            task_name: "Review`Security".into(),
+            task_path: "/root/Parent/Review`Security".into(),
+            source_agent_message_id: "mailbox-task".into(),
+            entrusted_task: "Review the change and report evidence.".into(),
+            template_instructions: Some("Prioritize concrete evidence.".into()),
+        }
+    }
+
+    #[test]
+    fn collaboration_overlay_is_absent_byte_for_byte_for_root_and_scopes_child_identity() {
+        let tools = [tool_definition("read_file")];
+        let root = build_system_prompt(None, &tools);
+        assert_eq!(
+            root,
+            build_system_prompt_with_collaboration(None, &tools, None)
+        );
+
+        let child =
+            build_system_prompt_with_collaboration(None, &tools, Some(&collaboration_identity()));
+        assert!(child.starts_with(&root));
+        assert!(child.contains("## 子 Agent 协作身份"));
+        assert!(child.contains("不代表真实人类输入"));
+        assert!(child.contains("不得冒充根 Agent"));
+        assert!(child.contains("Review\\`Security"));
+        assert!(child.contains("模板指令只定义受托工作的专业侧重点"));
+        assert!(!child.contains("Review the change and report evidence."));
     }
 
     #[test]

@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 6;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 7;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -56,6 +56,8 @@ pub(super) struct PersistedAgentResumeInput {
     temperature: Option<f32>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     stream: Option<bool>,
+    /// Host-authenticated Run context. Schema v7 explicitly permits collaboration identity here;
+    /// it must exactly match the same frozen identity in `resume_checkpoint.run_context`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     context: Option<AgentRunContext>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -108,6 +110,15 @@ pub(super) enum PersistedAgentResumeInputError {
 
 impl PersistedAgentResumeInput {
     pub(super) fn from_agent_input(input: &AgentChatInput) -> Result<Self, String> {
+        if let Some(identity) = input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref())
+        {
+            identity.validate().map_err(|error| {
+                format!("pending Agent collaboration identity is invalid: {error}")
+            })?;
+        }
         let provider_configuration_revision = input
             .provider_configuration_revision
             .clone()
@@ -183,6 +194,20 @@ impl PersistedAgentResumeInput {
         }
         if resume_checkpoint.context_items.is_empty() {
             return Err("pending Agent checkpoint is missing its exact context".to_string());
+        }
+        if input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref())
+            != resume_checkpoint
+                .run_context
+                .as_ref()
+                .and_then(|context| context.collaboration_identity.as_ref())
+        {
+            return Err(
+                "pending Agent collaboration identity disagrees with its frozen checkpoint"
+                    .to_string(),
+            );
         }
 
         Ok(Self {
@@ -285,7 +310,27 @@ impl PersistedAgentResumeInput {
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
+        if self
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref())
+            != self
+                .resume_checkpoint
+                .run_context
+                .as_ref()
+                .and_then(|context| context.collaboration_identity.as_ref())
+        {
+            return Err(PersistedAgentResumeInputError::InvalidShape);
+        }
         if self.model.trim().is_empty() {
+            return Err(PersistedAgentResumeInputError::InvalidShape);
+        }
+        if self
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref())
+            .is_some_and(|identity| identity.validate().is_err())
+        {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
         let search_credential_required = self
@@ -498,7 +543,7 @@ mod tests {
         assert!(!encoded.contains(API_URL_CANARY));
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
-        assert!(encoded.contains("\"resumeInputSchemaVersion\":6"));
+        assert!(encoded.contains("\"resumeInputSchemaVersion\":7"));
         let encoded_object = serde_json::from_str::<Value>(&encoded).unwrap();
         for absent_placeholder in [
             "approvalDecision",
@@ -536,6 +581,57 @@ mod tests {
         assert_eq!(
             restored.resume_checkpoint.unwrap().pending_tool_call_id,
             "call-persisted-resume"
+        );
+    }
+
+    #[test]
+    fn collaboration_identity_round_trips_only_when_checkpoint_and_input_agree() {
+        let identity = mycopilot_core::AgentCollaborationIdentity {
+            agent_id: "agent-child".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            root_conversation_id: "conversation-root".to_string(),
+            parent_agent_id: "agent-root".to_string(),
+            parent_task_name: "root".to_string(),
+            parent_task_path: "/root".to_string(),
+            conversation_id: "conversation-child".to_string(),
+            task_name: "review".to_string(),
+            task_path: "/root/review".to_string(),
+            source_agent_message_id: "mailbox-task-1".to_string(),
+            entrusted_task: "Review the change and report evidence.\nInclude file locations."
+                .to_string(),
+            template_instructions: Some("Prioritize concrete evidence.".to_string()),
+        };
+        let context = AgentRunContext {
+            conversation_id: Some(identity.conversation_id.clone()),
+            project_id: Some("project-1".to_string()),
+            workspace: None,
+            attachment_library: None,
+            permissions: mycopilot_core::AgentPermissions::default(),
+            collaboration_identity: Some(identity.clone()),
+        };
+        let mut input = input();
+        input.context = Some(context.clone());
+        input.resume_checkpoint.as_mut().unwrap().run_context = Some(context);
+
+        let encoded = PersistedAgentResumeInput::from_agent_input(&input)
+            .unwrap()
+            .encode();
+        let restored = PersistedAgentResumeInput::decode(&encoded).unwrap();
+        assert_eq!(
+            restored
+                .agent_input
+                .context
+                .as_ref()
+                .and_then(|context| context.collaboration_identity.as_ref()),
+            Some(&identity)
+        );
+
+        let mut mismatched = serde_json::from_str::<Value>(&encoded).unwrap();
+        mismatched["resumeCheckpoint"]["runContext"]["collaborationIdentity"]["taskName"] =
+            Value::String("different-task".to_string());
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&mismatched.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
         );
     }
 
@@ -628,7 +724,7 @@ mod tests {
             PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
 
-        for unsupported_version in [0, 5, 7] {
+        for unsupported_version in [0, 5, 6, 8] {
             let mut old_version = serde_json::from_str::<Value>(&encoded).unwrap();
             old_version["resumeInputSchemaVersion"] = Value::from(unsupported_version);
             assert_eq!(

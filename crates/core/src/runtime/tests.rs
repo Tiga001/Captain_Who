@@ -1334,6 +1334,7 @@ fn command_dispatch_require_approval_never_auto_executes_an_allowed_command() {
 #[test]
 fn runtime_messages_add_backend_system_prompt() {
     let context = AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-1".to_string()),
         project_id: Some("project-1".to_string()),
         workspace: Some(AgentWorkspaceContext {
@@ -1777,6 +1778,7 @@ fn activated_document_reader_can_read_the_same_authoritative_attachment_path() {
     assert!(effective_tool_set.contains("read_word"));
 
     let tool_context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-1".to_string()),
         project_id: None,
         workspace: None,
@@ -2251,6 +2253,7 @@ async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_
     input.stream = Some(false);
     input.assistant_message_id = Some("assistant-steer".to_string());
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-steer".to_string()),
         project_id: None,
         workspace: None,
@@ -2453,6 +2456,7 @@ async fn steer_accepted_during_transport_retry_is_applied_after_the_retried_resp
     input.stream = Some(false);
     input.assistant_message_id = Some("assistant-retry-steer".to_string());
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-retry-steer".to_string()),
         project_id: None,
         workspace: None,
@@ -2578,6 +2582,7 @@ async fn steer_waits_until_a_complete_multi_tool_exchange_before_next_sampling()
     input.stream = Some(false);
     input.assistant_message_id = Some("assistant-tool-steer".to_string());
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-tool-steer".to_string()),
         project_id: None,
         workspace: None,
@@ -2782,6 +2787,7 @@ async fn empty_normal_completion_is_repaired_once_for_openai_and_anthropic() {
         input.stream = Some(false);
         input.assistant_message_id = Some("assistant-empty-repair".to_string());
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-empty-repair".to_string()),
             project_id: None,
             workspace: None,
@@ -2983,6 +2989,7 @@ fn runtime_command_definition_is_fixed_while_dispatch_uses_current_permissions()
     .map(|permissions| {
         let mut input = conversation_context_input(vec![message("user", "run a command")]);
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: None,
@@ -3049,6 +3056,7 @@ fn model_capabilities_do_not_change_tool_definitions_or_context_revision() {
 fn run_context_changes_only_world_state_while_prompt_preferences_change_configuration() {
     let mut baseline = conversation_context_input(vec![message("user", "Inspect the project")]);
     baseline.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: None,
         project_id: None,
         workspace: None,
@@ -3065,6 +3073,7 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
 
     let mut changed_runtime = baseline.clone();
     changed_runtime.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-private".to_string()),
         project_id: Some("project-private".to_string()),
         workspace: Some(AgentWorkspaceContext {
@@ -3166,9 +3175,59 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
 }
 
 #[test]
+fn collaboration_identity_is_stable_prompt_configuration_not_run_world_state() {
+    let mut root = conversation_context_input(vec![message("user", "Inspect the project")]);
+    root.context = Some(AgentRunContext {
+        collaboration_identity: None,
+        conversation_id: Some("conversation-root".to_string()),
+        project_id: Some("project-1".to_string()),
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+    });
+    let root_revision = conversation_context_configuration_revision(&root).unwrap();
+
+    let mut child = root.clone();
+    child.context.as_mut().unwrap().collaboration_identity =
+        Some(crate::AgentCollaborationIdentity {
+            agent_id: "agent-child".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            root_conversation_id: "conversation-root".to_string(),
+            parent_agent_id: "agent-root".to_string(),
+            parent_task_name: "root".to_string(),
+            parent_task_path: "/root".to_string(),
+            conversation_id: "conversation-child".to_string(),
+            task_name: "review".to_string(),
+            task_path: "/root/review".to_string(),
+            source_agent_message_id: "mailbox-task-1".to_string(),
+            entrusted_task: "Review the change and report evidence.".to_string(),
+            template_instructions: Some("Prefer concrete file references.".to_string()),
+        });
+
+    assert_ne!(
+        root_revision,
+        conversation_context_configuration_revision(&child).unwrap(),
+        "a trusted child identity changes the stable system-prompt prefix"
+    );
+
+    let mut runtime_only_change = child.clone();
+    runtime_only_change
+        .context
+        .as_mut()
+        .unwrap()
+        .conversation_id = Some("different-runtime-conversation".to_string());
+    assert_eq!(
+        conversation_context_configuration_revision(&child).unwrap(),
+        conversation_context_configuration_revision(&runtime_only_change).unwrap(),
+        "ordinary runtime authority remains outside the stable prompt revision"
+    );
+}
+
+#[test]
 fn durable_conversation_sections_are_not_duplicated_in_run_world_state() {
     let mut input = conversation_context_input(vec![message("user", "Inspect the workspace")]);
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-1".to_string()),
         project_id: Some("project-1".to_string()),
         workspace: Some(AgentWorkspaceContext {
@@ -3307,6 +3366,7 @@ fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail(
     let input_with_permissions = |permissions| {
         let mut input = conversation_context_input(vec![message("user", "edit a file")]);
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -3410,6 +3470,7 @@ fn conversation_identity_does_not_change_the_stable_history_tool() {
     let input_with_conversation = |conversation_id: Option<&str>| {
         let mut input = conversation_context_input(vec![message("user", "find earlier evidence")]);
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: conversation_id.map(str::to_string),
             project_id: None,
             workspace: None,
@@ -3468,6 +3529,7 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
     let definitions = |patch, host_actions_available| {
         let mut input = conversation_context_input(vec![message("user", "edit a workbook")]);
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -3559,6 +3621,7 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
 fn write_denied_keeps_stable_writers_but_filters_dynamic_write_only_tools() {
     let mut input = conversation_context_input(vec![message("user", "inspect a workbook")]);
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -4091,6 +4154,7 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
         input.model_capabilities.image_input = true;
         input.assistant_message_id = Some("assistant-image".to_string());
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-image".to_string()),
             project_id: Some("project-image".to_string()),
             workspace: Some(AgentWorkspaceContext {
@@ -4245,6 +4309,7 @@ fn runtime_skill_script_definition_respects_the_host_permission_matrix() {
     let definitions = |write, command, command_safety, host_actions_available| {
         let mut input = conversation_context_input(vec![message("user", "run a Skill script")]);
         input.context = Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -5339,6 +5404,7 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
 fn conversation_history_tool_is_stable_even_without_a_persisted_conversation() {
     let mut input = conversation_context_input(vec![message("user", "Current question")]);
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-1".to_string()),
         project_id: None,
         workspace: None,
@@ -5507,6 +5573,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         temperature: None,
         stream: Some(false),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-1".to_string()),
             project_id: None,
             workspace: None,
@@ -6014,6 +6081,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         temperature: None,
         stream: Some(false),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-capacity".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -6370,6 +6438,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         temperature: None,
         stream: Some(true),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-preview".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -6655,6 +6724,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         temperature: None,
         stream: Some(true),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-checkpoint".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -7071,6 +7141,7 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
         temperature: None,
         stream: Some(false),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-skill-resource-checkpoint".to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -7405,6 +7476,7 @@ async fn deepseek_cancellation_during_result_publication_closes_grouped_suffix()
     input.stream = Some(false);
     input.assistant_message_id = Some(ASSISTANT_ID.to_string());
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -7637,6 +7709,7 @@ async fn deepseek_commit_unknown_trace_publish_recovers_staged_turn_without_tool
     input.stream = Some(false);
     input.assistant_message_id = Some(ASSISTANT_ID.to_string());
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -7861,6 +7934,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     first_input.stream = Some(false);
     first_input.assistant_message_id = Some(FIRST_ASSISTANT_ID.to_string());
     first_input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -7960,6 +8034,7 @@ async fn deepseek_checkpoint_abort_closes_unknown_suffix_and_replays_next_run() 
     recovery_input.stream = Some(false);
     recovery_input.assistant_message_id = Some(SECOND_ASSISTANT_ID.to_string());
     recovery_input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some(CONVERSATION_ID.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -8343,6 +8418,7 @@ async fn deepseek_runtime_persists_grouped_turns_before_tool_side_effects() {
         temperature: Some(0.3),
         stream: Some(false),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some(CONVERSATION_ID.to_string()),
             project_id: None,
             workspace: Some(AgentWorkspaceContext {

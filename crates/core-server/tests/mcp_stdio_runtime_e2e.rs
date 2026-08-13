@@ -222,6 +222,7 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
         temperature: None,
         stream: Some(false),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-mcp-stdio-e2e".to_string()),
             project_id: Some("project-mcp-stdio-e2e".to_string()),
             workspace: None,

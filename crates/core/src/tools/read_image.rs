@@ -423,6 +423,7 @@ mod tests {
 
     fn context(workspace: Option<&Path>, permissions: AgentPermissions) -> ToolExecutionContext {
         ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-read-image".to_string()),
             project_id: None,
             workspace: workspace.map(|root| AgentWorkspaceContext {
@@ -818,6 +819,7 @@ mod tests {
             project_attachments: Vec::new(),
         };
         let run_context = AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("c1".to_string()),
             project_id: None,
             workspace: None,

@@ -115,6 +115,10 @@ const FORBIDDEN_MARKERS: &[ForbiddenMarker] = &[
         allowed_files: &[],
     },
     ForbiddenMarker {
+        value: "PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 6",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
         value: "pub fn commit_pending_agent_action_audited_result_trace(",
         allowed_files: &[],
     },

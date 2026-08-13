@@ -3323,7 +3323,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     let row = storage.list_pending_agent_actions().unwrap().remove(0);
     assert!(row
         .agent_input_json
-        .contains("\"resumeInputSchemaVersion\":6"));
+        .contains("\"resumeInputSchemaVersion\":7"));
     for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
         assert!(!row.agent_input_json.contains(forbidden_key));
     }
@@ -3447,6 +3447,136 @@ fn frozen_provider_resume_input_with_profile(
             .encode(),
     )
     .unwrap()
+}
+
+fn valid_resume_collaboration_identity() -> mycopilot_core::AgentCollaborationIdentity {
+    mycopilot_core::AgentCollaborationIdentity {
+        agent_id: "agent-child-resume".to_string(),
+        root_agent_id: "agent-root-resume".to_string(),
+        root_conversation_id: "conversation-root-resume".to_string(),
+        parent_agent_id: "agent-root-resume".to_string(),
+        parent_task_name: "Root".to_string(),
+        parent_task_path: "root".to_string(),
+        conversation_id: "conversation-child-resume".to_string(),
+        task_name: "review".to_string(),
+        task_path: "root/review".to_string(),
+        source_agent_message_id: "mailbox-task-resume".to_string(),
+        entrusted_task: "Review the durable facts.".to_string(),
+        template_instructions: None,
+    }
+}
+
+fn collaboration_resume_input(storage: &StorageService) -> AgentChatInput {
+    let snapshot = storage.load_model_settings_snapshot().unwrap().unwrap();
+    let mut input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://resume-identity.example/v1/chat/completions",
+        "apiToken": "resume-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "contextWindowTokens": 128000,
+        "messages": []
+    }))
+    .unwrap();
+    freeze_provider_protocol(
+        &mut input,
+        snapshot.provider_protocol_revisions["test-model"].clone(),
+        mycopilot_core::ProviderProfileConfig::generic_for_dialect(
+            mycopilot_core::ProviderProtocolDialect::OpenAiChatCompletions,
+        ),
+    );
+    input.provider_connection_revision =
+        Some(snapshot.provider_connection_revisions["test-model"].clone());
+    input.search_connection_revision = Some(snapshot.search_connection_revision);
+    let call = AgentToolCall {
+        id: "resume-collaboration-call".to_string(),
+        tool: "read_file".to_string(),
+        args: json!({ "path": "README.md" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let context = AgentRunContext {
+        conversation_id: Some("conversation-child-resume".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: Some(valid_resume_collaboration_identity()),
+    };
+    let mut checkpoint = test_pending_resume_checkpoint_for_call(
+        storage,
+        "run-collaboration-resume",
+        None,
+        &call,
+        AgentToolIdentity::Builtin {
+            tool_name: call.tool.clone(),
+        },
+    );
+    checkpoint.run_context = Some(context.clone());
+    input.context = Some(context);
+    input.resume_checkpoint = Some(checkpoint);
+    input
+}
+
+#[test]
+fn persisted_resume_requires_exact_collaboration_identity_on_both_context_copies() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "test-model",
+        "https://resume-identity.example/v1/chat/completions",
+        "resume-token",
+        "disabled",
+        "",
+    );
+    let input = collaboration_resume_input(&storage);
+    let encoded = PersistedAgentResumeInput::from_agent_input(&input)
+        .unwrap()
+        .encode();
+    assert!(PersistedAgentResumeInput::decode(&encoded).is_ok());
+
+    let mut missing: Value = serde_json::from_str(&encoded).unwrap();
+    missing["context"]
+        .as_object_mut()
+        .unwrap()
+        .remove("collaborationIdentity");
+    assert_eq!(
+        PersistedAgentResumeInput::decode(&missing.to_string()).unwrap_err(),
+        PersistedAgentResumeInputError::InvalidShape
+    );
+
+    let mut forged: Value = serde_json::from_str(&encoded).unwrap();
+    forged["context"]["collaborationIdentity"]["entrustedTask"] =
+        Value::String("A forged task".to_string());
+    assert_eq!(
+        PersistedAgentResumeInput::decode(&forged.to_string()).unwrap_err(),
+        PersistedAgentResumeInputError::InvalidShape
+    );
+
+    let mut old: Value = serde_json::from_str(&encoded).unwrap();
+    old["resumeInputSchemaVersion"] = json!(6);
+    assert_eq!(
+        PersistedAgentResumeInput::decode(&old.to_string()).unwrap_err(),
+        PersistedAgentResumeInputError::UnsupportedOrMalformed
+    );
+
+    let mut mismatched = input;
+    mismatched
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .run_context
+        .as_mut()
+        .unwrap()
+        .collaboration_identity
+        .as_mut()
+        .unwrap()
+        .entrusted_task = "Different but individually valid task".to_string();
+    let error = match PersistedAgentResumeInput::from_agent_input(&mismatched) {
+        Ok(_) => panic!("mismatched Collaboration identity must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.contains("disagrees"), "{error}");
 }
 
 #[test]
@@ -4138,6 +4268,352 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         .unwrap()
         .agent_input_json
         .contains(CATALOG_MARKER));
+}
+
+#[tokio::test]
+async fn pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupancy() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let run_id = "pre-runtime-continuation-failure-run";
+    let conversation_id = "pre-runtime-continuation-failure-conversation";
+    let assistant_message_id = "pre-runtime-continuation-failure-assistant";
+    let call = AgentToolCall {
+        id: "pre-runtime-continuation-failure-call".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        None,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+    ));
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+
+    let service = AgentService::new(Arc::clone(&storage));
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+        1,
+    );
+    service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input.clone(),
+        )
+        .unwrap();
+    let storage_id = pending_action_storage_id(run_id, &call.id);
+    let pending = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .transition_pending_status(&pending, PendingActionStatus::Approved)
+        .unwrap();
+    let approved = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .persist_pending_target_status(&approved, PendingActionStatus::Completed)
+        .unwrap();
+    service.register_usage_context(
+        run_id,
+        AgentRunUsageContext {
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            run_id: run_id.to_string(),
+            project_id: None,
+            model_id: "test-model".to_string(),
+            model_name: "Test Model".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+
+    // The pending row contains a valid frozen checkpoint. Corrupt only the reconstructed
+    // continuation so restoration fails after the exact durable Turn owner has been acquired,
+    // but before any Runtime/model request can start.
+    let mut resumed_input = agent_input;
+    resumed_input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .extension_snapshots
+        .push(mycopilot_core::AgentExtensionSnapshot {
+            extension_id: "skills".to_string(),
+            version: u32::MAX,
+            state: json!({}),
+        });
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .run_action_continuation(
+            approved,
+            resumed_input,
+            notifications,
+            PendingActionStatus::Completed,
+            None,
+        )
+        .await;
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+
+    let pending_status: String = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [&storage_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "failed", "events: {events:#?}");
+    let trace = storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert_eq!(trace.run_id, run_id);
+    assert_eq!(trace.conversation_id, conversation_id);
+    assert!(matches!(
+        trace.items.first(),
+        Some(ConversationTurnTraceItem::ToolCall { call_id, .. }) if call_id == &call.id
+    ));
+    assert!(trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+    )));
+    let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == assistant_message_id)
+        .unwrap();
+    assert_eq!(assistant.status.as_deref(), Some("error"));
+    assert!(
+        assistant.content.contains("Skill extension version"),
+        "unexpected terminal assistant content: {}",
+        assistant.content
+    );
+    let usage = storage
+        .load_agent_usage_for_owner(run_id, conversation_id, assistant_message_id)
+        .unwrap()
+        .expect("pre-Runtime failure must settle the existing run Usage owner");
+    assert_eq!(usage.status.as_deref(), Some("failed"));
+    assert!(usage
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("Skill extension version")));
+
+    assert!(!service
+        .has_conversation_turn_occupancy(conversation_id)
+        .unwrap());
+    service
+        .reserve_conversation_turn(conversation_id, "next-run", "next-assistant")
+        .expect("a durable terminal continuation must admit the next Turn");
+    service.release_conversation_turn_if_current(conversation_id, "next-run");
+
+    let error = events
+        .iter()
+        .find(|event| event["params"]["type"] == "error")
+        .expect("terminal failure must emit an error event");
+    assert_eq!(
+        error["params"]["code"],
+        "skill_resource_snapshot_unavailable"
+    );
+    assert_eq!(error["params"]["recoverable"], false);
+    let done = events
+        .iter()
+        .find(|event| event["params"]["type"] == "done")
+        .expect("terminal failure must emit a Done event");
+    assert_eq!(done["params"]["status"], "failed");
+    assert_eq!(done["params"]["success"], false);
+}
+
+#[tokio::test]
+async fn pre_runtime_continuation_failure_cas_conflict_preserves_turn_for_recovery() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let run_id = "pre-runtime-continuation-conflict-run";
+    let conversation_id = "pre-runtime-continuation-conflict-conversation";
+    let assistant_message_id = "pre-runtime-continuation-conflict-assistant";
+    let call = AgentToolCall {
+        id: "pre-runtime-continuation-conflict-call".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        run_id,
+        None,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+    ));
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    seed_durable_pending_owner(
+        &storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &call,
+        AgentToolIdentity::Unregistered {
+            tool_name: call.tool.clone(),
+        },
+        1,
+    );
+    service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input.clone(),
+        )
+        .unwrap();
+    let storage_id = pending_action_storage_id(run_id, &call.id);
+    let pending = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .transition_pending_status(&pending, PendingActionStatus::Approved)
+        .unwrap();
+    let approved = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .persist_pending_target_status(&approved, PendingActionStatus::Completed)
+        .unwrap();
+
+    let mut resumed_input = agent_input;
+    resumed_input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .extension_snapshots
+        .push(mycopilot_core::AgentExtensionSnapshot {
+            extension_id: "skills".to_string(),
+            version: u32::MAX,
+            state: json!({}),
+        });
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .run_action_continuation(
+            approved,
+            resumed_input,
+            notifications,
+            // Deliberately stale: the durable executor target is completed. The terminalization
+            // transaction must lose this CAS without altering any durable fact or Turn lease.
+            PendingActionStatus::Rejected,
+            None,
+        )
+        .await;
+
+    let (status, target_status): (String, Option<String>) =
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(status, "approved");
+    assert_eq!(target_status.as_deref(), Some("completed"));
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace(assistant_message_id)
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::InProgress
+    );
+    let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
+    assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+    assert!(service
+        .has_conversation_turn_occupancy(conversation_id)
+        .unwrap());
+    assert!(service
+        .reserve_conversation_turn(conversation_id, "conflicting-next-run", "next-assistant")
+        .is_err());
+
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    let error = events
+        .iter()
+        .find(|event| event["params"]["type"] == "error")
+        .expect("CAS conflict must emit a recoverable persistence error");
+    assert_eq!(
+        error["params"]["code"],
+        "conversation_trace_persistence_failed"
+    );
+    assert_eq!(error["params"]["recoverable"], true);
+    assert!(!events.iter().any(|event| event["params"]["type"] == "done"));
 }
 
 #[test]

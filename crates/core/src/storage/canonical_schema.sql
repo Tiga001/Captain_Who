@@ -375,8 +375,19 @@ CREATE TABLE conversations (
             updated_at INTEGER NOT NULL,
             pinned_at INTEGER,
             archived_at INTEGER,
-            unread_at INTEGER
+            unread_at INTEGER,
+            revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
         );
+CREATE TRIGGER conversations_revision_after_business_update
+        AFTER UPDATE OF
+            project_id, model_id, title, created_at, updated_at,
+            pinned_at, archived_at, unread_at
+        ON conversations
+        BEGIN
+            UPDATE conversations
+            SET revision = revision + 1
+            WHERE id = NEW.id;
+        END;
 CREATE TABLE attachments (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
@@ -751,6 +762,14 @@ CREATE TABLE agent_nodes (
             model_settings_revision_snapshot TEXT,
             provider_connection_revision_snapshot TEXT,
             provider_protocol_revision_snapshot TEXT,
+            model_selection_source_snapshot TEXT CHECK (
+                model_selection_source_snapshot IS NULL
+                OR model_selection_source_snapshot IN ('explicit', 'template', 'parent', 'default')
+            ),
+            reasoning_effort_snapshot TEXT CHECK (
+                reasoning_effort_snapshot IS NULL
+                OR reasoning_effort_snapshot IN ('high', 'max')
+            ),
             lifecycle TEXT NOT NULL CHECK (
                 lifecycle IN ('active', 'archived', 'disabled')
             ),
@@ -775,11 +794,27 @@ CREATE TABLE agent_nodes (
                     AND agent_id = root_agent_id
                     AND conversation_id = root_conversation_id
                     AND task_path = '/root'
+                    AND model_selection_source_snapshot IS NULL
+                    AND reasoning_effort_snapshot IS NULL
                 ) OR (
                     parent_agent_id IS NOT NULL
                     AND agent_id != root_agent_id
                     AND conversation_id != root_conversation_id
                     AND model_config_id_snapshot IS NOT NULL
+                    AND model_selection_source_snapshot IS NOT NULL
+                )
+            ),
+            CHECK (
+                parent_agent_id IS NULL
+                OR model_selection_source_snapshot = 'explicit'
+                OR (
+                    model_selection_source_snapshot = 'template'
+                    AND template_id_snapshot IS NOT NULL
+                    AND model_config_id_snapshot = template_model_config_id_snapshot
+                )
+                OR (
+                    model_selection_source_snapshot IN ('parent', 'default')
+                    AND template_id_snapshot IS NULL
                 )
             ),
             CHECK (
@@ -923,7 +958,8 @@ CREATE TRIGGER prevent_agent_node_identity_update
             model_config_id_snapshot, model_display_name_snapshot,
             model_supports_image_snapshot, model_context_window_tokens_snapshot,
             model_settings_revision_snapshot, provider_connection_revision_snapshot,
-            provider_protocol_revision_snapshot, created_at
+            provider_protocol_revision_snapshot, model_selection_source_snapshot,
+            reasoning_effort_snapshot, created_at
         ON agent_nodes
         BEGIN
             SELECT RAISE(ABORT, 'Agent node identity and creation snapshot are immutable');
@@ -951,6 +987,17 @@ CREATE TRIGGER prevent_agent_lifecycle_deactivation_with_pending_wake
           )
         BEGIN
             SELECT RAISE(ABORT, 'Agent has an unsettled wake request');
+        END;
+CREATE TRIGGER prevent_agent_lifecycle_deactivation_with_active_turn
+        BEFORE UPDATE OF lifecycle ON agent_nodes
+        WHEN NEW.lifecycle != 'active'
+          AND EXISTS (
+              SELECT 1 FROM conversation_turn_traces
+              WHERE conversation_id = OLD.conversation_id
+                AND terminal_status = 'in_progress'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent has an active Conversation Turn');
         END;
 CREATE TRIGGER prevent_agent_lifecycle_deactivation_with_pending_mailbox
         BEFORE UPDATE OF lifecycle ON agent_nodes
@@ -1341,6 +1388,55 @@ CREATE TRIGGER prevent_agent_wake_terminal_rewrite
         BEGIN
             SELECT RAISE(ABORT, 'Agent wake terminal fact is immutable');
         END;
+CREATE TABLE child_context_snapshots (
+            target_conversation_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            source_conversation_id TEXT NOT NULL CHECK (
+                typeof(source_conversation_id) = 'text'
+                AND length(CAST(source_conversation_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            fork_kind TEXT NOT NULL CHECK (fork_kind IN ('none', 'all', 'last')),
+            fork_turn_count INTEGER,
+            selected_turn_count INTEGER NOT NULL CHECK (selected_turn_count >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            CHECK (
+                (fork_kind IN ('none', 'all') AND fork_turn_count IS NULL)
+                OR (fork_kind = 'last' AND fork_turn_count > 0)
+            ),
+            CHECK (fork_kind != 'none' OR selected_turn_count = 0),
+            FOREIGN KEY (target_conversation_id)
+                REFERENCES conversations(id) ON DELETE CASCADE
+        );
+CREATE INDEX child_context_snapshots_source_idx
+            ON child_context_snapshots (source_conversation_id, created_at);
+CREATE TRIGGER validate_child_context_snapshot_insert
+        BEFORE INSERT ON child_context_snapshots
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM agent_nodes AS child
+                INNER JOIN agent_nodes AS parent
+                    ON parent.agent_id = child.parent_agent_id
+                WHERE child.conversation_id = NEW.target_conversation_id
+                  AND parent.conversation_id = NEW.source_conversation_id
+                  AND child.root_agent_id = parent.root_agent_id
+                  AND child.root_conversation_id = parent.root_conversation_id
+                  AND child.project_id IS parent.project_id
+            ) THEN RAISE(ABORT, 'invalid child context snapshot boundary') END;
+        END;
+CREATE TRIGGER prevent_child_context_snapshot_update
+        BEFORE UPDATE ON child_context_snapshots
+        BEGIN
+            SELECT RAISE(ABORT, 'Child context snapshot provenance is immutable');
+        END;
+CREATE TRIGGER prevent_child_context_snapshot_delete
+        BEFORE DELETE ON child_context_snapshots
+        WHEN EXISTS (
+            SELECT 1 FROM conversations WHERE id = OLD.target_conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Child context snapshot provenance is immutable');
+        END;
 CREATE TABLE messages (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
@@ -1348,10 +1444,18 @@ CREATE TABLE messages (
             content TEXT NOT NULL,
             status TEXT,
             input_origin_kind TEXT CHECK (
-                input_origin_kind IS NULL OR input_origin_kind IN ('human', 'agent')
+                input_origin_kind IS NULL OR input_origin_kind IN ('human', 'agent', 'snapshot')
             ),
             input_origin_agent_id TEXT,
             source_agent_message_id TEXT UNIQUE,
+            snapshot_source_conversation_id TEXT,
+            snapshot_source_message_id TEXT,
+            snapshot_original_origin_kind TEXT CHECK (
+                snapshot_original_origin_kind IS NULL
+                OR snapshot_original_origin_kind IN ('human', 'agent')
+            ),
+            snapshot_original_agent_id TEXT,
+            snapshot_original_mailbox_message_id TEXT,
             agent_run_json TEXT CHECK (
                 agent_run_json IS NULL OR json_valid(agent_run_json)
             ),
@@ -1367,17 +1471,137 @@ CREATE TABLE messages (
             CHECK (
                 (input_origin_kind IS NULL
                     AND input_origin_agent_id IS NULL
-                    AND source_agent_message_id IS NULL)
+                    AND source_agent_message_id IS NULL
+                    AND snapshot_source_conversation_id IS NULL
+                    AND snapshot_source_message_id IS NULL
+                    AND snapshot_original_origin_kind IS NULL
+                    AND snapshot_original_agent_id IS NULL
+                    AND snapshot_original_mailbox_message_id IS NULL)
                 OR (input_origin_kind = 'human'
                     AND role = 'user'
                     AND input_origin_agent_id IS NULL
-                    AND source_agent_message_id IS NULL)
+                    AND source_agent_message_id IS NULL
+                    AND snapshot_source_conversation_id IS NULL
+                    AND snapshot_source_message_id IS NULL
+                    AND snapshot_original_origin_kind IS NULL
+                    AND snapshot_original_agent_id IS NULL
+                    AND snapshot_original_mailbox_message_id IS NULL)
                 OR (input_origin_kind = 'agent'
                     AND role = 'user'
                     AND input_origin_agent_id IS NOT NULL
-                    AND source_agent_message_id IS NOT NULL)
+                    AND source_agent_message_id IS NOT NULL
+                    AND snapshot_source_conversation_id IS NULL
+                    AND snapshot_source_message_id IS NULL
+                    AND snapshot_original_origin_kind IS NULL
+                    AND snapshot_original_agent_id IS NULL
+                    AND snapshot_original_mailbox_message_id IS NULL)
+                OR (input_origin_kind = 'snapshot'
+                    AND role IN ('user', 'assistant')
+                    AND input_origin_agent_id IS NULL
+                    AND source_agent_message_id IS NULL
+                    AND snapshot_source_conversation_id IS NOT NULL
+                    AND snapshot_source_message_id IS NOT NULL
+                    AND (
+                        (role = 'assistant'
+                            AND snapshot_original_origin_kind IS NULL
+                            AND snapshot_original_agent_id IS NULL
+                            AND snapshot_original_mailbox_message_id IS NULL)
+                        OR (role = 'user'
+                            AND snapshot_original_origin_kind = 'human'
+                            AND snapshot_original_agent_id IS NULL
+                            AND snapshot_original_mailbox_message_id IS NULL)
+                        OR (role = 'user'
+                            AND snapshot_original_origin_kind = 'agent'
+                            AND snapshot_original_agent_id IS NOT NULL
+                            AND snapshot_original_mailbox_message_id IS NOT NULL)
+                    ))
             )
         );
+CREATE TRIGGER conversations_revision_after_message_insert
+        AFTER INSERT ON messages
+        BEGIN
+            UPDATE conversations
+            SET revision = revision + 1
+            WHERE id = NEW.conversation_id;
+        END;
+CREATE TRIGGER conversations_revision_after_message_update
+        AFTER UPDATE ON messages
+        WHEN NEW.conversation_id IS NOT OLD.conversation_id
+          OR NEW.role IS NOT OLD.role
+          OR NEW.content IS NOT OLD.content
+          OR NEW.status IS NOT OLD.status
+          OR NEW.input_origin_kind IS NOT OLD.input_origin_kind
+          OR NEW.input_origin_agent_id IS NOT OLD.input_origin_agent_id
+          OR NEW.source_agent_message_id IS NOT OLD.source_agent_message_id
+          OR NEW.snapshot_source_conversation_id IS NOT OLD.snapshot_source_conversation_id
+          OR NEW.snapshot_source_message_id IS NOT OLD.snapshot_source_message_id
+          OR NEW.snapshot_original_origin_kind IS NOT OLD.snapshot_original_origin_kind
+          OR NEW.snapshot_original_agent_id IS NOT OLD.snapshot_original_agent_id
+          OR NEW.snapshot_original_mailbox_message_id IS NOT OLD.snapshot_original_mailbox_message_id
+          OR NEW.agent_run_json IS NOT OLD.agent_run_json
+          OR NEW.ui_state_json IS NOT OLD.ui_state_json
+          OR NEW.created_at IS NOT OLD.created_at
+          OR NEW.position IS NOT OLD.position
+        BEGIN
+            UPDATE conversations
+            SET revision = revision + 1
+            WHERE id IN (OLD.conversation_id, NEW.conversation_id);
+        END;
+CREATE TRIGGER conversations_revision_after_message_delete
+        AFTER DELETE ON messages
+        BEGIN
+            UPDATE conversations
+            SET revision = revision + 1
+            WHERE id = OLD.conversation_id;
+        END;
+CREATE UNIQUE INDEX messages_snapshot_source_idx
+            ON messages (
+                conversation_id, snapshot_source_conversation_id, snapshot_source_message_id
+            )
+            WHERE input_origin_kind = 'snapshot';
+CREATE TRIGGER validate_child_context_snapshot_message_insert
+        BEFORE INSERT ON messages
+        WHEN NEW.input_origin_kind = 'snapshot'
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1 FROM child_context_snapshots AS snapshot
+                WHERE snapshot.target_conversation_id = NEW.conversation_id
+                  AND snapshot.source_conversation_id = NEW.snapshot_source_conversation_id
+            ) THEN RAISE(ABORT, 'invalid child context snapshot message') END;
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM messages AS source
+                WHERE source.conversation_id = NEW.snapshot_source_conversation_id
+                  AND source.id = NEW.snapshot_source_message_id
+                  AND source.role = NEW.role
+                  AND source.content = NEW.content
+                  AND source.status IS NEW.status
+                  AND source.created_at = NEW.created_at
+                  AND (
+                    (source.role = 'assistant'
+                        AND NEW.snapshot_original_origin_kind IS NULL
+                        AND NEW.snapshot_original_agent_id IS NULL
+                        AND NEW.snapshot_original_mailbox_message_id IS NULL)
+                    OR (source.role = 'user'
+                        AND (source.input_origin_kind IS NULL
+                            OR source.input_origin_kind = 'human')
+                        AND NEW.snapshot_original_origin_kind = 'human'
+                        AND NEW.snapshot_original_agent_id IS NULL
+                        AND NEW.snapshot_original_mailbox_message_id IS NULL)
+                    OR (source.role = 'user'
+                        AND source.input_origin_kind = 'agent'
+                        AND NEW.snapshot_original_origin_kind = 'agent'
+                        AND NEW.snapshot_original_agent_id = source.input_origin_agent_id
+                        AND NEW.snapshot_original_mailbox_message_id = source.source_agent_message_id)
+                    OR (source.role = 'user'
+                        AND source.input_origin_kind = 'snapshot'
+                        AND NEW.snapshot_original_origin_kind = source.snapshot_original_origin_kind
+                        AND NEW.snapshot_original_agent_id IS source.snapshot_original_agent_id
+                        AND NEW.snapshot_original_mailbox_message_id
+                            IS source.snapshot_original_mailbox_message_id)
+                  )
+            ) THEN RAISE(ABORT, 'child context snapshot source facts do not match') END;
+        END;
 CREATE TRIGGER validate_agent_message_projection_insert
         BEFORE INSERT ON messages
         WHEN NEW.input_origin_kind = 'agent'
@@ -1475,6 +1699,21 @@ CREATE TRIGGER prevent_agent_message_projection_ui_rewrite
         BEGIN
             SELECT RAISE(ABORT, 'Agent input projection cannot carry mutable run UI state');
         END;
+CREATE TRIGGER prevent_child_context_snapshot_message_rewrite
+        BEFORE UPDATE ON messages
+        WHEN OLD.input_origin_kind = 'snapshot'
+        BEGIN
+            SELECT RAISE(ABORT, 'Child context snapshot message is immutable');
+        END;
+CREATE TRIGGER prevent_child_context_snapshot_message_delete
+        BEFORE DELETE ON messages
+        WHEN OLD.input_origin_kind = 'snapshot'
+          AND EXISTS (
+              SELECT 1 FROM conversations WHERE id = OLD.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Child context snapshot message is immutable');
+        END;
 CREATE TRIGGER validate_agent_mailbox_acknowledgement
         BEFORE UPDATE OF delivery_status ON agent_mailbox_messages
         WHEN NEW.delivery_status = 'acknowledged' AND NOT EXISTS (
@@ -1503,6 +1742,9 @@ CREATE TABLE conversation_turn_traces (
             FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
+CREATE UNIQUE INDEX conversation_turn_traces_one_active_turn
+            ON conversation_turn_traces (conversation_id)
+            WHERE terminal_status = 'in_progress';
 CREATE TABLE conversation_turn_trace_items (
             assistant_message_id TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence >= 0),

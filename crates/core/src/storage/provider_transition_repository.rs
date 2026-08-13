@@ -125,6 +125,7 @@ pub fn commit_compatible_transition(
     record: &ProviderTransitionTerminalRecord,
     expected_current_model_id: Option<&str>,
     expected_conversation_updated_at: i64,
+    expected_conversation_revision: i64,
     expected_target_provider_protocol_revision: &str,
 ) -> Result<ProviderTransitionCompatibleCommitOutcome, ProviderTransitionRepositoryError> {
     record.validate()?;
@@ -148,6 +149,7 @@ pub fn commit_compatible_transition(
         &record.conversation_id,
         expected_current_model_id,
         expected_conversation_updated_at,
+        expected_conversation_revision,
         &record.target_model_id,
         expected_target_provider_protocol_revision,
     )? {
@@ -234,21 +236,30 @@ fn provider_transition_compare_and_set_is_current(
     conversation_id: &str,
     expected_current_model_id: Option<&str>,
     expected_conversation_updated_at: i64,
+    expected_conversation_revision: i64,
     target_model_id: &str,
     expected_target_provider_protocol_revision: &str,
 ) -> Result<bool, ProviderTransitionRepositoryError> {
     let conversation = transaction
         .query_row(
-            "SELECT model_id, updated_at FROM conversations WHERE id = ?1",
+            "SELECT model_id, updated_at, revision FROM conversations WHERE id = ?1",
             [conversation_id],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((current_model_id, current_updated_at)) = conversation else {
+    let Some((current_model_id, current_updated_at, current_revision)) = conversation else {
         return Ok(false);
     };
     if current_model_id.as_deref() != expected_current_model_id
         || current_updated_at != expected_conversation_updated_at
+        || current_revision != expected_conversation_revision
+        || !graph_allows_provider_transition_commit(transaction, conversation_id)?
     {
         return Ok(false);
     }
@@ -260,6 +271,40 @@ fn provider_transition_compare_and_set_is_current(
         )
         .optional()?;
     Ok(target_revision.as_deref() == Some(expected_target_provider_protocol_revision))
+}
+
+/// Provider-transition commits are user/root mutations. Legacy Conversations may remain unbound,
+/// but once Graph identity exists only an active root with no active Turn may be changed. Keeping
+/// this check in the final SQLite transaction closes lifecycle and cross-Host admission races.
+pub(crate) fn graph_allows_provider_transition_commit(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<bool> {
+    let binding = connection
+        .query_row(
+            "SELECT parent_agent_id, lifecycle
+             FROM agent_nodes WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    if binding
+        .as_ref()
+        .is_some_and(|(parent_agent_id, lifecycle)| {
+            parent_agent_id.is_some() || lifecycle != "active"
+        })
+    {
+        return Ok(false);
+    }
+    let active_turn = connection.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM conversation_turn_traces
+             WHERE conversation_id = ?1 AND terminal_status = 'in_progress'
+         )",
+        [conversation_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(!active_turn)
 }
 
 fn apply_model_selection(
@@ -427,6 +472,7 @@ mod tests {
             &terminal,
             Some("source-model"),
             7,
+            0,
             "provider-protocol-v1:target-revision",
         )
         .unwrap();
@@ -464,6 +510,7 @@ mod tests {
             &terminal,
             Some("source-model"),
             7,
+            0,
             "provider-protocol-v1:target-revision",
         )
         .unwrap();
@@ -482,6 +529,7 @@ mod tests {
             &terminal,
             Some("source-model"),
             7,
+            0,
             "wrong-revision",
         )
         .unwrap();
@@ -512,6 +560,73 @@ mod tests {
     }
 
     #[test]
+    fn compatible_commit_rechecks_revision_and_active_root_inside_its_transaction() {
+        let mut connection = setup();
+        let stale_revision = record("provider-transition-compatible-stale-revision");
+        let outcome = commit_compatible_transition(
+            &mut connection,
+            &stale_revision,
+            Some("source-model"),
+            7,
+            1,
+            "provider-protocol-v1:target-revision",
+        )
+        .unwrap();
+        assert_eq!(outcome, ProviderTransitionCompatibleCommitOutcome::Stale);
+        assert!(
+            get_terminal_record(&connection, &stale_revision.operation_id)
+                .unwrap()
+                .is_none()
+        );
+
+        crate::storage::agent_graph_repository::ensure_root_agent(
+            &mut connection,
+            &crate::EnsureRootAgentInput {
+                agent_id: "agent-provider-transition-root".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                creation_request_id: "ensure-provider-transition-root".to_string(),
+                task_name: "Root".to_string(),
+            },
+            2,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE agent_nodes
+                 SET lifecycle = 'disabled', revision = revision + 1, updated_at = 3
+                 WHERE agent_id = 'agent-provider-transition-root'",
+                [],
+            )
+            .unwrap();
+        let inactive_root = record("provider-transition-compatible-inactive-root");
+        let outcome = commit_compatible_transition(
+            &mut connection,
+            &inactive_root,
+            Some("source-model"),
+            7,
+            0,
+            "provider-protocol-v1:target-revision",
+        )
+        .unwrap();
+        assert_eq!(outcome, ProviderTransitionCompatibleCommitOutcome::Stale);
+        assert!(
+            get_terminal_record(&connection, &inactive_root.operation_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "source-model"
+        );
+    }
+
+    #[test]
     fn terminal_records_list_newest_first_and_cascade_with_conversation() {
         let mut connection = setup();
         let first = record("provider-transition-compatible-first");
@@ -520,6 +635,7 @@ mod tests {
             &first,
             Some("source-model"),
             7,
+            0,
             "provider-protocol-v1:target-revision",
         )
         .unwrap();

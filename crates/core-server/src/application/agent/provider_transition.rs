@@ -35,6 +35,7 @@ struct ProviderTransitionTarget {
 struct PreparedProviderTransition {
     output: AgentProviderTransitionPreflightOutput,
     conversation: ChatConversationRecord,
+    conversation_revision: i64,
     target: ProviderTransitionTarget,
     source_model_display_name: Option<String>,
     target_model_display_name: Option<String>,
@@ -195,6 +196,7 @@ impl AgentService {
                     minimum_updated_at,
                     prepared.conversation.model_id.as_deref(),
                     prepared.conversation.updated_at,
+                    prepared.conversation_revision,
                     &prepared.target.protocol_revision,
                 )?;
             let record = match committed {
@@ -293,6 +295,7 @@ impl AgentService {
         let prefix = prefix.clone();
         let target = prepared.target;
         let conversation = prepared.conversation;
+        let conversation_revision = prepared.conversation_revision;
         tokio::spawn(async move {
             service
                 .run_provider_transition_compaction(
@@ -300,6 +303,7 @@ impl AgentService {
                     run_id,
                     target_model_id,
                     conversation,
+                    conversation_revision,
                     target,
                     prefix,
                     receipt,
@@ -402,10 +406,33 @@ impl AgentService {
                 .to_string()
                 .into());
         }
-        let conversation = self
+        let (conversation, conversation_revision) =
+            self.storage.load_conversation_for_turn(conversation_id)?;
+        let conversation = conversation.ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+        let conversation_revision = conversation_revision
+            .ok_or_else(|| "模型切换预检缺少 Conversation revision。".to_string())?;
+        if let Some(agent) = self
             .storage
-            .load_conversation(conversation_id)?
-            .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+            .get_agent_node_by_conversation(conversation_id)
+            .map_err(|error| error.to_string())?
+        {
+            if agent.parent_agent_id.is_some()
+                || agent.lifecycle != mycopilot_core::AgentLifecycle::Active
+            {
+                return Ok(ProviderTransitionPreparation::Blocked(
+                    provider_transition_blocked_output(
+                        conversation_id,
+                        target_model_id,
+                        AgentProviderTransitionReason::UnsupportedTarget,
+                        if agent.parent_agent_id.is_some() {
+                            "子 Agent Conversation 是只读观察视图，不能由用户切换模型。"
+                        } else {
+                            "根 Agent 当前不可用，不能切换模型。"
+                        },
+                    ),
+                ));
+            }
+        }
         if self
             .provider_transitions
             .lock()
@@ -421,13 +448,7 @@ impl AgentService {
                 ),
             ));
         }
-        if self
-            .active_runs
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-            .any(|run| run.conversation_id == conversation_id)
-        {
+        if self.has_conversation_turn_occupancy(conversation_id)? {
             return Ok(ProviderTransitionPreparation::Blocked(
                 provider_transition_blocked_output(
                     conversation_id,
@@ -634,6 +655,7 @@ impl AgentService {
             conversation_id,
             conversation.model_id.as_deref(),
             conversation.updated_at,
+            conversation_revision,
             target_model_id,
             &target.protocol,
             &source_fingerprint,
@@ -673,6 +695,7 @@ impl AgentService {
             PreparedProviderTransition {
                 output,
                 conversation,
+                conversation_revision,
                 target,
                 source_model_display_name,
                 target_model_display_name,
@@ -689,6 +712,7 @@ impl AgentService {
         run_id: String,
         target_model_id: String,
         conversation: ChatConversationRecord,
+        conversation_revision: i64,
         target: ProviderTransitionTarget,
         prefix: mycopilot_core::ContextCompactionPrefix,
         mut receipt: ContextCompactionReceipt,
@@ -698,6 +722,7 @@ impl AgentService {
             .execute_provider_transition_compaction(
                 &run_id,
                 &conversation,
+                conversation_revision,
                 &target,
                 &prefix,
                 &mut receipt,
@@ -762,6 +787,7 @@ impl AgentService {
         &self,
         run_id: &str,
         conversation: &ChatConversationRecord,
+        conversation_revision: i64,
         target: &ProviderTransitionTarget,
         prefix: &mycopilot_core::ContextCompactionPrefix,
         receipt: &mut ContextCompactionReceipt,
@@ -933,6 +959,7 @@ impl AgentService {
                 &generated.observation,
                 conversation.model_id.as_deref(),
                 conversation.updated_at,
+                conversation_revision,
                 &target.model.id,
                 &target.protocol_revision,
             ) {
@@ -1060,6 +1087,7 @@ fn resolve_provider_transition_target(
         temperature: None,
         stream: Some(true),
         context: Some(AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some(conversation.id.clone()),
             project_id: conversation.project_id.clone(),
             workspace: None,
@@ -1137,10 +1165,12 @@ fn provider_transition_context_fingerprint(
     Ok(mycopilot_core::content_revision(&encoded))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_transition_token(
     conversation_id: &str,
     current_model_id: Option<&str>,
     conversation_updated_at: i64,
+    conversation_revision: i64,
     target_model_id: &str,
     target_protocol: &ProviderProtocolKey,
     source_fingerprint: &str,
@@ -1151,6 +1181,7 @@ fn provider_transition_token(
         "conversationId": conversation_id,
         "currentModelId": current_model_id,
         "conversationUpdatedAt": conversation_updated_at,
+        "conversationRevision": conversation_revision,
         "targetModelId": target_model_id,
         "targetProtocol": target_protocol,
         "sourceFingerprint": source_fingerprint,
@@ -1359,6 +1390,7 @@ mod provider_transition_unit_tests {
             "conversation-1",
             None,
             1,
+            1,
             "target-model",
             &protocol,
             "source-revision",
@@ -1369,9 +1401,22 @@ mod provider_transition_unit_tests {
             provider_transition_operation_id(&first),
             provider_transition_operation_id(&first)
         );
+        let newer_conversation_revision = provider_transition_token(
+            "conversation-1",
+            None,
+            1,
+            2,
+            "target-model",
+            &protocol,
+            "source-revision",
+            0,
+        )
+        .unwrap();
+        assert_ne!(first, newer_conversation_revision);
         let retry = provider_transition_token(
             "conversation-1",
             None,
+            1,
             1,
             "target-model",
             &protocol,

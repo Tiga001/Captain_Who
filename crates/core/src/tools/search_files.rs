@@ -463,6 +463,7 @@ mod tests {
 
         fn context(&self) -> ToolExecutionContext {
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {

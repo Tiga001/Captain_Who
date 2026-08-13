@@ -70,6 +70,7 @@ fn command_test_input(workspace: &Path) -> AgentChatInput {
     }))
     .unwrap();
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-command-policy".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {

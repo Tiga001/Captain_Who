@@ -49,6 +49,7 @@ use uuid::Uuid;
 mod agent_graph;
 mod agent_templates;
 mod attachments;
+mod child_agents;
 mod command_sessions;
 mod compaction;
 mod conversations;

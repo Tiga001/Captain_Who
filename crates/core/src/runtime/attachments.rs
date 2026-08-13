@@ -54,6 +54,7 @@ fn build_attachment_context_in_workspace(
 ) -> AgentResult<AttachmentContext> {
     let registry = ToolRegistry::defaults_with_search(None);
     let tool_context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+        collaboration_identity: None,
         conversation_id: None,
         project_id: None,
         workspace: Some(AgentWorkspaceContext {

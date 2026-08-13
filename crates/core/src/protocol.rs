@@ -1,3 +1,4 @@
+use crate::agent_graph::AgentCollaborationIdentity;
 use crate::context::ContextCompactionSummary;
 use crate::conversation_trace::{
     ConversationModelContextItem, ConversationTraceAttachment, ConversationTurnTrace,
@@ -813,6 +814,12 @@ pub struct AgentRunContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment_library: Option<AgentAttachmentLibraryContext>,
     pub permissions: AgentPermissions,
+    /// Host-authenticated collaboration identity for a child Agent turn.
+    ///
+    /// This is never accepted from renderer RPC input. It is reconstructed from the durable
+    /// Agent/Wake/Mailbox bundle and remains inside the shared run context across pause/resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_identity: Option<AgentCollaborationIdentity>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

@@ -11,11 +11,126 @@ pub(crate) struct PreparedConversationTurn {
         Option<std::sync::Arc<mycopilot_core::skills::SkillResourceSession>>,
 }
 
+enum ConversationTurnInputSource {
+    Human,
+    ExistingAgentProjection {
+        collaboration_identity: Box<AgentCollaborationIdentity>,
+        model_snapshot: Box<AgentModelSelectionSnapshot>,
+        reasoning_effort_snapshot: Option<mycopilot_core::ReasoningEffort>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum TurnReservationMode {
+    #[cfg(test)]
+    PrepareOnly,
+    CommitDurableLease,
+}
+
+#[cfg(test)]
 pub(crate) fn prepare_conversation_turn(
     storage: &StorageService,
     skills_service: &SkillsService,
     input: AgentConversationTurnInput,
     run_id: &str,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    let (existing, expected_revision) = match normalized_optional(input.conversation_id.as_deref())
+    {
+        Some(conversation_id) => storage.load_conversation_for_turn(&conversation_id)?,
+        None => (None, None),
+    };
+    prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::Human,
+        TurnReservationMode::PrepareOnly,
+        existing,
+        expected_revision,
+    )
+}
+
+pub(crate) fn prepare_reserved_human_turn(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::Human,
+        TurnReservationMode::CommitDurableLease,
+        existing,
+        expected_revision,
+    )
+}
+
+/// Prepares a child Turn from the already-acknowledged Mailbox projection. The task remains the
+/// one durable `role=user` projection created by the collaboration transaction; this function
+/// appends only the pending assistant and carries the Host-authenticated identity in RunContext.
+pub(crate) fn prepare_agent_wake_turn(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    spawn: &mycopilot_core::ChildAgentSpawnRecord,
+    assistant_message_id: String,
+    run_id: &str,
+    existing: ChatConversationRecord,
+    expected_revision: i64,
+) -> Result<PreparedConversationTurn, AgentServiceError> {
+    let model_snapshot = spawn
+        .agent
+        .model_snapshot
+        .clone()
+        .ok_or_else(|| "子 Agent 缺少创建时模型快照，不能启动可信 Wake。".to_string())?;
+    let input = AgentConversationTurnInput {
+        conversation_id: Some(spawn.agent.conversation_id.clone()),
+        project_id: spawn.agent.project_id.clone(),
+        model_id: model_snapshot.model_config_id.clone(),
+        context_window_indicator_enabled: true,
+        content: spawn.collaboration_identity.entrusted_task.clone(),
+        attachments: Vec::new(),
+        skills: Vec::new(),
+        title: None,
+        user_message_id: Some(spawn.task_message.projection_message_id.clone()),
+        assistant_message_id: Some(assistant_message_id),
+        max_tokens: None,
+        temperature: None,
+        prompt_preferences: None,
+        // Child authority is a Host policy. It is never inherited from a model-authored payload.
+        permissions: AgentPermissions::default(),
+    };
+    prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::ExistingAgentProjection {
+            collaboration_identity: Box::new(spawn.collaboration_identity.clone()),
+            model_snapshot: Box::new(model_snapshot),
+            reasoning_effort_snapshot: spawn.agent.reasoning_effort_snapshot,
+        },
+        TurnReservationMode::CommitDurableLease,
+        Some(existing),
+        Some(expected_revision),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_conversation_turn_from_source(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    source: ConversationTurnInputSource,
+    reservation: TurnReservationMode,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     let content = input.content.trim().to_string();
     if content.is_empty() {
@@ -41,6 +156,13 @@ pub(crate) fn prepare_conversation_turn(
     if !model.enabled {
         return Err(format!("模型未启用：{model_id}").into());
     }
+    if let ConversationTurnInputSource::ExistingAgentProjection { model_snapshot, .. } = &source {
+        if model_snapshot.model_config_id != model.id {
+            return Err("可信 Wake 的模型选择与 Agent 创建快照不一致。"
+                .to_string()
+                .into());
+        }
+    }
     let provider_connection_revision = settings_snapshot
         .provider_connection_revisions
         .get(&model.id)
@@ -60,6 +182,20 @@ pub(crate) fn prepare_conversation_turn(
     let provider_profile_config = model
         .resolved_provider_profile_config(provider_dialect)
         .map_err(|error| format!("模型 {model_id} 的 Provider Profile 无效：{error}"))?;
+    if let ConversationTurnInputSource::ExistingAgentProjection {
+        reasoning_effort_snapshot: Some(expected),
+        ..
+    } = &source
+    {
+        if provider_profile_config.reasoning.mode != mycopilot_core::ReasoningMode::Enabled
+            || provider_profile_config.reasoning.effort != *expected
+        {
+            return Err(format!(
+                "可信 Wake 的 reasoning effort 与 Agent 创建快照不一致：{expected:?}"
+            )
+            .into());
+        }
+    }
     let provider_protocol_key = ProviderProtocolKey::new(
         provider_dialect,
         &provider_profile_config,
@@ -93,7 +229,15 @@ pub(crate) fn prepare_conversation_turn(
     let assistant_message_id = normalized_optional(input.assistant_message_id.as_deref())
         .unwrap_or_else(|| create_id("message"));
 
-    let existing = storage.load_conversation(&conversation_id)?;
+    if matches!(
+        &source,
+        ConversationTurnInputSource::ExistingAgentProjection { .. }
+    ) && existing.is_none()
+    {
+        return Err("可信 Wake 的子 Agent Conversation 不存在。"
+            .to_string()
+            .into());
+    }
     let resolved_project_id = resolve_conversation_project_id(
         existing.as_ref(),
         normalized_optional(input.project_id.as_deref()),
@@ -147,37 +291,98 @@ pub(crate) fn prepare_conversation_turn(
         &[user_message_id.as_str(), assistant_message_id.as_str()],
     )?;
 
-    let user_message = ChatMessageRecord {
-        id: user_message_id.clone(),
-        role: "user".to_string(),
-        content: content.clone(),
-        created_at: timestamp,
-        status: Some("sent".to_string()),
-        attachments: message_attachments_from_input(&input.attachments, timestamp),
-        agent_run_json: None,
-        ui_state_json: None,
+    let user_message = match &source {
+        ConversationTurnInputSource::Human => ChatMessageRecord {
+            id: user_message_id.clone(),
+            role: "user".to_string(),
+            content: content.clone(),
+            created_at: timestamp,
+            status: Some("sent".to_string()),
+            attachments: message_attachments_from_input(&input.attachments, timestamp),
+            agent_run_json: None,
+            ui_state_json: None,
+        },
+        ConversationTurnInputSource::ExistingAgentProjection {
+            collaboration_identity,
+            ..
+        } => {
+            if collaboration_identity.conversation_id != conversation_id
+                || collaboration_identity.entrusted_task != content
+            {
+                return Err("可信 Wake 的协作身份与任务投影不一致。".to_string().into());
+            }
+            let projected = conversation
+                .messages
+                .iter()
+                .position(|message| message.id == user_message_id)
+                .ok_or_else(|| "可信 Wake 的父任务 Conversation 投影不存在。".to_string())?;
+            if projected + 1 != conversation.messages.len() {
+                return Err("该可信 Wake 的父任务投影已经启动过 Turn，不能重复执行。"
+                    .to_string()
+                    .into());
+            }
+            let projected = conversation.messages[projected].clone();
+            if projected.role != "user"
+                || projected.status.as_deref() != Some("sent")
+                || projected.content != content
+            {
+                return Err("可信 Wake 的父任务 Conversation 投影已损坏。"
+                    .to_string()
+                    .into());
+            }
+            projected
+        }
     };
+    let assistant_created_at = timestamp.max(user_message.created_at.saturating_add(1));
     let assistant_message = ChatMessageRecord {
         id: assistant_message_id.clone(),
         role: "assistant".to_string(),
         content: THINKING_PLACEHOLDER.to_string(),
-        created_at: timestamp + 1,
+        created_at: assistant_created_at,
         status: Some("pending".to_string()),
         attachments: Vec::new(),
         agent_run_json: None,
         ui_state_json: None,
     };
 
-    upsert_message(&mut conversation.messages, user_message.clone());
+    if matches!(&source, ConversationTurnInputSource::Human) {
+        upsert_message(&mut conversation.messages, user_message.clone());
+    }
     upsert_message(&mut conversation.messages, assistant_message.clone());
-    storage.save_conversation(conversation)?;
-    storage.save_input_attachments(
-        &conversation_id,
-        &user_message_id,
-        resolved_project_id.as_deref(),
-        &input.attachments,
-        timestamp,
-    )?;
+    match reservation {
+        #[cfg(test)]
+        TurnReservationMode::PrepareOnly => {
+            storage.save_conversation(conversation)?;
+        }
+        TurnReservationMode::CommitDurableLease => {
+            let initial_trace = mycopilot_core::ConversationTraceSnapshot::default()
+                .in_progress_trace(run_id, &conversation_id, &assistant_message_id);
+            let trusted_agent_id = match &source {
+                ConversationTurnInputSource::Human => None,
+                ConversationTurnInputSource::ExistingAgentProjection {
+                    collaboration_identity,
+                    ..
+                } => Some(collaboration_identity.agent_id.as_str()),
+            };
+            storage.save_conversation_and_begin_turn(
+                conversation,
+                expected_revision,
+                trusted_agent_id,
+                &initial_trace,
+                assistant_created_at,
+                now_ms().max(assistant_created_at),
+            )?;
+        }
+    }
+    if matches!(&source, ConversationTurnInputSource::Human) {
+        storage.save_input_attachments(
+            &conversation_id,
+            &user_message_id,
+            resolved_project_id.as_deref(),
+            &input.attachments,
+            timestamp,
+        )?;
+    }
     let attachment_library = storage
         .build_attachment_library_context(&conversation_id, resolved_project_id.as_deref())?;
     let model_capabilities = ModelCapabilities {
@@ -193,6 +398,13 @@ pub(crate) fn prepare_conversation_turn(
         }),
         attachment_library: Some(attachment_library),
         permissions: input.permissions,
+        collaboration_identity: match &source {
+            ConversationTurnInputSource::Human => None,
+            ConversationTurnInputSource::ExistingAgentProjection {
+                collaboration_identity,
+                ..
+            } => Some(collaboration_identity.as_ref().clone()),
+        },
     };
     let world_state_records =
         ensure_conversation_world_state(EnsureConversationWorldStateRequest {
@@ -212,7 +424,7 @@ pub(crate) fn prepare_conversation_turn(
         message_id: Some(user_message_id.clone()),
         role: "user".to_string(),
         content,
-        created_at: Some(timestamp),
+        created_at: Some(user_message.created_at),
         conversation_turn_trace: None,
         conversation_model_context_items: Vec::new(),
     });

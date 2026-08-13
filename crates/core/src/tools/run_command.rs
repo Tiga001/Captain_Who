@@ -1626,6 +1626,7 @@ mod tests {
         );
         let trusted = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-pdf".to_string()),
                 project_id: None,
                 workspace: None,
@@ -1653,6 +1654,7 @@ mod tests {
         );
 
         let untrusted = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-pdf".to_string()),
             project_id: None,
             workspace: None,
@@ -1684,6 +1686,7 @@ mod tests {
         );
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-aspen".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -1750,6 +1753,7 @@ mod tests {
 
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-mixed-pdf-inputs".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -1839,6 +1843,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-missing-pdf".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -1890,6 +1895,7 @@ mod tests {
         .unwrap();
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-private-pdf-output".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -1955,6 +1961,7 @@ mod tests {
         let make_context = |read| {
             with_profile_resolver(
                 ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                    collaboration_identity: None,
                     conversation_id: Some("conversation-external-pdf".to_string()),
                     project_id: None,
                     workspace: Some(AgentWorkspaceContext {
@@ -2057,6 +2064,7 @@ mod tests {
 
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some(conversation_id.to_string()),
                 project_id: None,
                 workspace: None,
@@ -2140,6 +2148,7 @@ mod tests {
             reason: None,
         };
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2179,6 +2188,7 @@ mod tests {
             reason: None,
         };
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2209,6 +2219,7 @@ mod tests {
             reason: None,
         };
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2239,6 +2250,7 @@ mod tests {
         };
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2330,6 +2342,7 @@ mod tests {
             };
             let context = with_profile_resolver(
                 ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                    collaboration_identity: None,
                     conversation_id: None,
                     project_id: None,
                     workspace: Some(AgentWorkspaceContext {
@@ -2389,6 +2402,7 @@ mod tests {
         };
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-pdf-and-documents".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2435,6 +2449,7 @@ mod tests {
         std::fs::write(workspace.path().join("ordinary.py"), "print('ordinary')\n").unwrap();
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2484,6 +2499,7 @@ mod tests {
         );
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2531,6 +2547,7 @@ mod tests {
 
         let full_access_context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2604,6 +2621,7 @@ mod tests {
         };
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-1".to_string()),
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2707,6 +2725,7 @@ mod tests {
         .collect();
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-pdf".to_string()),
                 project_id: None,
                 workspace: None,
@@ -2784,6 +2803,7 @@ mod tests {
         };
         let context = with_profile_resolver(
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {
@@ -2860,6 +2880,7 @@ mod tests {
             reason: None,
         };
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2892,6 +2913,7 @@ mod tests {
             reason: None,
         };
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2950,6 +2972,7 @@ mod tests {
     #[test]
     fn rejects_cwd_outside_workspace() {
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2971,6 +2994,7 @@ mod tests {
     #[test]
     fn no_workspace_requires_explicit_cwd_and_accepts_alias_with_full_write() {
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: None,

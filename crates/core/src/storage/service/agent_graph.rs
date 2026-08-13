@@ -1,8 +1,10 @@
 use super::*;
+#[cfg(test)]
+use crate::CreateAgentNodeInput;
 use crate::{
     AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxMessageRecord,
     AgentNodeRecord, AgentWakeRequestRecord, AgentWakeStatus, ConversationMessageOrigin,
-    CreateAgentNodeInput, EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
+    EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
     FinishAgentWakeWithResultInput, IdempotentCreate,
 };
 
@@ -32,7 +34,8 @@ impl StorageService {
         agent_graph_repository::ensure_root_agent(&mut connection, input, now_ms())
     }
 
-    pub fn create_agent_node(
+    #[cfg(test)]
+    pub(crate) fn create_agent_node(
         &self,
         input: &CreateAgentNodeInput,
     ) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {

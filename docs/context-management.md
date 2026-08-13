@@ -27,6 +27,16 @@ Checkpoint 消费边界，见 [Tool Result 消费者矩阵与投影契约](tool-
 
 Exact History Archive 是原始工具结果的无损安全投影，不是模型上下文镜像；SQLite FTS5 是可重建的检索索引，不是另一份权威日志。系统不实现 run-overlay 专用压缩路径。`ModelRequestObservation` 也不属于内容仓库：它只记录发送边界的分类 token 估算、provider usage 和请求终态，不保存 prompt、消息正文、工具结果或密钥。
 
+子 Agent 创建时仍复用这套日志语义。`fork_turns=all` 复制全部已结束逻辑轮次、可见摘要链、
+终态 trace/model-context、Exact Archive、附件和相关 Artifact 授权；`fork_turns=N` 只复制最近 N 个
+完整终态轮次且不继承更老摘要，`none` 不复制历史。正在执行的 user/assistant 尾部以及 Usage、
+Run/UI JSON、Command Session 运行态、continuation/checkpoint、draft 和 mutable world state 都不进入
+快照。历史消息带独立的 immutable snapshot provenance，保留原 human/Agent actor；随后父子日志
+完全独立，各自继续通过同一个 `ContextAssembler` 组装。协作快照比普通 UI fork 更严格：旧版或
+导入历史中实际被 `all` / `N` 选中的 settled assistant 若没有 durable trace，创建明确失败，避免生成
+可持久但无法通过共享历史完整性校验的子 Agent；`Last(N)` 可避开未选中的更老缺 trace 轮次，调用方
+也可显式使用 `none`。
+
 ## 总体数据流
 
 ```text

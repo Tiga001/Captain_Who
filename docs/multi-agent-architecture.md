@@ -152,6 +152,10 @@ Turn/checkpoint 事实判定 `outcome_unknown`、恢复或终止，不能冒险�
   不是可脱离 Model Settings 重放的第二份 Provider 配置。后续 Turn 仍按 snapshot 中的精确模型 ID
   走现有模型解析链；缺失、禁用或配置无效时明确 unavailable，不能从 snapshot 猜测连接或回退模型。
 - 模型被删除、禁用或当前不可用时，解析明确返回 unavailable，绝不静默换模型。
+- `reasoning_effort` 不是一次 Run 的临时 Provider payload patch。未指定时完全沿用所选模型在
+  Model Settings 中的现有 reasoning policy；显式指定时只接受 Runtime 当前已支持、且与该模型
+  已解析配置精确一致的 `high` / `max`，并把选择冻结到 Agent snapshot。后续每个 Turn 都按冻结值
+  重新核对当前模型配置；不支持、被修改或不可用都明确失败，绝不忽略、降级或临时改写请求。
 - 模板修改只影响未来 Agent。删除模板也不能破坏已有 snapshot。
 - Spawn/Create 节点事务会核对模板 snapshot 与当时的模板 revision 内容完全一致；已经更新或
   删除的模板不能用旧 snapshot 创建新节点，并且 create 提交时模板必须仍为 enabled；禁用发生
@@ -225,6 +229,28 @@ Mailbox 与 Conversation message 服务不同消费者，但不能形成双写�
   它是谁、父节点是谁、当前任务是什么、只能向父树报告，不能直接对用户说话。
 - 创建时的 `fork_turns=none | N | all` 只决定初始历史 snapshot；创建后父子 Conversation
   分叉演进，只通过 Mailbox 通信。
+- `fork_turns` 按逻辑轮次而不是 message 行数计数，并复用既有 Conversation fork 的 settled
+  assistant 候选边界：assistant 非 pending、Run JSON 不活跃，若有 trace 则必须 terminal；一个轮次
+  包含自上一 settled assistant 之后的输入和该回复。协作快照比普通 UI fork 更严格：每个实际选中的
+  assistant 都必须有 durable trace，才能直接进入共享 ContextAssembler；缺失时明确返回 snapshot
+  unavailable，不能产生“能创建但不能执行”的子 Agent，也不能猜造 trace。`Last(N)` 可以避开更老、
+  未被选中的 legacy 缺 trace 轮次。当前 active 尾部及触发它的 user 整体排除；`N` 超过历史时取全部
+  可用终态轮次，`N=0` 是非法输入；调用方始终可用 `none` 创建空历史子 Agent。
+- `all` 物理保留全部终态历史及当时有效的 compaction summary 链；ContextAssembler 仍按
+  summary + uncovered raw suffix 组装模型上下文。`N` 只复制最近 N 个 raw 轮次，绝不暗带覆盖
+  更早历史的 summary；`none` 只落不可变 snapshot header。
+- 创建快照复制的是只读历史事实：消息、终态 trace、精确 model-context、Exact Archive、最终
+  turn diff、选中消息附件的独立文件副本，以及相关 content-addressed Artifact grant。Usage、
+  agent run/UI JSON、输入草稿、pending action、active Command Session、Provider continuation /
+  checkpoint、订阅与 mutable world state 均不复制。
+- `child_context_snapshots` 与 snapshot message provenance 是创建事务内的不可变事实。snapshot
+  message 冻结 source conversation/message 和原始 human/Agent actor，不能复用 Mailbox
+  `source_agent_message_id` 唯一投影外键；孙 Agent 因而仍能区分历史人类输入与历史父 Agent 任务。
+  数据库在复制当下核验 source role/content/status/time/actor，复制完成后父历史或模板变化不反向
+  改写子历史。
+- 可信协作身份放在共享 `AgentRunContext`，由 Host 从 Agent/Wake/Mailbox 事实构造，并随 approval
+  resume 的显式 allowlist 持久化；Renderer 和模型不能提供或覆盖。普通根 Turn 的身份为 `None`，
+  系统提示词逐字保持原样；子 Turn 只在同一 prompt builder 尾部追加有界身份 overlay。
 - 子 Agent 不继承超过根 Agent 的权限。模板不能提升权限。
 - 子 Agent 产生的 Approval 仍属于原 Turn/checkpoint，但用户可操作投影必须路由到根界面，并
   标明来源；本约束在第 4、5 轮实现。
@@ -288,6 +314,43 @@ Mailbox 与 Conversation message 服务不同消费者，但不能形成双写�
 子 Conversation 创建、`fork_turns` snapshot 和协作身份 overlay，不复制 prompt builder。正式
 Host spawn 只能调用 collaboration-owned 原子用例：提交前按实际模型 ID 和当前 revision 重新解析，
 随后创建/导入子 Conversation 并绑定节点；本轮低层 `create_agent_node` 不直接暴露给 Harness。
+这个用例在一个 `BEGIN IMMEDIATE` 事务中提交子 Conversation、AgentNode、不可变上下文快照、
+初始 task Mailbox、唯一 `role=user / origin=agent` 投影、ack 与 queued Wake；任一步失败都不留下
+半个子节点。附件先复制到独立目标并在数据库失败时清理，进程崩溃后的孤儿文件扫描留给恢复轮次。
+模型选择顺序固定为“显式 model > 模板 model snapshot > 父 Agent 当前模型 > 系统默认”；只有父
+Conversation 本来没有模型时才允许进入默认分支，任何已经指定或继承的模型不可用都明确失败，
+不能向后回退。幂等重试读取首次冻结的完整 bundle，不受模板或模型目录后续变化影响。
+
+公开聊天入口只能构造 `HumanRoot`，在任何写入前拒绝子 Conversation；Host 内部 Wake 使用不可
+反序列化的严格类型，并从 running Wake、claim lease、Mailbox projection 和 Agent node 重新解析
+协作身份。两者最终进入同一个 Turn executor 和 Runtime segment。父任务只使用已有的唯一
+`role=user / origin=agent` 投影，不再插入第二条 user 消息。子权限是 Host 的明确最小策略，不取自
+模型参数；Usage 仍归自己的 Conversation。
+
+单活跃 Turn 的权威边界不是内存 Runtime。准备阶段使用 SQLite `BEGIN IMMEDIATE`，在任何全量
+Conversation 写入前检查 durable active trace，并在同一事务中提交输入投影、pending assistant 和
+空 `in_progress` trace；canonical partial unique index 再提供数据库约束。审批暂停保留该占用，终态
+消息/trace（以及需要的 pending 状态）都提交后才释放。内存 map 只是快速拒绝和重启恢复加速器。
+有活跃 Turn 时 Agent lifecycle 也不能从 active 退为 disabled/archived，避免另一 Host 在运行中
+撤销执行身份。审批 continuation 已取得 Turn owner 后若在进入 Runtime 前恢复 Skills 或上下文失败，
+pending、assistant、AgentRun、terminal trace/model-context 与 Usage 必须在同一事务中失败终结；CAS
+冲突或任一写入失败则原样保留占用，交给重试/重启恢复，不能只改一半状态。
+读取历史时同时冻结 Conversation 的单调 revision；提交前在同一个 `BEGIN IMMEDIATE` 中做 CAS。
+因此即使另一 Host 已经完成并释放 active trace，基于旧历史准备的全量快照也只能失败并重新读取，
+不能删掉或覆盖刚完成的 Turn。
+启动后若后续 Host 预检失败，只能按 exact run/assistant identity 删除尚无 trace item 的 provisional
+事实，绝不能回滚或覆盖另一 Host 的 Turn。
+
+用户侧模型切换与压缩入口沿用同一 Graph 边界：只有 active 根 Agent 可以进入；disabled/archived
+根节点和所有子 Conversation 都在任何模型改写或压缩调用前 fail closed。子节点的模型只能由后续
+可信协作运行入口按冻结选择解析，observer 页面不拥有写权限。
+
+Agent 节点的 model snapshot 冻结创建时的选择和审计事实，不永久冻结全局 Model Settings revision。
+每次新 Turn 都按 snapshot 的精确 `model_config_id` 走现有解析链读取当前 enabled 配置；无关模型
+配置变化不阻塞，选中模型缺失、禁用或不可用时明确失败且不回退。一次 Turn/审批 checkpoint 则继续
+冻结本次实际 Provider revision。审批续跑对持久 envelope context 与 checkpoint run_context 的
+collaboration identity 做 exact 双向相等校验，并在进入 Runtime 或任何副作用前从 Graph/Wake 事实
+重验 active lease；序列化 envelope schema 变更必须显式升版。
 
 ### 第 3 轮：协作运行时、Mailbox 调度与双等待
 

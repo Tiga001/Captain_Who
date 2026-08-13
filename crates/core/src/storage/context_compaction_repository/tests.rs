@@ -1557,6 +1557,27 @@ fn seed_provider_transition_target(connection: &Connection, target_model_id: &st
         .unwrap();
 }
 
+fn settle_provider_transition_source_turn(connection: &Connection) {
+    connection
+        .execute(
+            "UPDATE conversation_turn_traces
+             SET terminal_status = 'completed', updated_at = 5, completed_at = 5
+             WHERE conversation_id = 'conversation-1' AND terminal_status = 'in_progress'",
+            [],
+        )
+        .unwrap();
+}
+
+fn conversation_revision(connection: &Connection) -> i64 {
+    connection
+        .query_row(
+            "SELECT revision FROM conversations WHERE id = 'conversation-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 fn applied_provider_transition_receipt(
     prefix: &ContextCompactionPrefix,
     target_model_id: &str,
@@ -1615,6 +1636,7 @@ fn applied_provider_transition_receipt(
 #[test]
 fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
     let mut connection = setup();
+    settle_provider_transition_source_turn(&connection);
     connection
         .execute(
             "UPDATE conversations SET model_id = 'source-model', updated_at = 7
@@ -1694,6 +1716,7 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
     )
     .unwrap();
 
+    let expected_revision = conversation_revision(&connection);
     let (summary, committed_updated_at) = commit_provider_transition_with_receipt(
         &mut connection,
         &prefix,
@@ -1702,6 +1725,7 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
         &observation,
         Some("source-model"),
         7,
+        expected_revision,
         "target-model",
         "provider-protocol-v1:target-revision",
     )
@@ -1874,6 +1898,7 @@ fn provider_transition_commit_is_atomic_and_preserves_existing_chat_usage() {
 #[test]
 fn provider_transition_releases_every_replayable_turn_before_switching_models() {
     let mut connection = setup();
+    settle_provider_transition_source_turn(&connection);
     connection
         .execute(
             "UPDATE conversations SET model_id = 'source-model', updated_at = 7
@@ -1903,6 +1928,7 @@ fn provider_transition_releases_every_replayable_turn_before_switching_models() 
     )
     .unwrap();
 
+    let expected_revision = conversation_revision(&connection);
     commit_provider_transition_with_receipt(
         &mut connection,
         &prefix,
@@ -1911,6 +1937,7 @@ fn provider_transition_releases_every_replayable_turn_before_switching_models() 
         &observation,
         Some("source-model"),
         7,
+        expected_revision,
         "target-model",
         "provider-protocol-v1:target-revision",
     )
@@ -1942,6 +1969,7 @@ fn provider_transition_releases_every_replayable_turn_before_switching_models() 
 #[test]
 fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summary() {
     let mut connection = setup();
+    settle_provider_transition_source_turn(&connection);
     connection
         .execute(
             "UPDATE conversations SET model_id = 'source-model', updated_at = 7
@@ -1975,6 +2003,7 @@ fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summ
     )
     .unwrap();
 
+    let expected_revision = conversation_revision(&connection);
     let error = commit_provider_transition_with_receipt(
         &mut connection,
         &prefix,
@@ -1983,6 +2012,7 @@ fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summ
         &observation,
         Some("source-model"),
         7,
+        expected_revision,
         "target-model",
         "provider-protocol-v1:target-revision",
     )
@@ -2025,6 +2055,7 @@ fn provider_transition_rolls_back_when_private_replay_is_not_covered_by_the_summ
 #[test]
 fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
     let mut connection = setup();
+    settle_provider_transition_source_turn(&connection);
     connection
         .execute(
             "UPDATE conversations SET model_id = 'source-model', updated_at = 7
@@ -2063,6 +2094,7 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
     )
     .unwrap();
 
+    let expected_revision = conversation_revision(&connection);
     let error = commit_provider_transition_with_receipt(
         &mut connection,
         &prefix,
@@ -2071,6 +2103,7 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
         &observation,
         Some("source-model"),
         7,
+        expected_revision,
         "target-model",
         "provider-protocol-v1:stale-revision",
     )
@@ -2090,6 +2123,88 @@ fn stale_provider_transition_rolls_back_summary_model_draft_and_observation() {
         connection
             .query_row(
                 "SELECT model_id FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "source-model"
+    );
+    assert!(get_active_summary(&connection, "conversation-1")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM model_request_observations
+                 WHERE operation_id = 'provider-transition-test'",
+                [],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn compacting_provider_transition_rechecks_conversation_revision_without_half_state() {
+    let mut connection = setup();
+    settle_provider_transition_source_turn(&connection);
+    connection
+        .execute(
+            "UPDATE conversations SET model_id = 'source-model', updated_at = 7
+             WHERE id = 'conversation-1'",
+            [],
+        )
+        .unwrap();
+    seed_provider_transition_target(
+        &connection,
+        "target-model",
+        "provider-protocol-v1:target-revision",
+    );
+    let prefix = prepare_prefix(
+        &connection,
+        "conversation-1",
+        &ContextJournalCursor::message("assistant-1"),
+    )
+    .unwrap();
+    let (transition_draft, planned_receipt, receipt, observation) =
+        applied_provider_transition_receipt(&prefix, "target-model");
+    crate::storage::context_compaction_receipt_repository::record_receipt(
+        &mut connection,
+        &planned_receipt,
+        None,
+    )
+    .unwrap();
+    let expected_revision = conversation_revision(&connection);
+    // Title changes do not move `updated_at`; the monotonic revision is what must fence this
+    // otherwise-invisible cross-Host mutation.
+    connection
+        .execute(
+            "UPDATE conversations SET title = 'Changed on another Host'
+             WHERE id = 'conversation-1'",
+            [],
+        )
+        .unwrap();
+
+    let error = commit_provider_transition_with_receipt(
+        &mut connection,
+        &prefix,
+        transition_draft,
+        &receipt,
+        &observation,
+        Some("source-model"),
+        7,
+        expected_revision,
+        "target-model",
+        "provider-protocol-v1:target-revision",
+    )
+    .unwrap_err();
+
+    assert!(error.is_stale());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
                 [],
                 |row| row.get::<_, String>(0),
             )

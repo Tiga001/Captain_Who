@@ -2106,6 +2106,7 @@ mod tests {
             temperature: None,
             stream: Some(false),
             context: Some(AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: Some("conversation-mcp-e2e".to_string()),
                 project_id: Some("project-fixture".to_string()),
                 workspace: None,

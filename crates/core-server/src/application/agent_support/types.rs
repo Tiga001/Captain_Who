@@ -158,7 +158,7 @@ pub struct AgentFileWriteDiffPage {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConversationTurnInput {
     pub conversation_id: Option<String>,
     pub project_id: Option<String>,

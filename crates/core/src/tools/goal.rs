@@ -267,6 +267,7 @@ mod tests {
         runtime: GoalRuntimeState,
     ) -> ToolExecutionContext {
         let run_context = AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-goal-tool".to_string()),
             project_id: None,
             workspace: None,

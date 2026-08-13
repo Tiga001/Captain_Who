@@ -4,11 +4,13 @@
 //! but no in-memory queue is allowed to substitute for them.
 
 use crate::{
-    AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
-    AgentMailboxKind, AgentMailboxMessageRecord, AgentModelSelectionSnapshot, AgentNodeRecord,
-    AgentTemplateSnapshot, AgentWakeRequestRecord, AgentWakeStatus, ConversationMessageOrigin,
+    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentGraphError, AgentLifecycle,
+    AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord,
+    AgentModelSelectionSnapshot, AgentModelSelectionSource, AgentNodeRecord, AgentTemplateSnapshot,
+    AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnRecord, ConversationMessageOrigin,
     CreateAgentNodeInput, EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
-    FinishAgentWakeWithResultInput, IdempotentCreate, AGENT_GRAPH_SCHEMA_VERSION,
+    FinishAgentWakeWithResultInput, IdempotentCreate, ReasoningEffort,
+    TrustedActiveChildWakeBundle, AGENT_GRAPH_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -30,7 +32,8 @@ const NODE_SELECT: &str = "
            model_config_id_snapshot, model_display_name_snapshot,
            model_supports_image_snapshot, model_context_window_tokens_snapshot,
            model_settings_revision_snapshot, provider_connection_revision_snapshot,
-           provider_protocol_revision_snapshot, lifecycle, revision, created_at, updated_at
+           provider_protocol_revision_snapshot, model_selection_source_snapshot,
+           reasoning_effort_snapshot, lifecycle, revision, created_at, updated_at
     FROM agent_nodes";
 
 const MESSAGE_SELECT: &str = "
@@ -55,7 +58,7 @@ pub fn ensure_root_agent(
     validate_id("agent_id", &input.agent_id)?;
     validate_id("conversation_id", &input.conversation_id)?;
     validate_request_id(&input.creation_request_id)?;
-    validate_trimmed("task_name", &input.task_name, MAX_TASK_NAME_BYTES)?;
+    validate_identity_task_name(&input.task_name)?;
     validate_time(created_at)?;
 
     let transaction = immediate(connection)?;
@@ -93,11 +96,12 @@ pub fn ensure_root_agent(
                  model_config_id_snapshot, model_display_name_snapshot,
                  model_supports_image_snapshot, model_context_window_tokens_snapshot,
                  model_settings_revision_snapshot, provider_connection_revision_snapshot,
-                 provider_protocol_revision_snapshot, lifecycle, revision, created_at, updated_at
+                 provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                 reasoning_effort_snapshot, lifecycle, revision, created_at, updated_at
              ) VALUES (
                  ?1, ?2, ?1, ?3, NULL, ?3, ?4, ?5, ?6, '/root',
                  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-                 NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'active', 1, ?7, ?7
+                 NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'active', 1, ?7, ?7
              )",
             params![
                 &input.agent_id,
@@ -116,21 +120,48 @@ pub fn ensure_root_agent(
     Ok(IdempotentCreate::Created(record))
 }
 
-pub fn create_agent_node(
+#[cfg(test)]
+pub(crate) fn create_agent_node(
     connection: &mut Connection,
     input: &CreateAgentNodeInput,
     created_at: i64,
 ) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {
-    validate_create_node(input, created_at)?;
     let transaction = immediate(connection)?;
+    let outcome = create_agent_node_in_transaction(
+        &transaction,
+        input,
+        AgentModelSelectionSource::Explicit,
+        None,
+        created_at,
+    )?;
+    transaction.commit().map_err(write_error)?;
+    Ok(outcome)
+}
+
+pub(crate) fn create_agent_node_in_transaction(
+    transaction: &Connection,
+    input: &CreateAgentNodeInput,
+    model_selection_source: AgentModelSelectionSource,
+    reasoning_effort_snapshot: Option<ReasoningEffort>,
+    created_at: i64,
+) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {
+    validate_create_node(input, created_at)?;
+    if reasoning_effort_snapshot == Some(ReasoningEffort::ProviderDefault) {
+        return Err(invalid(
+            "reasoning_effort_snapshot",
+            "must be high, max, or absent",
+        ));
+    }
 
     if let Some(existing) = query_node_by_request(
-        &transaction,
+        transaction,
         &input.root_agent_id,
         &input.creation_request_id,
     )? {
-        if node_matches_create(&existing, input) {
-            transaction.commit().map_err(write_error)?;
+        if node_matches_create(&existing, input)
+            && existing.model_selection_source == Some(model_selection_source)
+            && existing.reasoning_effort_snapshot == reasoning_effort_snapshot
+        {
             return Ok(IdempotentCreate::Existing(existing));
         }
         return Err(conflict(
@@ -138,7 +169,7 @@ pub fn create_agent_node(
         ));
     }
 
-    let parent = query_node(&transaction, &input.parent_agent_id)?
+    let parent = query_node(transaction, &input.parent_agent_id)?
         .ok_or_else(|| AgentGraphError::AgentNotFound(input.parent_agent_id.clone()))?;
     if parent.root_agent_id != input.root_agent_id || parent.lifecycle != AgentLifecycle::Active {
         return Err(conflict("parent Agent is not active in the requested tree"));
@@ -150,7 +181,7 @@ pub fn create_agent_node(
             "must be exactly one task-name segment below the parent path",
         ));
     }
-    let project_id = conversation_project(&transaction, &input.conversation_id)?;
+    let project_id = conversation_project(transaction, &input.conversation_id)?;
     if project_id != parent.project_id {
         return Err(conflict(
             "child Conversation project does not match its parent tree",
@@ -194,15 +225,15 @@ pub fn create_agent_node(
         ));
     }
     validate_template_snapshot(
-        &transaction,
+        transaction,
         input.template_snapshot.as_ref(),
         project_id.as_deref(),
     )?;
 
-    if query_node(&transaction, &input.agent_id)?.is_some() {
+    if query_node(transaction, &input.agent_id)?.is_some() {
         return Err(conflict("Agent ID is already bound to another node"));
     }
-    if query_node_by_conversation(&transaction, &input.conversation_id)?.is_some() {
+    if query_node_by_conversation(transaction, &input.conversation_id)?.is_some() {
         return Err(conflict("Conversation is already bound to an Agent"));
     }
     let duplicate_task = transaction
@@ -236,11 +267,12 @@ pub fn create_agent_node(
                  model_config_id_snapshot, model_display_name_snapshot,
                  model_supports_image_snapshot, model_context_window_tokens_snapshot,
                  model_settings_revision_snapshot, provider_connection_revision_snapshot,
-                 provider_protocol_revision_snapshot, lifecycle, revision, created_at, updated_at
+                 provider_protocol_revision_snapshot, model_selection_source_snapshot,
+                 reasoning_effort_snapshot, lifecycle, revision, created_at, updated_at
              ) VALUES (
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
-                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, 'active', 1, ?26, ?26
+                 ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, 'active', 1, ?28, ?28
              )",
             params![
                 &input.agent_id,
@@ -270,13 +302,14 @@ pub fn create_agent_node(
                 &model.model_settings_configuration_revision,
                 &model.provider_connection_revision,
                 &model.provider_protocol_revision,
+                model_selection_source.as_str(),
+                reasoning_effort_snapshot.map(reasoning_effort_as_str),
                 created_at,
             ],
         )
         .map_err(write_error)?;
-    let record = query_node(&transaction, &input.agent_id)?
+    let record = query_node(transaction, &input.agent_id)?
         .ok_or_else(|| corrupt("created child Agent could not be read back"))?;
-    transaction.commit().map_err(write_error)?;
     Ok(IdempotentCreate::Created(record))
 }
 
@@ -294,6 +327,236 @@ pub fn get_agent_node_by_conversation(
 ) -> Result<Option<AgentNodeRecord>, AgentGraphError> {
     validate_id("conversation_id", conversation_id)?;
     query_node_by_conversation(connection, conversation_id)
+}
+
+/// Reconstructs and verifies the durable facts required to execute a child Wake.
+///
+/// The caller supplies identities already read from a trusted Host request. Model input and task
+/// content always come back from SQLite; neither can be supplied by a model-facing argument.
+pub(crate) fn resolve_child_wake_bundle(
+    connection: &Connection,
+    agent_id: &str,
+    wake_id: &str,
+    source_agent_message_id: &str,
+) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
+    resolve_child_bundle(connection, agent_id, wake_id, source_agent_message_id, true)
+}
+
+pub(crate) fn resolve_running_child_wake_bundle(
+    connection: &Connection,
+    agent_id: &str,
+    wake_id: &str,
+    source_agent_message_id: &str,
+    claim_token: &str,
+    observed_at: i64,
+) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
+    validate_id("claim_token", claim_token)?;
+    validate_time(observed_at)?;
+    let bundle =
+        resolve_child_bundle(connection, agent_id, wake_id, source_agent_message_id, true)?;
+    if bundle.initial_wake.status != AgentWakeStatus::Running
+        || bundle.initial_wake.claim_token.as_deref() != Some(claim_token)
+        || bundle
+            .initial_wake
+            .lease_expires_at
+            .is_none_or(|lease_expires_at| lease_expires_at <= observed_at)
+    {
+        return Err(conflict(
+            "child Wake execution requires the exact running claim with an unexpired lease",
+        ));
+    }
+    Ok(bundle)
+}
+
+/// Recovers the exact active Wake capability carried across an approval checkpoint.
+///
+/// The checkpoint contributes only the previously authenticated collaboration identity. Wake and
+/// claim identities are re-read from SQLite, must be unique and active, and are never accepted
+/// from renderer or model input.
+pub(crate) fn resolve_active_child_wake_bundle_by_identity(
+    connection: &Connection,
+    identity: &AgentCollaborationIdentity,
+    observed_at: i64,
+) -> Result<TrustedActiveChildWakeBundle, AgentGraphError> {
+    identity
+        .validate()
+        .map_err(|error| AgentGraphError::InvalidInput {
+            field: "collaboration_identity",
+            reason: error.to_string(),
+        })?;
+    validate_time(observed_at)?;
+    let mut statement = connection
+        .prepare(&format!(
+            "{WAKE_SELECT}
+             WHERE agent_id = ?1 AND source_agent_message_id = ?2
+               AND status IN ('running', 'waiting_for_approval')
+             ORDER BY sequence LIMIT 2"
+        ))
+        .map_err(read_error)?;
+    let rows = statement
+        .query_map(
+            params![&identity.agent_id, &identity.source_agent_message_id],
+            read_wake_row,
+        )
+        .map_err(read_error)?;
+    let wakes = rows
+        .map(|row| row.map_err(read_error).and_then(decode_wake))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [wake] = wakes.as_slice() else {
+        return Err(conflict(
+            "collaboration identity must resolve to exactly one active child Wake",
+        ));
+    };
+    let claim_token = wake
+        .claim_token
+        .as_deref()
+        .ok_or_else(|| corrupt("active child Wake is missing its claim token"))?;
+    if wake
+        .lease_expires_at
+        .is_none_or(|lease_expires_at| lease_expires_at <= observed_at)
+    {
+        return Err(conflict("active child Wake lease has expired"));
+    }
+    let spawn = resolve_child_bundle(
+        connection,
+        &identity.agent_id,
+        &wake.wake_id,
+        &identity.source_agent_message_id,
+        true,
+    )?;
+    if &spawn.collaboration_identity != identity
+        || spawn.agent.conversation_id != identity.conversation_id
+    {
+        return Err(conflict(
+            "checkpoint collaboration identity does not match durable child facts",
+        ));
+    }
+    Ok(TrustedActiveChildWakeBundle {
+        spawn,
+        claim_token: claim_token.to_string(),
+    })
+}
+
+fn resolve_child_bundle(
+    connection: &Connection,
+    agent_id: &str,
+    wake_id: &str,
+    source_agent_message_id: &str,
+    require_active: bool,
+) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
+    validate_id("agent_id", agent_id)?;
+    validate_id("wake_id", wake_id)?;
+    validate_id("source_agent_message_id", source_agent_message_id)?;
+    let agent = query_node(connection, agent_id)?
+        .ok_or_else(|| AgentGraphError::AgentNotFound(agent_id.to_string()))?;
+    let parent_id = agent
+        .parent_agent_id
+        .as_deref()
+        .ok_or_else(|| corrupt("trusted child Wake resolved to a root Agent"))?;
+    let parent = query_node(connection, parent_id)?
+        .ok_or_else(|| corrupt("child Agent parent no longer exists"))?;
+    let task_message = query_message(connection, source_agent_message_id)?
+        .ok_or_else(|| corrupt("child Wake source Mailbox message no longer exists"))?;
+    let initial_wake =
+        query_wake(connection, wake_id)?.ok_or_else(|| corrupt("child Wake no longer exists"))?;
+    let projection_exists = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM messages
+                 WHERE id = ?1 AND conversation_id = ?2 AND role = 'user'
+                   AND input_origin_kind = 'agent'
+                   AND input_origin_agent_id = ?3
+                   AND source_agent_message_id = ?4
+             )",
+            params![
+                &task_message.projection_message_id,
+                &agent.conversation_id,
+                parent_id,
+                source_agent_message_id,
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(read_error)?;
+    if (require_active
+        && (agent.lifecycle != AgentLifecycle::Active
+            || parent.lifecycle != AgentLifecycle::Active))
+        || parent.root_agent_id != agent.root_agent_id
+        || parent.root_conversation_id != agent.root_conversation_id
+        || task_message.root_agent_id != agent.root_agent_id
+        || task_message.sender_agent_id != parent_id
+        || task_message.recipient_agent_id != agent.agent_id
+        || task_message.kind != AgentMailboxKind::Task
+        || task_message.delivery_status != AgentMailboxDeliveryStatus::Acknowledged
+        || initial_wake.root_agent_id != agent.root_agent_id
+        || initial_wake.agent_id != agent.agent_id
+        || initial_wake.requester_agent_id != parent_id
+        || initial_wake.source_agent_message_id.as_deref() != Some(source_agent_message_id)
+        || !projection_exists
+    {
+        return Err(corrupt(
+            "trusted child Wake facts do not form one durable assignment bundle",
+        ));
+    }
+    let model_selection_source = agent
+        .model_selection_source
+        .ok_or_else(|| corrupt("child Agent is missing model selector provenance"))?;
+    Ok(ChildAgentSpawnRecord {
+        collaboration_identity: AgentCollaborationIdentity {
+            agent_id: agent.agent_id.clone(),
+            root_agent_id: agent.root_agent_id.clone(),
+            root_conversation_id: agent.root_conversation_id.clone(),
+            parent_agent_id: parent.agent_id,
+            parent_task_name: parent.task_name,
+            parent_task_path: parent.task_path,
+            conversation_id: agent.conversation_id.clone(),
+            task_name: agent.task_name.clone(),
+            task_path: agent.task_path.clone(),
+            source_agent_message_id: task_message.message_id.clone(),
+            entrusted_task: task_message.content.clone(),
+            template_instructions: agent
+                .template_snapshot
+                .as_ref()
+                .map(|template| template.instructions.clone()),
+        },
+        agent,
+        model_selection_source,
+        task_message,
+        initial_wake,
+    })
+}
+
+pub(crate) fn resolve_child_spawn_by_creation_request(
+    connection: &Connection,
+    parent_agent_id: &str,
+    creation_request_id: &str,
+) -> Result<Option<ChildAgentSpawnRecord>, AgentGraphError> {
+    validate_id("parent_agent_id", parent_agent_id)?;
+    validate_request_id(creation_request_id)?;
+    let Some(parent) = query_node(connection, parent_agent_id)? else {
+        return Ok(None);
+    };
+    let Some(agent) =
+        query_node_by_request(connection, &parent.root_agent_id, creation_request_id)?
+    else {
+        return Ok(None);
+    };
+    if agent.parent_agent_id.as_deref() != Some(parent_agent_id) {
+        return Err(conflict(
+            "creation request ID belongs to a different parent Agent",
+        ));
+    }
+    let message = query_message_by_request(connection, parent_agent_id, creation_request_id)?
+        .ok_or_else(|| corrupt("created child Agent is missing its initial task"))?;
+    let wake = query_wake_by_request(connection, parent_agent_id, creation_request_id)?
+        .ok_or_else(|| corrupt("created child Agent is missing its initial Wake"))?;
+    resolve_child_bundle(
+        connection,
+        &agent.agent_id,
+        &wake.wake_id,
+        &message.message_id,
+        false,
+    )
+    .map(Some)
 }
 
 pub fn list_agent_children(
@@ -361,6 +624,19 @@ pub fn transition_agent_lifecycle(
         });
     }
     if requested_lifecycle != AgentLifecycle::Active {
+        let active_turn = transaction
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM conversation_turn_traces
+                     WHERE conversation_id = ?1 AND terminal_status = 'in_progress'
+                 )",
+                [&current.conversation_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(read_error)?;
+        if active_turn {
+            return Err(conflict("Agent has an active Conversation Turn"));
+        }
         let unsettled_wake = transaction
             .query_row(
                 "SELECT EXISTS(
@@ -688,7 +964,7 @@ pub fn acknowledge_agent_task_with_projection_and_wake(
 }
 
 fn acknowledge_message_in_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     message_id: &str,
     claim_token: &str,
     acknowledged_at: i64,
@@ -777,6 +1053,72 @@ fn acknowledge_message_in_transaction(
     Ok(acknowledged)
 }
 
+/// Persists the first parent task, its unique model/history projection and the initial queued
+/// Wake as one part of a caller-owned spawn transaction.
+pub(crate) fn create_initial_agent_task_and_wake_in_transaction(
+    transaction: &Connection,
+    message: &EnqueueAgentMessageInput,
+    wake: &EnqueueAgentWakeInput,
+    claim_token: &str,
+    created_at: i64,
+) -> Result<(AgentMailboxMessageRecord, AgentWakeRequestRecord), AgentGraphError> {
+    validate_message_input(message, created_at)?;
+    validate_wake_input(wake, created_at)?;
+    validate_id("claim_token", claim_token)?;
+    if message.kind != AgentMailboxKind::Task {
+        return Err(invalid(
+            "message.kind",
+            "initial child assignment must be a task",
+        ));
+    }
+    if wake.source_agent_message_id.as_deref() != Some(message.message_id.as_str())
+        || wake.root_agent_id != message.root_agent_id
+        || wake.requester_agent_id != message.sender_agent_id
+        || wake.agent_id != message.recipient_agent_id
+    {
+        return Err(invalid(
+            "wake",
+            "initial Wake must reference the exact parent-to-child task",
+        ));
+    }
+    let inserted = enqueue_message_in_transaction(transaction, message, created_at)?;
+    if matches!(inserted, IdempotentCreate::Existing(_)) {
+        return Err(conflict(
+            "initial task already exists outside the completed spawn bundle",
+        ));
+    }
+    let lease_expires_at = created_at
+        .checked_add(WAKE_LEASE_DURATION_MS)
+        .ok_or_else(|| invalid("created_at", "cannot compute initial task lease"))?;
+    transaction
+        .execute(
+            "UPDATE agent_mailbox_messages
+             SET delivery_status = 'claimed', claim_token = ?1, lease_expires_at = ?2,
+                 claimed_at = ?3
+             WHERE message_id = ?4 AND delivery_status = 'queued'",
+            params![
+                claim_token,
+                lease_expires_at,
+                created_at,
+                &message.message_id
+            ],
+        )
+        .map_err(write_error)?;
+    let acknowledged = acknowledge_message_in_transaction(
+        transaction,
+        &message.message_id,
+        claim_token,
+        created_at,
+    )?;
+    let wake = enqueue_wake_in_transaction(transaction, wake, created_at)?;
+    if matches!(wake, IdempotentCreate::Existing(_)) {
+        return Err(conflict(
+            "initial Wake already exists outside the completed spawn bundle",
+        ));
+    }
+    Ok((acknowledged, wake.record().clone()))
+}
+
 pub fn conversation_message_origin(
     connection: &Connection,
     conversation_id: &str,
@@ -786,7 +1128,10 @@ pub fn conversation_message_origin(
     validate_id("message_id", message_id)?;
     let stored = connection
         .query_row(
-            "SELECT role, input_origin_kind, input_origin_agent_id, source_agent_message_id
+            "SELECT role, input_origin_kind, input_origin_agent_id, source_agent_message_id,
+                    snapshot_source_conversation_id, snapshot_source_message_id,
+                    snapshot_original_origin_kind, snapshot_original_agent_id,
+                    snapshot_original_mailbox_message_id
              FROM messages WHERE conversation_id = ?1 AND id = ?2",
             params![conversation_id, message_id],
             |row| {
@@ -795,6 +1140,11 @@ pub fn conversation_message_origin(
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )
@@ -802,18 +1152,61 @@ pub fn conversation_message_origin(
         .map_err(read_error)?
         .ok_or_else(|| AgentGraphError::MessageNotFound(message_id.to_string()))?;
     match stored {
-        (role, _, _, _) if role != "user" => Err(AgentGraphError::InvalidInput {
+        (role, _, _, _, _, _, _, _, _) if role != "user" => Err(AgentGraphError::InvalidInput {
             field: "message_id",
             reason: "message origin is defined only for user/input messages".to_string(),
         }),
-        (_, None, None, None) => Ok(ConversationMessageOrigin::Human),
-        (_, Some(kind), None, None) if kind == "human" => Ok(ConversationMessageOrigin::Human),
-        (_, Some(kind), Some(sender_agent_id), Some(source_agent_message_id))
-            if kind == "agent" =>
-        {
-            Ok(ConversationMessageOrigin::Agent {
-                sender_agent_id,
-                source_agent_message_id,
+        (_, None, None, None, None, None, None, None, None) => Ok(ConversationMessageOrigin::Human),
+        (_, Some(kind), None, None, None, None, None, None, None) if kind == "human" => {
+            Ok(ConversationMessageOrigin::Human)
+        }
+        (
+            _,
+            Some(kind),
+            Some(sender_agent_id),
+            Some(source_agent_message_id),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ) if kind == "agent" => Ok(ConversationMessageOrigin::Agent {
+            sender_agent_id,
+            source_agent_message_id,
+        }),
+        (
+            _,
+            Some(kind),
+            None,
+            None,
+            Some(source_conversation_id),
+            Some(source_message_id),
+            Some(original_kind),
+            original_agent_id,
+            original_mailbox_message_id,
+        ) if kind == "snapshot" => {
+            let original = match (
+                original_kind.as_str(),
+                original_agent_id,
+                original_mailbox_message_id,
+            ) {
+                ("human", None, None) => ConversationMessageOrigin::Human,
+                ("agent", Some(sender_agent_id), Some(source_agent_message_id)) => {
+                    ConversationMessageOrigin::Agent {
+                        sender_agent_id,
+                        source_agent_message_id,
+                    }
+                }
+                _ => {
+                    return Err(corrupt(
+                        "Historical snapshot origin columns are inconsistent",
+                    ))
+                }
+            };
+            Ok(ConversationMessageOrigin::HistoricalSnapshot {
+                source_conversation_id,
+                source_message_id,
+                original: Box::new(original),
             })
         }
         _ => Err(corrupt(
@@ -835,7 +1228,7 @@ pub fn enqueue_agent_wake(
 }
 
 fn enqueue_wake_in_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     input: &EnqueueAgentWakeInput,
     created_at: i64,
 ) -> Result<IdempotentCreate<AgentWakeRequestRecord>, AgentGraphError> {
@@ -1250,7 +1643,7 @@ pub fn finish_agent_wake_with_result(
 }
 
 fn enqueue_message_in_transaction(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     input: &EnqueueAgentMessageInput,
     created_at: i64,
 ) -> Result<IdempotentCreate<AgentMailboxMessageRecord>, AgentGraphError> {
@@ -1421,10 +1814,12 @@ fn read_node_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRow> {
         model_settings_revision: row.get(22)?,
         provider_connection_revision: row.get(23)?,
         provider_protocol_revision: row.get(24)?,
-        lifecycle: row.get(25)?,
-        revision: row.get(26)?,
-        created_at: row.get(27)?,
-        updated_at: row.get(28)?,
+        model_selection_source: row.get(25)?,
+        reasoning_effort_snapshot: row.get(26)?,
+        lifecycle: row.get(27)?,
+        revision: row.get(28)?,
+        created_at: row.get(29)?,
+        updated_at: row.get(30)?,
     })
 }
 
@@ -1454,6 +1849,8 @@ struct NodeRow {
     model_settings_revision: Option<String>,
     provider_connection_revision: Option<String>,
     provider_protocol_revision: Option<String>,
+    model_selection_source: Option<String>,
+    reasoning_effort_snapshot: Option<String>,
     lifecycle: String,
     revision: i64,
     created_at: i64,
@@ -1528,6 +1925,37 @@ fn decode_node(row: NodeRow) -> Result<AgentNodeRecord, AgentGraphError> {
         }),
         _ => return Err(corrupt("Agent model snapshot is partial")),
     };
+    let model_selection_source = row
+        .model_selection_source
+        .as_deref()
+        .map(crate::AgentModelSelectionSource::parse)
+        .transpose()?;
+    let reasoning_effort_snapshot = row
+        .reasoning_effort_snapshot
+        .as_deref()
+        .map(reasoning_effort_from_str)
+        .transpose()?;
+    match (
+        row.parent_agent_id.is_some(),
+        model_selection_source,
+        template_snapshot.as_ref(),
+        model_snapshot.as_ref(),
+    ) {
+        (false, None, None, None) => {}
+        (true, Some(AgentModelSelectionSource::Explicit), _, Some(_)) => {}
+        (true, Some(AgentModelSelectionSource::Template), Some(template), Some(model))
+            if template.model_config_id == model.model_config_id => {}
+        (
+            true,
+            Some(AgentModelSelectionSource::Parent | AgentModelSelectionSource::Default),
+            None,
+            Some(_),
+        ) => {}
+        _ => return Err(corrupt("Agent model selector provenance is inconsistent")),
+    }
+    if row.parent_agent_id.is_none() && reasoning_effort_snapshot.is_some() {
+        return Err(corrupt("root Agent cannot freeze a reasoning effort"));
+    }
     Ok(AgentNodeRecord {
         agent_id: row.agent_id,
         root_agent_id: row.root_agent_id,
@@ -1540,11 +1968,29 @@ fn decode_node(row: NodeRow) -> Result<AgentNodeRecord, AgentGraphError> {
         task_path: row.task_path,
         template_snapshot,
         model_snapshot,
+        model_selection_source,
+        reasoning_effort_snapshot,
         lifecycle: AgentLifecycle::parse(&row.lifecycle)?,
         revision: positive_u64(row.revision, "Agent revision")?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
+}
+
+fn reasoning_effort_as_str(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Max => "max",
+        ReasoningEffort::ProviderDefault => "provider_default",
+    }
+}
+
+fn reasoning_effort_from_str(value: &str) -> Result<ReasoningEffort, AgentGraphError> {
+    match value {
+        "high" => Ok(ReasoningEffort::High),
+        "max" => Ok(ReasoningEffort::Max),
+        _ => Err(corrupt("Agent reasoning effort snapshot is invalid")),
+    }
 }
 
 fn query_message(
@@ -1779,7 +2225,7 @@ fn validate_create_node(
     validate_id("parent_agent_id", &input.parent_agent_id)?;
     validate_id("conversation_id", &input.conversation_id)?;
     validate_request_id(&input.creation_request_id)?;
-    validate_trimmed("task_name", &input.task_name, MAX_TASK_NAME_BYTES)?;
+    validate_identity_task_name(&input.task_name)?;
     validate_trimmed("task_path", &input.task_path, MAX_TASK_PATH_BYTES)?;
     validate_model_snapshot(&input.model_snapshot)?;
     if let Some(template) = &input.template_snapshot {
@@ -2011,6 +2457,17 @@ fn validate_trimmed(
         return Err(invalid(
             field,
             "must not contain leading or trailing whitespace",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identity_task_name(value: &str) -> Result<(), AgentGraphError> {
+    validate_trimmed("task_name", value, MAX_TASK_NAME_BYTES)?;
+    if value.contains('/') || value.chars().any(char::is_control) {
+        return Err(invalid(
+            "task_name",
+            "must be one control-free Agent task-path segment",
         ));
     }
     Ok(())
@@ -3092,5 +3549,78 @@ mod tests {
             Err(AgentGraphError::RevisionConflict { .. })
         ));
         assert!(enqueue_agent_wake(&mut connection, &wake_input("inactive"), 46).is_err());
+    }
+
+    #[test]
+    fn active_conversation_turn_fences_lifecycle_deactivation_until_terminal() {
+        let mut connection = setup_tree();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-active-root', 'conversation-child', 'assistant',
+                     'Thinking...', 'pending', 20, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        let active = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-active-root",
+            "conversation-child",
+            "assistant-active-root",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &active,
+            20,
+            20,
+        )
+        .unwrap();
+
+        let error = transition_agent_lifecycle(
+            &mut connection,
+            "agent-child",
+            1,
+            AgentLifecycle::Active,
+            AgentLifecycle::Disabled,
+            21,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AgentGraphError::Conflict(reason) if reason.contains("active Conversation Turn")
+        ));
+        assert!(connection
+            .execute(
+                "UPDATE agent_nodes
+                 SET lifecycle = 'disabled', revision = revision + 1, updated_at = 22
+                 WHERE agent_id = 'agent-child'",
+                [],
+            )
+            .is_err());
+
+        let terminal = crate::completed_conversation_trace_without_items(
+            "run-active-root",
+            "conversation-child",
+            "assistant-active-root",
+        );
+        crate::storage::conversation_trace_repository::replace_trace(
+            &mut connection,
+            &terminal,
+            20,
+            23,
+        )
+        .unwrap();
+        let disabled = transition_agent_lifecycle(
+            &mut connection,
+            "agent-child",
+            1,
+            AgentLifecycle::Active,
+            AgentLifecycle::Disabled,
+            24,
+        )
+        .unwrap();
+        assert_eq!(disabled.lifecycle, AgentLifecycle::Disabled);
     }
 }

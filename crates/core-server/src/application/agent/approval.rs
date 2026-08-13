@@ -340,6 +340,12 @@ impl AgentService {
         }
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
         self.transition_pending_status(&record, PendingActionStatus::Cancelled)?;
+        // `finalize_cancelled_pending_action` committed the assistant/trace terminal state and
+        // the pending-action CAS above committed the matching action terminal state. Only after
+        // both durable facts exist may the in-memory accelerator release this logical Turn.
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
+        }
         Ok(true)
     }
 
@@ -411,6 +417,9 @@ impl AgentService {
         drop(deletion_lifecycle);
 
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
+        }
         Ok(Some(AgentActionExecutionOutput {
             action_id: record.snapshot.action_id,
             action_type: record.snapshot.action_type,

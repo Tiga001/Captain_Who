@@ -467,6 +467,7 @@ mod tests {
         assert_eq!(error.code(), Some("skill_script.full_access_required"));
 
         let run_context = AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: None,

@@ -7,10 +7,10 @@ use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxMessageRecord,
     AgentNodeRecord, AgentTemplateError, AgentTemplateRecord, AgentWakeRequestRecord,
-    AgentWakeStatus, ConversationMessageOrigin, CreateAgentNodeInput, CreateAgentTemplateInput,
-    EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
-    FinishAgentWakeWithResultInput, IdempotentCreate, ResolvedAgentTemplateForSpawn,
-    UpdateAgentTemplateInput,
+    AgentWakeStatus, ChildAgentSpawnError, ChildAgentSpawnRecord, ConversationMessageOrigin,
+    CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
+    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentWakeWithResultInput, IdempotentCreate,
+    ResolvedAgentTemplateForSpawn, TrustedActiveChildWakeBundle, UpdateAgentTemplateInput,
 };
 use std::sync::Arc;
 
@@ -23,6 +23,52 @@ pub(crate) struct AgentCollaborationService {
     storage: Arc<StorageService>,
 }
 
+/// The only application entry point allowed to create child Agent identities.
+///
+/// It intentionally has no Runtime or transport dependency. A dispatcher can later consume the
+/// returned queued Wake through the trusted resolve method without gaining access to low-level
+/// node binding APIs.
+#[derive(Clone)]
+pub(crate) struct ChildAgentFactory {
+    storage: Arc<StorageService>,
+}
+
+impl ChildAgentFactory {
+    pub(crate) fn new(storage: Arc<StorageService>) -> Self {
+        Self { storage }
+    }
+
+    pub(crate) fn create_child(
+        &self,
+        input: &CreateChildAgentInput,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.storage.create_child_agent(input)
+    }
+
+    pub(crate) fn resolve_trusted_running_wake(
+        &self,
+        agent_id: &str,
+        wake_id: &str,
+        source_agent_message_id: &str,
+        claim_token: &str,
+    ) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
+        self.storage.resolve_running_child_agent_wake(
+            agent_id,
+            wake_id,
+            source_agent_message_id,
+            claim_token,
+        )
+    }
+
+    pub(crate) fn resolve_trusted_active_wake_by_identity(
+        &self,
+        identity: &mycopilot_core::AgentCollaborationIdentity,
+    ) -> Result<TrustedActiveChildWakeBundle, AgentGraphError> {
+        self.storage
+            .resolve_active_child_agent_wake_by_identity(identity)
+    }
+}
+
 impl AgentCollaborationService {
     pub(crate) fn new(storage: Arc<StorageService>) -> Self {
         Self { storage }
@@ -33,13 +79,6 @@ impl AgentCollaborationService {
         input: &EnsureRootAgentInput,
     ) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {
         self.storage.ensure_root_agent(input)
-    }
-
-    pub(crate) fn create_node(
-        &self,
-        input: &CreateAgentNodeInput,
-    ) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {
-        self.storage.create_agent_node(input)
     }
 
     pub(crate) fn get_node(

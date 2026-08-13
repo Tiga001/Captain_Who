@@ -2447,6 +2447,9 @@ impl AgentService {
             return;
         }
 
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.release_conversation_turn_if_current(conversation_id, run_id);
+        }
         self.discard_trace_snapshot(run_id);
         let _ = notifications.send(agent_event_notification(AgentEvent::Done {
             run_id: run_id.clone(),
@@ -2455,6 +2458,214 @@ impl AgentService {
             content: None,
             usage: output.usage,
             finish_reason: output.finish_reason,
+            proposed_actions: Vec::new(),
+        }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_pre_runtime_action_continuation_failure(
+        &self,
+        record: &PendingActionRecord,
+        notifications: &CoreServerNotificationSender,
+        steer_input: &AgentSteerInputQueue,
+        cancellation_token: &AgentCancellationToken,
+        expected_target_status: PendingActionStatus,
+        failure_code: &str,
+        failure_message: String,
+    ) {
+        let run_id = &record.snapshot.run_id;
+        let (Some(conversation_id), Some(assistant_message_id)) = (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+        ) else {
+            self.discard_usage_context(run_id);
+            let _ = self.unregister_active_run_control(
+                run_id,
+                steer_input,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                "The agent run has finished and no longer accepts guidance.",
+                notifications,
+            );
+            self.unregister_cancellation_if_current(run_id, cancellation_token);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id.clone()),
+                message: "审批续跑缺少 Conversation Turn 持久化身份。".to_string(),
+                recoverable: true,
+                code: Some("conversation_turn_identity_missing".to_string()),
+                details: None,
+            }));
+            return;
+        };
+
+        let steering_close_error = self
+            .unregister_active_run_control(
+                run_id,
+                steer_input,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                "The agent run has finished and no longer accepts guidance.",
+                notifications,
+            )
+            .err();
+        self.unregister_cancellation_if_current(run_id, cancellation_token);
+        let terminal_message = match steering_close_error {
+            Some(error) => {
+                format!("{failure_message}；同时无法关闭审批续跑的用户引导通道：{error}")
+            }
+            None => failure_message,
+        };
+
+        let terminal_projection = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)
+            .and_then(|trace| match trace {
+                Some(trace)
+                    if trace.run_id == *run_id
+                        && trace.conversation_id == conversation_id
+                        && trace.terminal_status
+                            == ConversationTurnTraceTerminalStatus::InProgress =>
+                {
+                    let model_context_items = self
+                        .storage
+                        .get_conversation_model_context_log(assistant_message_id)?
+                        .map(|log| log.items)
+                        .unwrap_or_default();
+                    let next_sequence = trace
+                        .items
+                        .last()
+                        .map(ConversationTurnTraceItem::sequence)
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    terminal_conversation_trace_from_snapshot(
+                        ConversationTraceSnapshot {
+                            items: trace.items,
+                            model_context_items,
+                            next_sequence,
+                            truncated: trace.truncated,
+                        },
+                        run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        ConversationTurnTraceTerminalStatus::Failed,
+                        &terminal_message,
+                    )
+                }
+                Some(_) => {
+                    Err("审批续跑的 durable ConversationTurnTrace 身份或状态不一致。".to_string())
+                }
+                None => Err("审批续跑的 durable ConversationTurnTrace 不存在。".to_string()),
+            });
+        let terminal = match terminal_projection {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id.clone()),
+                    message: format!("无法构造审批续跑的失败终态：{error}"),
+                    recoverable: true,
+                    code: Some("conversation_trace_persistence_failed".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+        };
+        let previous_usage_state = self
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned();
+        let usage_record = self.prepare_run_usage_record(
+            run_id,
+            AgentRunStatus::Failed,
+            None,
+            Some(terminal_message.clone()),
+        );
+        let cumulative_usage = self.preview_cumulative_run_usage(run_id, None);
+        let completed_at = now_ms();
+        let persisted = {
+            let mut pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let pending = pending_actions
+                .get_mut(&record.storage_id)
+                .ok_or_else(|| format!("审批续跑的内存 pending 状态不存在：{}", record.storage_id));
+            pending.and_then(|pending| {
+                if pending.snapshot.run_id != *run_id
+                    || pending.snapshot.conversation_id.as_deref() != Some(conversation_id)
+                    || pending.snapshot.assistant_message_id.as_deref()
+                        != Some(assistant_message_id)
+                {
+                    return Err("审批续跑的内存 pending 身份不一致。".to_string());
+                }
+                let expected_status = pending.snapshot.status;
+                self.storage.fail_claimed_agent_action_continuation(
+                    &record.storage_id,
+                    pending_status_label(expected_status),
+                    pending_status_label(expected_target_status),
+                    conversation_id,
+                    assistant_message_id,
+                    &terminal_message,
+                    &terminal.trace,
+                    &terminal.model_context_items,
+                    completed_at,
+                    usage_record.as_ref(),
+                )?;
+                pending.snapshot.status = PendingActionStatus::Failed;
+                Ok(())
+            })
+        };
+        if let Err(error) = persisted {
+            let mut usage_contexts = self
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner());
+            match previous_usage_state {
+                Some(previous) => {
+                    usage_contexts.insert(run_id.clone(), previous);
+                }
+                None => {
+                    usage_contexts.remove(run_id);
+                }
+            }
+            drop(usage_contexts);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id.clone()),
+                message: format!(
+                    "无法原子持久化 pending、assistant、轨迹与 Usage 的失败终态：{error}"
+                ),
+                recoverable: true,
+                code: Some("conversation_trace_persistence_failed".to_string()),
+                details: None,
+            }));
+            return;
+        }
+        self.finish_persisted_run_usage(run_id, AgentRunStatus::Failed);
+
+        self.emit_terminal_context_window_snapshot(
+            notifications,
+            &record.agent_input,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            &terminal_message,
+        );
+        self.release_conversation_turn_if_current(conversation_id, run_id);
+        self.discard_trace_snapshot(run_id);
+        self.discard_exact_running_context_window_snapshot(run_id);
+        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+            run_id: Some(run_id.clone()),
+            message: terminal_message.clone(),
+            recoverable: false,
+            code: Some(failure_code.to_string()),
+            details: None,
+        }));
+        let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+            run_id: run_id.clone(),
+            success: false,
+            status: Some(AgentRunStatus::Failed),
+            content: Some(terminal_message),
+            usage: cumulative_usage,
+            finish_reason: None,
             proposed_actions: Vec::new(),
         }));
     }
@@ -2469,6 +2680,45 @@ impl AgentService {
     ) {
         let run_id = record.snapshot.run_id.clone();
         let cancellation_token = existing_cancellation_token.unwrap_or_default();
+        let frozen_identity = record
+            .agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref());
+        let resumed_identity = agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.as_ref());
+        if frozen_identity != resumed_identity {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id),
+                message: "审批续跑的 Collaboration identity 与冻结 checkpoint 不一致。".to_string(),
+                recoverable: true,
+                code: Some("collaboration_identity_mismatch".to_string()),
+                details: None,
+            }));
+            return;
+        }
+        if let Some(identity) = resumed_identity {
+            if let Err(error) = ChildAgentFactory::new(Arc::clone(&self.storage))
+                .resolve_trusted_active_wake_by_identity(identity)
+            {
+                self.discard_usage_context(&run_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: format!(
+                        "子 Agent 审批续跑的 Host 协作身份已失效，已拒绝执行：{error}"
+                    ),
+                    recoverable: true,
+                    code: Some("collaboration_identity_revalidation_failed".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+        }
         if cancellation_token.is_cancelled() {
             self.finish_cancelled_action_continuation(&record, &notifications, &cancellation_token);
             return;
@@ -2485,118 +2735,67 @@ impl AgentService {
             self.discard_usage_context(&run_id);
             return;
         }
-        let steer_input = match (
+        let (turn_conversation_id, turn_assistant_message_id) = match (
             record.snapshot.conversation_id.as_deref(),
             record.snapshot.assistant_message_id.as_deref(),
         ) {
-            (Some(conversation_id), Some(assistant_message_id)) => Some(
-                self.register_active_run_control(
-                    &run_id,
-                    conversation_id,
-                    assistant_message_id,
-                    record
-                        .agent_input
-                        .context
-                        .as_ref()
-                        .and_then(|context| context.project_id.as_deref()),
-                    record.agent_input.model_capabilities,
-                ),
+            (Some(conversation_id), Some(assistant_message_id)) => (
+                conversation_id.to_string(),
+                assistant_message_id.to_string(),
             ),
-            _ => None,
-        };
-
-        let emitter_notifications = notifications.clone();
-        let emitter_service = self.clone();
-        let emitter_conversation_id = record.snapshot.conversation_id.clone();
-        let emitter_assistant_message_id = record.snapshot.assistant_message_id.clone();
-        let emitter_agent_input = record.agent_input.clone();
-        let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
-        let emitter_terminal_event_gate = terminal_event_gate.clone();
-        let pending_store_failure = Arc::new(Mutex::new(None::<String>));
-        let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
-        let emitter: AgentEventEmitter = Arc::new(move |event| {
-            if let AgentEvent::ApprovalRequired {
-                run_id,
-                action,
-                checkpoint,
-            } = &event
-            {
-                if let Err(error) = emitter_service.close_active_run_steering(
-                    run_id,
-                    AgentSteerRunRejectionCode::RunNotSteerable,
-                    "The agent run is waiting for approval and no longer accepts guidance.",
-                    &emitter_notifications,
-                ) {
-                    emitter_terminal_event_gate.discard();
-                    *emitter_pending_store_failure
-                        .lock()
-                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                    return;
-                }
-                let mut agent_input =
-                    agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
-                if let Err(error) =
-                    emitter_service.refresh_agent_input_attachment_library(&mut agent_input)
-                {
-                    emitter_terminal_event_gate.discard();
-                    *emitter_pending_store_failure
-                        .lock()
-                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                    return;
-                }
-                match emitter_service.store_pending_action(
-                    run_id,
-                    emitter_conversation_id.as_deref().unwrap_or_default(),
-                    emitter_assistant_message_id.as_deref().unwrap_or_default(),
-                    action.as_ref().clone(),
-                    agent_input,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => return,
-                    Err(error) => {
-                        emitter_terminal_event_gate.discard();
-                        *emitter_pending_store_failure
-                            .lock()
-                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
-                        return;
-                    }
-                }
-            }
-            if emitter_pending_store_failure
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .is_some()
-            {
+            _ => {
+                self.discard_usage_context(&run_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: "审批续跑缺少 Conversation Turn 持久化身份。".to_string(),
+                    recoverable: true,
+                    code: Some("conversation_turn_identity_missing".to_string()),
+                    details: None,
+                }));
                 return;
             }
-            let event = emitter_service.project_cumulative_usage_onto_event(event);
-            if let Some(event) = emitter_terminal_event_gate.route(event) {
-                let _ = emitter_notifications.send(agent_event_notification(event));
-            }
-        });
+        };
+        if let Err(error) = self.ensure_conversation_turn_owner(
+            &turn_conversation_id,
+            &run_id,
+            &turn_assistant_message_id,
+        ) {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id),
+                message: format!("审批续跑无法取得 Conversation Turn：{error}"),
+                recoverable: true,
+                code: Some("conversation_turn_ownership_conflict".to_string()),
+                details: None,
+            }));
+            return;
+        }
+        let steer_input = self.register_active_run_control(
+            &run_id,
+            &turn_conversation_id,
+            &turn_assistant_message_id,
+            record
+                .agent_input
+                .context
+                .as_ref()
+                .and_then(|context| context.project_id.as_deref()),
+            record.agent_input.model_capabilities,
+        );
 
         let skill_resources = match self.restore_skill_resource_session(&agent_input) {
             Ok(resources) => resources,
             Err(error) => {
-                let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
-                self.discard_usage_context(&run_id);
-                if let Some(steer_input) = steer_input.as_ref() {
-                    let _ = self.unregister_active_run_control(
-                        &run_id,
-                        steer_input,
-                        AgentSteerRunRejectionCode::RunNotSteerable,
-                        "The agent run has finished and no longer accepts guidance.",
-                        &notifications,
-                    );
-                }
-                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id),
-                    message: error.to_string(),
-                    recoverable: true,
-                    code: Some("skill_resource_snapshot_unavailable".to_string()),
-                    details: None,
-                }));
+                self.finish_pre_runtime_action_continuation_failure(
+                    &record,
+                    &notifications,
+                    &steer_input,
+                    &cancellation_token,
+                    final_pending_status,
+                    "skill_resource_snapshot_unavailable",
+                    error.to_string(),
+                );
                 return;
             }
         };
@@ -2609,163 +2808,42 @@ impl AgentService {
             ) {
             Ok(projection) => projection,
             Err(error) => {
-                let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
-                self.discard_usage_context(&run_id);
-                if let Some(steer_input) = steer_input.as_ref() {
-                    let _ = self.unregister_active_run_control(
-                        &run_id,
-                        steer_input,
-                        AgentSteerRunRejectionCode::RunNotSteerable,
-                        "The agent run has finished and no longer accepts guidance.",
-                        &notifications,
-                    );
-                }
-                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id),
-                    message: error,
-                    recoverable: true,
-                    code: Some("context_window_tool_projection_unavailable".to_string()),
-                    details: None,
-                }));
+                self.finish_pre_runtime_action_continuation_failure(
+                    &record,
+                    &notifications,
+                    &steer_input,
+                    &cancellation_token,
+                    final_pending_status,
+                    "context_window_tool_projection_unavailable",
+                    error,
+                );
                 return;
             }
         };
         let context_window_tool_projection =
             RunContextToolProjection::new(initial_context_window_tool_projection);
-        let host_executor = self.host_action_executor(
-            agent_input.clone(),
-            run_id.clone(),
-            record.snapshot.conversation_id.clone(),
-            record.snapshot.assistant_message_id.clone(),
-            skill_resources.clone(),
-            notifications.clone(),
-        );
-        let trace_conversation_id = record
-            .snapshot
-            .conversation_id
-            .as_deref()
-            .unwrap_or_default();
-        let trace_assistant_message_id = record
-            .snapshot
-            .assistant_message_id
-            .as_deref()
-            .unwrap_or_default();
-        let trace_observer = self.trace_observer(
-            &run_id,
-            trace_conversation_id,
-            trace_assistant_message_id,
-            record.snapshot.created_at,
-            record.agent_input.clone(),
-            context_window_tool_projection.clone(),
-            notifications.clone(),
-        );
-        let context_compaction_services = self.context_compaction_services(
-            &run_id,
-            trace_conversation_id,
-            trace_assistant_message_id,
-            record.agent_input.clone(),
-            context_window_tool_projection.clone(),
-            notifications.clone(),
-        );
-        let model_request_observer =
-            self.model_request_observer(&run_id, trace_conversation_id, trace_assistant_message_id);
-        let context_window_observer =
-            record
-                .agent_input
-                .context_window_indicator_enabled
-                .then(|| {
-                    self.context_window_observer(
-                        &run_id,
-                        trace_conversation_id,
-                        &record.agent_input.model,
-                        notifications.clone(),
-                    )
-                });
-        let mut host_services = AgentRuntimeHostServices::new()
-            .with_host_actions(host_executor, self.storage.clone())
-            .with_command_session_executor(Arc::new(self.command_sessions.clone()))
-            .with_office_engine(self.office_engine.clone())
-            .with_trace_observer(trace_observer)
-            .with_model_request_observer(model_request_observer)
-            .with_context_compaction(context_compaction_services);
-        if let Some(provider_continuation_vault) = self.provider_continuation_vault.as_ref() {
-            host_services = host_services
-                .with_provider_continuation_vault(Arc::clone(provider_continuation_vault));
-        }
-        if let Some(context_window_observer) = context_window_observer {
-            host_services = host_services.with_context_window_observer(context_window_observer);
-        }
-        if let Some(image_generation_execution) = self.image_generation_execution.clone() {
-            host_services =
-                host_services.with_image_generation_execution(image_generation_execution);
-        }
-        if let Some(skill_installation_prepare) = self.skill_installation_prepare.clone() {
-            host_services =
-                host_services.with_skill_installation_prepare(skill_installation_prepare);
-        }
-        if let Some(skill_installation) = self.skill_installation.clone() {
-            host_services = host_services.with_skill_installation_commit(skill_installation);
-        }
-        host_services = host_services.with_skill_activation_resolver(
-            model_skill_activation_resolver(self.storage.clone(), self.skills.clone()),
-        );
-        if let Some(resources) = skill_resources {
-            host_services = host_services.with_skill_resources(resources);
-        }
-        if let Some(resolver) = self.artifact_runtime.clone() {
-            host_services = host_services.with_command_runtime_profile_resolver(resolver);
-        }
-        if let Some(steer_input) = steer_input.as_ref() {
-            host_services = host_services.with_steer_input(steer_input.clone());
-        }
-        if let Some(mcp_tools) = mcp_tools {
-            host_services = host_services.with_mcp_tools(mcp_tools);
-        }
-        let result = send_chat_with_host_services(
-            agent_input,
-            run_id.clone(),
-            emitter,
-            cancellation_token.clone(),
-            host_services,
-        )
-        .await;
-        let result = match pending_store_failure
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-        {
-            Some(error) => {
-                terminal_event_gate.discard();
-                Err(pending_action_persistence_error(error))
-            }
-            None => result,
-        };
-        let close_message = match &result {
-            Ok(output) if output.status == AgentRunStatus::WaitingForApproval => {
-                "The agent run is waiting for approval and no longer accepts guidance."
-            }
-            _ => "The agent run has finished and no longer accepts guidance.",
-        };
-        let result = if let Some(steer_input) = steer_input.as_ref() {
-            match self.unregister_active_run_control(
-                &run_id,
-                steer_input,
-                AgentSteerRunRejectionCode::RunNotSteerable,
-                close_message,
-                &notifications,
-            ) {
-                Ok(()) => result,
-                Err(error) => {
-                    terminal_event_gate.discard();
-                    Err(AgentError::new(format!(
-                        "无法关闭审批续跑的用户引导通道并持久化剩余引导：{error}"
-                    )))
-                }
-            }
-        } else {
-            result
-        };
+        let RuntimeTurnSegmentOutcome {
+            result,
+            terminal_event_gate,
+        } = self
+            .run_prepared_turn_segment(
+                PreparedRuntimeTurnSegment {
+                    run_id: run_id.clone(),
+                    conversation_id: turn_conversation_id.clone(),
+                    assistant_message_id: turn_assistant_message_id.clone(),
+                    assistant_created_at: record.snapshot.created_at,
+                    agent_input,
+                    skill_resources,
+                    mcp_tools,
+                    context_window_tool_projection,
+                    cancellation_token: cancellation_token.clone(),
+                    steer_input,
+                    invalidate_mcp_payload_on_pending_store_failure: false,
+                    steering_close_error_context: "无法关闭审批续跑的用户引导通道并持久化剩余引导",
+                },
+                notifications.clone(),
+            )
+            .await;
         let keep_trace_snapshot = matches!(
             &result,
             Ok(output) if output.status == AgentRunStatus::WaitingForApproval
@@ -2782,7 +2860,7 @@ impl AgentService {
             return;
         }
 
-        match result {
+        let durable_turn_terminal = match result {
             Ok(mut agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
                 let owner_ids = (
@@ -2812,12 +2890,13 @@ impl AgentService {
                         error,
                     );
                 });
+                let terminal_commit_published = pending_terminal_commit_is_publishable(
+                    persisted.is_ok(),
+                    pending_transition.is_ok(),
+                    committed_durable_context,
+                );
                 if let (Some(conversation_id), Some(assistant_message_id)) = owner_ids {
-                    if pending_terminal_commit_is_publishable(
-                        persisted.is_ok(),
-                        pending_transition.is_ok(),
-                        committed_durable_context,
-                    ) {
+                    if terminal_commit_published {
                         self.emit_terminal_context_window_snapshot(
                             &notifications,
                             &record.agent_input,
@@ -2840,11 +2919,7 @@ impl AgentService {
                             details: None,
                         }));
                     }
-                    if pending_terminal_commit_is_publishable(
-                        persisted.is_ok(),
-                        pending_transition.is_ok(),
-                        committed_durable_context,
-                    ) {
+                    if terminal_commit_published {
                         emit_terminal_events_after_persistence(
                             &notifications,
                             &terminal_event_gate,
@@ -2852,6 +2927,7 @@ impl AgentService {
                         );
                     }
                 }
+                terminal_commit_published
             }
             Err(error) => {
                 terminal_event_gate.discard();
@@ -3001,10 +3077,14 @@ impl AgentService {
                         proposed_actions: Vec::new(),
                     }));
                 }
+                terminal_commit_published
             }
-        }
+        };
 
         drop(deletion_lifecycle);
+        if durable_turn_terminal {
+            self.release_conversation_turn_if_current(&turn_conversation_id, &run_id);
+        }
         if !keep_trace_snapshot {
             self.discard_trace_snapshot(&run_id);
             self.discard_exact_running_context_window_snapshot(&run_id);

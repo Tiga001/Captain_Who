@@ -2638,6 +2638,7 @@ mod tests {
     fn write_proposal_binds_the_trimmed_reason_to_the_frozen_action() {
         let fixture = tempdir().unwrap();
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2878,6 +2879,7 @@ mod tests {
     fn semantic_image_input_compiles_without_model_visible_provider_tokens() {
         let fixture = tempdir().unwrap();
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2972,6 +2974,7 @@ mod tests {
     fn model_image_path_survives_frozen_approval_validation() {
         let fixture = tempdir().unwrap();
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {

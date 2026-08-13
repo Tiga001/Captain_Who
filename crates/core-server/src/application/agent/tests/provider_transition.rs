@@ -105,6 +105,151 @@ fn persist_completed_history(
         .unwrap();
 }
 
+#[test]
+fn durable_turn_occupancy_blocks_provider_transition_after_runtime_is_gone() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_model_settings(two_model_settings(None))
+        .unwrap();
+    let conversation_id = "conversation-transition-durable-turn";
+    let mut conversation = conversation_with_completed_history(conversation_id, Some("model-1"));
+    let completed_assistant = conversation.messages[1].id.clone();
+    conversation.messages.push(ChatMessageRecord {
+        id: "assistant-durable-active".to_string(),
+        role: "assistant".to_string(),
+        content: THINKING_PLACEHOLDER.to_string(),
+        created_at: 3,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    conversation.updated_at = 3;
+    storage.save_conversation(conversation).unwrap();
+    persist_completed_history(&storage, conversation_id, &completed_assistant);
+    let active = ConversationTraceSnapshot::default().in_progress_trace(
+        "run-durable-active",
+        conversation_id,
+        "assistant-durable-active",
+    );
+    storage
+        .append_in_progress_conversation_turn_trace(&active, 3, 3)
+        .unwrap();
+
+    // A fresh Host has no resident Runtime/steering entry. The durable trace lease remains the
+    // authority and must still block model mutation.
+    let service = AgentService::try_new_deferred_startup_reconciliation(storage.clone()).unwrap();
+    let before = storage.load_conversation(conversation_id).unwrap().unwrap();
+    let preflight = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: conversation_id.to_string(),
+            target_model_id: "model-2".to_string(),
+        })
+        .unwrap();
+    assert_eq!(preflight.decision, AgentProviderTransitionDecision::Blocked);
+    assert_eq!(preflight.reason, AgentProviderTransitionReason::ActiveRun);
+    assert_eq!(
+        serde_json::to_value(storage.load_conversation(conversation_id).unwrap().unwrap()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+}
+
+#[test]
+fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_without_writes() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_model_settings(two_model_settings(None))
+        .unwrap();
+
+    for (conversation_id, agent_id) in [
+        (
+            "conversation-transition-inactive-root",
+            "agent-transition-inactive-root",
+        ),
+        ("conversation-transition-parent", "agent-transition-parent"),
+    ] {
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: conversation_id.to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: conversation_id.to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        storage
+            .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+                agent_id: agent_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                creation_request_id: format!("ensure-{agent_id}"),
+                task_name: "Root".to_string(),
+            })
+            .unwrap();
+    }
+    let inactive_root = storage
+        .get_agent_node("agent-transition-inactive-root")
+        .unwrap()
+        .unwrap();
+    storage
+        .transition_agent_lifecycle(
+            &inactive_root.agent_id,
+            inactive_root.revision,
+            mycopilot_core::AgentLifecycle::Active,
+            mycopilot_core::AgentLifecycle::Disabled,
+        )
+        .unwrap();
+    let child = storage
+        .create_child_agent(&mycopilot_core::CreateChildAgentInput {
+            parent_agent_id: "agent-transition-parent".to_string(),
+            creation_request_id: "spawn-transition-observer-child".to_string(),
+            task_name: "transition_observer".to_string(),
+            task: "Inspect only.".to_string(),
+            template_machine_key: None,
+            explicit_model_id: None,
+            reasoning_effort: None,
+            fork_turns: mycopilot_core::AgentForkTurns::None,
+        })
+        .unwrap();
+
+    let service = AgentService::new(Arc::clone(&storage));
+    for (conversation_id, expected_message) in [
+        (
+            "conversation-transition-inactive-root",
+            "根 Agent 当前不可用，不能切换模型。",
+        ),
+        (
+            child.agent.conversation_id.as_str(),
+            "子 Agent Conversation 是只读观察视图，不能由用户切换模型。",
+        ),
+    ] {
+        let before = storage.load_conversation(conversation_id).unwrap().unwrap();
+        let output = service
+            .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                conversation_id: conversation_id.to_string(),
+                target_model_id: "model-2".to_string(),
+            })
+            .unwrap();
+        assert_eq!(output.decision, AgentProviderTransitionDecision::Blocked);
+        assert_eq!(
+            output.reason,
+            AgentProviderTransitionReason::UnsupportedTarget
+        );
+        assert_eq!(output.message.as_deref(), Some(expected_message));
+        assert_eq!(
+            serde_json::to_value(storage.load_conversation(conversation_id).unwrap().unwrap())
+                .unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
+}
+
 fn two_model_settings(
     target_profile: Option<mycopilot_core::ProviderProfileConfig>,
 ) -> ModelSettingsRecord {

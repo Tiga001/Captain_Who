@@ -15,6 +15,7 @@ impl StorageService {
         conversation_updated_at: i64,
         expected_current_model_id: Option<&str>,
         expected_conversation_updated_at: i64,
+        expected_conversation_revision: i64,
         expected_target_provider_protocol_revision: &str,
     ) -> Result<ProviderTransitionCompatibleCommitOutcome, String> {
         let record = ProviderTransitionTerminalRecord::new(
@@ -34,6 +35,7 @@ impl StorageService {
             &record,
             expected_current_model_id,
             expected_conversation_updated_at,
+            expected_conversation_revision,
             expected_target_provider_protocol_revision,
         )
         .map_err(|error| error.to_string())

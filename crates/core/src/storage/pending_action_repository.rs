@@ -369,6 +369,50 @@ pub fn set_pending_action_target_status(
     )
 }
 
+/// Redirects an already claimed continuation to a Host-owned pre-Runtime failure terminal.
+///
+/// `expected_target_status` is part of the CAS because the approved action executor may already
+/// have persisted a different durable outcome before the continuation is reconstructed. A stale
+/// worker must never rewrite a newer action decision.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fail_claimed_action_continuation(
+    connection: &Connection,
+    action_id: &str,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    expected_status: &str,
+    expected_target_status: &str,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "
+        UPDATE agent_pending_actions
+        SET status = 'failed',
+            target_status = 'failed',
+            action_json = '{}',
+            agent_input_json = '{}',
+            updated_at = ?7
+        WHERE action_id = ?1
+          AND run_id = ?2
+          AND conversation_id = ?3
+          AND assistant_message_id = ?4
+          AND status = ?5
+          AND target_status = ?6
+          AND status IN ('approved', 'executing', 'rejected')
+        ",
+        params![
+            action_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            expected_status,
+            expected_target_status,
+            updated_at
+        ],
+    )
+}
+
 pub fn delete_pending_actions_for_conversation(
     connection: &Connection,
     conversation_id: &str,

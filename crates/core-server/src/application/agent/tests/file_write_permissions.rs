@@ -10,6 +10,7 @@ fn test_input(permissions: AgentPermissions) -> AgentChatInput {
     }))
     .unwrap();
     input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-file-policy".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {

@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 4;
+pub const STORAGE_SCHEMA_VERSION: i32 = 5;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:477de03f9d63de083258fe77d5f4d9c9f26783daf7465fd51ebae66c5e0e8853";
+    "sha256:5ded7ec02894107e9175625db6685ab3e5e0a6042b28f0f3df340f7d3ec0f81f";
 
 /// Opens the single supported development schema.
 ///
@@ -156,6 +156,7 @@ mod tests {
             "prevent_agent_node_identity_update",
             "validate_agent_node_lifecycle_update",
             "prevent_agent_lifecycle_deactivation_with_pending_wake",
+            "prevent_agent_lifecycle_deactivation_with_active_turn",
             "prevent_agent_lifecycle_deactivation_with_pending_mailbox",
             "prevent_agent_lifecycle_deactivation_with_active_children",
             "validate_agent_lifecycle_activation_parent",
@@ -186,6 +187,15 @@ mod tests {
             "prevent_agent_wake_claim_time_rewrite",
             "prevent_agent_wake_start_time_rewrite",
             "prevent_agent_wake_terminal_rewrite",
+            "child_context_snapshots",
+            "child_context_snapshots_source_idx",
+            "validate_child_context_snapshot_insert",
+            "prevent_child_context_snapshot_update",
+            "prevent_child_context_snapshot_delete",
+            "messages_snapshot_source_idx",
+            "validate_child_context_snapshot_message_insert",
+            "prevent_child_context_snapshot_message_rewrite",
+            "prevent_child_context_snapshot_message_delete",
             "validate_agent_message_projection_insert",
             "prevent_human_input_to_child_agent",
             "prevent_human_input_update_to_child_agent",
@@ -195,7 +205,12 @@ mod tests {
             "prevent_agent_message_projection_ui_rewrite",
             "validate_agent_mailbox_acknowledgement",
             "prevent_agent_bound_conversation_fork_insert",
+            "conversations_revision_after_business_update",
+            "conversations_revision_after_message_insert",
+            "conversations_revision_after_message_update",
+            "conversations_revision_after_message_delete",
             "conversation_turn_traces",
+            "conversation_turn_traces_one_active_turn",
             "provider_continuations",
             "context_compaction_summaries",
             "conversation_forks",
@@ -231,6 +246,43 @@ mod tests {
             .unwrap()
             .is_some();
         assert!(!maintenance_table_exists);
+    }
+
+    #[test]
+    fn canonical_schema_allows_only_one_in_progress_trace_per_conversation() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection.execute_batch(
+            "INSERT INTO conversations (
+                id, project_id, model_id, title, created_at, updated_at,
+                pinned_at, archived_at, unread_at
+             ) VALUES ('conversation-active', NULL, NULL, 'Active', 1, 1, NULL, NULL, NULL);
+             INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json,
+                ui_state_json, created_at, position
+             ) VALUES
+                ('assistant-active-1', 'conversation-active', 'assistant', '', 'pending', NULL, NULL, 1, 0),
+                ('assistant-active-2', 'conversation-active', 'assistant', '', 'pending', NULL, NULL, 2, 1);
+             INSERT INTO conversation_turn_traces (
+                assistant_message_id, conversation_id, run_id, schema_version,
+                terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
+             ) VALUES (
+                'assistant-active-1', 'conversation-active', 'run-active-1', 3,
+                'in_progress', NULL, 0, 1, 1, NULL
+             );",
+        ).unwrap();
+        assert!(connection
+            .execute(
+                "INSERT INTO conversation_turn_traces (
+                assistant_message_id, conversation_id, run_id, schema_version,
+                terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
+             ) VALUES (
+                'assistant-active-2', 'conversation-active', 'run-active-2', 3,
+                'in_progress', NULL, 0, 2, 2, NULL
+             )",
+                [],
+            )
+            .is_err());
     }
 
     #[test]
@@ -381,7 +433,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 4, found 3"));
+            .contains("expected schema version 5, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -402,6 +454,48 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_v4_database_requires_reset_without_rewriting_the_fixture() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v4.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE legacy_v4_sentinel (
+                         id TEXT PRIMARY KEY,
+                         payload TEXT NOT NULL
+                     );
+                     INSERT INTO legacy_v4_sentinel (id, payload)
+                     VALUES ('sentinel', 'do not rewrite');
+                     PRAGMA user_version = 4;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("expected schema version 5, found 4"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 4);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload FROM legacy_v4_sentinel WHERE id = 'sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "do not rewrite"
+        );
     }
 
     #[test]

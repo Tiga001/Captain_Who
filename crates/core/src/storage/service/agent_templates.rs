@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
-    AgentModelSelectionSnapshot, AgentTemplateError, AgentTemplateModelUnavailableReason,
-    AgentTemplateRecord, AgentTemplateSnapshot, CreateAgentTemplateInput,
-    ResolvedAgentTemplateForSpawn, UpdateAgentTemplateInput,
+    AgentModelSelectionSnapshot, AgentModelUnavailableReason, AgentTemplateError,
+    AgentTemplateModelUnavailableReason, AgentTemplateRecord, AgentTemplateSnapshot,
+    CreateAgentTemplateInput, ResolvedAgentTemplateForSpawn, UpdateAgentTemplateInput,
 };
 
 impl StorageService {
@@ -131,76 +131,54 @@ fn resolve_model_selection(
     template: &AgentTemplateRecord,
     snapshot: &ModelSettingsSnapshot,
 ) -> Result<AgentModelSelectionSnapshot, AgentTemplateError> {
+    resolve_exact_agent_model(snapshot, &template.model_config_id)
+        .map_err(|reason| model_unavailable(template, reason))
+}
+
+/// Resolves one exact configured model to the credential-free identity frozen on an Agent node.
+///
+/// This function never chooses a fallback. Callers own selection priority; once an identity has
+/// been selected, every unavailable condition is terminal for that spawn attempt.
+pub(crate) fn resolve_exact_agent_model(
+    snapshot: &ModelSettingsSnapshot,
+    model_config_id: &str,
+) -> Result<AgentModelSelectionSnapshot, AgentModelUnavailableReason> {
     let model = snapshot
         .settings
         .models
         .iter()
-        .find(|model| model.id == template.model_config_id)
-        .ok_or_else(|| {
-            model_unavailable(template, AgentTemplateModelUnavailableReason::NotFound)
-        })?;
+        .find(|model| model.id == model_config_id)
+        .ok_or(AgentModelUnavailableReason::NotFound)?;
     if !model.enabled {
-        return Err(model_unavailable(
-            template,
-            AgentTemplateModelUnavailableReason::Disabled,
-        ));
+        return Err(AgentModelUnavailableReason::Disabled);
     }
     let connection = snapshot
         .settings
         .effective_connection_for(model)
-        .map_err(|_| {
-            model_unavailable(
-                template,
-                AgentTemplateModelUnavailableReason::InvalidConnection,
-            )
-        })?;
+        .map_err(|_| AgentModelUnavailableReason::InvalidConnection)?;
     let dialect = crate::ProviderProtocolDialect::detect_from_api_url(&connection.api_url);
     let profile = model
         .resolved_provider_profile_config(dialect)
-        .map_err(|_| {
-            model_unavailable(
-                template,
-                AgentTemplateModelUnavailableReason::InvalidProfile,
-            )
-        })?;
+        .map_err(|_| AgentModelUnavailableReason::InvalidProfile)?;
     let provider_connection_revision = snapshot
         .provider_connection_revisions
         .get(&model.id)
         .cloned()
-        .ok_or_else(|| {
-            model_unavailable(
-                template,
-                AgentTemplateModelUnavailableReason::MissingConnectionIdentity,
-            )
-        })?;
+        .ok_or(AgentModelUnavailableReason::MissingConnectionIdentity)?;
     let provider_protocol_revision = snapshot
         .provider_protocol_revisions
         .get(&model.id)
         .cloned()
-        .ok_or_else(|| {
-            model_unavailable(
-                template,
-                AgentTemplateModelUnavailableReason::MissingProtocolIdentity,
-            )
-        })?;
+        .ok_or(AgentModelUnavailableReason::MissingProtocolIdentity)?;
     let protocol = crate::ProviderProtocolKey::new(
         dialect,
         &profile,
         model.id.clone(),
         Some(provider_protocol_revision.clone()),
     )
-    .map_err(|_| {
-        model_unavailable(
-            template,
-            AgentTemplateModelUnavailableReason::InvalidProfile,
-        )
-    })?;
-    crate::resolve_provider_runtime_capabilities(&protocol).map_err(|_| {
-        model_unavailable(
-            template,
-            AgentTemplateModelUnavailableReason::UnsupportedRuntime,
-        )
-    })?;
+    .map_err(|_| AgentModelUnavailableReason::InvalidProfile)?;
+    crate::resolve_provider_runtime_capabilities(&protocol)
+        .map_err(|_| AgentModelUnavailableReason::UnsupportedRuntime)?;
 
     let display_name = model.display_name.trim();
     Ok(AgentModelSelectionSnapshot {

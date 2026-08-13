@@ -361,6 +361,7 @@ mod tests {
 
     fn context(executor: Arc<dyn AgentCommandSessionExecutor>) -> ToolExecutionContext {
         ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             workspace: None,
             permissions: AgentPermissions {
                 command: AgentCommandPermission::AutoApprove,
@@ -568,6 +569,7 @@ mod tests {
     #[test]
     fn fails_closed_when_the_host_capability_is_absent() {
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             workspace: None,
             permissions: AgentPermissions::default(),
             conversation_id: Some("conversation-one".to_string()),

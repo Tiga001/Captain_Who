@@ -1953,6 +1953,7 @@ mod tests {
 
         let mut checkpoint_with_context = checkpoint.clone();
         checkpoint_with_context.run_context = Some(crate::protocol::AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(crate::protocol::AgentWorkspaceContext {
@@ -2155,6 +2156,7 @@ mod tests {
     fn approval_restore_preserves_frozen_run_authority_and_capabilities() {
         let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
         let frozen_context = AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-frozen".to_string()),
             project_id: Some("project-frozen".to_string()),
             workspace: Some(crate::protocol::AgentWorkspaceContext {

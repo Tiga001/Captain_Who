@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::provider_profile::ReasoningEffort;
+
 pub const AGENT_GRAPH_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +199,12 @@ pub enum ConversationMessageOrigin {
         sender_agent_id: String,
         source_agent_message_id: String,
     },
+    /// Immutable actor provenance copied into a child's creation-time history snapshot.
+    HistoricalSnapshot {
+        source_conversation_id: String,
+        source_message_id: String,
+        original: Box<ConversationMessageOrigin>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +246,13 @@ pub struct AgentNodeRecord {
     pub task_path: String,
     pub template_snapshot: Option<AgentTemplateSnapshot>,
     pub model_snapshot: Option<AgentModelSelectionSnapshot>,
+    /// Creation-time selector provenance. Roots have no frozen model selection; every child has
+    /// exactly one source so idempotent retries cannot change selector semantics accidentally.
+    pub model_selection_source: Option<AgentModelSelectionSource>,
+    /// Optional spawn-time reasoning constraint. `None` means the child follows the selected
+    /// model's ordinary persisted Provider Profile; `High`/`Max` mean the parent explicitly
+    /// required that exact, already-configured capability. Roots never carry this snapshot.
+    pub reasoning_effort_snapshot: Option<ReasoningEffort>,
     pub lifecycle: AgentLifecycle,
     pub revision: u64,
     pub created_at: i64,
@@ -256,6 +271,301 @@ pub struct CreateAgentNodeInput {
     pub template_snapshot: Option<AgentTemplateSnapshot>,
     pub model_snapshot: AgentModelSelectionSnapshot,
 }
+
+/// Creation-time history policy for a child Agent.
+///
+/// `Last` counts complete logical user/assistant turns as defined by the Conversation context
+/// boundary. It never means a raw number of rows in `messages`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "count", rename_all = "snake_case")]
+pub enum AgentForkTurns {
+    None,
+    All,
+    Last(u32),
+}
+
+impl AgentForkTurns {
+    pub fn validate(self) -> Result<Self, ChildAgentSpawnError> {
+        if matches!(self, Self::Last(0)) {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "fork_turns",
+                reason: "last-turn count must be greater than zero".to_string(),
+            });
+        }
+        Ok(self)
+    }
+}
+
+/// Host-internal request for atomically creating one direct child.
+///
+/// Stable object identifiers are deliberately absent. The persistence boundary owns them so an
+/// idempotent retry can return the first committed bundle instead of trusting caller-selected
+/// graph/message identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateChildAgentInput {
+    pub parent_agent_id: String,
+    pub creation_request_id: String,
+    pub task_name: String,
+    pub task: String,
+    pub template_machine_key: Option<String>,
+    pub explicit_model_id: Option<String>,
+    /// Optional exact constraint over the selected model's persisted Provider Profile. High/Max
+    /// are accepted only when the current registered Runtime already exposes that exact enabled
+    /// policy; this never mutates or overlays Provider configuration for one run.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub fork_turns: AgentForkTurns,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentModelSelectionSource {
+    Explicit,
+    Template,
+    Parent,
+    Default,
+}
+
+impl AgentModelSelectionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Template => "template",
+            Self::Parent => "parent",
+            Self::Default => "default",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AgentGraphError> {
+        match value {
+            "explicit" => Ok(Self::Explicit),
+            "template" => Ok(Self::Template),
+            "parent" => Ok(Self::Parent),
+            "default" => Ok(Self::Default),
+            _ => Err(AgentGraphError::CorruptRecord(format!(
+                "unknown Agent model selection source `{value}`"
+            ))),
+        }
+    }
+}
+
+/// Trusted collaboration identity supplied to the shared Turn executor by the Host.
+///
+/// This type has no permissive defaults and is never a model-facing tool argument. The entrusted
+/// task remains the durable Mailbox payload identified by `source_agent_message_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCollaborationIdentity {
+    pub agent_id: String,
+    pub root_agent_id: String,
+    pub root_conversation_id: String,
+    pub parent_agent_id: String,
+    pub parent_task_name: String,
+    pub parent_task_path: String,
+    pub conversation_id: String,
+    pub task_name: String,
+    pub task_path: String,
+    pub source_agent_message_id: String,
+    pub entrusted_task: String,
+    pub template_instructions: Option<String>,
+}
+
+impl AgentCollaborationIdentity {
+    /// Validates the Host-owned identity before it is admitted to a model run or durable resume.
+    pub fn validate(&self) -> Result<(), ChildAgentSpawnError> {
+        const MAX_ID_BYTES: usize = 256;
+        const MAX_NAME_BYTES: usize = 256;
+        const MAX_PATH_BYTES: usize = 4_096;
+        const MAX_TASK_BYTES: usize = 1_048_576;
+        const MAX_INSTRUCTIONS_BYTES: usize = 65_536;
+
+        fn bounded(
+            field: &'static str,
+            value: &str,
+            maximum: usize,
+        ) -> Result<(), ChildAgentSpawnError> {
+            if value.trim().is_empty()
+                || value.trim() != value
+                || value.len() > maximum
+                || value.chars().any(char::is_control)
+            {
+                return Err(ChildAgentSpawnError::InvalidInput {
+                    field,
+                    reason: format!(
+                        "must be non-empty, trimmed, and no longer than {maximum} bytes"
+                    ),
+                });
+            }
+            Ok(())
+        }
+
+        fn bounded_multiline(
+            field: &'static str,
+            value: &str,
+            maximum: usize,
+        ) -> Result<(), ChildAgentSpawnError> {
+            if value.trim().is_empty()
+                || value.trim() != value
+                || value.len() > maximum
+                || value.contains('\0')
+            {
+                return Err(ChildAgentSpawnError::InvalidInput {
+                    field,
+                    reason: format!(
+                        "must be non-empty, trimmed, NUL-free, and no longer than {maximum} bytes"
+                    ),
+                });
+            }
+            Ok(())
+        }
+
+        for (field, value) in [
+            ("agent_id", self.agent_id.as_str()),
+            ("root_agent_id", self.root_agent_id.as_str()),
+            ("root_conversation_id", self.root_conversation_id.as_str()),
+            ("parent_agent_id", self.parent_agent_id.as_str()),
+            ("conversation_id", self.conversation_id.as_str()),
+            (
+                "source_agent_message_id",
+                self.source_agent_message_id.as_str(),
+            ),
+        ] {
+            bounded(field, value, MAX_ID_BYTES)?;
+        }
+        bounded("parent_task_name", &self.parent_task_name, MAX_NAME_BYTES)?;
+        bounded("task_name", &self.task_name, MAX_NAME_BYTES)?;
+        bounded("parent_task_path", &self.parent_task_path, MAX_PATH_BYTES)?;
+        bounded("task_path", &self.task_path, MAX_PATH_BYTES)?;
+        bounded_multiline("entrusted_task", &self.entrusted_task, MAX_TASK_BYTES)?;
+        if let Some(instructions) = self.template_instructions.as_deref() {
+            bounded_multiline(
+                "template_instructions",
+                instructions,
+                MAX_INSTRUCTIONS_BYTES,
+            )?;
+        }
+        if self.agent_id == self.root_agent_id || self.agent_id == self.parent_agent_id {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "agent_id",
+                reason: "a child Agent must differ from its root and parent".to_string(),
+            });
+        }
+        let expected_path = format!(
+            "{}/{}",
+            self.parent_task_path.trim_end_matches('/'),
+            self.task_name
+        );
+        if self.task_path != expected_path {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "task_path",
+                reason: "must be the direct child path of parent_task_path".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildAgentSpawnRecord {
+    pub agent: AgentNodeRecord,
+    pub model_selection_source: AgentModelSelectionSource,
+    pub task_message: AgentMailboxMessageRecord,
+    pub initial_wake: AgentWakeRequestRecord,
+    pub collaboration_identity: AgentCollaborationIdentity,
+}
+
+/// Durable authorization recovered for a running or approval-paused child Turn.
+///
+/// `claim_token` is never model input. The Host uses it only to bind lifecycle transitions back
+/// to the exact active Wake after a checkpoint/resume boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedActiveChildWakeBundle {
+    pub spawn: ChildAgentSpawnRecord,
+    pub claim_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentModelUnavailableReason {
+    SettingsMissing,
+    NotFound,
+    Disabled,
+    InvalidConnection,
+    InvalidProfile,
+    MissingConnectionIdentity,
+    MissingProtocolIdentity,
+    UnsupportedRuntime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildAgentSpawnError {
+    InvalidInput {
+        field: &'static str,
+        reason: String,
+    },
+    ParentNotFound(String),
+    ParentUnavailable(String),
+    ProjectRequiredForTemplate,
+    TemplateNotFound(String),
+    TemplateDisabled(String),
+    ModelUnavailable {
+        model_config_id: Option<String>,
+        reason: AgentModelUnavailableReason,
+    },
+    UnsupportedReasoningEffort(ReasoningEffort),
+    IdempotencyConflict(String),
+    Conflict(String),
+    SnapshotUnavailable(String),
+    CorruptRecord(String),
+    StorageUnavailable(String),
+}
+
+impl fmt::Display for ChildAgentSpawnError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput { field, reason } => write!(formatter, "invalid {field}: {reason}"),
+            Self::ParentNotFound(id) => write!(formatter, "parent Agent `{id}` was not found"),
+            Self::ParentUnavailable(id) => write!(formatter, "parent Agent `{id}` is unavailable"),
+            Self::ProjectRequiredForTemplate => {
+                formatter.write_str("a project-bound Agent template requires a project")
+            }
+            Self::TemplateNotFound(key) => {
+                write!(formatter, "Agent template `{key}` was not found")
+            }
+            Self::TemplateDisabled(key) => {
+                write!(formatter, "Agent template `{key}` is disabled")
+            }
+            Self::ModelUnavailable {
+                model_config_id,
+                reason,
+            } => write!(
+                formatter,
+                "Agent model `{}` is unavailable: {reason:?}",
+                model_config_id.as_deref().unwrap_or("<default>")
+            ),
+            Self::UnsupportedReasoningEffort(effort) => write!(
+                formatter,
+                "reasoning effort constraint `{effort:?}` is unsupported by the selected model"
+            ),
+            Self::IdempotencyConflict(reason) => {
+                write!(formatter, "child Agent request was reused: {reason}")
+            }
+            Self::Conflict(reason) => write!(formatter, "child Agent conflict: {reason}"),
+            Self::SnapshotUnavailable(reason) => {
+                write!(
+                    formatter,
+                    "child Agent context snapshot is unavailable: {reason}"
+                )
+            }
+            Self::CorruptRecord(reason) => {
+                write!(formatter, "corrupt child Agent record: {reason}")
+            }
+            Self::StorageUnavailable(reason) => {
+                write!(formatter, "child Agent storage is unavailable: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChildAgentSpawnError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsureRootAgentInput {
@@ -480,17 +790,7 @@ impl fmt::Display for AgentGraphError {
 
 impl std::error::Error for AgentGraphError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentTemplateModelUnavailableReason {
-    SettingsMissing,
-    NotFound,
-    Disabled,
-    InvalidConnection,
-    InvalidProfile,
-    MissingConnectionIdentity,
-    MissingProtocolIdentity,
-    UnsupportedRuntime,
-}
+pub type AgentTemplateModelUnavailableReason = AgentModelUnavailableReason;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentTemplateError {

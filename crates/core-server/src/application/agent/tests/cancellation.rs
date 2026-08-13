@@ -707,6 +707,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     }))
     .unwrap();
     agent_input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-cancel-before-spawn".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -856,6 +857,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
     }))
     .unwrap();
     agent_input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some(conversation_id.to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {
@@ -1056,6 +1058,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
     }))
     .unwrap();
     agent_input.context = Some(AgentRunContext {
+        collaboration_identity: None,
         conversation_id: Some("conversation-command-cancel".to_string()),
         project_id: None,
         workspace: Some(AgentWorkspaceContext {

@@ -509,6 +509,7 @@ mod tests {
         )
         .unwrap();
         let run_context = AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-1".to_string()),
             project_id: None,
             workspace: None,

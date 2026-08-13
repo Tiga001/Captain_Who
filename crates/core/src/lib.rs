@@ -33,13 +33,16 @@ mod usage;
 pub mod world_state;
 
 pub use agent_graph::{
-    AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
-    AgentMailboxKind, AgentMailboxMessageRecord, AgentModelSelectionSnapshot, AgentNodeRecord,
-    AgentTemplateError, AgentTemplateModelUnavailableReason, AgentTemplateRecord,
-    AgentTemplateSnapshot, AgentWakeRequestRecord, AgentWakeStatus, ConversationMessageOrigin,
-    CreateAgentNodeInput, CreateAgentTemplateInput, EnqueueAgentMessageInput,
+    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentForkTurns, AgentGraphError,
+    AgentLifecycle, AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord,
+    AgentModelSelectionSnapshot, AgentModelSelectionSource, AgentModelUnavailableReason,
+    AgentNodeRecord, AgentTemplateError, AgentTemplateModelUnavailableReason, AgentTemplateRecord,
+    AgentTemplateSnapshot, AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnError,
+    ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
+    CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
     EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentWakeWithResultInput, IdempotentCreate,
-    ResolvedAgentTemplateForSpawn, UpdateAgentTemplateInput, AGENT_GRAPH_SCHEMA_VERSION,
+    ResolvedAgentTemplateForSpawn, TrustedActiveChildWakeBundle, UpdateAgentTemplateInput,
+    AGENT_GRAPH_SCHEMA_VERSION,
 };
 pub use cancellation::AgentCancellationToken;
 pub use context::{

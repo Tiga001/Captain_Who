@@ -700,6 +700,7 @@ mod tests {
         project_attachments: Vec<AgentAttachmentReference>,
     ) -> ToolExecutionContext {
         ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("conversation-1".to_string()),
             project_id: Some("project-1".to_string()),
             workspace: None,

@@ -2,6 +2,7 @@ use crate::adapters::agent_skill_installation::AgentSkillInstallationInspectionA
 use crate::adapters::skills_adapter::{
     activate_selected_skills, model_skill_activation_resolver, prepare_enabled_skill_discovery,
 };
+use crate::application::agent_collaboration::ChildAgentFactory;
 use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
@@ -72,17 +73,18 @@ use mycopilot_core::{
     project_persisted_continuation_observation, send_chat_with_host_services,
     terminal_conversation_trace_from_snapshot, AgentApprovalDecision, AgentApprovalDecisionStatus,
     AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput,
-    AgentContextBaseline, AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
-    AgentContextCompactionGenerationOutput, AgentContextCompactionGenerationRequest,
-    AgentContextCompactionModelGenerator, AgentContextCompactionPrepareOutcome,
-    AgentContextCompactionServices, AgentContextWindowObserver, AgentContextWindowSnapshot,
-    AgentContextWindowToolProjection, AgentConversationContextState,
-    AgentConversationTraceObserver, AgentError, AgentEvent, AgentEventEmitter, AgentGuidanceStatus,
-    AgentHostActionExecutor, AgentMcpDispatchCertainty, AgentMcpInvocationFailureStage,
-    AgentMcpResultSizeSummary, AgentMcpServerScope, AgentMcpToolInvocationOutcome,
-    AgentMcpToolInvocationState, AgentModelRequestObserver, AgentPatchResult, AgentProposedAction,
-    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,
-    AgentSearchConfig, AgentSkillInstallationPrepareExecutor, AgentSkillMaterializationRequest,
+    AgentCollaborationIdentity, AgentContextBaseline, AgentContextCompactionCommitOutcome,
+    AgentContextCompactionCommitRequest, AgentContextCompactionGenerationOutput,
+    AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
+    AgentContextCompactionPrepareOutcome, AgentContextCompactionServices,
+    AgentContextWindowObserver, AgentContextWindowSnapshot, AgentContextWindowToolProjection,
+    AgentConversationContextState, AgentConversationTraceObserver, AgentError, AgentEvent,
+    AgentEventEmitter, AgentGuidanceStatus, AgentHostActionExecutor, AgentMcpDispatchCertainty,
+    AgentMcpInvocationFailureStage, AgentMcpResultSizeSummary, AgentMcpServerScope,
+    AgentMcpToolInvocationOutcome, AgentMcpToolInvocationState, AgentModelRequestObserver,
+    AgentPatchResult, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
+    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig,
+    AgentSkillInstallationPrepareExecutor, AgentSkillMaterializationRequest,
     AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
     AgentSkillScriptRequest, AgentSkillScriptResult, AgentSteerEnqueueOutcome, AgentSteerInput,
     AgentSteerInputQueue, AgentSteerRunInput, AgentSteerRunOutput, AgentSteerRunRejectionCode,
@@ -114,6 +116,7 @@ mod provider_transition;
 mod run_lifecycle;
 mod steering;
 mod turn;
+mod turn_executor;
 mod usage;
 
 use action_execution::*;
@@ -127,6 +130,7 @@ use completion::*;
 use pending_action_store::*;
 use persisted_resume_input::*;
 use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
+use turn_executor::*;
 
 #[cfg(test)]
 use context_compaction::validate_compaction_trace_boundary;
@@ -414,6 +418,15 @@ struct ActiveRunControl {
     steer_input: AgentSteerInputQueue,
 }
 
+/// Process-local accelerator for the durable in-progress ConversationTurnTrace admission fact.
+/// It is keyed by Conversation (not run) so startup, normal execution, and approval continuation
+/// all enforce the same logical-Turn boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveConversationTurn {
+    run_id: String,
+    assistant_message_id: String,
+}
+
 #[derive(Clone)]
 pub struct AgentService {
     storage: Arc<StorageService>,
@@ -421,6 +434,7 @@ pub struct AgentService {
     skills: Arc<SkillsService>,
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveRunControl>>>,
+    active_conversation_turns: Arc<Mutex<HashMap<String, ActiveConversationTurn>>>,
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     startup_recoverable_mcp_approvals: Arc<Mutex<HashSet<String>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
@@ -554,6 +568,7 @@ impl AgentService {
             skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
+            active_conversation_turns: Arc::new(Mutex::new(HashMap::new())),
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             startup_recoverable_mcp_approvals: Arc::new(Mutex::new(
                 startup_recoverable_mcp_approvals,
@@ -594,6 +609,7 @@ impl AgentService {
                     format!("failed to reconcile orphaned conversation traces: {error}")
                 })?;
         }
+        service.restore_durable_conversation_turn_occupancies()?;
         Ok(service)
     }
 
@@ -1250,9 +1266,14 @@ impl AgentService {
     }
 
     pub(crate) fn reconcile_startup_orphaned_conversation_traces(&self) -> Result<usize, String> {
-        self.storage
+        let reconciled = self
+            .storage
             .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())
-            .map_err(|error| format!("failed to reconcile orphaned conversation traces: {error}"))
+            .map_err(|error| {
+                format!("failed to reconcile orphaned conversation traces: {error}")
+            })?;
+        self.restore_durable_conversation_turn_occupancies()?;
+        Ok(reconciled)
     }
 
     /// Probes the same Office engine instance used by Agent tools and actions.

@@ -1892,6 +1892,7 @@ mod tests {
         fs::write(&attachment_path, "hello from attachment").unwrap();
 
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("c1".to_string()),
             project_id: Some("p1".to_string()),
             workspace: None,
@@ -2008,6 +2009,7 @@ mod tests {
         fs::write(&attachment_path, &image_bytes).unwrap();
 
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: Some("c1".to_string()),
             project_id: Some("p1".to_string()),
             workspace: None,
@@ -2077,6 +2079,7 @@ mod tests {
         assert!(denied.error.unwrap().contains("仅允许访问 workspace"));
 
         let allowed = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: Some(AgentWorkspaceContext {
@@ -2358,6 +2361,7 @@ mod tests {
 
         fn context(&self) -> ToolExecutionContext {
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(AgentWorkspaceContext {

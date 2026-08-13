@@ -161,6 +161,7 @@ impl AgentService {
             temperature: None,
             stream: Some(false),
             context: Some(AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: conversation_id.clone(),
                 project_id: project_id.clone(),
                 workspace: project

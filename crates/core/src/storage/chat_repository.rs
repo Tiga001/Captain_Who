@@ -24,6 +24,41 @@ pub(crate) struct McpInvocationTerminalProjection<'a> {
     pub error_code: &'static str,
 }
 
+struct StoredImmutableMessage {
+    role: String,
+    content: String,
+    status: Option<String>,
+    agent_run_json: Option<String>,
+    ui_state_json: Option<String>,
+    created_at: i64,
+}
+
+fn immutable_graph_message(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<Option<StoredImmutableMessage>> {
+    connection
+        .query_row(
+            "SELECT role, content, status, agent_run_json, ui_state_json, created_at
+             FROM messages
+             WHERE conversation_id = ?1 AND id = ?2
+               AND input_origin_kind IN ('agent', 'snapshot')",
+            params![conversation_id, message_id],
+            |row| {
+                Ok(StoredImmutableMessage {
+                    role: row.get(0)?,
+                    content: row.get(1)?,
+                    status: row.get(2)?,
+                    agent_run_json: row.get(3)?,
+                    ui_state_json: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+}
+
 pub fn conversation_exists(
     connection: &Connection,
     conversation_id: &str,
@@ -148,18 +183,29 @@ pub fn save_conversation(
     conversation: ChatConversationRecord,
 ) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
-    let agent_bound = transaction.query_row(
+    save_conversation_in_connection(&transaction, &conversation)?;
+    transaction.commit()
+}
+
+/// Applies the complete Conversation/message projection inside a caller-owned transaction.
+/// Turn admission uses this together with its empty trace lease so cross-Host races cannot expose
+/// one half of startup.
+pub(crate) fn save_conversation_in_connection(
+    connection: &Connection,
+    conversation: &ChatConversationRecord,
+) -> rusqlite::Result<()> {
+    let agent_bound = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE conversation_id = ?1)",
         [&conversation.id],
         |row| row.get::<_, bool>(0),
     )?;
-    let mut next_agent_position = transaction.query_row(
+    let mut next_agent_position = connection.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?1",
         [&conversation.id],
         |row| row.get::<_, i64>(0),
     )?;
 
-    transaction.execute(
+    connection.execute(
         "
         INSERT INTO conversations (
             id,
@@ -196,7 +242,7 @@ pub fn save_conversation(
     )?;
 
     for (index, message) in conversation.messages.iter().enumerate() {
-        let existing_identity = transaction
+        let existing_identity = connection
             .query_row(
                 "SELECT conversation_id, position FROM messages WHERE id = ?1",
                 params![&message.id],
@@ -209,35 +255,14 @@ pub fn save_conversation(
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let existing_agent_projection = transaction
-            .query_row(
-                "SELECT role, content, status, created_at, position,
-                        input_origin_agent_id, source_agent_message_id
-                 FROM messages
-                 WHERE conversation_id = ?1 AND id = ?2 AND input_origin_kind = 'agent'",
-                params![&conversation.id, &message.id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((role, content, status, created_at, _position, _, _)) =
-            existing_agent_projection
+        if let Some(existing) = immutable_graph_message(connection, &conversation.id, &message.id)?
         {
-            if role != message.role
-                || content != message.content
-                || status != message.status
-                || created_at != message.created_at
-                || message.agent_run_json.is_some()
-                || message.ui_state_json.is_some()
+            if existing.role != message.role
+                || existing.content != message.content
+                || existing.status != message.status
+                || existing.created_at != message.created_at
+                || existing.agent_run_json != message.agent_run_json
+                || existing.ui_state_json != message.ui_state_json
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -255,7 +280,7 @@ pub fn save_conversation(
         } else {
             index as i64
         };
-        let affected = transaction.execute(
+        let affected = connection.execute(
             "
             INSERT INTO messages (
                 id,
@@ -295,7 +320,7 @@ pub fn save_conversation(
             return Err(rusqlite::Error::InvalidQuery);
         }
         if message.role != "assistant" {
-            transaction.execute(
+            connection.execute(
                 "DELETE FROM conversation_turn_traces WHERE assistant_message_id = ?1",
                 params![&message.id],
             )?;
@@ -309,7 +334,7 @@ pub fn save_conversation(
         .collect::<HashSet<_>>();
     let existing_message_ids = {
         let mut statement =
-            transaction.prepare("SELECT id FROM messages WHERE conversation_id = ?1")?;
+            connection.prepare("SELECT id FROM messages WHERE conversation_id = ?1")?;
         let message_ids = statement
             .query_map(params![&conversation.id], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -322,8 +347,8 @@ pub fn save_conversation(
     if agent_bound && !removed_message_ids.is_empty() {
         let mut retained_graph_projections = HashSet::new();
         for message_id in &removed_message_ids {
-            let is_projection = transaction.query_row(
-                "SELECT COALESCE(input_origin_kind = 'agent', 0) FROM messages
+            let is_projection = connection.query_row(
+                "SELECT COALESCE(input_origin_kind IN ('agent', 'snapshot'), 0) FROM messages
                  WHERE conversation_id = ?1 AND id = ?2",
                 params![&conversation.id, message_id],
                 |row| row.get::<_, bool>(0),
@@ -336,37 +361,36 @@ pub fn save_conversation(
     }
     let compaction_rewind =
         context_compaction_repository::prepare_message_deletion_compaction_rewind(
-            &transaction,
+            connection,
             &conversation.id,
             &removed_message_ids,
         )
         .map_err(context_compaction_error_to_sqlite)?;
     world_state_repository::rewind_for_message_deletion(
-        &transaction,
+        connection,
         &conversation.id,
         &removed_message_ids,
     )
     .map_err(world_state_error_to_sqlite)?;
     provider_continuation_repository::release_for_messages(
-        &transaction,
+        connection,
         &conversation.id,
         &removed_message_ids,
         now_ms(),
     )?;
     for message_id in &removed_message_ids {
-        transaction.execute(
+        connection.execute(
             "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
             params![&conversation.id, message_id],
         )?;
     }
     context_compaction_repository::finish_message_deletion_compaction_rewind(
-        &transaction,
+        connection,
         compaction_rewind,
         now_ms(),
     )
     .map_err(context_compaction_error_to_sqlite)?;
-
-    transaction.commit()
+    Ok(())
 }
 
 pub fn save_conversation_meta(
@@ -435,29 +459,14 @@ pub fn upsert_messages(
     )?;
 
     for (index, message) in messages.iter().enumerate() {
-        let existing_agent_projection = transaction
-            .query_row(
-                "SELECT role, content, status, created_at
-                 FROM messages
-                 WHERE conversation_id = ?1 AND id = ?2 AND input_origin_kind = 'agent'",
-                params![conversation_id, &message.id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((role, content, status, created_at)) = existing_agent_projection {
-            if role != message.role
-                || content != message.content
-                || status != message.status
-                || created_at != message.created_at
-                || message.agent_run_json.is_some()
-                || message.ui_state_json.is_some()
+        if let Some(existing) = immutable_graph_message(&transaction, conversation_id, &message.id)?
+        {
+            if existing.role != message.role
+                || existing.content != message.content
+                || existing.status != message.status
+                || existing.created_at != message.created_at
+                || existing.agent_run_json != message.agent_run_json
+                || existing.ui_state_json != message.ui_state_json
             {
                 return Err(rusqlite::Error::InvalidQuery);
             }
@@ -545,7 +554,7 @@ pub(crate) fn delete_messages_in_transaction(
                  SELECT 1 FROM messages
                  WHERE conversation_id = ?1
                    AND id = ?2
-                   AND input_origin_kind = 'agent'
+                   AND input_origin_kind IN ('agent', 'snapshot')
              )",
             params![conversation_id, message_id],
             |row| row.get::<_, bool>(0),

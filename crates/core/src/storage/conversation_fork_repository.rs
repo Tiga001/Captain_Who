@@ -1371,20 +1371,57 @@ fn clone_summary_chain(
     connection: &Connection,
     plan: &ConversationForkPlan,
 ) -> Result<HashMap<String, String>, String> {
-    if plan.summaries.is_empty() {
+    clone_summary_chain_core(
+        connection,
+        &plan.source_conversation_id,
+        &plan.target.id,
+        plan.target.created_at,
+        &plan.summaries,
+        &plan.message_id_map,
+        &plan.id_replacements,
+    )
+}
+
+pub(crate) fn clone_child_snapshot_summary_chain(
+    connection: &Connection,
+    source_conversation_id: &str,
+    target_conversation_id: &str,
+    target_created_at: i64,
+    summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
+    message_id_map: &HashMap<String, String>,
+    id_replacements: &HashMap<String, String>,
+) -> Result<(), String> {
+    clone_summary_chain_core(
+        connection,
+        source_conversation_id,
+        target_conversation_id,
+        target_created_at,
+        summaries,
+        message_id_map,
+        id_replacements,
+    )
+    .map(|_| ())
+}
+
+fn clone_summary_chain_core(
+    connection: &Connection,
+    source_conversation_id: &str,
+    target_conversation_id: &str,
+    target_created_at: i64,
+    summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
+    message_id_map: &HashMap<String, String>,
+    id_replacements: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    if summaries.is_empty() {
         return Ok(HashMap::new());
     }
     let mut summary_id_map = HashMap::new();
     let mut latest_summary_id = None;
-    for version in &plan.summaries {
+    for version in summaries {
         let source = &version.summary;
         let summary_id = new_id("context-summary");
-        let covered_through = remap_cursor(&source.covered_through, &plan.message_id_map)?;
-        let continuity = remap_continuity(
-            &source.continuity,
-            &plan.message_id_map,
-            &plan.id_replacements,
-        )?;
+        let covered_through = remap_cursor(&source.covered_through, message_id_map)?;
+        let continuity = remap_continuity(&source.continuity, message_id_map, id_replacements)?;
         let previous_summary_id = source
             .previous_summary_id
             .as_ref()
@@ -1392,14 +1429,14 @@ fn clone_summary_chain(
             .transpose()?;
         let source_revision = context_compaction_repository::source_revision_for_cursor(
             connection,
-            &plan.target.id,
+            target_conversation_id,
             &covered_through,
         )
         .map_err(|error| error.to_string())?;
         let summary = ContextCompactionSummary {
             schema_version: source.schema_version,
             id: summary_id.clone(),
-            conversation_id: plan.target.id.clone(),
+            conversation_id: target_conversation_id.to_string(),
             source_revision,
             previous_summary_id,
             covered_through,
@@ -1420,11 +1457,11 @@ fn clone_summary_chain(
             &summary,
             &context_compaction_repository::ContextCompactionSummaryLineage {
                 introduced_by_assistant_message_id: mapped_id(
-                    &plan.message_id_map,
+                    message_id_map,
                     &version.lineage.introduced_by_assistant_message_id,
                     "摘要生成回复",
                 )?,
-                source_conversation_id: Some(plan.source_conversation_id.clone()),
+                source_conversation_id: Some(source_conversation_id.to_string()),
                 source_summary_id: Some(source.id.clone()),
             },
         )
@@ -1434,12 +1471,12 @@ fn clone_summary_chain(
     }
     context_compaction_repository::set_active_summary_head(
         connection,
-        &plan.target.id,
+        target_conversation_id,
         latest_summary_id
             .as_deref()
-            .expect("non-empty summary chain has a head"),
-        plan.summaries.len() as u64,
-        plan.target.created_at,
+            .expect("non-empty child snapshot summary chain has a head"),
+        summaries.len() as u64,
+        target_created_at,
     )
     .map_err(|error| error.to_string())?;
     Ok(summary_id_map)
@@ -1678,7 +1715,7 @@ fn rewrite_model_context_items(
     Ok(())
 }
 
-fn rewrite_history_open_tokens(
+pub(crate) fn rewrite_history_open_tokens(
     value: &mut Value,
     replacements: &HashMap<String, String>,
 ) -> Result<(), String> {

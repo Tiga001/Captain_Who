@@ -559,6 +559,7 @@ mod tests {
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
             conversation_id: None,
             project_id: None,
             workspace: None,
@@ -802,6 +803,7 @@ mod tests {
 
         fn context(&self) -> ToolExecutionContext {
             ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
                 conversation_id: None,
                 project_id: None,
                 workspace: Some(crate::protocol::AgentWorkspaceContext {
