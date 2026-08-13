@@ -1919,7 +1919,9 @@ fn caller_panic_drops_pending_handoff_and_settles_its_process_and_file_effect() 
         record.snapshot.status,
         AgentCommandSessionStatus::Interrupted
     );
-    assert_eq!(fixture.registry.retained_admission_count(), 0);
+    // The durable terminal row is committed immediately before the worker releases its
+    // in-memory admission lease; observe both boundaries instead of racing the latter.
+    wait_for_retained_admission_count(&fixture.registry, 0);
     assert!(tracker
         .active_run_ids_for_conversation(&fixture.conversation_id)
         .is_empty());

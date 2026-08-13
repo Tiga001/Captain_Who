@@ -6,6 +6,7 @@ import { formatTranslation } from '../../../config/translationFormat'
 
 interface EditSummaryCardProps {
   onReview?: (filePath?: string) => void
+  readOnly?: boolean
   summary: GitTurnDiffSummary
 }
 
@@ -72,7 +73,11 @@ function EditSummaryPath({
   )
 }
 
-export function EditSummaryCard({ onReview, summary }: EditSummaryCardProps): JSX.Element | null {
+export function EditSummaryCard({
+  onReview,
+  readOnly = false,
+  summary
+}: EditSummaryCardProps): JSX.Element | null {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
   const entries = summary.files.map((file) => ({
@@ -105,25 +110,27 @@ export function EditSummaryCard({ onReview, summary }: EditSummaryCardProps): JS
             <span className="edit-summary-card__deletions">-{totals.deletions}</span>
           </div>
         </div>
-        <div className="edit-summary-card__actions" aria-label={t('agent.editSummary.actions')}>
-          <button className="edit-summary-card__undo" type="button">
-            <span>{t('agent.editSummary.undo')}</span>
-            <Undo2 aria-hidden="true" />
-          </button>
-          <button
-            className="edit-summary-card__review"
-            disabled={!onReview}
-            onClick={() => onReview?.()}
-            type="button"
-          >
-            {t('agent.editSummary.review')}
-          </button>
-        </div>
+        {!readOnly && (
+          <div className="edit-summary-card__actions" aria-label={t('agent.editSummary.actions')}>
+            <button className="edit-summary-card__undo" type="button">
+              <span>{t('agent.editSummary.undo')}</span>
+              <Undo2 aria-hidden="true" />
+            </button>
+            <button
+              className="edit-summary-card__review"
+              disabled={!onReview}
+              onClick={() => onReview?.()}
+              type="button"
+            >
+              {t('agent.editSummary.review')}
+            </button>
+          </div>
+        )}
       </div>
       <div className="edit-summary-card__files">
         {visibleEntries.map((entry) => (
           <div className="edit-summary-card__file-row" key={entry.id}>
-            <EditSummaryPath entry={entry} onReview={onReview} />
+            <EditSummaryPath entry={entry} onReview={readOnly ? undefined : onReview} />
             {entry.additions !== undefined && entry.deletions !== undefined && (
               <span
                 className="edit-summary-card__file-stats"

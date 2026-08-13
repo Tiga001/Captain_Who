@@ -902,25 +902,27 @@ impl AgentService {
             } else {
                 McpAutoActionJournalTerminalOutcome::Failed
             };
-            let _ = self.settle_auto_mcp_action_journal(&journal, terminal_outcome);
+            let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let lifecycle_update = McpToolInvocationEventUpdate {
+                state: settlement.state,
+                dispatch_certainty: settlement.dispatch_certainty,
+                outcome: Some(settlement.outcome),
+                is_error: mcp_lifecycle_is_error(settlement.outcome),
+                error_code: settlement.error_code.as_deref(),
+                duration_ms: Some(elapsed_ms),
+                output_truncated: settlement.output_truncated,
+                result_size: settlement.result_size.clone(),
+                failure_stage: settlement.failure_stage,
+            };
+            let lifecycle = mcp_tool_invocation_event(&approval, lifecycle_update.clone()).ok();
+            let _ =
+                self.settle_auto_mcp_action_journal(&journal, terminal_outcome, lifecycle.as_ref());
             if let Some(notifications) = context.notifications.as_ref() {
-                let elapsed_ms =
-                    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
                 emit_mcp_lifecycle_event(
                     notifications,
                     &context.run_id,
                     &approval,
-                    McpToolInvocationEventUpdate {
-                        state: settlement.state,
-                        dispatch_certainty: settlement.dispatch_certainty,
-                        outcome: Some(settlement.outcome),
-                        is_error: mcp_lifecycle_is_error(settlement.outcome),
-                        error_code: settlement.error_code.as_deref(),
-                        duration_ms: Some(elapsed_ms),
-                        output_truncated: settlement.output_truncated,
-                        result_size: settlement.result_size.clone(),
-                        failure_stage: settlement.failure_stage,
-                    },
+                    lifecycle_update,
                 );
             }
             return Ok(settlement.tool_result);
@@ -928,9 +930,25 @@ impl AgentService {
 
         if self.claim_auto_mcp_dispatch(&mut journal).is_err() {
             self.invalidate_mcp_pending_payload(&action);
+            let claim_failure = mcp_tool_invocation_event(
+                &approval,
+                McpToolInvocationEventUpdate {
+                    state: AgentMcpToolInvocationState::Failed,
+                    dispatch_certainty: AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                    outcome: Some(AgentMcpToolInvocationOutcome::TransportError),
+                    is_error: Some(true),
+                    error_code: Some("mcp.auto_dispatch_claim_failed"),
+                    duration_ms: Some(0),
+                    output_truncated: false,
+                    result_size: None,
+                    failure_stage: Some(AgentMcpInvocationFailureStage::Dispatch),
+                },
+            )
+            .ok();
             let _ = self.settle_auto_mcp_action_journal(
                 &journal,
                 McpAutoActionJournalTerminalOutcome::Failed,
+                claim_failure.as_ref(),
             );
             return Err(AgentError::structured(
                 "mcp.auto_dispatch_claim_failed",
@@ -985,8 +1003,24 @@ impl AgentService {
             }
             _ => McpAutoActionJournalTerminalOutcome::Failed,
         };
+        let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let lifecycle = mcp_tool_invocation_event(
+            &approval,
+            McpToolInvocationEventUpdate {
+                state: settlement.state,
+                dispatch_certainty: settlement.dispatch_certainty,
+                outcome: Some(settlement.outcome),
+                is_error: mcp_lifecycle_is_error(settlement.outcome),
+                error_code: settlement.error_code.as_deref(),
+                duration_ms: Some(elapsed_ms),
+                output_truncated: settlement.output_truncated,
+                result_size: settlement.result_size.clone(),
+                failure_stage: settlement.failure_stage,
+            },
+        )
+        .ok();
         if self
-            .settle_auto_mcp_action_journal(&journal, journal_outcome)
+            .settle_auto_mcp_action_journal(&journal, journal_outcome, lifecycle.as_ref())
             .is_err()
         {
             // A durable terminal receipt could not be proven. Never expose the transient response
@@ -1009,7 +1043,6 @@ impl AgentService {
             };
         }
         if let Some(notifications) = context.notifications.as_ref() {
-            let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             emit_mcp_lifecycle_event(
                 notifications,
                 &context.run_id,
@@ -2694,8 +2727,8 @@ impl AgentService {
         let resumed_identity = agent_input
             .context
             .as_ref()
-            .and_then(|context| context.collaboration_identity.as_ref());
-        if frozen_identity != resumed_identity {
+            .and_then(|context| context.collaboration_identity.clone());
+        if frozen_identity != resumed_identity.as_ref() {
             self.discard_usage_context(&run_id);
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
@@ -2707,7 +2740,7 @@ impl AgentService {
             }));
             return;
         }
-        let active_child_wake = if let Some(identity) = resumed_identity {
+        let active_child_wake = if let Some(identity) = resumed_identity.as_ref() {
             match ChildAgentFactory::new(Arc::clone(&self.storage))
                 .resolve_trusted_active_wake_by_identity(identity)
             {
@@ -2964,10 +2997,12 @@ impl AgentService {
                         }));
                     }
                     if terminal_commit_published {
-                        emit_terminal_events_after_persistence(
+                        emit_terminal_events_after_persistence_for_turn(
                             &notifications,
                             &terminal_event_gate,
                             &agent_output,
+                            resumed_identity.as_ref(),
+                            assistant_message_id,
                         );
                     }
                 }

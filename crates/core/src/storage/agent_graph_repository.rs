@@ -71,15 +71,30 @@ pub fn ensure_root_agent(
     input: &EnsureRootAgentInput,
     created_at: i64,
 ) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {
+    let transaction = immediate(connection)?;
+    let outcome = ensure_root_agent_in_transaction(&transaction, input, created_at)?;
+    transaction.commit().map_err(write_error)?;
+    Ok(outcome)
+}
+
+/// Creates or resolves a root Agent inside a caller-owned write transaction.
+///
+/// Conversation forking uses this to make the new Conversation, independent root identity, copied
+/// history and fork receipt one crash-atomic database transition. Ordinary callers should keep
+/// using [`ensure_root_agent`].
+pub(crate) fn ensure_root_agent_in_transaction(
+    transaction: &Connection,
+    input: &EnsureRootAgentInput,
+    created_at: i64,
+) -> Result<IdempotentCreate<AgentNodeRecord>, AgentGraphError> {
     validate_id("agent_id", &input.agent_id)?;
     validate_id("conversation_id", &input.conversation_id)?;
     validate_request_id(&input.creation_request_id)?;
     validate_identity_task_name(&input.task_name)?;
     validate_time(created_at)?;
 
-    let transaction = immediate(connection)?;
-    let project_id = conversation_project(&transaction, &input.conversation_id)?;
-    if let Some(existing) = query_node_by_root_conversation(&transaction, &input.conversation_id)? {
+    let project_id = conversation_project(transaction, &input.conversation_id)?;
+    if let Some(existing) = query_node_by_root_conversation(transaction, &input.conversation_id)? {
         if existing.agent_id == input.agent_id
             && existing.parent_agent_id.is_none()
             && existing.conversation_id == input.conversation_id
@@ -88,14 +103,13 @@ pub fn ensure_root_agent(
             && existing.task_path == "/root"
             && existing.project_id == project_id
         {
-            transaction.commit().map_err(write_error)?;
             return Ok(IdempotentCreate::Existing(existing));
         }
         return Err(conflict(
             "root Conversation is already bound to another root identity",
         ));
     }
-    if query_node(&transaction, &input.agent_id)?.is_some() {
+    if query_node(transaction, &input.agent_id)?.is_some() {
         return Err(conflict("Agent ID is already bound to another node"));
     }
 
@@ -130,9 +144,8 @@ pub fn ensure_root_agent(
             ],
         )
         .map_err(write_error)?;
-    let record = query_node(&transaction, &input.agent_id)?
+    let record = query_node(transaction, &input.agent_id)?
         .ok_or_else(|| corrupt("created root Agent could not be read back"))?;
-    transaction.commit().map_err(write_error)?;
     Ok(IdempotentCreate::Created(record))
 }
 

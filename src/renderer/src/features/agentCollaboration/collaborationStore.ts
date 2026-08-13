@@ -4,7 +4,10 @@ import { hostCollaborationDataSource, type CollaborationDataSource } from './col
 const EVENT_PAGE_SIZE = 256
 
 export interface CollaborationStoreSnapshot {
+  /** Latest validated durable invalidation sequence for each Agent in this root tree. */
+  agentInvalidationSequences: Readonly<Record<string, number>>
   error: boolean
+  hydrationRevision: number
   loading: boolean
   rootConversationId: string
   tree: AgentTreeSnapshot | null
@@ -29,7 +32,9 @@ export class CollaborationStore {
     private readonly source: CollaborationDataSource = hostCollaborationDataSource
   ) {
     this.snapshot = {
+      agentInvalidationSequences: {},
       error: false,
+      hydrationRevision: 0,
       loading: true,
       rootConversationId,
       tree: null
@@ -58,11 +63,26 @@ export class CollaborationStore {
       const tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
       if (!this.isCurrent(generation)) return
       if (!tree) {
-        this.publish({ error: false, loading: false, tree: null })
+        this.publish({
+          agentInvalidationSequences: {},
+          error: false,
+          hydrationRevision: this.snapshot.hydrationRevision + 1,
+          loading: false,
+          tree: null
+        })
         return
       }
       if (tree.rootConversationId !== this.rootConversationId) throw new Error('Wrong root')
-      this.publish({ error: false, loading: false, tree })
+      this.publish({
+        agentInvalidationSequences: seedAgentInvalidationSequences(
+          this.snapshot.agentInvalidationSequences,
+          tree
+        ),
+        error: false,
+        hydrationRevision: this.snapshot.hydrationRevision + 1,
+        loading: false,
+        tree
+      })
       this.requestCatchUp()
     } catch {
       if (!this.isCurrent(generation)) return
@@ -116,6 +136,7 @@ export class CollaborationStore {
       const generation = this.generation
       let cursor = this.snapshot.tree.lastSequence
       let gap = false
+      const agentInvalidationSequences = { ...this.snapshot.agentInvalidationSequences }
 
       try {
         for (;;) {
@@ -136,6 +157,7 @@ export class CollaborationStore {
               break
             }
             cursor = event.sequence
+            agentInvalidationSequences[event.agentId] = event.sequence
           }
           if (gap || !page.hasMore) break
           if (page.events.length === 0) {
@@ -149,11 +171,29 @@ export class CollaborationStore {
         const tree = await this.source.getTree({ rootConversationId: this.rootConversationId })
         if (!this.isCurrent(generation)) return
         if (!tree) {
-          this.publish({ error: false, loading: false, tree: null })
+          this.publish({
+            agentInvalidationSequences: {},
+            error: false,
+            ...(gap ? { hydrationRevision: this.snapshot.hydrationRevision + 1 } : {}),
+            loading: false,
+            tree: null
+          })
           return
         }
         if (!gap && tree.lastSequence < cursor) throw new Error('Stale collaboration snapshot')
-        this.publish({ error: false, loading: false, tree })
+        const requiresFullInvalidation = gap || tree.lastSequence > cursor
+        this.publish({
+          agentInvalidationSequences: seedAgentInvalidationSequences(
+            requiresFullInvalidation ? {} : agentInvalidationSequences,
+            tree
+          ),
+          error: false,
+          ...(requiresFullInvalidation
+            ? { hydrationRevision: this.snapshot.hydrationRevision + 1 }
+            : {}),
+          loading: false,
+          tree
+        })
       } catch {
         if (this.isCurrent(generation)) this.publish({ error: true, loading: false })
       }
@@ -168,4 +208,13 @@ export class CollaborationStore {
     this.snapshot = { ...this.snapshot, ...changes }
     for (const listener of this.listeners) listener()
   }
+}
+
+function seedAgentInvalidationSequences(
+  current: Readonly<Record<string, number>>,
+  tree: AgentTreeSnapshot
+): Readonly<Record<string, number>> {
+  return Object.fromEntries(
+    tree.agents.map((agent) => [agent.agentId, current[agent.agentId] ?? tree.lastSequence])
+  )
 }

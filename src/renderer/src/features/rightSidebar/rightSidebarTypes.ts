@@ -2,8 +2,9 @@ import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { Translate } from '../../config/translationFormat'
+import type { AgentSummary } from '@mycopilot/protocol'
 
-export type RightSidebarModuleId = 'terminal' | 'browser' | 'files' | 'git-review'
+export type RightSidebarModuleId = 'terminal' | 'browser' | 'files' | 'git-review' | 'agent-center'
 
 export type RightSidebarSurfaceKind = 'react' | 'webview'
 
@@ -78,6 +79,12 @@ export type RightSidebarModulePageState =
       requestId: number
       scope: 'lastTurn'
     }
+  | {
+      agentId?: string
+      kind: 'agent-center'
+      rootConversationId: string
+      view: 'list' | 'detail'
+    }
 
 export type RightSidebarReviewNavigationRequest = Extract<
   RightSidebarModulePageState,
@@ -105,6 +112,7 @@ export interface RightSidebarModuleRenderProps {
 }
 
 export interface RightSidebarModuleDefinition {
+  badge?: number
   contextBinding: RightSidebarContextBinding
   createPage: (context: RightSidebarModuleCreateContext) => RightSidebarPage
   id: RightSidebarModuleId
@@ -119,6 +127,19 @@ export interface RightSidebarModuleDefinition {
   surfaceKind: RightSidebarSurfaceKind
   titleKey: TranslationKey
   unavailablePagePolicy: RightSidebarUnavailablePagePolicy
+}
+
+export interface AgentObserverRenderContext {
+  agent: AgentSummary
+  agentLabelsById: Readonly<Record<string, string>>
+  invalidationVersion: string
+  rootConversationId: string
+}
+
+export interface RightSidebarAgentNavigationRequest {
+  agentId: string
+  requestId: number
+  rootConversationId: string
 }
 
 export interface RightSidebarPage {

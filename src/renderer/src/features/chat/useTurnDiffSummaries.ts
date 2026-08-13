@@ -29,8 +29,10 @@ interface TurnDiffSummaryState {
  * tool-patch fallback, so overlapping edits cannot be counted more than once.
  */
 export function useTurnDiffSummaries(
-  conversation: ChatConversation
+  conversation: ChatConversation,
+  options: { enabled?: boolean } = {}
 ): ReadonlyMap<string, GitTurnDiffSummary> {
+  const enabled = options.enabled ?? true
   const requestSequenceRef = useRef(0)
   const [state, setState] = useState<TurnDiffSummaryState>({
     conversationId: null,
@@ -50,7 +52,7 @@ export function useTurnDiffSummaries(
     let cancelled = false
     const assistantMessageIds = JSON.parse(requestKey) as string[]
 
-    if (!conversation.projectId || assistantMessageIds.length === 0) {
+    if (!enabled || !conversation.projectId || assistantMessageIds.length === 0) {
       setState({
         conversationId: conversation.id,
         summaries: EMPTY_SUMMARIES
@@ -87,7 +89,7 @@ export function useTurnDiffSummaries(
     return () => {
       cancelled = true
     }
-  }, [conversation.id, conversation.projectId, requestKey])
+  }, [conversation.id, conversation.projectId, enabled, requestKey])
 
-  return state.conversationId === conversation.id ? state.summaries : EMPTY_SUMMARIES
+  return enabled && state.conversationId === conversation.id ? state.summaries : EMPTY_SUMMARIES
 }

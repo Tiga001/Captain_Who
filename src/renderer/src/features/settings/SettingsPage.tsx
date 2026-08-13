@@ -3,6 +3,7 @@ import type { LucideIcon } from 'lucide-react'
 import {
   Archive,
   ArrowLeft,
+  Bot,
   Cable,
   Clock,
   Gauge,
@@ -32,6 +33,7 @@ import { PersonalizationSettingsPage } from './pages/PersonalizationSettingsPage
 import { ProfileSettingsPage } from './pages/ProfileSettingsPage'
 import { SkillsSettingsPage } from './pages/SkillsSettingsPage'
 import { UsageBillingSettingsPage } from './pages/UsageBillingSettingsPage'
+import { AgentTemplatesSettingsPage } from './pages/AgentTemplatesSettingsPage'
 import './SettingsPage.css'
 
 const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
@@ -45,6 +47,7 @@ interface SettingsPageProps {
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   projects: AppProject[]
+  initialProjectId?: string | null
   initialPage?: SettingsPageId
   uiPreferences: UiPreferencesSnapshot
 }
@@ -60,6 +63,7 @@ export type SettingsPageId =
   | 'mcp'
   | 'environment'
   | 'archivedConversations'
+  | 'agentTemplates'
 
 interface SettingsNavItem {
   id: SettingsPageId
@@ -83,6 +87,7 @@ const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsNavItem[
     titleKey: 'settings.group.coding',
     items: [
       { id: 'skills', labelKey: 'settings.page.skills', icon: WandSparkles },
+      { id: 'agentTemplates', labelKey: 'settings.page.agentTemplates', icon: Bot },
       { id: 'mcp', labelKey: 'settings.nav.mcp', icon: Cable },
       { id: 'environment', labelKey: 'settings.page.environment', icon: Monitor }
     ]
@@ -108,6 +113,7 @@ function SettingsContent({
   onRemoveProject,
   onUnarchiveConversation,
   onUiPreferencesChange,
+  initialProjectId,
   projects,
   uiPreferences
 }: {
@@ -119,6 +125,7 @@ function SettingsContent({
   onRemoveProject: (projectId: string) => Promise<boolean>
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
+  initialProjectId?: string | null
   projects: AppProject[]
   uiPreferences: UiPreferencesSnapshot
 }) {
@@ -159,6 +166,10 @@ function SettingsContent({
 
   if (activePage === 'skills') {
     return <SkillsSettingsPage />
+  }
+
+  if (activePage === 'agentTemplates') {
+    return <AgentTemplatesSettingsPage initialProjectId={initialProjectId} projects={projects} />
   }
 
   if (activePage === 'mcp') {
@@ -269,6 +280,7 @@ export function SettingsPage({
   onUnarchiveConversation,
   onUiPreferencesChange,
   projects,
+  initialProjectId,
   initialPage = 'general',
   uiPreferences
 }: SettingsPageProps) {
@@ -355,6 +367,7 @@ export function SettingsPage({
             onRemoveProject={onRemoveProject}
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}
+            initialProjectId={initialProjectId}
             uiPreferences={uiPreferences}
           />
         </div>

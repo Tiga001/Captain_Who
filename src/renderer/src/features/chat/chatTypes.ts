@@ -7,6 +7,7 @@ import type {
   AgentFileDraftSnapshot,
   AgentFileWritePreview,
   AgentInputAttachment,
+  AgentObserverInputOrigin,
   AgentLlmRetryCategory,
   AgentMcpDispatchCertainty,
   AgentMcpServerScope,
@@ -262,6 +263,11 @@ export interface ChatMessage {
   attachments?: ChatMessageAttachment[]
   agentRun?: ChatAgentRunView
   uiState?: ChatMessageUiState
+  /**
+   * Durable transport/audit identity for model-facing user inputs. Root conversations created
+   * before collaboration do not carry this field and continue to render as human messages.
+   */
+  inputOrigin?: AgentObserverInputOrigin
 }
 
 export type ChatPermissionMode = 'default' | 'full' | 'custom'

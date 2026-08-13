@@ -172,6 +172,22 @@
   max-width: 100%;
 }
 
+.chat-message__input-origin {
+  align-items: center;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 11px;
+  gap: 5px;
+  line-height: 1.25;
+  margin: 0 0 5px;
+}
+
+.chat-message__input-origin strong {
+  color: var(--text-primary);
+  font-weight: 550;
+}
+
 .chat-message--user::after,
 .chat-message--assistant::after {
   position: absolute;

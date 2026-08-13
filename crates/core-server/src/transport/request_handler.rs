@@ -197,7 +197,12 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            match agent_service.read_file_draft(&input.draft_id, input.offset, input.max_chars) {
+            match agent_service.read_file_draft(
+                &input.draft_id,
+                input.observer_root_conversation_id.as_deref(),
+                input.offset,
+                input.max_chars,
+            ) {
                 Ok(output) => response_success(request.id, output),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
@@ -207,8 +212,12 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            match agent_service.get_file_write_diff(&input.draft_id, input.offset, input.max_chars)
-            {
+            match agent_service.get_file_write_diff(
+                &input.draft_id,
+                input.observer_root_conversation_id.as_deref(),
+                input.offset,
+                input.max_chars,
+            ) {
                 Ok(output) => response_success(request.id, output),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }

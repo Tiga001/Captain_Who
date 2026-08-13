@@ -169,9 +169,20 @@ pub(crate) fn handle_image_generation_configuration_request(
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn handle_image_generation_artifact_request(
     store: Arc<ManagedImageGenerationArtifactStore>,
     storage: Arc<StorageService>,
+    request: JsonRpcRequest,
+) -> Value {
+    handle_image_generation_artifact_request_with_observer_authority(store, storage, None, request)
+        .await
+}
+
+pub(crate) async fn handle_image_generation_artifact_request_with_observer_authority(
+    store: Arc<ManagedImageGenerationArtifactStore>,
+    storage: Arc<StorageService>,
+    agent_service: Option<&AgentService>,
     request: JsonRpcRequest,
 ) -> Value {
     let id = request.id;
@@ -200,12 +211,44 @@ pub(crate) async fn handle_image_generation_artifact_request(
             ImageGenerationArtifactErrorCodeDto::InvalidRequest,
         );
     }
+    if input
+        .observer_root_conversation_id
+        .as_deref()
+        .is_some_and(|value| {
+            value.trim().is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+        })
+        || (input.observer_root_conversation_id.is_some() && input.conversation_id.is_none())
+    {
+        return image_generation_artifact_error_response(
+            id,
+            ImageGenerationArtifactErrorCodeDto::InvalidRequest,
+        );
+    }
     if let Some(conversation_id) = input.conversation_id.as_deref() {
         match storage.get_agent_node_by_conversation(conversation_id) {
             Ok(Some(node)) if node.parent_agent_id.is_some() => {
-                // The legacy artifact endpoint is a user-facing root/unbound surface. Child
-                // artifacts are visible only through an exact root-scoped observer projection;
-                // return the same result as an unknown capability to avoid an ownership oracle.
+                let authorized = input
+                    .observer_root_conversation_id
+                    .as_deref()
+                    .zip(agent_service)
+                    .is_some_and(|(root_conversation_id, service)| {
+                        service
+                            .authorize_exact_child_observer_read(
+                                root_conversation_id,
+                                conversation_id,
+                            )
+                            .is_ok()
+                    });
+                if !authorized {
+                    // Unknown, foreign-tree, and missing observer authority are intentionally
+                    // indistinguishable at this byte-bearing boundary.
+                    return image_generation_artifact_error_response(
+                        id,
+                        ImageGenerationArtifactErrorCodeDto::NotFound,
+                    );
+                }
+            }
+            Ok(_) if input.observer_root_conversation_id.is_some() => {
                 return image_generation_artifact_error_response(
                     id,
                     ImageGenerationArtifactErrorCodeDto::NotFound,
@@ -1192,6 +1235,48 @@ mod tests {
                 base64::engine::general_purpose::STANDARD.encode(&bytes)
             );
         }
+
+        let agent_service = AgentService::new(Arc::clone(&storage));
+        let observer_authorized = handle_image_generation_artifact_request_with_observer_authority(
+            Arc::clone(&store),
+            Arc::clone(&storage),
+            Some(&agent_service),
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(20),
+                method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+                params: Some(json!({
+                    "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                    "artifact": artifact.clone(),
+                    "conversationId": child_conversation_id,
+                    "observerRootConversationId": "conversation-root",
+                })),
+            },
+        )
+        .await;
+        assert_eq!(
+            observer_authorized["result"]["dataBase64"],
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+
+        let observer_cross_tree = handle_image_generation_artifact_request_with_observer_authority(
+            Arc::clone(&store),
+            Arc::clone(&storage),
+            Some(&agent_service),
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(21),
+                method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+                params: Some(json!({
+                    "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                    "artifact": artifact.clone(),
+                    "conversationId": child_conversation_id,
+                    "observerRootConversationId": "conversation-unbound",
+                })),
+            },
+        )
+        .await;
+        assert_eq!(observer_cross_tree["error"]["data"]["code"], "notFound");
 
         for (id, conversation_id) in [
             (3, Some(child_conversation_id.as_str())),

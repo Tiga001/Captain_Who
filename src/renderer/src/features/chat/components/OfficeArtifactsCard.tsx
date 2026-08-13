@@ -15,13 +15,15 @@ import { hostClient } from '../../../host/hostClient'
 
 async function downloadManagedArtifact(
   entry: OfficeArtifactEntry,
-  conversationId: string
+  conversationId: string,
+  observerRootConversationId?: string
 ): Promise<void> {
   if (!entry.managedArtifact) throw new Error('Managed document identity is unavailable.')
   const result = await hostClient.imageGeneration.readArtifact({
     schemaVersion: 1,
     artifact: entry.managedArtifact,
-    conversationId
+    conversationId,
+    ...(observerRootConversationId ? { observerRootConversationId } : {})
   })
   if (!result.ok) throw new Error(result.error.message)
   const bytes = Uint8Array.from(result.value.bytes)
@@ -63,11 +65,13 @@ function ArtifactIcon({ kind }: { kind: OfficeArtifactEntry['artifactKind'] }) {
 function OfficeArtifactCard({
   entry,
   projectId,
-  conversationId
+  conversationId,
+  observerRootConversationId
 }: {
   entry: OfficeArtifactEntry
   projectId?: string | null
   conversationId?: string
+  observerRootConversationId?: string
 }) {
   const { t } = useFrontendConfig()
   const isManagedArtifact = Boolean(entry.managedReadPath)
@@ -104,9 +108,11 @@ function OfficeArtifactCard({
         onClick={() => {
           if (entry.managedReadPath) {
             if (!conversationId) return
-            void downloadManagedArtifact(entry, conversationId).catch((error) => {
-              console.error('Failed to download managed document Artifact', error)
-            })
+            void downloadManagedArtifact(entry, conversationId, observerRootConversationId).catch(
+              (error) => {
+                console.error('Failed to download managed document Artifact', error)
+              }
+            )
             return
           }
           if (!canReveal) return
@@ -134,10 +140,12 @@ function OfficeArtifactCard({
 
 export function OfficeArtifactsCard({
   conversationId,
+  observerRootConversationId,
   projectId,
   run
 }: {
   conversationId?: string
+  observerRootConversationId?: string
   projectId?: string | null
   run: ChatAgentRunView
 }) {
@@ -150,6 +158,7 @@ export function OfficeArtifactsCard({
       {entries.map((entry) => (
         <OfficeArtifactCard
           conversationId={conversationId}
+          observerRootConversationId={observerRootConversationId}
           entry={entry}
           key={entry.id}
           projectId={projectId}

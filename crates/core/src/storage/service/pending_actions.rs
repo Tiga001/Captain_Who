@@ -302,39 +302,6 @@ impl McpStartupActionTerminalOutcome {
         }
     }
 
-    fn invocation_state(self) -> &'static str {
-        match self {
-            Self::PayloadUnavailable => "payload_unavailable",
-            Self::Expired => "expired",
-            Self::PolicyDenied => "policy_denied",
-            Self::Rejected => "rejected",
-            Self::Cancelled => "cancelled",
-            Self::OutcomeUnknown => "outcome_unknown",
-        }
-    }
-
-    fn invocation_outcome(self) -> &'static str {
-        match self {
-            Self::PayloadUnavailable => "payload_unavailable",
-            Self::Expired => "expired",
-            Self::PolicyDenied => "policy_denied",
-            Self::Rejected => "rejected",
-            Self::Cancelled => "cancelled",
-            Self::OutcomeUnknown => "outcome_unknown",
-        }
-    }
-
-    fn dispatch_certainty(self) -> &'static str {
-        match self {
-            Self::OutcomeUnknown => "possibly_dispatched",
-            Self::PayloadUnavailable
-            | Self::Expired
-            | Self::PolicyDenied
-            | Self::Rejected
-            | Self::Cancelled => "definitely_not_dispatched",
-        }
-    }
-
     fn invocation_is_error(self) -> Option<bool> {
         match self {
             Self::PayloadUnavailable => Some(true),
@@ -848,27 +815,84 @@ fn terminalize_mcp_action_in_transaction(
     )
     .map_err(storage_error)?;
     if let Some(approval) = approval.as_ref() {
-        let identity = &approval.identity;
-        let provenance = &identity.provenance;
-        chat_repository::update_message_mcp_invocation_terminal_state(
+        let invocation = crate::mcp_tool_invocation_event(
+            approval,
+            crate::McpToolInvocationEventUpdate {
+                state: match request.outcome {
+                    McpStartupActionTerminalOutcome::PayloadUnavailable => {
+                        crate::AgentMcpToolInvocationState::PayloadUnavailable
+                    }
+                    McpStartupActionTerminalOutcome::Expired => {
+                        crate::AgentMcpToolInvocationState::Expired
+                    }
+                    McpStartupActionTerminalOutcome::PolicyDenied => {
+                        crate::AgentMcpToolInvocationState::PolicyDenied
+                    }
+                    McpStartupActionTerminalOutcome::Rejected => {
+                        crate::AgentMcpToolInvocationState::Rejected
+                    }
+                    McpStartupActionTerminalOutcome::Cancelled => {
+                        crate::AgentMcpToolInvocationState::Cancelled
+                    }
+                    McpStartupActionTerminalOutcome::OutcomeUnknown => {
+                        crate::AgentMcpToolInvocationState::OutcomeUnknown
+                    }
+                },
+                dispatch_certainty: match request.outcome {
+                    McpStartupActionTerminalOutcome::OutcomeUnknown => {
+                        crate::AgentMcpDispatchCertainty::PossiblyDispatched
+                    }
+                    _ => crate::AgentMcpDispatchCertainty::DefinitelyNotDispatched,
+                },
+                outcome: Some(match request.outcome {
+                    McpStartupActionTerminalOutcome::PayloadUnavailable => {
+                        crate::AgentMcpToolInvocationOutcome::PayloadUnavailable
+                    }
+                    McpStartupActionTerminalOutcome::Expired => {
+                        crate::AgentMcpToolInvocationOutcome::Expired
+                    }
+                    McpStartupActionTerminalOutcome::PolicyDenied => {
+                        crate::AgentMcpToolInvocationOutcome::PolicyDenied
+                    }
+                    McpStartupActionTerminalOutcome::Rejected => {
+                        crate::AgentMcpToolInvocationOutcome::Rejected
+                    }
+                    McpStartupActionTerminalOutcome::Cancelled => {
+                        crate::AgentMcpToolInvocationOutcome::Cancelled
+                    }
+                    McpStartupActionTerminalOutcome::OutcomeUnknown => {
+                        crate::AgentMcpToolInvocationOutcome::OutcomeUnknown
+                    }
+                }),
+                is_error: request.outcome.invocation_is_error(),
+                error_code: Some(request.outcome.error_code()),
+                duration_ms: None,
+                output_truncated: false,
+                result_size: None,
+                failure_stage: match request.outcome {
+                    McpStartupActionTerminalOutcome::PayloadUnavailable
+                    | McpStartupActionTerminalOutcome::Expired => {
+                        Some(crate::AgentMcpInvocationFailureStage::ApprovalPayload)
+                    }
+                    McpStartupActionTerminalOutcome::PolicyDenied => {
+                        Some(crate::AgentMcpInvocationFailureStage::Policy)
+                    }
+                    McpStartupActionTerminalOutcome::OutcomeUnknown => {
+                        Some(crate::AgentMcpInvocationFailureStage::Shutdown)
+                    }
+                    McpStartupActionTerminalOutcome::Rejected
+                    | McpStartupActionTerminalOutcome::Cancelled => None,
+                },
+            },
+        )
+        .map_err(|_| "MCP terminal lifecycle could not be projected safely".to_string())?;
+        chat_repository::upsert_message_mcp_invocation_event(
             transaction,
             conversation_id,
             assistant_message_id,
-            &chat_repository::McpInvocationTerminalProjection {
-                action_id: &identity.action_id,
-                invocation_id: &identity.invocation_id,
-                call_id: &identity.call_id,
-                server_id: &provenance.server_id,
-                server_display_name: &approval.summary.server_display_name,
-                scope: &provenance.scope,
-                raw_tool_name: &provenance.raw_tool_name,
-                model_tool_name: &provenance.model_tool_name,
-                state: request.outcome.invocation_state(),
-                dispatch_certainty: request.outcome.dispatch_certainty(),
-                outcome: request.outcome.invocation_outcome(),
-                is_error: request.outcome.invocation_is_error(),
-                error_code: request.outcome.error_code(),
-            },
+            approval,
+            &invocation,
+            updated_at,
         )
         .map_err(storage_error)?;
     }
@@ -917,6 +941,7 @@ impl StorageService {
         action_id: &str,
         expected_status: &str,
         outcome: McpAutoActionJournalTerminalOutcome,
+        invocation: Option<&crate::AgentMcpToolInvocationEvent>,
         updated_at: i64,
     ) -> Result<bool, String> {
         let transition_is_valid = match expected_status {
@@ -944,6 +969,18 @@ impl StorageService {
         if record.status != expected_status || record.action_type != "mcp_tool_call" {
             return Ok(false);
         }
+        let message_owner = match (
+            record.conversation_id.as_deref(),
+            record.assistant_message_id.as_deref(),
+        ) {
+            (Some(conversation_id), Some(assistant_message_id)) => {
+                Some((conversation_id, assistant_message_id))
+            }
+            (None, None) => None,
+            _ => {
+                return Err("automatic MCP journal has an incomplete conversation owner".to_string())
+            }
+        };
         let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
             .map_err(|_| "automatic MCP journal contains an invalid frozen action".to_string())?;
         let AgentProposedAction::McpToolCall { approval } = action else {
@@ -972,6 +1009,42 @@ impl StorageService {
             || !approval.summary.external
         {
             return Err("automatic MCP journal rejected a drifted typed identity".to_string());
+        }
+        if let Some(invocation) = invocation {
+            let lifecycle_matches_outcome = match outcome {
+                McpAutoActionJournalTerminalOutcome::Completed => {
+                    invocation.state == crate::AgentMcpToolInvocationState::Completed
+                }
+                McpAutoActionJournalTerminalOutcome::Cancelled => {
+                    invocation.state == crate::AgentMcpToolInvocationState::Cancelled
+                }
+                McpAutoActionJournalTerminalOutcome::OutcomeUnknown => {
+                    invocation.state == crate::AgentMcpToolInvocationState::OutcomeUnknown
+                }
+                McpAutoActionJournalTerminalOutcome::Failed => matches!(
+                    invocation.state,
+                    crate::AgentMcpToolInvocationState::Failed
+                        | crate::AgentMcpToolInvocationState::Expired
+                        | crate::AgentMcpToolInvocationState::PayloadUnavailable
+                        | crate::AgentMcpToolInvocationState::PolicyDenied
+                ),
+            };
+            if !lifecycle_matches_outcome {
+                return Err(
+                    "automatic MCP journal lifecycle projection contradicts settlement".to_string(),
+                );
+            }
+            if let Some((conversation_id, assistant_message_id)) = message_owner {
+                chat_repository::upsert_message_mcp_invocation_event(
+                    &transaction,
+                    conversation_id,
+                    assistant_message_id,
+                    &approval,
+                    invocation,
+                    updated_at,
+                )
+                .map_err(storage_error)?;
+            }
         }
 
         let terminal_status = outcome.pending_status();

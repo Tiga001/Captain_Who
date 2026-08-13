@@ -229,6 +229,22 @@ pub struct CollaborationEventEnvelopeDto {
     pub occurred_at: i64,
 }
 
+/// Process-local child stream. Durable observer snapshots and the collaboration event log remain
+/// authoritative across restart; these exact identities only authorize reuse of the existing
+/// Renderer Agent-event reducer while the child is live.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentObserverEventEnvelopeDto {
+    pub schema_version: u32,
+    pub root_agent_id: String,
+    pub root_conversation_id: String,
+    pub agent_id: String,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub assistant_message_id: String,
+    pub event: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationEventsRequest {

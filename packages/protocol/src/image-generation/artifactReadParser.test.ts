@@ -31,6 +31,23 @@ describe('image generation Artifact read protocol', () => {
     expect(
       parseImageGenerationArtifactReadInput({ ...input, conversationId: 'conversation-1' })
     ).toEqual({ ...input, conversationId: 'conversation-1' })
+    expect(
+      parseImageGenerationArtifactReadInput({
+        ...input,
+        conversationId: 'conversation-child',
+        observerRootConversationId: 'conversation-root'
+      })
+    ).toEqual({
+      ...input,
+      conversationId: 'conversation-child',
+      observerRootConversationId: 'conversation-root'
+    })
+    expect(() =>
+      parseImageGenerationArtifactReadInput({
+        ...input,
+        observerRootConversationId: 'conversation-root'
+      })
+    ).toThrow(/requires an exact child conversationId/)
     expect(() =>
       parseImageGenerationArtifactReadInput({ ...input, conversationId: 'bad\nconversation' })
     ).toThrow(/conversationId/)

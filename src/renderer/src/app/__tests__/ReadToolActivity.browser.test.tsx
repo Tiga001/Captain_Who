@@ -174,7 +174,7 @@ describe('ReadToolActivity image presentation', () => {
 
     screen.container.querySelector<HTMLButtonElement>('.read-activity__image')?.click()
     await vi.waitFor(() => {
-      expect(artifactResolver.resolve).toHaveBeenCalledWith(artifact)
+      expect(artifactResolver.resolve).toHaveBeenCalledWith(artifact, {})
       expect(mocks.loadImageFile).not.toHaveBeenCalled()
       expect(release).toHaveBeenCalledTimes(1)
       expect(mocks.openImagePreview).toHaveBeenCalledWith({

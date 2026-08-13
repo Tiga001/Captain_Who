@@ -78,13 +78,21 @@ pub(super) fn terminal_done_event(output: &AgentChatOutput) -> AgentEvent {
     }
 }
 
-pub(super) fn emit_terminal_events_after_persistence(
+pub(super) fn emit_terminal_events_after_persistence_for_turn(
     notifications: &CoreServerNotificationSender,
     gate: &AgentTerminalEventGate,
     output: &AgentChatOutput,
+    collaboration_identity: Option<&AgentCollaborationIdentity>,
+    assistant_message_id: &str,
 ) {
     for event in gate.take_after_persistence(output) {
-        let _ = notifications.send(agent_event_notification(event));
+        emit_agent_event_notifications(
+            notifications,
+            collaboration_identity,
+            &output.run_id,
+            assistant_message_id,
+            event,
+        );
     }
 }
 

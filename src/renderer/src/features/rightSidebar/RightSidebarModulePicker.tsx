@@ -35,6 +35,11 @@ export function RightSidebarModulePicker({
           >
             <Icon aria-hidden="true" />
             <span>{t(module.titleKey)}</span>
+            {module.badge ? (
+              <span className="right-sidebar__module-badge" aria-label={`${module.badge}`}>
+                {module.badge}
+              </span>
+            ) : null}
           </button>
         )
       })}

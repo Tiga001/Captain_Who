@@ -160,10 +160,12 @@ function ImageArtifactRow({
 
 export function ImageGenerationArtifactsCard({
   conversationId,
+  observerRootConversationId,
   resolver,
   run
 }: {
   conversationId?: string
+  observerRootConversationId?: string
   resolver?: ImageArtifactResolver
   run: ChatAgentRunView
 }) {
@@ -176,7 +178,8 @@ export function ImageGenerationArtifactsCard({
   const resolutions = useImageArtifactResolutions(
     artifacts,
     isNearViewport ? resolver : undefined,
-    conversationId
+    conversationId,
+    observerRootConversationId
   )
   if (entries.length === 0) return null
 

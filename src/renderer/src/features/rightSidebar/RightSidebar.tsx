@@ -9,9 +9,12 @@ import { RightSidebarModulePicker } from './RightSidebarModulePicker'
 import { RightSidebarPageStack } from './RightSidebarPageStack'
 import { RightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
 import { useRightSidebarDocumentVisibility } from './rightSidebarActivity'
-import { RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
+import { AGENT_CENTER_RIGHT_SIDEBAR_MODULE, RIGHT_SIDEBAR_MODULES } from './rightSidebarModules'
+import type { CollaborationStoreSnapshot } from '../agentCollaboration/collaborationStore'
 import type {
   RightSidebarCapabilities,
+  AgentObserverRenderContext,
+  RightSidebarAgentNavigationRequest,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
   RightSidebarReviewNavigationRequest
@@ -21,14 +24,18 @@ import './RightSidebar.css'
 
 interface RightSidebarProps {
   activeConversationId?: string | null
+  agentNavigationRequest?: RightSidebarAgentNavigationRequest | null
   capabilities?: RightSidebarCapabilities
+  collaborationSnapshot?: CollaborationStoreSnapshot | null
   isMaximized: boolean
   isOpen: boolean
   isWorkspaceVisible?: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
+  onOpenAgentTemplates?: () => void
   onToggleMaximized: () => void
   reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
+  renderAgentObserver?: (context: AgentObserverRenderContext) => ReactNode
   workspaceKey?: string | null
   workspaceKeys?: readonly string[]
   workspaceName?: string | null
@@ -55,14 +62,18 @@ function RestoreFromMaximizedIcon(): ReactNode {
 
 export const RightSidebar = memo(function RightSidebar({
   activeConversationId,
+  agentNavigationRequest,
   capabilities,
+  collaborationSnapshot = null,
   isMaximized,
   isOpen,
   isWorkspaceVisible = true,
   maximizedToolbarControls,
-  modules = RIGHT_SIDEBAR_MODULES,
+  modules: configuredModules = RIGHT_SIDEBAR_MODULES,
+  onOpenAgentTemplates,
   onToggleMaximized,
   reviewNavigationRequest,
+  renderAgentObserver,
   workspaceKey,
   workspaceKeys,
   workspaceName,
@@ -71,10 +82,28 @@ export const RightSidebar = memo(function RightSidebar({
   const { t } = useFrontendConfig()
   const documentVisible = useRightSidebarDocumentVisibility()
   const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
+  const handledAgentNavigationRequestIdRef = useRef<number | null>(null)
   const moduleMenuRef = useRef<HTMLDivElement>(null)
   const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [isModuleMenuOpen, setIsModuleMenuOpen] = useState(false)
   const [moduleMenuPosition, setModuleMenuPosition] = useState({ top: 0, left: 0 })
+  const childAgents = useMemo(() => {
+    const tree = collaborationSnapshot?.tree
+    if (!activeConversationId || tree?.rootConversationId !== activeConversationId) return []
+    return tree.agents.filter((agent) => agent.parentAgentId !== null)
+  }, [activeConversationId, collaborationSnapshot?.tree])
+  const activeChildCount = childAgents.filter((agent) =>
+    ['queued', 'running', 'waiting_approval'].includes(agent.displayStatus)
+  ).length
+  const modules = useMemo(() => {
+    const withoutAgentCenter = configuredModules.filter((module) => module.id !== 'agent-center')
+    return childAgents.length > 0
+      ? [
+          ...withoutAgentCenter,
+          { ...AGENT_CENTER_RIGHT_SIDEBAR_MODULE, badge: activeChildCount || undefined }
+        ]
+      : withoutAgentCenter
+  }, [activeChildCount, childAgents.length, configuredModules])
   const {
     activatePage,
     activePageId,
@@ -112,9 +141,18 @@ export const RightSidebar = memo(function RightSidebar({
   const runtimeContext = useMemo(
     () => ({
       activeConversationId: activeConversationId ?? null,
-      activeWorkspaceKey: workspaceKey ?? null
+      activeWorkspaceKey: workspaceKey ?? null,
+      collaborationSnapshot,
+      onOpenAgentTemplates,
+      renderAgentObserver
     }),
-    [activeConversationId, workspaceKey]
+    [
+      activeConversationId,
+      collaborationSnapshot,
+      onOpenAgentTemplates,
+      renderAgentObserver,
+      workspaceKey
+    ]
   )
 
   const closeTransientUi = useCallback(() => {
@@ -157,11 +195,64 @@ export const RightSidebar = memo(function RightSidebar({
 
   const openModule = useCallback(
     (moduleId: RightSidebarModuleId) => {
-      openPlatformModule(moduleId)
+      if (moduleId === 'agent-center') {
+        if (!activeConversationId || childAgents.length === 0) return
+        openPlatformModule(moduleId, {
+          kind: 'agent-center',
+          rootConversationId: activeConversationId,
+          view: 'list'
+        })
+      } else {
+        openPlatformModule(moduleId)
+      }
       closeTransientUi()
     },
-    [closeTransientUi, openPlatformModule]
+    [activeConversationId, childAgents.length, closeTransientUi, openPlatformModule]
   )
+
+  useEffect(() => {
+    if (
+      !agentNavigationRequest ||
+      handledAgentNavigationRequestIdRef.current === agentNavigationRequest.requestId
+    ) {
+      return
+    }
+    if (
+      agentNavigationRequest.rootConversationId !== activeConversationId ||
+      !childAgents.some((agent) => agent.agentId === agentNavigationRequest.agentId)
+    ) {
+      handledAgentNavigationRequestIdRef.current = agentNavigationRequest.requestId
+      return
+    }
+    handledAgentNavigationRequestIdRef.current = agentNavigationRequest.requestId
+    openPlatformModule('agent-center', {
+      agentId: agentNavigationRequest.agentId,
+      kind: 'agent-center',
+      rootConversationId: agentNavigationRequest.rootConversationId,
+      view: 'detail'
+    })
+  }, [activeConversationId, agentNavigationRequest, childAgents, openPlatformModule])
+
+  useEffect(() => {
+    if (!activeConversationId) return
+    for (const page of pages) {
+      if (page.moduleId !== 'agent-center') continue
+      if (
+        page.moduleState?.kind === 'agent-center' &&
+        page.moduleState.rootConversationId === activeConversationId
+      ) {
+        continue
+      }
+      updatePage(page.id, {
+        moduleState: {
+          kind: 'agent-center',
+          rootConversationId: activeConversationId,
+          view: 'list'
+        },
+        title: t('rightSidebar.agentCenter')
+      })
+    }
+  }, [activeConversationId, pages, t, updatePage])
 
   useEffect(() => {
     if (

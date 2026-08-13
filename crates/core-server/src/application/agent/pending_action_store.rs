@@ -233,6 +233,7 @@ impl AgentService {
             let _ = self.settle_auto_mcp_action_journal(
                 &record,
                 McpAutoActionJournalTerminalOutcome::Failed,
+                None,
             );
             return Err(
                 "automatic MCP invocation journal audit could not be persisted".to_string(),
@@ -260,12 +261,14 @@ impl AgentService {
         &self,
         record: &PendingActionRecord,
         outcome: McpAutoActionJournalTerminalOutcome,
+        invocation: Option<&mycopilot_core::AgentMcpToolInvocationEvent>,
     ) -> Result<(), String> {
         let expected_status = pending_status_label(record.snapshot.status);
         let settled = self.storage.settle_auto_mcp_action_journal(
             &record.storage_id,
             expected_status,
             outcome,
+            invocation,
             now_ms(),
         )?;
         if !settled {

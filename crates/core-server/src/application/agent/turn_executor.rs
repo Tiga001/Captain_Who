@@ -460,10 +460,15 @@ impl AgentService {
                         }));
                     }
                     if durable_terminal {
-                        emit_terminal_events_after_persistence(
+                        emit_terminal_events_after_persistence_for_turn(
                             &notifications,
                             &terminal_event_gate,
                             &agent_output,
+                            pending_agent_input
+                                .context
+                                .as_ref()
+                                .and_then(|context| context.collaboration_identity.as_ref()),
+                            &worker_assistant_message_id,
                         );
                     }
                     durable_terminal
@@ -516,22 +521,38 @@ impl AgentService {
                         }));
                     }
                     if durable_terminal {
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(worker_run_id.clone()),
-                            message: message.clone(),
-                            recoverable: false,
-                            code,
-                            details,
-                        }));
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Done {
-                            run_id: worker_run_id.clone(),
-                            success: false,
-                            status: Some(AgentRunStatus::Failed),
-                            content: Some(message),
-                            usage: cumulative_usage,
-                            finish_reason: None,
-                            proposed_actions: Vec::new(),
-                        }));
+                        let collaboration_identity = pending_agent_input
+                            .context
+                            .as_ref()
+                            .and_then(|context| context.collaboration_identity.as_ref());
+                        emit_agent_event_notifications(
+                            &notifications,
+                            collaboration_identity,
+                            &worker_run_id,
+                            &worker_assistant_message_id,
+                            AgentEvent::Error {
+                                run_id: Some(worker_run_id.clone()),
+                                message: message.clone(),
+                                recoverable: false,
+                                code,
+                                details,
+                            },
+                        );
+                        emit_agent_event_notifications(
+                            &notifications,
+                            collaboration_identity,
+                            &worker_run_id,
+                            &worker_assistant_message_id,
+                            AgentEvent::Done {
+                                run_id: worker_run_id.clone(),
+                                success: false,
+                                status: Some(AgentRunStatus::Failed),
+                                content: Some(message),
+                                usage: cumulative_usage,
+                                finish_reason: None,
+                                proposed_actions: Vec::new(),
+                            },
+                        );
                     }
                     durable_terminal
                 }
@@ -862,6 +883,11 @@ impl AgentService {
         let emitter_conversation_id = conversation_id.clone();
         let emitter_assistant_message_id = assistant_message_id.clone();
         let emitter_agent_input = agent_input.clone();
+        let emitter_collaboration_identity = agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.collaboration_identity.clone());
+        let emitter_run_id = run_id.clone();
         let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
         let emitter_terminal_event_gate = terminal_event_gate.clone();
         let pending_store_failure = Arc::new(Mutex::new(None::<String>));
@@ -932,7 +958,13 @@ impl AgentService {
             }
             let event = emitter_service.project_cumulative_usage_onto_event(event);
             if let Some(event) = emitter_terminal_event_gate.route(event) {
-                let _ = emitter_notifications.send(agent_event_notification(event));
+                emit_agent_event_notifications(
+                    &emitter_notifications,
+                    emitter_collaboration_identity.as_ref(),
+                    &emitter_run_id,
+                    &emitter_assistant_message_id,
+                    event,
+                );
             }
         });
 

@@ -69,12 +69,16 @@ const STATUS_ICON: Readonly<Record<ImageGenerationActivityStatus, LucideIcon>> =
 
 export function ImageGenerationToolActivity({
   call,
+  conversationId,
+  observerRootConversationId,
   resolver = lazyHostImageArtifactResolver,
   result,
   settledStatus,
   showArtifactPreview = true
 }: {
   call: AgentToolCall
+  conversationId?: string
+  observerRootConversationId?: string
   resolver?: ImageArtifactResolver
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
@@ -103,7 +107,9 @@ export function ImageGenerationToolActivity({
         <div className="agent-activity__details image-generation-activity__details">
           {showPreview ? (
             <ImageGenerationActivityPreview
+              conversationId={conversationId}
               entry={artifactEntry}
+              observerRootConversationId={observerRootConversationId}
               resolver={resolver}
               running={view.status === 'running'}
             />
@@ -118,11 +124,15 @@ export function ImageGenerationToolActivity({
 }
 
 function ImageGenerationActivityPreview({
+  conversationId,
   entry,
+  observerRootConversationId,
   resolver,
   running
 }: {
+  conversationId?: string
   entry?: ImageGenerationArtifactEntry
+  observerRootConversationId?: string
   resolver?: ImageArtifactResolver
   running: boolean
 }) {
@@ -133,7 +143,9 @@ function ImageGenerationActivityPreview({
   const artifacts = useMemo(() => (entry ? [entry.artifact] : []), [entry])
   const resolutions = useImageArtifactResolutions(
     artifacts,
-    entry && isNearViewport ? resolver : undefined
+    entry && isNearViewport ? resolver : undefined,
+    conversationId,
+    observerRootConversationId
   )
   const resolution = entry
     ? (resolutions.get(entry.artifact.artifactId) ?? { status: 'unavailable' as const })

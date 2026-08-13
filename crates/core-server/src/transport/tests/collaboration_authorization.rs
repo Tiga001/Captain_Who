@@ -402,6 +402,39 @@ fn ordinary_user_rpc_cannot_read_or_mutate_a_child_conversation() {
         child.task_message.message_id
     );
 
+    for method in [
+        AGENT_READ_FILE_DRAFT_METHOD,
+        AGENT_GET_FILE_WRITE_DIFF_METHOD,
+    ] {
+        let exact_observer = request(
+            &storage,
+            &service,
+            method,
+            serde_json::json!({
+                "draftId": "draft-child",
+                "observerRootConversationId": "conversation-root"
+            }),
+        );
+        assert!(
+            exact_observer.get("result").is_some(),
+            "exact root+child observer authority must permit read-only draft details: {exact_observer}"
+        );
+
+        let forged_observer = request(
+            &storage,
+            &service,
+            method,
+            serde_json::json!({
+                "draftId": "draft-child",
+                "observerRootConversationId": "conversation-legacy"
+            }),
+        );
+        assert_eq!(
+            forged_observer["error"]["code"], -32000,
+            "{forged_observer}"
+        );
+    }
+
     let loaded = storage
         .load_conversation(&child_conversation)
         .unwrap()

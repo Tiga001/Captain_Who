@@ -293,6 +293,8 @@ pub struct ImageGenerationArtifactReadRequest {
     pub artifact: ManagedArtifactReadIdentityDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observer_root_conversation_id: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -266,9 +266,34 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
         &invocation_id,
         mycopilot_core::storage::now_ms(),
     );
+    let projection_created_at = mycopilot_core::storage::now_ms();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "auto-mcp-conversation".to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Backend-owned automatic MCP".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "auto-mcp-assistant".to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: projection_created_at,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: projection_created_at,
+            updated_at: projection_created_at,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
     let AgentProposedAction::McpToolCall { approval } = action else {
         unreachable!();
     };
+    let frozen_approval = approval.clone();
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let context = AutoApprovedActionContext::new(
         auto_mcp_agent_input(&storage, run_id, &action_id),
@@ -321,6 +346,80 @@ async fn auto_mcp_invokes_only_after_hidden_durable_executing_journal_and_scrubs
     assert_eq!(terminal.2, "{}");
     let durable = format!("{}{}", terminal.1, terminal.2);
     assert!(!durable.contains("AUTO_RESULT_CANARY_NOT_DURABLE"));
+
+    let durable_result = mycopilot_core::mcp_tool_result_persistence_projection(&result);
+    let trace = mycopilot_core::ConversationTurnTrace {
+        schema_version: mycopilot_core::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: "auto-mcp-conversation".to_string(),
+        assistant_message_id: "auto-mcp-assistant".to_string(),
+        terminal_status: mycopilot_core::ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: true,
+        items: vec![
+            mycopilot_core::ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: frozen_approval.identity.call_id.clone(),
+                tool: frozen_approval.identity.provenance.model_tool_name.clone(),
+                provenance: AgentToolIdentity::Mcp {
+                    provenance: frozen_approval.identity.provenance.clone(),
+                },
+                operation: json!({}),
+                approval_status: AgentApprovalStatus::Approved,
+                truncated: true,
+            },
+            mycopilot_core::ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: frozen_approval.identity.call_id.clone(),
+                tool: frozen_approval.identity.provenance.model_tool_name.clone(),
+                status: mycopilot_core::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: durable_result.result.clone().unwrap(),
+                approval_status: AgentApprovalStatus::Approved,
+                error: None,
+                truncated: true,
+                archive: Default::default(),
+            },
+        ],
+    };
+    let mut in_progress = trace.clone();
+    in_progress.terminal_status = mycopilot_core::ConversationTurnTraceTerminalStatus::InProgress;
+    storage
+        .append_in_progress_conversation_turn_trace(
+            &in_progress,
+            projection_created_at,
+            projection_created_at,
+        )
+        .unwrap();
+    storage
+        .replace_conversation_turn_trace(
+            &trace,
+            projection_created_at,
+            projection_created_at.saturating_add(1),
+        )
+        .unwrap();
+    let reloaded = storage
+        .load_conversation("auto-mcp-conversation")
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value = serde_json::from_str(
+        reloaded.messages[0]
+            .agent_run_json
+            .as_deref()
+            .expect("terminal MCP projection survives journal scrubbing"),
+    )
+    .unwrap();
+    assert_eq!(run["mcpInvocations"][0]["actionId"], action_id);
+    assert_eq!(run["mcpInvocations"][0]["invocationId"], invocation_id);
+    assert_eq!(run["mcpInvocations"][0]["state"], "completed");
+    assert_eq!(run["mcpInvocations"][0]["outcome"], "succeeded");
+    assert_eq!(
+        run["mcpInvocations"][0]["dispatchCertainty"],
+        "response_received"
+    );
+    assert_eq!(run["timeline"][0]["type"], "mcp_tool_call");
+    let encoded = run.to_string();
+    assert!(!encoded.contains("AUTO_RESULT_CANARY_NOT_DURABLE"));
 }
 
 #[tokio::test]
@@ -1854,7 +1953,8 @@ fn store_test_mcp_action_for_source(
 #[test]
 fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelopes() {
     let fixture = tempdir().unwrap();
-    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
     save_test_pending_provider(
         &storage,
         "test-model",
@@ -1936,6 +2036,23 @@ fn process_only_startup_terminalizes_mcp_pending_actions_and_removes_all_envelop
             expired_agent_input,
         )
         .unwrap());
+
+    // Headless child Turns do not have a Renderer maintaining `agent_run_json`. Startup
+    // terminalization must create the typed MCP card from the validated frozen approval before
+    // scrubbing it, rather than requiring a pre-existing Renderer projection.
+    {
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute(
+                "UPDATE messages SET agent_run_json = NULL
+                 WHERE conversation_id IN (
+                    'mcp-envelope-live-conversation',
+                    'mcp-envelope-expired-conversation'
+                 )",
+                [],
+            )
+            .unwrap();
+    }
 
     storage
         .store_mcp_approval_envelope(test_mcp_envelope(

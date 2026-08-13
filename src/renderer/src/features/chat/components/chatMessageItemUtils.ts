@@ -36,11 +36,21 @@ import {
 
 const FILE_WRITE_ACTIVITY_GRACE_MS = 2000
 
-const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>(['command_session'])
+const HIDDEN_TIMELINE_TOOLS = new Set<AgentToolCall['tool']>([
+  'command_session',
+  'spawn_agent',
+  'send_message',
+  'followup_task',
+  'wait_agent',
+  'list_agents',
+  'interrupt_agent'
+])
 
 function isHiddenTimelineTool(tool: AgentToolCall['tool']) {
-  // command_session is model-facing process coordination. Keep its call/result in agentRun for
-  // history and diagnostics, but do not let that bookkeeping create a user-visible timeline row.
+  // Command Session and Agent collaboration Harness calls are model-facing coordination. Keep
+  // their call/result records for durable history and diagnostics, but do not expose raw JSON or
+  // repeated list/wait bookkeeping as user-visible timeline rows. Collaboration has a separate
+  // semantic projection keyed by durable Agent identity.
   return HIDDEN_TIMELINE_TOOLS.has(tool) || isHiddenSkillTool(tool)
 }
 

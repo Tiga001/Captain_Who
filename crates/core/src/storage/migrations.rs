@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 7;
+pub const STORAGE_SCHEMA_VERSION: i32 = 8;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:6e653a62162a1c6357d897daf4c0b66ceea2d5260001ee518a21d427309cb929";
+    "sha256:6d0bdd683b559905fc0316d76d6fa491d2e3161e5936412d36dade4b49e67a6b";
 
 /// Opens the single supported development schema.
 ///
@@ -229,6 +229,7 @@ mod tests {
             "prevent_child_context_snapshot_delete",
             "messages_snapshot_source_idx",
             "validate_child_context_snapshot_message_insert",
+            "validate_context_snapshot_message_update",
             "prevent_child_context_snapshot_message_rewrite",
             "prevent_child_context_snapshot_message_delete",
             "validate_agent_message_projection_insert",
@@ -240,6 +241,7 @@ mod tests {
             "prevent_agent_message_projection_ui_rewrite",
             "validate_agent_mailbox_acknowledgement",
             "prevent_agent_bound_conversation_fork_insert",
+            "prevent_conversation_fork_update",
             "conversations_revision_after_business_update",
             "conversations_revision_after_message_insert",
             "conversations_revision_after_message_update",
@@ -489,7 +491,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 7, found 3"));
+            .contains("expected schema version 8, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -538,7 +540,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 7, found 4"));
+            .contains("expected schema version 8, found 4"));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -580,7 +582,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 7, found 5"));
+            .contains("expected schema version 8, found 5"));
         assert_eq!(read_schema_version(&connection).unwrap(), 5);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -631,7 +633,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 7, found 6"));
+            .contains("expected schema version 8, found 6"));
         assert_eq!(read_schema_version(&connection).unwrap(), 6);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -654,6 +656,49 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_v7_database_requires_reset_without_rewriting_round4_collaboration_facts() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v7.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE agent_collaboration_events (
+                         event_id TEXT PRIMARY KEY,
+                         payload TEXT NOT NULL
+                     );
+                     INSERT INTO agent_collaboration_events (event_id, payload)
+                     VALUES ('event-round4', 'must remain untouched');
+                     PRAGMA user_version = 7;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("expected schema version 8, found 7"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 7);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload FROM agent_collaboration_events
+                     WHERE event_id = 'event-round4'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "must remain untouched"
+        );
     }
 
     #[test]

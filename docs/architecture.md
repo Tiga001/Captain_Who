@@ -21,6 +21,59 @@ app (composition and navigation)
 - Features must not import `app`; shared components must not import `app` or `features`. ESLint
   enforces these rules.
 
+### Conversation surfaces and collaboration composition
+
+`ConversationSurface` is the single renderer boundary for a Conversation timeline. Its
+discriminated `mode` is a capability contract rather than a presentation hint:
+
+- `interactive` receives the composer and root-only mutation callbacks for send, edit, retry,
+  fork, stop/guide, approval, model transition, and persisted message UI state. The existing
+  `ChatConversationPage` is a thin adapter that can select only this branch.
+- `observer` receives an exact `rootConversationId` plus an authorized child Conversation. It
+  reuses the same message, Markdown, Tool/MCP/Skill, Artifact, error, usage, copy, and disclosure
+  rendering, but its type and DOM omit the composer and every Conversation mutation or approval
+  callback. Agent-origin input remains a `user` role projection for the model while the renderer
+  labels it from its persisted origin and parent Agent identity.
+
+The application shell owns one optional `CollaborationStore` for the currently selected root
+Conversation. It passes that root-scoped snapshot to root-chat collaboration projections and the
+right sidebar; those consumers do not create parallel event subscriptions or Conversation
+reducers. Child messages remain owned by the existing Conversation projection and
+`ConversationSurface`, not by the collaboration store.
+
+Collaboration notifications are invalidations, not renderer state truth. The store hydrates the
+authoritative tree from the Host, ignores duplicate or foreign-root notifications, validates the
+root-local persistent sequence through the event log, and rehydrates on a gap or Host resync.
+Observer Conversation refreshes use the selected Agent's latest validated sequence plus a
+process-hydration revision; unrelated child events therefore do not replace an active stream,
+while a gap or Core resync invalidates every selected observer.
+Changing root or child identity hides the previous scope immediately and rejects late responses;
+a refresh within the same scope can retain the last authorized snapshot while the replacement is
+loaded. While a child is live, Core additionally emits a process-local observer envelope with the
+exact root Agent/root Conversation/Agent/Conversation/Run/assistant-message identity. The observer
+applies its nested ordinary `AgentEvent` through the existing Conversation reducer. A bounded
+request-local arrival window replays events which race an in-flight hydration; normal long-running
+streams are never accumulated in another store. If that request window overflows, the observer
+keeps its live overlay and refuses the potentially stale response until a target invalidation or
+explicit reload can obtain a durable snapshot.
+
+The durable boundary in this round is the Agent tree, Conversation history, approval projection,
+template records, and root-local collaboration event log. The root-chat activity surface is a
+current-state projection keyed by stable Agent ID: reload reconstructs one latest row per child,
+not a durable timeline of every collaboration action. The observer envelope is only a low-latency
+overlay and is not persisted; durable Conversation snapshots and the collaboration event log remain
+recovery truth after gaps, Core restart, and window reload. Both live and restored child activity
+use the one Conversation reducer rather than a second token/chat store. The right-sidebar
+navigation stack and local disclosure/scroll UI state are renderer state and are not presented as
+persisted collaboration facts.
+
+An interactive root that has been materialized as an Agent still uses the existing Conversation
+fork service. Its collaboration-owned fork mode commits the target Conversation, an independent
+root Agent, the ordinary idempotency receipt, and provenance-preserving history in one SQLite
+transaction. Agent-origin transport projections remain model/audit context but are filtered from
+the user-facing target history and search. Child Conversations and roots with an active Turn remain
+non-forkable.
+
 ## Core server
 
 `crates/core-server` is an application boundary around `mycopilot-core`, not an unstructured

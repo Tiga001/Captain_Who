@@ -21,7 +21,11 @@ function tree(rootConversationId: string, lastSequence: number): AgentTreeSnapsh
   }
 }
 
-function event(rootConversationId: string, sequence: number): CollaborationEventEnvelope {
+function event(
+  rootConversationId: string,
+  sequence: number,
+  agentId = `root:${rootConversationId}`
+): CollaborationEventEnvelope {
   return {
     schemaVersion: 1,
     eventId: `${rootConversationId}:${sequence}`,
@@ -30,7 +34,7 @@ function event(rootConversationId: string, sequence: number): CollaborationEvent
     projectId: 'project-a',
     rootAgentId: `root:${rootConversationId}`,
     rootConversationId,
-    agentId: `root:${rootConversationId}`,
+    agentId,
     conversationId: rootConversationId,
     turnId: null,
     runId: null,
@@ -210,10 +214,173 @@ describe('CollaborationStore', () => {
     store.start()
     await settle()
     expect(store.getSnapshot()).toEqual({
+      agentInvalidationSequences: {},
       error: false,
+      hydrationRevision: 1,
       loading: false,
       rootConversationId: 'legacy-conversation',
       tree: null
     })
   })
+
+  it('advances hydration revision on resync even when the durable sequence is unchanged', async () => {
+    let resync: (() => void) | undefined
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => tree('root-conversation', 2)),
+      listEvents: vi.fn(async () => page('root-conversation', [])),
+      subscribe: () => () => undefined,
+      subscribeResync: (next) => {
+        resync = next
+        return () => undefined
+      }
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await settle()
+    const before = store.getSnapshot().hydrationRevision
+    resync?.()
+    await settle()
+    expect(store.getSnapshot()).toMatchObject({
+      hydrationRevision: before + 1,
+      tree: { lastSequence: 2 }
+    })
+  })
+
+  it('advances only the target Agent invalidation sequence after a validated catch-up', async () => {
+    let handler: ((value: CollaborationEventEnvelope) => void) | undefined
+    const childA = 'agent-child-a'
+    const childB = 'agent-child-b'
+    let exposeEvents = false
+    let authoritative: AgentTreeSnapshot = {
+      ...tree('root-conversation', 2),
+      agents: [childSummary(childA, 'child-a'), childSummary(childB, 'child-b')]
+    }
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => authoritative),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(
+          'root-conversation',
+          exposeEvents && afterSequence === 2 ? [event('root-conversation', 3, childB)] : []
+        )
+      ),
+      subscribe: (next) => {
+        handler = next
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await settle()
+    const initial = store.getSnapshot().agentInvalidationSequences
+    expect(initial).toEqual({ [childA]: 2, [childB]: 2 })
+
+    authoritative = { ...authoritative, lastSequence: 3 }
+    exposeEvents = true
+    handler?.(event('root-conversation', 3, childB))
+    await settle()
+    await settle()
+
+    expect(store.getSnapshot().agentInvalidationSequences).toEqual({
+      [childA]: 2,
+      [childB]: 3
+    })
+  })
+
+  it('invalidates every selected observer after an event-log gap forces full hydration', async () => {
+    let handler: ((value: CollaborationEventEnvelope) => void) | undefined
+    const childA = 'agent-child-a'
+    const childB = 'agent-child-b'
+    let exposeGap = false
+    let authoritative: AgentTreeSnapshot = {
+      ...tree('root-conversation', 2),
+      agents: [childSummary(childA, 'child-a'), childSummary(childB, 'child-b')]
+    }
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => authoritative),
+      listEvents: vi.fn(async () =>
+        page('root-conversation', exposeGap ? [event('root-conversation', 4, childB)] : [])
+      ),
+      subscribe: (next) => {
+        handler = next
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await settle()
+    const hydrationRevision = store.getSnapshot().hydrationRevision
+
+    authoritative = { ...authoritative, lastSequence: 4 }
+    exposeGap = true
+    handler?.(event('root-conversation', 4, childB))
+    await settle()
+    await settle()
+
+    expect(store.getSnapshot()).toMatchObject({
+      agentInvalidationSequences: { [childA]: 4, [childB]: 4 },
+      hydrationRevision: hydrationRevision + 1
+    })
+  })
+
+  it('fully invalidates observers when the authoritative snapshot advances beyond replay', async () => {
+    let handler: ((value: CollaborationEventEnvelope) => void) | undefined
+    const childA = 'agent-child-a'
+    const childB = 'agent-child-b'
+    let exposeEvents = false
+    let authoritative: AgentTreeSnapshot = {
+      ...tree('root-conversation', 2),
+      agents: [childSummary(childA, 'child-a'), childSummary(childB, 'child-b')]
+    }
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => authoritative),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(
+          'root-conversation',
+          exposeEvents && afterSequence === 2 ? [event('root-conversation', 3, childA)] : []
+        )
+      ),
+      subscribe: (next) => {
+        handler = next
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await settle()
+    const hydrationRevision = store.getSnapshot().hydrationRevision
+
+    exposeEvents = true
+    authoritative = { ...authoritative, lastSequence: 5 }
+    handler?.(event('root-conversation', 3, childA))
+    handler?.(event('root-conversation', 4, childB))
+    handler?.(event('root-conversation', 5, childB))
+    await settle()
+    await settle()
+
+    expect(store.getSnapshot()).toMatchObject({
+      agentInvalidationSequences: { [childA]: 5, [childB]: 5 },
+      hydrationRevision: hydrationRevision + 1,
+      tree: { lastSequence: 5 }
+    })
+  })
 })
+
+function childSummary(agentId: string, conversationId: string) {
+  return {
+    agentId,
+    rootAgentId: 'root:root-conversation',
+    rootConversationId: 'root-conversation',
+    parentAgentId: 'root:root-conversation',
+    conversationId,
+    projectId: 'project-a',
+    taskName: agentId,
+    taskPath: `/root/${agentId}`,
+    lifecycle: 'active' as const,
+    displayStatus: 'running' as const,
+    latestActivityAt: 1,
+    model: null
+  }
+}

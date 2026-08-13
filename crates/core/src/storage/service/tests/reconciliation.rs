@@ -944,6 +944,12 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
     let assistant_message_id = "assistant-mcp-rejection-crash";
     let (pending, pending_audit, terminal_audit, expected_trace, _) =
         mcp_rejection_settlement(run_id, conversation_id, assistant_message_id);
+    let AgentProposedAction::McpToolCall {
+        approval: expected_approval,
+    } = serde_json::from_str::<AgentProposedAction>(&terminal_audit.action_json).unwrap()
+    else {
+        panic!("fixture must retain its typed MCP approval identity");
+    };
     let action_id = pending.action_id.clone();
     save_assistant_conversation(&service, conversation_id, assistant_message_id);
     service.store_pending_agent_action(pending).unwrap();
@@ -1091,6 +1097,26 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
     recovered_trace
         .validate_complete_model_context(&recovered_model_context.items)
         .unwrap();
+
+    let conversation = service.load_conversation(conversation_id).unwrap().unwrap();
+    let run: serde_json::Value = serde_json::from_str(
+        conversation.messages[0]
+            .agent_run_json
+            .as_deref()
+            .expect("backend-owned rejected MCP trace must produce a typed observer run"),
+    )
+    .unwrap();
+    assert_eq!(
+        run["mcpInvocations"][0]["actionId"],
+        expected_approval.identity.action_id
+    );
+    assert_eq!(
+        run["mcpInvocations"][0]["invocationId"],
+        expected_approval.identity.invocation_id
+    );
+    assert_eq!(run["mcpInvocations"][0]["state"], "rejected");
+    assert_eq!(run["mcpInvocations"][0]["outcome"], "rejected");
+    assert_eq!(run["timeline"][0]["type"], "mcp_tool_call");
 
     assert!(service
         .reconcile_interrupted_pending_agent_actions(43)

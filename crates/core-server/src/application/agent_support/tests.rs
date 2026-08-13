@@ -105,6 +105,54 @@ fn shared_mcp_renderer_contract_matches_rust_safe_event_serialization() {
 }
 
 #[test]
+fn child_observer_notification_adds_exact_identity_without_changing_safe_event_projection() {
+    let identity = mycopilot_core::AgentCollaborationIdentity {
+        agent_id: "agent-child".to_string(),
+        root_agent_id: "agent-root".to_string(),
+        root_conversation_id: "conversation-root".to_string(),
+        parent_agent_id: "agent-root".to_string(),
+        parent_task_name: "root".to_string(),
+        parent_task_path: "/root".to_string(),
+        conversation_id: "conversation-child".to_string(),
+        task_name: "child".to_string(),
+        task_path: "/root/child".to_string(),
+        source_agent_id: "agent-root".to_string(),
+        source_kind: mycopilot_core::AgentMailboxKind::Task,
+        source_task_name: "root".to_string(),
+        source_task_path: "/root".to_string(),
+        source_agent_message_id: "mailbox-task".to_string(),
+        entrusted_task: "review".to_string(),
+        template_instructions: None,
+    };
+    let event = AgentEvent::MessageDelta {
+        run_id: "run-child".to_string(),
+        stream_id: Some("stream-child".to_string()),
+        delta: "hello".to_string(),
+    };
+    let notification =
+        child_observer_event_notification(&identity, "run-child", "assistant-child", event.clone());
+    assert_eq!(
+        notification["method"],
+        mycopilot_protocol_rs::AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD
+    );
+    assert_eq!(notification["params"]["rootAgentId"], "agent-root");
+    assert_eq!(notification["params"]["agentId"], "agent-child");
+    assert_eq!(
+        notification["params"]["conversationId"],
+        "conversation-child"
+    );
+    assert_eq!(notification["params"]["runId"], "run-child");
+    assert_eq!(
+        notification["params"]["assistantMessageId"],
+        "assistant-child"
+    );
+    assert_eq!(
+        notification["params"]["event"],
+        agent_event_notification(event)["params"]
+    );
+}
+
+#[test]
 fn renderer_command_projection_excludes_host_runtime_authority_and_private_input_paths() {
     let private_artifact_path = "/private/managed-artifacts/objects/secret/manual.pdf";
     let artifact_uri =

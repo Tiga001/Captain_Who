@@ -80,7 +80,10 @@ async function resolveHostImageArtifact(
     result = await hostClient.imageGeneration.readArtifact({
       schemaVersion: 1,
       artifact,
-      ...(options?.conversationId ? { conversationId: options.conversationId } : {})
+      ...(options?.conversationId ? { conversationId: options.conversationId } : {}),
+      ...(options?.observerRootConversationId
+        ? { observerRootConversationId: options.observerRootConversationId }
+        : {})
     })
   } finally {
     releaseReadSlot()

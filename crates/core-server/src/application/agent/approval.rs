@@ -417,6 +417,7 @@ impl AgentService {
     pub fn read_file_draft(
         &self,
         draft_id: &str,
+        observer_root_conversation_id: Option<&str>,
         offset: Option<usize>,
         max_chars: Option<usize>,
     ) -> Result<AgentFileDraftContentPage, String> {
@@ -424,8 +425,7 @@ impl AgentService {
             .storage
             .get_agent_file_draft(draft_id)?
             .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
-        self.authorize_user_conversation_write(&draft.conversation_id)
-            .map_err(|error| error.to_string())?;
+        self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
         let snapshot = file_draft_snapshot(&draft)?;
         let (content, offset, next_offset, truncated) =
             paginate_chars(&draft.content, offset, max_chars);
@@ -441,6 +441,7 @@ impl AgentService {
     pub fn get_file_write_diff(
         &self,
         draft_id: &str,
+        observer_root_conversation_id: Option<&str>,
         offset: Option<usize>,
         max_chars: Option<usize>,
     ) -> Result<AgentFileWriteDiffPage, String> {
@@ -448,8 +449,7 @@ impl AgentService {
             .storage
             .get_agent_file_draft(draft_id)?
             .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
-        self.authorize_user_conversation_write(&draft.conversation_id)
-            .map_err(|error| error.to_string())?;
+        self.authorize_file_draft_read(observer_root_conversation_id, &draft.conversation_id)?;
         let diff = file_write_diff(&draft);
         let (patch, offset, next_offset, truncated) = paginate_chars(&diff, offset, max_chars);
         Ok(AgentFileWriteDiffPage {
@@ -459,6 +459,22 @@ impl AgentService {
             next_offset,
             truncated,
         })
+    }
+
+    fn authorize_file_draft_read(
+        &self,
+        observer_root_conversation_id: Option<&str>,
+        draft_conversation_id: &str,
+    ) -> Result<(), String> {
+        match observer_root_conversation_id {
+            Some(root_conversation_id) => self
+                .authorize_exact_child_observer_read(root_conversation_id, draft_conversation_id)
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            None => self
+                .authorize_user_conversation_write(draft_conversation_id)
+                .map_err(|error| error.to_string()),
+        }
     }
 
     pub fn approve_action(

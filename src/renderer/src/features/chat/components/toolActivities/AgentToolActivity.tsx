@@ -27,11 +27,13 @@ import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
   cancelled?: boolean
+  conversationId?: string
   readActivity?: ChatReadActivity
   webActivity?: ChatWebSearchActivity
   call: AgentToolCall
   diff?: AgentDiffProposal
   mcpInvocation?: ChatMcpToolInvocationView
+  observerRootConversationId?: string
   projectId?: string | null
   previousTodoResult?: AgentToolResult
   result?: AgentToolResult
@@ -42,11 +44,13 @@ interface AgentToolActivityProps {
 
 export function AgentToolActivity({
   cancelled = false,
+  conversationId,
   readActivity,
   webActivity,
   call,
   diff,
   mcpInvocation,
+  observerRootConversationId,
   projectId,
   previousTodoResult,
   result,
@@ -85,6 +89,8 @@ export function AgentToolActivity({
       <ReadToolActivity
         activity={readActivity}
         call={call}
+        conversationId={conversationId}
+        observerRootConversationId={observerRootConversationId}
         projectId={projectId}
         result={result}
         settledStatus={settledStatus}
@@ -196,6 +202,8 @@ export function AgentToolActivity({
     return (
       <ImageGenerationToolActivity
         call={call}
+        conversationId={conversationId}
+        observerRootConversationId={observerRootConversationId}
         result={result}
         settledStatus={settledStatus}
         showArtifactPreview={showImageGenerationPreview}

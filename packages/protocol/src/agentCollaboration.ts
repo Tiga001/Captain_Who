@@ -1,5 +1,22 @@
-import type { AgentProposedAction } from './agent'
-import { parsePendingAgentActionSnapshotsForHost } from './agentMcpParsers'
+import type {
+  AgentEvent,
+  AgentFileDraftSnapshot,
+  AgentProposedAction,
+  AgentStateSnapshot,
+  AgentToolCall,
+  AgentToolResult,
+  AgentUsage
+} from './agent'
+import type { ActivatedSkillSummary } from './skills'
+import {
+  parseAgentEventForHost,
+  parseAgentMcpToolInvocationEvent,
+  parsePendingAgentActionSnapshotsForHost
+} from './agentMcpParsers'
+import {
+  isAgentCommandSessionEventType,
+  parseAgentCommandSessionEvent
+} from './agentCommandSessionParsers'
 
 export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
 
@@ -19,6 +36,8 @@ export const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD = 'agent.collaboration.
 export const AGENT_COLLABORATION_APPROVALS_LIST_METHOD = 'agent.collaboration.approvals.list'
 export const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD = 'agent.collaboration.approvals.decide'
 export const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.event'
+export const AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD =
+  'agent.collaboration.observerEvent'
 export const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD = 'agent.collaboration.resync'
 
 export type AgentLifecycleView = 'active' | 'archived' | 'disabled'
@@ -182,6 +201,24 @@ export interface CollaborationEventEnvelope {
   kind: CollaborationEventKind
   resourceRevision: number
   occurredAt: number
+}
+
+/**
+ * Process-local, presentation-only stream for an authorized child Conversation observer.
+ *
+ * Durable collaboration events and observer snapshots remain the recovery source of truth. This
+ * envelope adds the exact Host-owned identities which the legacy `agent.event` stream does not
+ * carry, so two child Conversations can safely reuse the existing Renderer Agent-event reducer.
+ */
+export interface AgentObserverEventEnvelope {
+  schemaVersion: typeof AGENT_COLLABORATION_SCHEMA_VERSION
+  rootAgentId: string
+  rootConversationId: string
+  agentId: string
+  conversationId: string
+  runId: string
+  assistantMessageId: string
+  event: AgentEvent
 }
 
 export interface CollaborationEventsRequest extends AgentTreeRequest {
@@ -869,6 +906,481 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
     throw new Error('Invalid CollaborationEventEnvelope identity')
   }
   return parsed
+}
+
+export function parseAgentObserverEventEnvelope(value: unknown): AgentObserverEventEnvelope {
+  const item = record(value, 'AgentObserverEventEnvelope')
+  exact(
+    item,
+    [
+      'schemaVersion',
+      'rootAgentId',
+      'rootConversationId',
+      'agentId',
+      'conversationId',
+      'runId',
+      'assistantMessageId',
+      'event'
+    ],
+    'AgentObserverEventEnvelope'
+  )
+  const parsed: AgentObserverEventEnvelope = {
+    schemaVersion: schema(item.schemaVersion, 'AgentObserverEventEnvelope'),
+    rootAgentId: text(item.rootAgentId, 'rootAgentId'),
+    rootConversationId: text(item.rootConversationId, 'rootConversationId'),
+    agentId: text(item.agentId, 'agentId'),
+    conversationId: text(item.conversationId, 'conversationId'),
+    runId: text(item.runId, 'runId'),
+    assistantMessageId: text(item.assistantMessageId, 'assistantMessageId'),
+    event: parseObserverAgentEvent(item.event)
+  }
+  if (parsed.event.runId !== parsed.runId) {
+    throw new Error('Invalid AgentObserverEventEnvelope run identity')
+  }
+  if (
+    (parsed.event.type === 'command_started' ||
+      parsed.event.type === 'command_output' ||
+      parsed.event.type === 'command_exited' ||
+      parsed.event.type === 'command_interrupted') &&
+    (parsed.event.conversationId !== parsed.conversationId ||
+      parsed.event.assistantMessageId !== parsed.assistantMessageId)
+  ) {
+    throw new Error('Invalid AgentObserverEventEnvelope Command identity')
+  }
+  if (
+    parsed.event.type === 'file_draft_updated' &&
+    parsed.event.draft.conversationId !== parsed.conversationId
+  ) {
+    throw new Error('Invalid AgentObserverEventEnvelope file draft identity')
+  }
+  return parsed
+}
+
+const OBSERVER_EVENT_MAX_TEXT_BYTES = 1024 * 1024
+const OBSERVER_EVENT_MAX_JSON_BYTES = 4 * 1024 * 1024
+
+function boundedObserverText(value: unknown, context: string, maximumBytes: number): string {
+  if (typeof value !== 'string' || new TextEncoder().encode(value).byteLength > maximumBytes) {
+    throw new Error(`Invalid ${context}`)
+  }
+  return value
+}
+
+function observerRunId(value: unknown, context: string): string {
+  const runId = boundedObserverText(value, context, 2048)
+  if (runId.length === 0 || runId.trim() !== runId || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(runId)) {
+    throw new Error(`Invalid ${context}`)
+  }
+  return runId
+}
+
+function boundedObserverJson(value: unknown, context: string): unknown {
+  let encoded: string
+  try {
+    encoded = JSON.stringify(value)
+  } catch {
+    throw new Error(`Invalid ${context}`)
+  }
+  if (new TextEncoder().encode(encoded).byteLength > OBSERVER_EVENT_MAX_JSON_BYTES) {
+    throw new Error(`Invalid ${context}`)
+  }
+  return value
+}
+
+function exactObserverEvent(
+  item: Record<string, unknown>,
+  keys: readonly string[],
+  context: string
+): void {
+  const allowed = new Set(keys)
+  const unexpected = Object.keys(item).find((key) => !allowed.has(key))
+  if (unexpected) throw new Error(`Invalid ${context}.${unexpected}`)
+  for (const required of ['type', 'runId']) {
+    if (!Object.hasOwn(item, required)) throw new Error(`Missing ${context}.${required}`)
+  }
+}
+
+function observerOnlyKeys(
+  item: Record<string, unknown>,
+  keys: readonly string[],
+  context: string
+): void {
+  const allowed = new Set(keys)
+  const unexpected = Object.keys(item).find((key) => !allowed.has(key))
+  if (unexpected) throw new Error(`Invalid ${context}.${unexpected}`)
+}
+
+/** Strict parser for the process-local observer overlay. */
+function parseObserverAgentEvent(value: unknown): AgentEvent {
+  const item = record(value, 'AgentObserverEventEnvelope.event')
+  const type = text(item.type, 'event.type')
+  if (isAgentCommandSessionEventType(type)) return parseAgentCommandSessionEvent(item)
+  const runId = observerRunId(item.runId, `${type}.runId`)
+  if (!runId) throw new Error(`Invalid ${type}.runId`)
+
+  switch (type) {
+    case 'message_delta':
+      exactObserverEvent(item, ['type', 'runId', 'streamId', 'delta'], type)
+      if (!Object.hasOwn(item, 'delta')) throw new Error(`Missing ${type}.delta`)
+      return {
+        type,
+        runId,
+        ...(item.streamId === undefined
+          ? {}
+          : { streamId: boundedObserverText(item.streamId, `${type}.streamId`, 2048) }),
+        delta: boundedObserverText(item.delta, `${type}.delta`, OBSERVER_EVENT_MAX_TEXT_BYTES)
+      }
+    case 'message':
+      exactObserverEvent(item, ['type', 'runId', 'content'], type)
+      if (!Object.hasOwn(item, 'content')) throw new Error(`Missing ${type}.content`)
+      return {
+        type,
+        runId,
+        content: boundedObserverText(item.content, `${type}.content`, OBSERVER_EVENT_MAX_TEXT_BYTES)
+      }
+    case 'tool_call':
+      exactObserverEvent(item, ['type', 'runId', 'call'], type)
+      if (!Object.hasOwn(item, 'call')) throw new Error(`Missing ${type}.call`)
+      return { type, runId, call: parseObserverToolCall(item.call) }
+    case 'tool_result':
+      exactObserverEvent(item, ['type', 'runId', 'result'], type)
+      if (!Object.hasOwn(item, 'result')) throw new Error(`Missing ${type}.result`)
+      return { type, runId, result: parseObserverToolResult(item.result) }
+    case 'mcp_tool_invocation_state_changed':
+      exactObserverEvent(item, ['type', 'runId', 'invocation'], type)
+      if (!Object.hasOwn(item, 'invocation')) throw new Error(`Missing ${type}.invocation`)
+      return { type, runId, invocation: parseAgentMcpToolInvocationEvent(item.invocation) }
+    case 'skill_activated':
+      exactObserverEvent(
+        item,
+        ['type', 'runId', 'activationRevision', 'activatedBy', 'skill'],
+        type
+      )
+      if (item.activatedBy !== 'user' && item.activatedBy !== 'model') {
+        throw new Error(`Invalid ${type}.activatedBy`)
+      }
+      return {
+        type,
+        runId,
+        activationRevision: boundedObserverText(
+          item.activationRevision,
+          `${type}.activationRevision`,
+          2048
+        ),
+        activatedBy: item.activatedBy,
+        skill: parseObserverSkill(item.skill)
+      }
+    case 'file_draft_updated':
+      exactObserverEvent(item, ['type', 'runId', 'draft'], type)
+      if (!Object.hasOwn(item, 'draft')) throw new Error(`Missing ${type}.draft`)
+      return { type, runId, draft: parseObserverFileDraft(item.draft) }
+    case 'error':
+      exactObserverEvent(item, ['type', 'runId', 'message', 'recoverable', 'code', 'details'], type)
+      if (typeof item.recoverable !== 'boolean') throw new Error(`Invalid ${type}.recoverable`)
+      return {
+        type,
+        runId,
+        message: boundedObserverText(
+          item.message,
+          `${type}.message`,
+          OBSERVER_EVENT_MAX_TEXT_BYTES
+        ),
+        recoverable: item.recoverable,
+        ...(item.code === undefined
+          ? {}
+          : { code: boundedObserverText(item.code, `${type}.code`, 128) }),
+        ...(item.details === undefined
+          ? {}
+          : { details: boundedObserverJson(item.details, `${type}.details`) })
+      }
+    case 'done':
+      exactObserverEvent(
+        item,
+        [
+          'type',
+          'runId',
+          'success',
+          'status',
+          'content',
+          'usage',
+          'finishReason',
+          'proposedActions'
+        ],
+        type
+      )
+      if (
+        typeof item.success !== 'boolean' ||
+        (item.proposedActions !== undefined &&
+          (!Array.isArray(item.proposedActions) || item.proposedActions.length !== 0))
+      ) {
+        throw new Error(`Invalid ${type}`)
+      }
+      return {
+        type,
+        runId,
+        success: item.success,
+        ...(item.status === undefined
+          ? {}
+          : { status: observerRunStatus(item.status, `${type}.status`) }),
+        ...(item.content === undefined
+          ? {}
+          : {
+              content: boundedObserverText(
+                item.content,
+                `${type}.content`,
+                OBSERVER_EVENT_MAX_TEXT_BYTES
+              )
+            }),
+        ...(item.usage === undefined ? {} : { usage: parseObserverUsage(item.usage) }),
+        ...(item.finishReason === undefined
+          ? {}
+          : { finishReason: boundedObserverText(item.finishReason, `${type}.finishReason`, 2048) }),
+        ...(item.proposedActions === undefined ? {} : { proposedActions: [] })
+      }
+    default:
+      return parseObserverStructuralEvent(type, runId, item)
+  }
+}
+
+function parseObserverStructuralEvent(
+  type: string,
+  runId: string,
+  item: Record<string, unknown>
+): AgentEvent {
+  if (type === 'message_stream_reset' || type === 'llm_retry') {
+    const parsed = parseAgentEventForHost(item)
+    if (parsed.type !== type) throw new Error(`Invalid Agent observer event type ${type}`)
+    return parsed
+  }
+  if (type === 'state') {
+    exactObserverEvent(item, ['type', 'runId', 'state'], type)
+    return { type, runId, state: parseObserverState(item.state) }
+  }
+  if (type === 'message_stream_started') {
+    exactObserverEvent(item, ['type', 'runId', 'streamId', 'attempt'], type)
+    return {
+      type,
+      runId,
+      streamId: text(item.streamId, `${type}.streamId`, 2048),
+      attempt: integer(item.attempt, `${type}.attempt`)
+    }
+  }
+  if (type === 'message_stream_committed') {
+    exactObserverEvent(item, ['type', 'runId', 'streamId'], type)
+    return { type, runId, streamId: text(item.streamId, `${type}.streamId`, 2048) }
+  }
+  throw new Error(`Invalid Agent observer event type ${type}`)
+}
+
+function observerRunStatus(value: unknown, context: string) {
+  return oneOf(
+    value,
+    [
+      'idle',
+      'queued',
+      'running',
+      'waiting_for_approval',
+      'completed',
+      'failed',
+      'cancelled'
+    ] as const,
+    context
+  )
+}
+
+function parseObserverToolCall(value: unknown): AgentToolCall {
+  const item = record(value, 'observer Tool call')
+  exact(item, ['id', 'tool', 'args', 'approvalStatus', 'reason'], 'observer Tool call')
+  return {
+    id: text(item.id, 'observer Tool call.id', 2048),
+    tool: text(item.tool, 'observer Tool call.tool', 1024),
+    args: boundedObserverJson(item.args, 'observer Tool call.args'),
+    approvalStatus: oneOf(
+      item.approvalStatus,
+      ['not_required', 'required', 'approved', 'rejected'] as const,
+      'observer Tool call.approvalStatus'
+    ),
+    reason:
+      item.reason === null
+        ? null
+        : boundedObserverText(item.reason, 'observer Tool call.reason', 16 * 1024)
+  }
+}
+
+function parseObserverToolResult(value: unknown): AgentToolResult {
+  const item = record(value, 'observer Tool result')
+  const allowed = ['callId', 'tool', 'ok', 'result', 'error'] as const
+  observerOnlyKeys(item, allowed, 'observer Tool result')
+  if (
+    !Object.hasOwn(item, 'callId') ||
+    !Object.hasOwn(item, 'tool') ||
+    !Object.hasOwn(item, 'ok')
+  ) {
+    throw new Error('Invalid observer Tool result')
+  }
+  if (typeof item.ok !== 'boolean') throw new Error('Invalid observer Tool result.ok')
+  return {
+    callId: text(item.callId, 'observer Tool result.callId', 2048),
+    tool: text(item.tool, 'observer Tool result.tool', 1024),
+    ok: item.ok,
+    ...(item.result === undefined
+      ? {}
+      : { result: boundedObserverJson(item.result, 'observer Tool result.result') }),
+    ...(item.error === undefined
+      ? {}
+      : {
+          error: boundedObserverText(
+            item.error,
+            'observer Tool result.error',
+            OBSERVER_EVENT_MAX_TEXT_BYTES
+          )
+        })
+  }
+}
+
+function parseObserverSkill(value: unknown): ActivatedSkillSummary {
+  const item = record(value, 'observer Skill')
+  exact(item, ['id', 'name', 'revision', 'source'], 'observer Skill')
+  const source = record(item.source, 'observer Skill.source')
+  exact(source, ['kind', 'id'], 'observer Skill.source')
+  return {
+    id: text(item.id, 'observer Skill.id'),
+    name: text(item.name, 'observer Skill.name', 1024),
+    revision: text(item.revision, 'observer Skill.revision', 2048),
+    source: {
+      kind: oneOf(
+        source.kind,
+        ['workspace', 'bundled', 'installed'] as const,
+        'observer Skill.source.kind'
+      ),
+      id: text(source.id, 'observer Skill.source.id')
+    }
+  }
+}
+
+function parseObserverFileDraft(value: unknown): AgentFileDraftSnapshot {
+  const item = record(value, 'observer file draft')
+  const keys = [
+    'draftId',
+    'conversationId',
+    'projectId',
+    'filePath',
+    'mode',
+    'status',
+    'baseRevision',
+    'additions',
+    'deletions',
+    'lineCount',
+    'byteCount',
+    'chunkCount',
+    'nextChunkIndex',
+    'statsFinal',
+    'summary',
+    'createdAt',
+    'updatedAt'
+  ] as const
+  observerOnlyKeys(item, keys, 'observer file draft')
+  for (const required of [
+    'draftId',
+    'conversationId',
+    'filePath',
+    'mode',
+    'status',
+    'additions',
+    'deletions',
+    'lineCount',
+    'byteCount',
+    'chunkCount',
+    'nextChunkIndex',
+    'statsFinal',
+    'createdAt',
+    'updatedAt'
+  ]) {
+    if (!Object.hasOwn(item, required)) throw new Error(`Invalid observer file draft.${required}`)
+  }
+  if (typeof item.statsFinal !== 'boolean')
+    throw new Error('Invalid observer file draft.statsFinal')
+  return {
+    draftId: text(item.draftId, 'observer file draft.draftId'),
+    conversationId: text(item.conversationId, 'observer file draft.conversationId'),
+    ...(item.projectId === undefined
+      ? {}
+      : { projectId: text(item.projectId, 'observer file draft.projectId') }),
+    filePath: text(item.filePath, 'observer file draft.filePath', 16 * 1024),
+    mode: oneOf(
+      item.mode,
+      ['create', 'rewrite', 'modify', 'append', 'upsert'] as const,
+      'observer file draft.mode'
+    ),
+    status: oneOf(
+      item.status,
+      [
+        'drafting',
+        'ready',
+        'waiting_approval',
+        'applying',
+        'applied',
+        'rejected',
+        'conflict',
+        'failed',
+        'aborted',
+        'expired'
+      ] as const,
+      'observer file draft.status'
+    ),
+    ...(item.baseRevision === undefined
+      ? {}
+      : { baseRevision: text(item.baseRevision, 'observer file draft.baseRevision', 2048) }),
+    additions: integer(item.additions, 'observer file draft.additions'),
+    deletions: integer(item.deletions, 'observer file draft.deletions'),
+    lineCount: integer(item.lineCount, 'observer file draft.lineCount'),
+    byteCount: integer(item.byteCount, 'observer file draft.byteCount'),
+    chunkCount: integer(item.chunkCount, 'observer file draft.chunkCount'),
+    nextChunkIndex: integer(item.nextChunkIndex, 'observer file draft.nextChunkIndex'),
+    statsFinal: item.statsFinal,
+    ...(item.summary === undefined
+      ? {}
+      : { summary: boundedObserverText(item.summary, 'observer file draft.summary', 16 * 1024) }),
+    createdAt: integer(item.createdAt, 'observer file draft.createdAt'),
+    updatedAt: integer(item.updatedAt, 'observer file draft.updatedAt')
+  }
+}
+
+function parseObserverState(value: unknown): AgentStateSnapshot {
+  const item = record(value, 'observer state')
+  exact(item, ['status', 'activeRunId', 'lastError', 'updatedAt'], 'observer state')
+  return {
+    status: observerRunStatus(item.status, 'observer state.status'),
+    activeRunId: item.activeRunId === null ? null : observerRunId(item.activeRunId, 'activeRunId'),
+    lastError:
+      item.lastError === null
+        ? null
+        : boundedObserverText(
+            item.lastError,
+            'observer state.lastError',
+            OBSERVER_EVENT_MAX_TEXT_BYTES
+          ),
+    updatedAt: integer(item.updatedAt, 'observer state.updatedAt')
+  }
+}
+
+function parseObserverUsage(value: unknown): AgentUsage {
+  const item = record(value, 'observer usage')
+  const keys = [
+    'inputTokens',
+    'outputTokens',
+    'outputThinkingTokens',
+    'totalTokens',
+    'cachedInputTokens',
+    'cacheCreationInputTokens',
+    'billableRequestCount'
+  ] as const
+  observerOnlyKeys(item, keys, 'observer usage')
+  const usage: AgentUsage = {}
+  for (const key of keys) {
+    if (item[key] !== undefined) usage[key] = integer(item[key], `observer usage.${key}`)
+  }
+  return usage
 }
 
 export function parseCollaborationEventsRequest(value: unknown): CollaborationEventsRequest {

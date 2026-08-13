@@ -25,6 +25,7 @@ import { featureFlags } from '../config/featureFlags'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import type {
+  RightSidebarAgentNavigationRequest,
   RightSidebarCapabilities,
   RightSidebarReviewNavigationRequest
 } from '../features/rightSidebar/rightSidebarTypes'
@@ -98,6 +99,11 @@ import { useContextWindowSnapshots } from '../features/agentRun/useContextWindow
 import { useAgentRunLifecycle } from './useAgentRunLifecycle'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
 import { selectRenderableModelTransitionOperations } from '../features/chat/modelTransitionUiState'
+import { useOptionalCollaborationStore } from '../features/agentCollaboration/useCollaborationStore'
+import { CollaborationActivityPanel } from '../features/agentCollaboration/CollaborationActivityPanel'
+import { CollaborationApprovalPanel } from '../features/agentCollaboration/CollaborationApprovalPanel'
+import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
+import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -139,6 +145,9 @@ export function AppShell() {
   const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
     useState<RightSidebarReviewNavigationRequest | null>(null)
   const rightSidebarReviewNavigationRequestIdRef = useRef(0)
+  const [rightSidebarAgentNavigationRequest, setRightSidebarAgentNavigationRequest] =
+    useState<RightSidebarAgentNavigationRequest | null>(null)
+  const rightSidebarAgentNavigationRequestIdRef = useRef(0)
   const {
     appWindowMaximized,
     closeSettings,
@@ -220,6 +229,21 @@ export function AppShell() {
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
     [activeConversationId, conversations]
   )
+  const collaborationSnapshot = useOptionalCollaborationStore(activeConversation?.id ?? null)
+  const collaborationTreeCandidate = collaborationSnapshot?.tree ?? null
+  const collaborationTree =
+    collaborationTreeCandidate?.rootConversationId === activeConversation?.id
+      ? collaborationTreeCandidate
+      : null
+  const collaborationChildren = useMemo(
+    () => collaborationTree?.agents.filter((agent) => agent.parentAgentId !== null) ?? [],
+    [collaborationTree]
+  )
+  const collaborationApprovals = useCollaborationApprovals({
+    enabled: collaborationChildren.length > 0,
+    invalidationSequence: collaborationTree?.lastSequence ?? 0,
+    rootConversationId: collaborationTree?.rootConversationId ?? null
+  })
   const activeDraftId = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
   const activeDraft =
     drafts[activeDraftId] ??
@@ -302,6 +326,65 @@ export function AppShell() {
       openRightSidebar()
     },
     [openRightSidebar, rightSidebarWorkspaceProject?.id]
+  )
+  const openAgentCenter = useCallback(
+    (agentId: string) => {
+      const rootConversationId = activeConversation?.id
+      if (!rootConversationId) return
+      rightSidebarAgentNavigationRequestIdRef.current += 1
+      setRightSidebarAgentNavigationRequest({
+        agentId,
+        requestId: rightSidebarAgentNavigationRequestIdRef.current,
+        rootConversationId
+      })
+      openRightSidebar()
+    },
+    [activeConversation?.id, openRightSidebar]
+  )
+  const renderAgentObserver = useCallback(
+    ({ agent, agentLabelsById, invalidationVersion, rootConversationId }) => (
+      <AgentObserverConversationSurface
+        agent={agent}
+        agentLabelsById={agentLabelsById}
+        invalidationVersion={invalidationVersion}
+        rootConversationId={rootConversationId}
+        showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
+      />
+    ),
+    [uiPreferences.showTokenUsageDetails]
+  )
+  const {
+    approvals: projectedCollaborationApprovals,
+    decide: decideCollaborationApproval,
+    error: collaborationApprovalError,
+    refresh: refreshCollaborationApprovals
+  } = collaborationApprovals
+  const collaborationContent = useMemo(
+    () =>
+      collaborationChildren.length > 0 ? (
+        <>
+          <CollaborationActivityPanel
+            agents={collaborationChildren}
+            onOpenAgent={openAgentCenter}
+          />
+          <CollaborationApprovalPanel
+            approvals={projectedCollaborationApprovals}
+            loadError={collaborationApprovalError}
+            mode="interactive"
+            onDecision={decideCollaborationApproval}
+            onOpenAgent={openAgentCenter}
+            onRetryLoad={() => void refreshCollaborationApprovals()}
+          />
+        </>
+      ) : null,
+    [
+      collaborationApprovalError,
+      collaborationChildren,
+      decideCollaborationApproval,
+      openAgentCenter,
+      projectedCollaborationApprovals,
+      refreshCollaborationApprovals
+    ]
   )
   const rightSidebarMaximizedToolbarControls = useMemo(
     () =>
@@ -1567,6 +1650,7 @@ export function AppShell() {
               </div>
             ) : (
               <ChatConversationPage
+                collaborationContent={collaborationContent}
                 composerDraft={activeDraft}
                 conversation={activeConversation}
                 contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
@@ -1642,7 +1726,9 @@ export function AppShell() {
       <aside className="side-panel side-panel--right">
         <RightSidebar
           activeConversationId={activeConversation?.id}
+          agentNavigationRequest={rightSidebarAgentNavigationRequest}
           capabilities={rightSidebarCapabilities}
+          collaborationSnapshot={collaborationSnapshot}
           isMaximized={rightMaximized}
           isOpen={rightOpen}
           isWorkspaceVisible={!settingsOpen}
@@ -1651,7 +1737,9 @@ export function AppShell() {
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}
+          onOpenAgentTemplates={() => openSettings('agentTemplates')}
           reviewNavigationRequest={rightSidebarReviewNavigationRequest}
+          renderAgentObserver={renderAgentObserver}
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
         />
       </aside>
@@ -1660,6 +1748,7 @@ export function AppShell() {
           <AppShellSettingsView
             conversations={conversations}
             initialPage={settingsInitialPage}
+            initialProjectId={rightSidebarWorkspaceProject?.id}
             onBack={closeSettings}
             onConversationPatch={patchConversation}
             onConversationsChange={setConversationsWithRef}

@@ -312,6 +312,69 @@ pub fn list_pending_actions(
     records
 }
 
+/// Lists every durable MCP action journal owned by one Assistant run.
+///
+/// Unlike [`list_pending_actions`], this query intentionally includes terminal rows: automatic
+/// MCP journals scrub their payload after settlement but retain the exact Tool call binding,
+/// stable action identity and lifecycle timestamps needed for a safe read-only conversation
+/// projection. Callers must still corroborate the row with the append-only conversation trace;
+/// a journal row alone is never execution truth.
+pub(crate) fn list_mcp_actions_for_assistant_run(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+) -> rusqlite::Result<Vec<AgentPendingActionRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            action_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action_type,
+            tool_name,
+            tool_call_id,
+            status,
+            target_status,
+            action_json,
+            agent_input_json,
+            created_at,
+            updated_at
+        FROM agent_pending_actions
+        WHERE conversation_id = ?1
+          AND assistant_message_id = ?2
+          AND run_id = ?3
+          AND action_type = 'mcp_tool_call'
+        ORDER BY created_at ASC, action_id ASC
+        ",
+    )?;
+
+    let records = statement
+        .query_map(
+            params![conversation_id, assistant_message_id, run_id],
+            |row| {
+                Ok(AgentPendingActionRecord {
+                    action_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    assistant_message_id: row.get(3)?,
+                    action_type: row.get(4)?,
+                    tool_name: row.get(5)?,
+                    tool_call_id: row.get(6)?,
+                    status: row.get(7)?,
+                    target_status: row.get(8)?,
+                    action_json: row.get(9)?,
+                    agent_input_json: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            },
+        )?
+        .collect();
+    records
+}
+
 /// Atomically replaces both lifecycle status and its persisted resume payload. Keeping these
 /// columns in one statement prevents a terminal row from becoming visible while it still carries
 /// the prior run-scoped payload.

@@ -46,6 +46,7 @@ pub struct JsonRpcErrorObject {
 #[serde(rename_all = "camelCase")]
 pub struct AgentFileDraftReadRequest {
     pub draft_id: String,
+    pub observer_root_conversation_id: Option<String>,
     pub offset: Option<usize>,
     pub max_chars: Option<usize>,
 }

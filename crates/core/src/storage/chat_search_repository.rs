@@ -111,6 +111,13 @@ fn query_message_hits(
               WHERE hidden_agent.conversation_id = c.id
                 AND hidden_agent.parent_agent_id IS NOT NULL
           )
+          AND NOT (
+              m.input_origin_kind IS 'agent'
+              OR (
+                  m.input_origin_kind IS 'snapshot'
+                  AND m.snapshot_original_origin_kind IS 'agent'
+              )
+          )
           AND m.content <> ''
           AND lower(m.content) LIKE ?1 ESCAPE '\\'
         ORDER BY c.updated_at DESC, m.position ASC, m.created_at ASC
@@ -153,6 +160,13 @@ fn query_title_hits(
               SELECT 1
               FROM messages
               WHERE messages.conversation_id = conversations.id
+                AND NOT (
+                    messages.input_origin_kind IS 'agent'
+                    OR (
+                        messages.input_origin_kind IS 'snapshot'
+                        AND messages.snapshot_original_origin_kind IS 'agent'
+                    )
+                )
                 AND messages.content <> ''
                 AND lower(messages.content) LIKE ?1 ESCAPE '\\'
           )

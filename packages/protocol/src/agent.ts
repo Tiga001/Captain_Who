@@ -1163,6 +1163,8 @@ export interface AgentFileWriteResult {
 
 export interface AgentFileDraftIdInput {
   draftId: string
+  /** Exact root authority for an authorized read-only child observer. */
+  observerRootConversationId?: string
 }
 
 export interface AgentFileDraftReadInput extends AgentFileDraftIdInput {

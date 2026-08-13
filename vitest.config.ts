@@ -84,7 +84,8 @@ export default defineConfig({
             `${mcpTests}/**/*.browser.test.tsx`,
             `${gitReviewTests}/**/*.browser.test.tsx`,
             `${rightSidebarTests}/**/*.browser.test.tsx`,
-            `${filesTests}/**/*.browser.test.tsx`
+            `${filesTests}/**/*.browser.test.tsx`,
+            `${agentCollaborationTests}/**/*.browser.test.tsx`
           ],
           name: 'browser'
         }

@@ -1768,17 +1768,20 @@ mod tests {
             wake: &AgentWakeRequestRecord,
             permit: AgentTurnConcurrencyPermit,
         ) -> Result<AgentWakeExecutionHandle, String> {
-            self.starts
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .push(wake.agent_id.clone());
-            self.start_notify.notify_waiters();
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
             self.permits
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .insert(format!("run:{}", wake.wake_id), permit);
+            // Publish the deterministic test barrier only after every fact asserted by a waiter
+            // is visible. Otherwise `wait_for_starts(2)` can observe the second vector entry
+            // between that write and the corresponding active-count update.
+            self.starts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(wake.agent_id.clone());
+            self.start_notify.notify_waiters();
             Ok(AgentWakeExecutionHandle {
                 wake_id: wake.wake_id.clone(),
                 run_id: format!("run:{}", wake.wake_id),

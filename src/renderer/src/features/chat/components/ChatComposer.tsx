@@ -56,6 +56,7 @@ import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
 import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
+import { ModelConfigPicker } from '../../modelSelection/ModelConfigPicker'
 import './ChatComposer.css'
 import './GuidanceQueue.css'
 
@@ -132,13 +133,11 @@ export function ChatComposer({
   const attachmentPickerRef = useRef<HTMLDivElement>(null)
   const attachmentTriggerRef = useRef<HTMLButtonElement>(null)
   const permissionPickerRef = useRef<HTMLDivElement>(null)
-  const modelPickerRef = useRef<HTMLDivElement>(null)
   const projectPickerRef = useRef<HTMLDivElement>(null)
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false)
   const [isSkillMenuOpen, setIsSkillMenuOpen] = useState(false)
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false)
   const [isFullPermissionConfirmationOpen, setIsFullPermissionConfirmationOpen] = useState(false)
-  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false)
   const [isFileDragActive, setIsFileDragActive] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
@@ -251,7 +250,6 @@ export function ChatComposer({
   useDismissOnOutsidePointer(permissionPickerRef, isPermissionMenuOpen, () =>
     setIsPermissionMenuOpen(false)
   )
-  useDismissOnOutsidePointer(modelPickerRef, isModelMenuOpen, () => setIsModelMenuOpen(false))
   useDismissOnOutsidePointer(projectPickerRef, isProjectMenuOpen, () => setIsProjectMenuOpen(false))
 
   useEffect(() => {
@@ -295,7 +293,6 @@ export function ChatComposer({
     setIsAttachmentMenuOpen(false)
     setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
-    setIsModelMenuOpen(false)
     setIsProjectMenuOpen(false)
   }, [isModelTransitionRunning])
 
@@ -477,7 +474,6 @@ export function ChatComposer({
     setIsAttachmentMenuOpen(false)
     setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
-    setIsModelMenuOpen(false)
     setIsProjectMenuOpen(false)
   }
 
@@ -767,7 +763,6 @@ export function ChatComposer({
                 setIsAttachmentMenuOpen((open) => !open)
                 setIsSkillMenuOpen(false)
                 setIsPermissionMenuOpen(false)
-                setIsModelMenuOpen(false)
                 setIsProjectMenuOpen(false)
               }}
             >
@@ -833,7 +828,6 @@ export function ChatComposer({
               onClick={() => {
                 setIsAttachmentMenuOpen(false)
                 setIsSkillMenuOpen(false)
-                setIsModelMenuOpen(false)
                 setIsPermissionMenuOpen((open) => !open)
               }}
               onKeyDown={(event) => {
@@ -886,70 +880,27 @@ export function ChatComposer({
             <ContextWindowIndicator snapshot={contextWindowSnapshot} />
           )}
 
-          <div className="composer-model-picker" ref={modelPickerRef}>
-            <button
-              type="button"
-              className="composer-model-button"
-              disabled={isGenerating || isModelTransitionRunning}
-              aria-haspopup="listbox"
-              aria-expanded={isModelMenuOpen}
-              aria-label={t('chat.selectModel')}
-              onClick={() => {
-                setIsAttachmentMenuOpen(false)
-                setIsSkillMenuOpen(false)
-                setIsPermissionMenuOpen(false)
-                setIsModelMenuOpen((open) => !open)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  setIsModelMenuOpen(false)
-                }
-              }}
-            >
-              <span>{selectedModel?.displayName ?? t('chat.noEnabledModels')}</span>
-              <ChevronDown aria-hidden="true" />
-            </button>
-
-            {isModelMenuOpen && (
-              <div
-                className="composer-model-menu"
-                role="listbox"
-                aria-label={t('chat.selectModel')}
-              >
-                {enabledModels.length === 0 ? (
-                  <span className="composer-model-empty">{t('chat.noEnabledModels')}</span>
-                ) : (
-                  enabledModels.map((model) => {
-                    const isSelected = model.id === selectedModel?.id
-
-                    return (
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={isSelected}
-                        className="composer-model-option"
-                        data-selected={isSelected || undefined}
-                        key={model.id}
-                        onClick={() => {
-                          setIsModelMenuOpen(false)
-                          if (model.id === selectedModel?.id) return
-                          updateDraft({ modelId: model.id })
-                        }}
-                      >
-                        <span className="composer-model-option__name">{model.displayName}</span>
-                        <span
-                          className="composer-model-option__capability"
-                          data-supported={model.supportsImage || undefined}
-                        >
-                          {model.supportsImage ? t('configuration.image') : t('configuration.text')}
-                        </span>
-                      </button>
-                    )
-                  })
-                )}
-              </div>
-            )}
-          </div>
+          <ModelConfigPicker
+            ariaLabel={t('chat.selectModel')}
+            disabled={isGenerating || isModelTransitionRunning}
+            emptyLabel={t('chat.noEnabledModels')}
+            onChange={(modelId) => {
+              setIsAttachmentMenuOpen(false)
+              setIsSkillMenuOpen(false)
+              setIsPermissionMenuOpen(false)
+              if (modelId !== selectedModel?.id) updateDraft({ modelId })
+            }}
+            options={enabledModels.map((model) => ({
+              capabilityLabel: model.supportsImage
+                ? t('configuration.image')
+                : t('configuration.text'),
+              capabilitySupported: model.supportsImage,
+              id: model.id,
+              label: model.displayName
+            }))}
+            value={selectedModel?.id ?? null}
+            variant="composer"
+          />
 
           <button
             type={isModelTransitionRunning || (isGenerating && !canSend) ? 'button' : 'submit'}
@@ -986,7 +937,6 @@ export function ChatComposer({
                   setIsAttachmentMenuOpen(false)
                   setIsSkillMenuOpen(false)
                   setIsPermissionMenuOpen(false)
-                  setIsModelMenuOpen(false)
                   setIsProjectMenuOpen((open) => !open)
                 }}
               >

@@ -289,7 +289,21 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
     assert_eq!(run["status"], "cancelled");
     assert_eq!(run["state"]["status"], "cancelled");
     assert!(run["state"]["activeRunId"].is_null());
-    assert_eq!(run["timeline"], serde_json::json!([]));
+    assert_eq!(
+        run["timeline"],
+        serde_json::json!([
+            {
+                "id": "trace-message-0",
+                "type": "message",
+                "content": "I will inspect the file."
+            },
+            {
+                "id": "tool-call-call-run-cancelled-orphan",
+                "type": "tool_call",
+                "callId": "call-run-cancelled-orphan"
+            }
+        ])
+    );
 
     let usage_state: (String, Option<String>, Option<i64>) = service
         .state

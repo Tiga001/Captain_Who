@@ -10,6 +10,51 @@ pub fn agent_event_notification(event: AgentEvent) -> Value {
     })
 }
 
+/// Wraps one ordinary safe Agent event with the exact child identities required by an observer.
+/// The nested event projection is deliberately identical to `agent.event`; this is routing
+/// authority, not a second runtime event or presentation model.
+pub(crate) fn child_observer_event_notification(
+    identity: &AgentCollaborationIdentity,
+    run_id: &str,
+    assistant_message_id: &str,
+    event: AgentEvent,
+) -> Value {
+    let safe = agent_event_notification(event);
+    json!({
+        "jsonrpc": "2.0",
+        "method": mycopilot_protocol_rs::AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
+        "params": {
+            "schemaVersion": mycopilot_protocol_rs::AGENT_COLLABORATION_SCHEMA_VERSION,
+            "rootAgentId": identity.root_agent_id,
+            "rootConversationId": identity.root_conversation_id,
+            "agentId": identity.agent_id,
+            "conversationId": identity.conversation_id,
+            "runId": run_id,
+            "assistantMessageId": assistant_message_id,
+            "event": safe["params"].clone(),
+        }
+    })
+}
+
+/// Emits the legacy root event plus the identity-rich observer event for a trusted child Turn.
+pub(crate) fn emit_agent_event_notifications(
+    notifications: &crate::application::agent::CoreServerNotificationSender,
+    collaboration_identity: Option<&AgentCollaborationIdentity>,
+    run_id: &str,
+    assistant_message_id: &str,
+    event: AgentEvent,
+) {
+    let _ = notifications.send(agent_event_notification(event.clone()));
+    if let Some(identity) = collaboration_identity {
+        let _ = notifications.send(child_observer_event_notification(
+            identity,
+            run_id,
+            assistant_message_id,
+            event,
+        ));
+    }
+}
+
 /// Removes Host-only approval binding material before a value crosses the
 /// core-server → Main/Renderer notification boundary.
 ///

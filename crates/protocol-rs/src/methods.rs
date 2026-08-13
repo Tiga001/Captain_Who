@@ -62,6 +62,8 @@ pub const AGENT_COLLABORATION_APPROVALS_LIST_METHOD: &str = "agent.collaboration
 pub const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD: &str =
     "agent.collaboration.approvals.decide";
 pub const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD: &str = "agent.collaboration.event";
+pub const AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD: &str =
+    "agent.collaboration.observerEvent";
 pub const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD: &str = "agent.collaboration.resync";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
 pub const SKILLS_LIST_METHOD: &str = "skills.list";

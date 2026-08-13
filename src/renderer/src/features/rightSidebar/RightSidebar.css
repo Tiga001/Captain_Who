@@ -287,6 +287,20 @@
   stroke-width: var(--mc-icon-stroke-regular);
 }
 
+.right-sidebar__module-badge {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  margin-left: auto;
+  padding: 0 6px;
+  place-items: center;
+  color: var(--mc-color-text-accent);
+  background: var(--mc-color-surface-info-subtle);
+  border-radius: var(--mc-radius-pill);
+  font-size: var(--mc-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
 .right-sidebar__content {
   position: relative;
   min-width: 0;

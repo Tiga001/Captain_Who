@@ -24,6 +24,11 @@ export function RightSidebarHome({ modules, onOpenModule }: RightSidebarHomeProp
             <span className="right-sidebar__tool-heading">
               <Icon aria-hidden="true" />
               <span className="right-sidebar__tool-title">{t(module.titleKey)}</span>
+              {module.badge ? (
+                <span className="right-sidebar__module-badge" aria-label={`${module.badge}`}>
+                  {module.badge}
+                </span>
+              ) : null}
             </span>
           </button>
         )

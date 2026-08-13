@@ -32,6 +32,7 @@ import type {
   CollaborationApprovalList,
   CollaborationApprovalListRequest,
   CollaborationEventEnvelope,
+  AgentObserverEventEnvelope,
   CollaborationEventsPage,
   CollaborationEventsRequest,
   CollaborationResyncEnvelope,
@@ -364,6 +365,7 @@ export interface AgentHostApi {
     input: CollaborationApprovalDecisionRequest
   ): Promise<HostInvocationResult<CollaborationApprovalDecisionResult>>
   onCollaborationEvent(handler: (event: CollaborationEventEnvelope) => void): () => void
+  onCollaborationObserverEvent(handler: (event: AgentObserverEventEnvelope) => void): () => void
   onCollaborationResync(handler: (event: CollaborationResyncEnvelope) => void): () => void
   preflightProviderTransition(
     input: AgentProviderTransitionPreflightInput

@@ -16,6 +16,7 @@ export const HOST_CHANNELS = {
     collaborationApprovalDecide: 'host:agent.collaboration.approvals.decide',
     collaborationApprovalList: 'host:agent.collaboration.approvals.list',
     collaborationEvent: 'host:agent.collaboration.event',
+    collaborationObserverEvent: 'host:agent.collaboration.observerEvent',
     collaborationResync: 'host:agent.collaboration.resync',
     collaborationGetAgent: 'host:agent.collaboration.getAgent',
     collaborationGetTree: 'host:agent.collaboration.getTree',

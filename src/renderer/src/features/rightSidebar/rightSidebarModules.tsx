@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useCallback } from 'react'
-import { FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
+import { Bot, FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
 import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
 import type { BrowserPageMetadata } from '../browser/browserTypes'
 import { useRightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
@@ -29,6 +29,11 @@ const GitReviewPanel = lazy(async () => {
 const FilesPanel = lazy(async () => {
   const module = await import('../files/FilesPanel')
   return { default: module.FilesPanel }
+})
+
+const AgentCenterPanel = lazy(async () => {
+  const module = await import('../agentCollaboration/AgentCenterPanel')
+  return { default: module.AgentCenterPanel }
 })
 
 export const MAX_FILE_PREVIEW_PAGES_PER_WORKSPACE = 20
@@ -95,6 +100,21 @@ function createFilesPage({
     id: pageId,
     moduleId: 'files',
     title: t('files.openFile'),
+    workspaceKey: workspace.key,
+    workspaceName: workspace.name,
+    workspacePath: workspace.path
+  }
+}
+
+function createAgentCenterPage({
+  pageId,
+  t,
+  workspace
+}: RightSidebarModuleCreateContext): RightSidebarPage {
+  return {
+    id: pageId,
+    moduleId: 'agent-center',
+    title: t('rightSidebar.agentCenter'),
     workspaceKey: workspace.key,
     workspaceName: workspace.name,
     workspacePath: workspace.path
@@ -292,6 +312,20 @@ function renderFilesModule({
   )
 }
 
+function renderAgentCenterModule({ onPageUpdate, page, t }: RightSidebarModuleRenderProps) {
+  const pageState = page.moduleState?.kind === 'agent-center' ? page.moduleState : null
+  return (
+    <Suspense
+      fallback={<div className="right-sidebar__panel-loading">{t('agentCenter.loading')}</div>}
+    >
+      <AgentCenterPanel
+        onNavigate={(moduleState) => onPageUpdate({ moduleState })}
+        pageState={pageState}
+      />
+    </Suspense>
+  )
+}
+
 function createWorkspaceFileOpenRequest(
   path: string,
   disposition: NonNullable<RightSidebarPageOpenRequest['disposition']>
@@ -360,3 +394,16 @@ export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
     unavailablePagePolicy: 'close-page'
   }
 ]
+
+export const AGENT_CENTER_RIGHT_SIDEBAR_MODULE: RightSidebarModuleDefinition = {
+  contextBinding: 'follow-workspace',
+  createPage: createAgentCenterPage,
+  id: 'agent-center',
+  icon: Bot,
+  instancePolicy: 'single',
+  render: renderAgentCenterModule,
+  retention: 'keep-alive',
+  surfaceKind: 'react',
+  titleKey: 'rightSidebar.agentCenter',
+  unavailablePagePolicy: 'close-page'
+}

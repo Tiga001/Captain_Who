@@ -28,6 +28,58 @@ preserve runtime state can use `unmount-when-inactive`.
 The browser uses `keep-alive`, so navigation, page state, cookies, and focus history survive tab
 switches. The terminal also uses `keep-alive`, preserving its PTY session.
 
+## Root-scoped Agent Center
+
+The Agent Center is a dynamic React module composed by `RightSidebar`; it is deliberately not in
+the static default registry used by an empty or legacy Conversation. It is added only when the
+currently active root Conversation's authorized tree snapshot contains at least one child Agent.
+Consequently, a root with no child preserves the previous sidebar module list and DOM, while a tree
+with children gains a translated “Subagents” entry and an active-Agent count.
+
+The module is bound to the active root Conversation, not merely to the project/workspace:
+
+- the home page divides the current tree into active and non-active groups, sorted by latest
+  activity, and shows only presentation-safe task, status, model display, and timing fields;
+- selecting an Agent pushes the module into a detail state and renders the shared
+  `ConversationSurface` in `observer` mode through an application-shell render contract;
+- switching to another root in the same project resets an existing Agent Center detail to that
+  root's list; a stale snapshot fails closed, and a root with no child removes the module;
+- the observer has no composer, send, edit, retry, fork, stop/guide, or approval controls. Its Host
+  load also requires the exact root and child Conversation identities, so the UI restriction is
+  not the authorization boundary;
+- the 280 px sidebar floor uses scoped spacing overrides around the shared Surface rather than a
+  second compact chat implementation.
+
+`AppShell` is the sole owner of the active-root collaboration store. It supplies the same snapshot
+and per-Agent validated invalidation sequence to the Agent Center, root-chat activity/approval
+projections, and observer refreshes. A hydration revision additionally invalidates every observer
+after a gap, restart resync, or window reload. An observer change is
+identity-scoped so a late response for Agent A cannot appear under Agent B; same-Agent invalidation
+refreshes may retain the last authorized snapshot rather than flashing unrelated or empty content.
+During a live child Turn, a strictly parsed process-local observer envelope supplies the exact root
+Agent, root Conversation, Agent, Conversation, Run, and assistant-message identities. Its nested
+`AgentEvent` feeds the existing chat reducer, and a bounded request-local arrival window closes
+in-flight hydration races without accumulating a normal long stream. An overflow rejects the stale
+snapshot until target invalidation or explicit reload. Managed Command Session events remain a
+narrow compatibility stream and are accepted
+only with their own exact Conversation/assistant-message/Run owner identity.
+
+The Agent Center's settings button opens the same Agent template settings page that is always
+available from Settings, including before the first child exists. That page uses the shared
+`ModelConfigPicker`, persists project-scoped template CRUD through the Host API, and saves an exact
+`model_config_id`. A deleted or disabled model is shown as unavailable and must be explicitly
+replaced before the template can be saved or re-enabled. Template edits affect later Agent
+creation; the center continues to display each existing Agent's creation snapshot.
+
+Agent identities, latest statuses, templates, approvals, and child Conversation history recover
+from the database. The open Agent Center page/detail, local collapse state, and scroll position are
+not persisted across a full renderer reload. Root-chat collaboration activity currently
+reconstructs the latest Agent summary per stable Agent ID; it does not persist a separate card for
+every historical send, wait, or Tool call. Live observer envelopes are an unpersisted latency
+overlay, not a second stream store; persisted Conversation snapshots and the collaboration event
+log rehydrate and overwrite transient state after gaps, process restart, or window reload. This
+module adds no child write path, tree deletion control, graph canvas, or cross-root dashboard.
+
 ## Adding A Webview Module
 
 1. Add the module ID and renderer definition to the right-sidebar registry.

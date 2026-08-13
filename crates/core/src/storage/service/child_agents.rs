@@ -800,12 +800,13 @@ mod tests {
     use super::*;
     use crate::storage::models::{
         AttachmentRecord, ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord,
-        ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
+        ConversationForkPoint, ForkConversationRequest, ModelConfigRecord, ModelSettingsRecord,
+        ProjectRecord,
     };
     use crate::{
-        AgentMailboxDeliveryStatus, AgentWakeStatus, ConversationTurnTrace,
-        ConversationTurnTraceTerminalStatus, CreateAgentTemplateInput, EnsureRootAgentInput,
-        ProviderProfileConfig, ProviderProtocolDialect, ReasoningEffort,
+        AgentMailboxDeliveryStatus, AgentWakeStatus, ConversationMessageOrigin,
+        ConversationTurnTrace, ConversationTurnTraceTerminalStatus, CreateAgentTemplateInput,
+        EnsureRootAgentInput, ProviderProfileConfig, ProviderProtocolDialect, ReasoningEffort,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use tempfile::TempDir;
@@ -1120,10 +1121,11 @@ mod tests {
             for historical in conversation.messages.iter().take(expected_history) {
                 assert!(historical.ui_state_json.is_none());
                 if let Some(run) = historical.agent_run_json.as_deref() {
-                    assert_eq!(
-                        serde_json::from_str::<serde_json::Value>(run).unwrap()["usage"]
-                            ["totalTokens"],
-                        0
+                    let run = serde_json::from_str::<serde_json::Value>(run).unwrap();
+                    assert!(
+                        run.get("usage").is_none()
+                            || run["usage"]["totalTokens"].as_u64() == Some(0),
+                        "a context snapshot must not copy parent usage"
                     );
                 }
             }
@@ -1318,6 +1320,381 @@ mod tests {
             .iter()
             .filter(|message| message.role == "user")
             .all(|message| observer.input_origins.contains_key(&message.id)));
+    }
+
+    #[test]
+    fn user_facing_root_reload_hides_only_agent_projection_while_observer_keeps_origins() {
+        let fixture = Fixture::new(Some("model-a"));
+        save_settled_history(&fixture, 1, false);
+        // Exercise reload projection from the durable trace, not the intentionally minimal
+        // legacy AgentRun fixture used by the fork characterization helper.
+        fixture
+            .service
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE messages SET agent_run_json = NULL WHERE id = 'root-assistant-0'",
+                [],
+            )
+            .unwrap();
+
+        let mut child_input = spawn_input("observer-origin-child", "observer_origin");
+        child_input.fork_turns = AgentForkTurns::All;
+        let child = fixture.service.create_child_agent(&child_input).unwrap();
+        let result = EnqueueAgentMessageInput {
+            message_id: "mailbox-child-result".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            sender_agent_id: child.agent.agent_id.clone(),
+            recipient_agent_id: "agent-root".to_string(),
+            request_id: "request-child-result".to_string(),
+            kind: AgentMailboxKind::Result,
+            content: "durable child result".to_string(),
+            projection_message_id: "projection-child-result".to_string(),
+        };
+        fixture.service.enqueue_agent_message(&result).unwrap();
+        let claimed = fixture
+            .service
+            .claim_next_agent_message("agent-root", "claim-child-result")
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.message_id, result.message_id);
+        fixture
+            .service
+            .acknowledge_agent_message_with_projection(&result.message_id, "claim-child-result")
+            .unwrap();
+
+        // The transport fact remains part of the durable Conversation and model context.
+        let raw_root = fixture
+            .service
+            .load_conversation("root-conversation")
+            .unwrap()
+            .unwrap();
+        assert!(raw_root
+            .messages
+            .iter()
+            .any(|message| message.id == result.projection_message_id));
+
+        // Reopen the database to characterize renderer reloads rather than an in-memory cache.
+        let reopened =
+            StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+        let single_root = reopened
+            .load_conversation_view("root-conversation")
+            .unwrap()
+            .unwrap()
+            .conversation;
+        assert!(single_root
+            .messages
+            .iter()
+            .any(|message| message.id == "root-user-0"));
+        assert!(!single_root
+            .messages
+            .iter()
+            .any(|message| message.id == result.projection_message_id));
+
+        let listed_roots = reopened.load_conversation_views().unwrap();
+        assert_eq!(listed_roots.len(), 1);
+        assert!(listed_roots[0]
+            .conversation
+            .messages
+            .iter()
+            .any(|message| message.id == "root-user-0"));
+        assert!(!listed_roots[0]
+            .conversation
+            .messages
+            .iter()
+            .any(|message| message.id == result.projection_message_id));
+
+        reopened
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE conversations
+                 SET title = 'Durable child result title', updated_at = updated_at + 1
+                 WHERE id = 'root-conversation'",
+                [],
+            )
+            .unwrap();
+        let hidden_transport_hits = reopened
+            .search_chats(&ChatSearchInput {
+                query: "durable child result".to_string(),
+                limit: Some(10),
+            })
+            .unwrap();
+        assert_eq!(hidden_transport_hits.len(), 1);
+        assert_eq!(
+            hidden_transport_hits[0].conversation_id,
+            "root-conversation"
+        );
+        assert_eq!(hidden_transport_hits[0].message_id, None);
+        assert_eq!(hidden_transport_hits[0].snippet, None);
+        let human_hits = reopened
+            .search_chats(&ChatSearchInput {
+                query: "question 0".to_string(),
+                limit: Some(10),
+            })
+            .unwrap();
+        assert_eq!(human_hits.len(), 1);
+        assert_eq!(human_hits[0].message_id.as_deref(), Some("root-user-0"));
+
+        // The exact child observer read remains unfiltered and preserves both live Agent and
+        // historical snapshot provenance for renderer labels and audit.
+        let observer = reopened
+            .load_conversation_observer_snapshot(&child.agent.conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            observer
+                .input_origins
+                .get(&child.task_message.projection_message_id),
+            Some(&crate::ConversationMessageOrigin::Agent {
+                sender_agent_id: "agent-root".to_string(),
+                source_agent_message_id: child.task_message.message_id.clone(),
+            })
+        );
+        let snapshot_message = observer
+            .conversation
+            .messages
+            .iter()
+            .find(|message| message.content == "question 0")
+            .expect("historical input remains visible to the child observer");
+        assert_eq!(
+            observer.input_origins.get(&snapshot_message.id),
+            Some(&crate::ConversationMessageOrigin::HistoricalSnapshot {
+                source_conversation_id: "root-conversation".to_string(),
+                source_message_id: "root-user-0".to_string(),
+                original: Box::new(crate::ConversationMessageOrigin::Human),
+            })
+        );
+    }
+
+    #[test]
+    fn active_root_fork_is_atomic_idempotent_and_preserves_agent_actor_without_crossing_trees() {
+        let fixture = Fixture::new(Some("model-a"));
+        save_settled_history(&fixture, 1, false);
+        let child = fixture
+            .service
+            .create_child_agent(&spawn_input("fork-child", "fork_child"))
+            .unwrap();
+        let result = EnqueueAgentMessageInput {
+            message_id: "mailbox-fork-result".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            sender_agent_id: child.agent.agent_id.clone(),
+            recipient_agent_id: "agent-root".to_string(),
+            request_id: "request-fork-result".to_string(),
+            kind: AgentMailboxKind::Result,
+            content: "internal child evidence".to_string(),
+            projection_message_id: "projection-fork-result".to_string(),
+        };
+        fixture.service.enqueue_agent_message(&result).unwrap();
+        fixture
+            .service
+            .claim_next_agent_message("agent-root", "claim-fork-result")
+            .unwrap()
+            .unwrap();
+        fixture
+            .service
+            .acknowledge_agent_message_with_projection(&result.message_id, "claim-fork-result")
+            .unwrap();
+        {
+            let connection = fixture.service.state.connection().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO messages (
+                         id, conversation_id, role, content, status, created_at, position
+                     ) VALUES (
+                         'root-assistant-after-result', 'root-conversation', 'assistant',
+                         'combined answer', 'completed', 300,
+                         (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                          WHERE conversation_id = 'root-conversation')
+                     )",
+                    [],
+                )
+                .unwrap();
+        }
+        let request = ForkConversationRequest {
+            request_id: "collaboration-root-fork".to_string(),
+            source_conversation_id: "root-conversation".to_string(),
+            fork_point: ConversationForkPoint::AssistantReply {
+                assistant_message_id: "root-assistant-after-result".to_string(),
+            },
+        };
+
+        let created = fixture
+            .service
+            .fork_conversation_request_view(request.clone())
+            .unwrap();
+        assert!(created
+            .conversation
+            .messages
+            .iter()
+            .all(|message| message.content != "internal child evidence"));
+        let target_id = created.conversation.id.clone();
+        let target_root = fixture
+            .service
+            .get_agent_node_by_conversation(&target_id)
+            .unwrap()
+            .expect("fork target is bound to an independent root");
+        assert_eq!(target_root.parent_agent_id, None);
+        assert_eq!(target_root.root_conversation_id, target_id);
+        assert_ne!(target_root.root_agent_id, "agent-root");
+        assert_eq!(target_root.project_id.as_deref(), Some("project-a"));
+
+        let raw_target = fixture
+            .service
+            .load_conversation(&target_id)
+            .unwrap()
+            .unwrap();
+        let copied_agent_input = raw_target
+            .messages
+            .iter()
+            .find(|message| message.content == "internal child evidence")
+            .expect("transport fact remains available to context assembly");
+        assert_eq!(
+            fixture
+                .service
+                .conversation_message_origin(&target_id, &copied_agent_input.id)
+                .unwrap(),
+            ConversationMessageOrigin::HistoricalSnapshot {
+                source_conversation_id: "root-conversation".to_string(),
+                source_message_id: result.projection_message_id.clone(),
+                original: Box::new(ConversationMessageOrigin::Agent {
+                    sender_agent_id: child.agent.agent_id.clone(),
+                    source_agent_message_id: result.message_id.clone(),
+                }),
+            }
+        );
+        assert_eq!(
+            fixture.service.list_agent_tree("agent-root").unwrap().len(),
+            2
+        );
+        assert_eq!(
+            fixture
+                .service
+                .list_agent_tree(&target_root.root_agent_id)
+                .unwrap(),
+            vec![target_root.clone()]
+        );
+        // The immutable receipt remains the idempotency truth even if lifecycle display state
+        // changes after the successful fork. Admission required an active source at creation;
+        // retry must not attempt a second target or depend on mutable lifecycle.
+        let target_root = fixture
+            .service
+            .transition_agent_lifecycle(
+                &target_root.agent_id,
+                target_root.revision,
+                AgentLifecycle::Active,
+                AgentLifecycle::Disabled,
+            )
+            .unwrap();
+
+        let reopened =
+            StorageService::open(&fixture._directory.path().join("storage.sqlite")).unwrap();
+        let retried = reopened.fork_conversation_request_view(request).unwrap();
+        assert_eq!(retried.conversation.id, target_id);
+        assert!(retried
+            .conversation
+            .messages
+            .iter()
+            .all(|message| message.content != "internal child evidence"));
+        assert_eq!(
+            reopened
+                .get_agent_node_by_conversation(&target_id)
+                .unwrap()
+                .unwrap(),
+            target_root
+        );
+        let receipt_update = reopened
+            .state
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE conversation_forks
+                 SET source_root_agent_id = target_root_agent_id
+                 WHERE request_id = 'collaboration-root-fork'",
+                [],
+            )
+            .unwrap_err();
+        assert!(receipt_update
+            .to_string()
+            .contains("Conversation fork receipt is immutable"));
+        let hidden_hits = reopened
+            .search_chats(&ChatSearchInput {
+                query: "internal child evidence".to_string(),
+                limit: Some(10),
+            })
+            .unwrap();
+        assert!(hidden_hits.is_empty());
+
+        let child_fork = reopened
+            .fork_conversation_request_view(ForkConversationRequest {
+                request_id: "forbidden-child-fork".to_string(),
+                source_conversation_id: child.agent.conversation_id,
+                fork_point: ConversationForkPoint::AssistantReply {
+                    assistant_message_id: "missing".to_string(),
+                },
+            })
+            .unwrap_err();
+        assert!(child_fork.message().contains("子 Agent 保持只读"));
+    }
+
+    #[test]
+    fn active_root_turn_rejects_fork_without_writing_target_or_receipt() {
+        let fixture = Fixture::new(Some("model-a"));
+        save_settled_history(&fixture, 1, true);
+        let before = {
+            let connection = fixture.service.state.connection().unwrap();
+            (
+                connection
+                    .query_row("SELECT COUNT(*) FROM conversations", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row("SELECT COUNT(*) FROM agent_nodes", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row("SELECT COUNT(*) FROM conversation_forks", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+            )
+        };
+        let error = fixture
+            .service
+            .fork_conversation_request_view(ForkConversationRequest {
+                request_id: "active-root-fork".to_string(),
+                source_conversation_id: "root-conversation".to_string(),
+                fork_point: ConversationForkPoint::AssistantReply {
+                    assistant_message_id: "root-assistant-0".to_string(),
+                },
+            })
+            .unwrap_err();
+        assert!(error.message().contains("活跃 Turn"));
+        let after = {
+            let connection = fixture.service.state.connection().unwrap();
+            (
+                connection
+                    .query_row("SELECT COUNT(*) FROM conversations", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row("SELECT COUNT(*) FROM agent_nodes", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+                connection
+                    .query_row("SELECT COUNT(*) FROM conversation_forks", [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+            )
+        };
+        assert_eq!(after, before);
     }
 
     #[test]

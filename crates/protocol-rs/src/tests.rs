@@ -38,9 +38,17 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
         fixture["notifications"],
         serde_json::json!({
             "event": AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
+            "observerEvent": AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
             "resync": AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
         })
     );
+
+    let observer_event: AgentObserverEventEnvelopeDto =
+        serde_json::from_value(fixture["observerEvent"].clone()).unwrap();
+    assert_eq!(observer_event.root_agent_id, "agent-root");
+    assert_eq!(observer_event.agent_id, "agent-child");
+    assert_eq!(observer_event.run_id, "run-child");
+    assert_eq!(observer_event.event["type"], "message_delta");
 
     let tree: AgentTreeSnapshotDto = serde_json::from_value(fixture["tree"].clone()).unwrap();
     assert_eq!(tree.last_sequence, 7);
@@ -140,6 +148,54 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     let mut unknown = fixture["tree"].clone();
     unknown["providerSecret"] = serde_json::json!("must-not-cross");
     assert!(serde_json::from_value::<AgentTreeSnapshotDto>(unknown).is_err());
+}
+
+#[test]
+fn round5_collaboration_scenario_is_strict_across_rust_and_typescript() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/agent-collaboration-round5-scenario-v1.json"
+    ))
+    .unwrap();
+    assert_eq!(fixture["schemaVersion"], 1);
+    assert_eq!(fixture["scenario"], "deterministic_six_tool_roundtrip");
+
+    let running: AgentTreeSnapshotDto =
+        serde_json::from_value(fixture["runningTree"].clone()).unwrap();
+    let settled: AgentTreeSnapshotDto =
+        serde_json::from_value(fixture["settledTree"].clone()).unwrap();
+    let page: CollaborationEventsPageDto =
+        serde_json::from_value(fixture["settledEventPage"].clone()).unwrap();
+    let observers = fixture["observerConversations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<AgentObserverConversationDto>)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let approvals: CollaborationApprovalListDto =
+        serde_json::from_value(fixture["approvalList"].clone()).unwrap();
+    let approved: CollaborationApprovalDecisionResultDto =
+        serde_json::from_value(fixture["approvalDecisions"]["approve"].clone()).unwrap();
+    let rejected: CollaborationApprovalDecisionResultDto =
+        serde_json::from_value(fixture["approvalDecisions"]["reject"].clone()).unwrap();
+
+    assert_eq!(running.agents.len(), 3);
+    assert_eq!(
+        running.agents[1].model.as_ref().unwrap().model_config_id,
+        "model-1"
+    );
+    assert_eq!(
+        running.agents[2].model.as_ref().unwrap().model_config_id,
+        "model-2"
+    );
+    assert_eq!(settled.last_sequence, page.last_sequence);
+    assert_eq!(page.events[0].run_id.as_deref(), Some("run-review"));
+    assert_eq!(observers[0].conversation_id, "conversation-review");
+    assert_eq!(observers[1].conversation_id, "conversation-compatibility");
+    assert_eq!(approvals.approvals.len(), 2);
+    assert_eq!(approved.status, CollaborationApprovalStatusDto::Approved);
+    assert_eq!(rejected.status, CollaborationApprovalStatusDto::Rejected);
 }
 
 #[test]
@@ -1253,6 +1309,7 @@ fn image_artifact_read_contract_is_path_free_and_redacts_content_debug() {
         "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
         "artifact": artifact,
         "conversationId": "conversation-1",
+        "observerRootConversationId": "conversation-root",
     }))
     .unwrap();
     assert!(matches!(
@@ -1261,6 +1318,10 @@ fn image_artifact_read_contract_is_path_free_and_redacts_content_debug() {
             if artifact.kind == ImageGenerationArtifactKindDto::Image
     ));
     assert_eq!(request.conversation_id.as_deref(), Some("conversation-1"));
+    assert_eq!(
+        request.observer_root_conversation_id.as_deref(),
+        Some("conversation-root")
+    );
 
     let mut unsafe_request = serde_json::to_value(&request).unwrap();
     unsafe_request["artifact"]["managedPath"] = serde_json::json!("/private/object.png");

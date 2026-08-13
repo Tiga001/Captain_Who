@@ -20,6 +20,7 @@ import type {
   AgentDetailRequest,
   AgentObserverConversationRequest,
   AgentObserverConversation,
+  AgentObserverEventEnvelope,
   AgentTemplate,
   AgentTemplateCreateRequest,
   AgentTemplateDeleteRequest,
@@ -252,6 +253,7 @@ import {
   parseAgentDetailRequest,
   parseAgentObserverConversationRequest,
   parseAgentObserverConversation,
+  parseAgentObserverEventEnvelope,
   parseAgentTemplate,
   parseAgentTemplateCreateRequest,
   parseAgentTemplateDeleteRequest,
@@ -324,6 +326,7 @@ const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD = 'agent.collaboration.templat
 const AGENT_COLLABORATION_APPROVALS_LIST_METHOD = 'agent.collaboration.approvals.list'
 const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD = 'agent.collaboration.approvals.decide'
 const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.event'
+const AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.observerEvent'
 const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD = 'agent.collaboration.resync'
 
 function validateProviderTransitionResponseIdentity(
@@ -1149,6 +1152,19 @@ export class CoreServer {
         console.warn('Ignored invalid collaboration event')
       }
     })
+  }
+
+  onCollaborationObserverEvent(handler: (event: AgentObserverEventEnvelope) => void): () => void {
+    return this.rpc.onNotification(
+      AGENT_COLLABORATION_OBSERVER_EVENT_NOTIFICATION_METHOD,
+      (params) => {
+        try {
+          handler(parseAgentObserverEventEnvelope(params))
+        } catch {
+          console.warn('Ignored invalid Agent observer event')
+        }
+      }
+    )
   }
 
   onCollaborationResync(handler: (event: CollaborationResyncEnvelope) => void): () => void {

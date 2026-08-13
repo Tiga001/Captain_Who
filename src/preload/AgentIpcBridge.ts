@@ -2,6 +2,7 @@ import type { IpcRenderer, IpcRendererEvent } from 'electron'
 import { HOST_CHANNELS, type AgentHostApi } from '@mycopilot/host-api'
 import type {
   AgentEvent,
+  AgentObserverEventEnvelope,
   CollaborationEventEnvelope,
   CollaborationResyncEnvelope
 } from '@mycopilot/protocol'
@@ -39,6 +40,13 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
         handler(payload)
       ipcRenderer.on(HOST_CHANNELS.agent.collaborationEvent, listener)
       return () => ipcRenderer.removeListener(HOST_CHANNELS.agent.collaborationEvent, listener)
+    },
+    onCollaborationObserverEvent: (handler) => {
+      const listener = (_event: IpcRendererEvent, payload: AgentObserverEventEnvelope): void =>
+        handler(payload)
+      ipcRenderer.on(HOST_CHANNELS.agent.collaborationObserverEvent, listener)
+      return () =>
+        ipcRenderer.removeListener(HOST_CHANNELS.agent.collaborationObserverEvent, listener)
     },
     onCollaborationResync: (handler) => {
       const listener = (_event: IpcRendererEvent, payload: CollaborationResyncEnvelope): void =>

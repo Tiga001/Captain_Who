@@ -12,6 +12,7 @@ use crate::application::collaboration_authorization::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
+    bounded_root_agent_task_name, root_agent_creation_request_id, root_agent_id_for_conversation,
     AgentCollaborationAction, AgentCollaborationCaller, AgentCollaborationDeliveryState,
     AgentCollaborationExecutionControl, AgentCollaborationExecutionFuture,
     AgentCollaborationExecutionOutput, AgentCollaborationExecutor, AgentCollaborationInvocation,
@@ -119,15 +120,15 @@ impl AgentCollaborationHarnessAdapter {
             .load_conversation(conversation_id)
             .map_err(storage_error)?
             .ok_or_else(|| unavailable("Root Conversation is unavailable."))?;
-        let digest = stable_digest(conversation_id);
+        let root_agent_id = root_agent_id_for_conversation(conversation_id);
         Ok(AgentCollaborationCaller {
-            agent_id: format!("agent-root-{}", &digest[..32]),
-            root_agent_id: format!("agent-root-{}", &digest[..32]),
+            agent_id: root_agent_id.clone(),
+            root_agent_id,
             root_conversation_id: conversation_id.to_string(),
             parent_agent_id: None,
             conversation_id: conversation_id.to_string(),
             project_id: conversation.project_id,
-            task_name: bounded_task_name(&conversation.title),
+            task_name: bounded_root_agent_task_name(&conversation.title),
             task_path: "/root".to_string(),
         })
     }
@@ -142,19 +143,17 @@ impl AgentCollaborationHarnessAdapter {
             .map_err(graph_error)?
         {
             Some(node) => node,
-            None if claimed.parent_agent_id.is_none() => {
-                let digest = stable_digest(&claimed.conversation_id);
-                self.storage
-                    .ensure_root_agent(&EnsureRootAgentInput {
-                        agent_id: format!("agent-root-{}", &digest[..32]),
-                        conversation_id: claimed.conversation_id.clone(),
-                        creation_request_id: format!("harness-root-{}", &digest[..32]),
-                        task_name: claimed.task_name.clone(),
-                    })
-                    .map_err(graph_error)?
-                    .record()
-                    .clone()
-            }
+            None if claimed.parent_agent_id.is_none() => self
+                .storage
+                .ensure_root_agent(&EnsureRootAgentInput {
+                    agent_id: root_agent_id_for_conversation(&claimed.conversation_id),
+                    conversation_id: claimed.conversation_id.clone(),
+                    creation_request_id: root_agent_creation_request_id(&claimed.conversation_id),
+                    task_name: claimed.task_name.clone(),
+                })
+                .map_err(graph_error)?
+                .record()
+                .clone(),
             None => return Err(permission_denied()),
         };
         let actual = caller_from_node(&node);
@@ -481,26 +480,6 @@ fn stable_digest(value: &str) -> String {
 fn stable_request_id(run_id: &str, tool_call_id: &str) -> String {
     let digest = stable_digest(&format!("{run_id}\0{tool_call_id}"));
     format!("harness-{}", &digest[..48])
-}
-
-fn bounded_task_name(title: &str) -> String {
-    let normalized = title
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    let title = normalized.trim();
-    let title = if title.is_empty() { "Root" } else { title };
-    let mut boundary = title.len().min(256);
-    while boundary > 0 && !title.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    title[..boundary].to_string()
 }
 
 fn wait_stop_reason(reason: AgentWaitStopReason) -> &'static str {

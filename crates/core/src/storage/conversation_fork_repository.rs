@@ -6,20 +6,24 @@ use crate::storage::models::{
     ChatMessageRecord, ConversationContinuationOriginRecord, ConversationForkPoint,
 };
 use crate::storage::{
-    attachment_repository, chat_repository, context_compaction_receipt_repository,
-    context_compaction_repository, conversation_context_adaptation_repository,
-    conversation_history_archive_repository, conversation_history_open,
-    conversation_model_context_repository, conversation_trace_repository, file_draft_repository,
-    guidance_repository, model_request_observation_repository, provider_continuation_repository,
-    turn_diff_repository, world_state_repository,
+    agent_graph_repository, attachment_repository, chat_repository,
+    context_compaction_receipt_repository, context_compaction_repository,
+    conversation_context_adaptation_repository, conversation_history_archive_repository,
+    conversation_history_open, conversation_model_context_repository,
+    conversation_trace_repository, file_draft_repository, guidance_repository,
+    model_request_observation_repository, provider_continuation_repository, turn_diff_repository,
+    world_state_repository,
 };
 use crate::{
+    bounded_root_agent_task_name,
     provider_continuation_store::{
         PreparedProviderContinuationClone, ProviderContinuationForkMapping,
     },
-    AgentGuidanceStatus, ContextCompactionReceipt, ContextCompactionReceiptStage,
-    ContextCompactionReceiptStatus, ConversationModelContextItem, ConversationTurnTrace,
-    ModelRequestObservation, ProviderContinuationRef, WorldStateRecord,
+    root_agent_creation_request_id, root_agent_id_for_conversation, AgentGuidanceStatus,
+    AgentLifecycle, ContextCompactionReceipt, ContextCompactionReceiptStage,
+    ContextCompactionReceiptStatus, ConversationMessageOrigin, ConversationModelContextItem,
+    ConversationTurnTrace, EnsureRootAgentInput, ModelRequestObservation, ProviderContinuationRef,
+    WorldStateRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
@@ -93,6 +97,21 @@ struct ForkProviderTransitionReceipt {
 }
 
 #[derive(Debug)]
+struct CollaborationRootFork {
+    source_agent_id: String,
+    target_root: EnsureRootAgentInput,
+}
+
+#[derive(Debug)]
+struct ForkSnapshotOrigin {
+    target_message_id: String,
+    source_message_id: String,
+    original_kind: Option<&'static str>,
+    original_agent_id: Option<String>,
+    original_mailbox_message_id: Option<String>,
+}
+
+#[derive(Debug)]
 pub(crate) struct ConversationForkPlan {
     pub request_id: String,
     pub source_conversation_id: String,
@@ -112,6 +131,8 @@ pub(crate) struct ConversationForkPlan {
     pub(crate) requires_context_adaptation: bool,
     adaptation_source_summary_id: Option<String>,
     message_id_map: HashMap<String, String>,
+    collaboration_root: Option<CollaborationRootFork>,
+    snapshot_origins: Vec<ForkSnapshotOrigin>,
     #[cfg(test)]
     run_id_map: HashMap<String, String>,
     id_replacements: HashMap<String, String>,
@@ -122,6 +143,9 @@ pub(crate) struct ExistingConversationFork {
     pub target_conversation_id: String,
     pub source_conversation_id: String,
     pub source_fork_point: ConversationForkPoint,
+    fork_authority: String,
+    source_root_agent_id: Option<String>,
+    target_root_agent_id: Option<String>,
 }
 
 struct ResolvedConversationForkPoint {
@@ -136,7 +160,8 @@ pub(crate) fn find_existing_fork(
 ) -> rusqlite::Result<Option<ExistingConversationFork>> {
     connection
         .query_row(
-            "SELECT target_conversation_id, source_conversation_id, source_fork_point_json
+            "SELECT target_conversation_id, source_conversation_id, source_fork_point_json,
+                    fork_authority, source_root_agent_id, target_root_agent_id
              FROM conversation_forks
              WHERE request_id = ?1",
             [request_id],
@@ -149,10 +174,77 @@ pub(crate) fn find_existing_fork(
                     target_conversation_id: row.get(0)?,
                     source_conversation_id: row.get(1)?,
                     source_fork_point,
+                    fork_authority: row.get(3)?,
+                    source_root_agent_id: row.get(4)?,
+                    target_root_agent_id: row.get(5)?,
                 })
             },
         )
         .optional()
+}
+
+pub(crate) fn validate_existing_fork_authority(
+    connection: &Connection,
+    existing: &ExistingConversationFork,
+) -> Result<(), ConversationForkError> {
+    let valid = match existing.fork_authority.as_str() {
+        "legacy" => {
+            existing.source_root_agent_id.is_none()
+                && existing.target_root_agent_id.is_none()
+                && !connection
+                    .query_row(
+                        "SELECT EXISTS(
+                             SELECT 1 FROM agent_nodes
+                             WHERE conversation_id IN (?1, ?2)
+                         )",
+                        params![
+                            &existing.source_conversation_id,
+                            &existing.target_conversation_id
+                        ],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(database_error)?
+        }
+        "collaboration_root" => match (
+            existing.source_root_agent_id.as_deref(),
+            existing.target_root_agent_id.as_deref(),
+        ) {
+            (Some(source_agent_id), Some(target_agent_id)) => connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM agent_nodes AS source
+                         INNER JOIN agent_nodes AS target ON target.agent_id = ?2
+                         WHERE source.agent_id = ?1
+                           AND source.parent_agent_id IS NULL
+                           AND source.conversation_id = ?3
+                           AND source.root_conversation_id = ?3
+                           AND target.parent_agent_id IS NULL
+                           AND target.conversation_id = ?4
+                           AND target.root_conversation_id = ?4
+                           AND target.root_agent_id != source.root_agent_id
+                           AND target.project_id IS source.project_id
+                     )",
+                    params![
+                        source_agent_id,
+                        target_agent_id,
+                        &existing.source_conversation_id,
+                        &existing.target_conversation_id,
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(database_error)?,
+            _ => false,
+        },
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ConversationForkError::Other(
+            "已存在的分叉记录身份无效，已拒绝重试。".to_string(),
+        ))
+    }
 }
 
 pub(crate) fn get_continuation_origin(
@@ -185,21 +277,26 @@ pub(crate) fn build_fork_plan_at_point(
     created_at: i64,
 ) -> Result<ConversationForkPlan, ConversationForkError> {
     validate_fork_point_input(request_id, source_conversation_id, fork_point)?;
-    let source_is_agent_bound = connection
-        .query_row(
-            "SELECT EXISTS (
-                 SELECT 1 FROM agent_nodes WHERE conversation_id = ?1
-             )",
-            [source_conversation_id],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(database_error)?;
-    if source_is_agent_bound {
-        return Err(ConversationForkError::Other(
-            "Persistent Agent conversations must be forked through the collaboration service."
-                .to_string(),
-        ));
-    }
+    let source_agent =
+        agent_graph_repository::get_agent_node_by_conversation(connection, source_conversation_id)
+            .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+    let source_root = match source_agent {
+        None => None,
+        Some(node) if node.parent_agent_id.is_some() => {
+            return Err(ConversationForkError::Other(
+                "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
+            ));
+        }
+        Some(node) if node.lifecycle != AgentLifecycle::Active => {
+            return Err(ConversationForkError::Other(
+                "根 Agent 当前不可用，无法继续新任务。".to_string(),
+            ));
+        }
+        Some(node) => {
+            ensure_no_active_conversation_turn(connection, source_conversation_id)?;
+            Some(node)
+        }
+    };
     ensure_no_active_command_sessions(connection, source_conversation_id)?;
     let source = chat_repository::get_conversation(connection, source_conversation_id)
         .map_err(database_error)?
@@ -229,6 +326,11 @@ pub(crate) fn build_fork_plan_at_point(
         .iter()
         .map(|message| (message.id.clone(), new_id("message")))
         .collect::<HashMap<_, _>>();
+    let snapshot_origins = if source_root.is_some() {
+        fork_snapshot_origins(connection, &source, &source_messages, &message_id_map)?
+    } else {
+        Vec::new()
+    };
 
     let source_message_ids = source_messages
         .iter()
@@ -598,6 +700,16 @@ pub(crate) fn build_fork_plan_at_point(
             .collect::<Result<Vec<_>, String>>()?
     };
 
+    let collaboration_root = source_root.map(|source_root| CollaborationRootFork {
+        source_agent_id: source_root.agent_id,
+        target_root: EnsureRootAgentInput {
+            agent_id: root_agent_id_for_conversation(&target_conversation_id),
+            conversation_id: target_conversation_id.clone(),
+            creation_request_id: root_agent_creation_request_id(&target_conversation_id),
+            task_name: bounded_root_agent_task_name(&source.title),
+        },
+    });
+
     Ok(ConversationForkPlan {
         request_id: request_id.to_string(),
         source_conversation_id: source.id,
@@ -628,6 +740,8 @@ pub(crate) fn build_fork_plan_at_point(
         requires_context_adaptation,
         adaptation_source_summary_id,
         message_id_map,
+        collaboration_root,
+        snapshot_origins,
         #[cfg(test)]
         run_id_map,
         id_replacements: replacements,
@@ -678,7 +792,36 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
     ensure_no_active_command_sessions(&transaction, &plan.source_conversation_id)?;
+    if plan.collaboration_root.is_some() {
+        ensure_no_active_conversation_turn(&transaction, &plan.source_conversation_id)?;
+    }
     insert_conversation(&transaction, &plan.target)?;
+    if let Some(collaboration) = &plan.collaboration_root {
+        let source = agent_graph_repository::get_agent_node_by_conversation(
+            &transaction,
+            &plan.source_conversation_id,
+        )
+        .map_err(|error| ConversationForkError::Other(error.to_string()))?
+        .filter(|node| {
+            node.agent_id == collaboration.source_agent_id
+                && node.parent_agent_id.is_none()
+                && node.lifecycle == AgentLifecycle::Active
+        })
+        .ok_or_else(|| {
+            ConversationForkError::Other("根 Agent 身份在分叉提交前已改变，请重试。".to_string())
+        })?;
+        if source.root_conversation_id != plan.source_conversation_id {
+            return Err(ConversationForkError::Other(
+                "根 Agent 的 Conversation 身份无效。".to_string(),
+            ));
+        }
+        agent_graph_repository::ensure_root_agent_in_transaction(
+            &transaction,
+            &collaboration.target_root,
+            plan.target.created_at,
+        )
+        .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+    }
     for prepared in provider_continuations {
         match provider_continuation_repository::store_active_in_connection(
             &transaction,
@@ -797,8 +940,9 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
         .execute(
             "INSERT INTO conversation_forks (
                 request_id, target_conversation_id, source_conversation_id,
-                source_message_id, target_message_id, created_at, source_fork_point_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                source_message_id, target_message_id, created_at, source_fork_point_json,
+                fork_authority, source_root_agent_id, target_root_agent_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 &plan.request_id,
                 &plan.target.id,
@@ -808,9 +952,20 @@ pub(crate) fn commit_fork_plan_with_provider_continuations(
                 plan.target.created_at,
                 serde_json::to_string(&plan.source_fork_point)
                     .map_err(|error| format!("无法序列化分叉时间线边界：{error}"))?,
+                plan.collaboration_root
+                    .as_ref()
+                    .map(|_| "collaboration_root")
+                    .unwrap_or("legacy"),
+                plan.collaboration_root
+                    .as_ref()
+                    .map(|root| root.source_agent_id.as_str()),
+                plan.collaboration_root
+                    .as_ref()
+                    .map(|root| root.target_root.agent_id.as_str()),
             ],
         )
         .map_err(database_error)?;
+    apply_fork_snapshot_origins(&transaction, plan)?;
     transaction
         .commit()
         .map_err(database_error)
@@ -948,6 +1103,29 @@ fn ensure_no_active_command_sessions(
         conversation_id: conversation_id.to_string(),
         active_session_count,
     })
+}
+
+fn ensure_no_active_conversation_turn(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<(), ConversationForkError> {
+    let active_run_id = connection
+        .query_row(
+            "SELECT run_id
+             FROM conversation_turn_traces
+             WHERE conversation_id = ?1 AND terminal_status = 'in_progress'
+             LIMIT 1",
+            [conversation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(database_error)?;
+    if active_run_id.is_some() {
+        return Err(ConversationForkError::Other(
+            "根 Agent 仍有活跃 Turn，结束后才能继续新任务。".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_fork_point_input(
@@ -1250,6 +1428,76 @@ fn clone_message(
     })
 }
 
+fn fork_snapshot_origins(
+    connection: &Connection,
+    source: &ChatConversationRecord,
+    source_messages: &[ChatMessageRecord],
+    message_id_map: &HashMap<String, String>,
+) -> Result<Vec<ForkSnapshotOrigin>, ConversationForkError> {
+    let mut origins = Vec::with_capacity(source_messages.len());
+    for message in source_messages {
+        let target_message_id = mapped_id(message_id_map, &message.id, "消息")?;
+        let (original_kind, original_agent_id, original_mailbox_message_id) =
+            match message.role.as_str() {
+                "assistant" => (None, None, None),
+                "user" => {
+                    let origin = agent_graph_repository::conversation_message_origin(
+                        connection,
+                        &source.id,
+                        &message.id,
+                    )
+                    .map_err(|error| ConversationForkError::Other(error.to_string()))?;
+                    flattened_snapshot_origin(&origin)?
+                }
+                _ => {
+                    return Err(ConversationForkError::Other(
+                        "分叉历史包含不受支持的消息角色。".to_string(),
+                    ));
+                }
+            };
+        origins.push(ForkSnapshotOrigin {
+            target_message_id,
+            source_message_id: message.id.clone(),
+            original_kind,
+            original_agent_id,
+            original_mailbox_message_id,
+        });
+    }
+    Ok(origins)
+}
+
+type FlattenedSnapshotOrigin = (Option<&'static str>, Option<String>, Option<String>);
+
+fn flattened_snapshot_origin(
+    origin: &ConversationMessageOrigin,
+) -> Result<FlattenedSnapshotOrigin, ConversationForkError> {
+    match origin {
+        ConversationMessageOrigin::Human => Ok((Some("human"), None, None)),
+        ConversationMessageOrigin::Agent {
+            sender_agent_id,
+            source_agent_message_id,
+        } => Ok((
+            Some("agent"),
+            Some(sender_agent_id.clone()),
+            Some(source_agent_message_id.clone()),
+        )),
+        ConversationMessageOrigin::HistoricalSnapshot { original, .. } => match original.as_ref() {
+            ConversationMessageOrigin::Human => Ok((Some("human"), None, None)),
+            ConversationMessageOrigin::Agent {
+                sender_agent_id,
+                source_agent_message_id,
+            } => Ok((
+                Some("agent"),
+                Some(sender_agent_id.clone()),
+                Some(source_agent_message_id.clone()),
+            )),
+            ConversationMessageOrigin::HistoricalSnapshot { .. } => Err(
+                ConversationForkError::Other("嵌套的历史消息来源无效。".to_string()),
+            ),
+        },
+    }
+}
+
 fn clone_agent_run_json(
     raw: &str,
     replacements: &HashMap<String, String>,
@@ -1363,6 +1611,41 @@ fn insert_conversation(
                 ],
             )
             .map_err(database_error)?;
+    }
+    Ok(())
+}
+
+fn apply_fork_snapshot_origins(
+    connection: &Connection,
+    plan: &ConversationForkPlan,
+) -> Result<(), ConversationForkError> {
+    for origin in &plan.snapshot_origins {
+        let affected = connection
+            .execute(
+                "UPDATE messages
+                 SET input_origin_kind = 'snapshot',
+                     snapshot_source_conversation_id = ?3,
+                     snapshot_source_message_id = ?4,
+                     snapshot_original_origin_kind = ?5,
+                     snapshot_original_agent_id = ?6,
+                     snapshot_original_mailbox_message_id = ?7
+                 WHERE conversation_id = ?1 AND id = ?2",
+                params![
+                    &plan.target.id,
+                    &origin.target_message_id,
+                    &plan.source_conversation_id,
+                    &origin.source_message_id,
+                    origin.original_kind,
+                    &origin.original_agent_id,
+                    &origin.original_mailbox_message_id,
+                ],
+            )
+            .map_err(database_error)?;
+        if affected != 1 {
+            return Err(ConversationForkError::Other(
+                "分叉历史消息来源写入不完整。".to_string(),
+            ));
+        }
     }
     Ok(())
 }

@@ -115,6 +115,9 @@ impl StorageService {
             .collect::<Result<Vec<_>, String>>()?
             .into_iter()
             .map(|conversation| {
+                let mut conversation = conversation;
+                chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
+                    .map_err(storage_error)?;
                 let continuation_origin = conversation_fork_repository::get_continuation_origin(
                     &connection,
                     &conversation.id,
@@ -257,10 +260,12 @@ impl StorageService {
         &self,
         conversation_id: &str,
     ) -> Result<Option<ChatConversationViewRecord>, String> {
-        let Some(conversation) = self.load_conversation(conversation_id)? else {
+        let Some(mut conversation) = self.load_conversation(conversation_id)? else {
             return Ok(None);
         };
         let connection = self.state.connection()?;
+        chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
+            .map_err(storage_error)?;
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, conversation_id)
                 .map_err(storage_error)?;
@@ -308,6 +313,7 @@ impl StorageService {
                     .to_string()
                     .into());
             }
+            conversation_fork_repository::validate_existing_fork_authority(&connection, &existing)?;
             let mut conversation =
                 chat_repository::get_conversation(&connection, &existing.target_conversation_id)
                     .map_err(storage_error)?
@@ -440,10 +446,12 @@ impl StorageService {
 
     fn decorate_fork_conversation_view(
         &self,
-        conversation: ChatConversationRecord,
+        mut conversation: ChatConversationRecord,
     ) -> Result<ChatConversationViewRecord, conversation_fork_repository::ConversationForkError>
     {
         let connection = self.state.connection()?;
+        chat_repository::retain_user_facing_root_messages(&connection, &mut conversation)
+            .map_err(storage_error)?;
         let continuation_origin =
             conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)
                 .map_err(storage_error)?;
@@ -1267,6 +1275,12 @@ fn attach_message_guidance_timelines(
             .into_iter()
             .map(|trace| (trace.assistant_message_id.clone(), trace))
             .collect::<HashMap<_, _>>();
+        let command_sessions = agent_command_session_repository::list_sessions_for_conversation(
+            connection,
+            &conversation.id,
+            agent_command_session_repository::MAX_RETAINED_TERMINAL_COMMAND_SESSIONS_PER_CONVERSATION,
+        )
+        .map_err(storage_error)?;
 
         for message in &mut conversation.messages {
             if message.role != "assistant" {
@@ -1275,15 +1289,16 @@ fn attach_message_guidance_timelines(
             let guidances =
                 guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
                     .map_err(storage_error)?;
-            if guidances.is_empty() {
+            let trace = traces.get(&message.id);
+            if guidances.is_empty() && trace.is_none() {
                 continue;
             }
-            let trace = traces.get(&message.id);
             message.agent_run_json = Some(project_guidance_timeline(
                 connection,
                 message.agent_run_json.as_deref(),
                 trace,
                 &guidances,
+                &command_sessions,
                 message.created_at,
             )?);
         }
@@ -1296,16 +1311,26 @@ fn project_guidance_timeline(
     existing_run_json: Option<&str>,
     trace: Option<&ConversationTurnTrace>,
     guidances: &[AgentRunGuidanceRecord],
+    command_sessions: &[agent_command_session_repository::AgentCommandSessionRecord],
     fallback_started_at: i64,
 ) -> Result<String, String> {
-    let mut run = if let Some(raw) = existing_run_json {
+    let existing_run = if let Some(raw) = existing_run_json {
         let value = serde_json::from_str::<serde_json::Value>(raw)
             .map_err(|error| format!("current AgentRun projection is invalid JSON: {error}"))?;
         let run = value
             .as_object()
             .cloned()
             .ok_or_else(|| "current AgentRun projection must be an object".to_string())?;
-        validate_current_agent_run_projection(&run)?;
+        // Some pre-runtime Renderer fixtures persisted only lifecycle fields. They are not a
+        // valid current projection and must never be merged field-by-field, but an authoritative
+        // trace can safely rebuild the complete presentation skeleton from scratch.
+        validate_current_agent_run_projection(&run)
+            .ok()
+            .map(|()| run)
+    } else {
+        None
+    };
+    let mut run = if let Some(run) = existing_run {
         run
     } else {
         let (run_id, status, completed_at) = trace
@@ -1345,6 +1370,7 @@ fn project_guidance_timeline(
             .cloned()
             .expect("canonical AgentRun projection is an object")
     };
+    project_durable_mcp_invocations(connection, &mut run, trace)?;
     let mcp_trace_anchors = mcp_trace_anchors(&run)?;
     let existing_timeline = run
         .remove("timeline")
@@ -1353,19 +1379,70 @@ fn project_guidance_timeline(
     let presentation_only_items = existing_timeline
         .into_iter()
         .filter(|item| {
-            !matches!(
-                item.get("type").and_then(serde_json::Value::as_str),
-                Some("message" | "tool_call" | "user_guidance" | "mcp_tool_call")
-            )
+            let item_type = item.get("type").and_then(serde_json::Value::as_str);
+            let item_id = item.get("id").and_then(serde_json::Value::as_str);
+            let backend_owned = match (item_type, item_id) {
+                (Some("message"), Some(id)) => id.starts_with("trace-message-"),
+                (Some("tool_call"), Some(id)) => id.starts_with("tool-call-"),
+                (Some("user_guidance"), Some(id)) => id.starts_with("user-guidance-"),
+                (Some("mcp_tool_call"), Some(id)) => id.starts_with("mcp-invocation-"),
+                _ => false,
+            };
+            !backend_owned
         })
         .collect::<Vec<_>>();
     // Renderer-only items that have no durable trace identity remain presentation-only. Typed MCP
     // items are rebuilt below from their call-id anchors so they retain their original sequence.
     let mut timeline = presentation_only_items;
     let mut emitted_mcp_invocations = HashSet::new();
+    let mut tool_calls = run
+        .remove("toolCalls")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut tool_results = run
+        .remove("toolResults")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut projected_command_sessions = run
+        .remove("commandSessions")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut activated_skills = run
+        .remove("activatedSkills")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut skill_activation_revision = run.remove("skillActivationRevision");
+    let mut projected_tool_call_ids = tool_calls
+        .iter()
+        .filter_map(|call| call.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let mut projected_tool_result_ids = tool_results
+        .iter()
+        .filter_map(|result| result.get("callId").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
 
     if let Some(trace) = trace {
         run.insert("runId".to_string(), trace.run_id.clone().into());
+        match trace.terminal_status {
+            crate::ConversationTurnTraceTerminalStatus::InProgress => {}
+            crate::ConversationTurnTraceTerminalStatus::Completed => {
+                run.insert("status".to_string(), "completed".into());
+                run.entry("completedAt".to_string())
+                    .or_insert_with(|| fallback_started_at.into());
+            }
+            crate::ConversationTurnTraceTerminalStatus::Failed => {
+                run.insert("status".to_string(), "failed".into());
+                run.entry("completedAt".to_string())
+                    .or_insert_with(|| fallback_started_at.into());
+            }
+            crate::ConversationTurnTraceTerminalStatus::Cancelled => {
+                run.insert("status".to_string(), "cancelled".into());
+                run.entry("completedAt".to_string())
+                    .or_insert_with(|| fallback_started_at.into());
+            }
+        }
         for item in &trace.items {
             match item {
                 ConversationTurnTraceItem::AssistantNarration {
@@ -1395,7 +1472,11 @@ fn project_guidance_timeline(
                     "sequence": sequence,
                 })),
                 ConversationTurnTraceItem::ToolCall {
-                    call_id, sequence, ..
+                    call_id,
+                    tool,
+                    operation,
+                    approval_status,
+                    ..
                 } => {
                     if let Some(invocation_id) = mcp_trace_anchors.get(call_id) {
                         if emitted_mcp_invocations.insert(invocation_id.clone()) {
@@ -1406,19 +1487,99 @@ fn project_guidance_timeline(
                             }));
                         }
                     } else {
+                        if projected_tool_call_ids.insert(call_id.clone()) {
+                            tool_calls.push(serde_json::json!({
+                                "id": call_id,
+                                "tool": tool,
+                                "args": operation,
+                                "approvalStatus": approval_status,
+                                "reason": serde_json::Value::Null,
+                            }));
+                        }
                         timeline.push(serde_json::json!({
                             "id": format!("tool-call-{call_id}"),
                             "type": "tool_call",
                             "callId": call_id,
-                            "traceSequence": sequence,
                         }));
                     }
                 }
-                ConversationTurnTraceItem::ToolResult { .. }
-                | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
+                ConversationTurnTraceItem::ToolResult {
+                    call_id,
+                    tool,
+                    success,
+                    observation,
+                    error,
+                    ..
+                } => {
+                    if tool == "skills_activate" && *success {
+                        if let Some((skill, activation_revision)) =
+                            project_activated_skill_from_trace_result(observation)
+                        {
+                            let skill_id = skill
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .expect("projected activated Skill has an id");
+                            if let Some(existing) = activated_skills.iter_mut().find(|existing| {
+                                existing.get("id").and_then(serde_json::Value::as_str)
+                                    == Some(skill_id)
+                            }) {
+                                *existing = skill;
+                            } else {
+                                activated_skills.push(skill);
+                            }
+                            skill_activation_revision = Some(activation_revision.into());
+                        }
+                    }
+                    if !mcp_trace_anchors.contains_key(call_id)
+                        && projected_tool_result_ids.insert(call_id.clone())
+                    {
+                        let mut projected = serde_json::json!({
+                            "callId": call_id,
+                            "tool": tool,
+                            "ok": success,
+                            "result": observation,
+                        });
+                        if let Some(error) = error {
+                            projected
+                                .as_object_mut()
+                                .expect("projected ToolResult is an object")
+                                .insert("error".to_string(), error.clone().into());
+                        }
+                        tool_results.push(projected);
+                    }
+                }
+                ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
         }
+    }
+
+    for record in command_sessions.iter().filter(|record| {
+        trace.is_some_and(|trace| {
+            record.snapshot.assistant_message_id == trace.assistant_message_id
+                && record.snapshot.origin_run_id == trace.run_id
+                && record.snapshot.status.is_terminal()
+        })
+    }) {
+        let snapshot = &record.snapshot;
+        let mut projection = serde_json::json!({
+            "callId": snapshot.call_id,
+            "status": snapshot.status,
+            "startedAt": snapshot.started_at,
+            "latestSequence": snapshot.latest_sequence,
+            "outputTruncated": snapshot.output_truncated,
+            "outputs": snapshot.outputs,
+        });
+        let object = projection
+            .as_object_mut()
+            .expect("command Session projection is an object");
+        if let Some(ended_at) = snapshot.ended_at {
+            object.insert("endedAt".to_string(), ended_at.into());
+        }
+        if let Some(exit_code) = snapshot.exit_code {
+            object.insert("exitCode".to_string(), exit_code.into());
+        }
+        projected_command_sessions.insert(snapshot.call_id.clone(), projection);
     }
 
     for guidance in guidances {
@@ -1476,12 +1637,27 @@ fn project_guidance_timeline(
     }
 
     run.insert("timeline".to_string(), timeline.into());
+    run.insert("toolCalls".to_string(), tool_calls.into());
+    run.insert("toolResults".to_string(), tool_results.into());
+    if !projected_command_sessions.is_empty() {
+        run.insert(
+            "commandSessions".to_string(),
+            projected_command_sessions.into(),
+        );
+    }
+    if !activated_skills.is_empty() {
+        run.insert("activatedSkills".to_string(), activated_skills.into());
+    }
+    if let Some(skill_activation_revision) = skill_activation_revision {
+        run.insert(
+            "skillActivationRevision".to_string(),
+            skill_activation_revision,
+        );
+    }
     run.entry("startedAt".to_string())
         .or_insert_with(|| fallback_started_at.into());
     for field in [
         "toolDefinitions",
-        "toolCalls",
-        "toolResults",
         "approvals",
         "diffs",
         "fileDrafts",
@@ -1507,6 +1683,35 @@ fn project_guidance_timeline(
 
     serde_json::to_string(&serde_json::Value::Object(run))
         .map_err(|error| format!("serialize guidance timeline: {error}"))
+}
+
+fn project_activated_skill_from_trace_result(
+    observation: &serde_json::Value,
+) -> Option<(serde_json::Value, &str)> {
+    let status = observation.get("status")?.as_str()?;
+    if !matches!(status, "activated" | "alreadyActivated") {
+        return None;
+    }
+    let revision = observation.get("activationRevision")?.as_str()?;
+    let skill = observation.get("skill")?;
+    let id = skill.get("id")?.as_str()?;
+    let name = skill.get("name")?.as_str()?;
+    let skill_revision = skill.get("revision")?.as_str()?;
+    let source = skill.get("source")?.as_str()?;
+    let (source_kind, source_id) = source.split_once(':')?;
+    if !matches!(source_kind, "workspace" | "bundled" | "installed") || source_id.trim().is_empty()
+    {
+        return None;
+    }
+    Some((
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "revision": skill_revision,
+            "source": { "kind": source_kind, "id": source_id },
+        }),
+        revision,
+    ))
 }
 
 fn validate_current_agent_run_projection(
@@ -1541,6 +1746,312 @@ fn validate_current_agent_run_projection(
         return Err("current AgentRun messageStreamCheckpoints must be an object".to_string());
     }
     Ok(())
+}
+
+fn project_durable_mcp_invocations(
+    connection: &rusqlite::Connection,
+    run: &mut serde_json::Map<String, serde_json::Value>,
+    trace: Option<&ConversationTurnTrace>,
+) -> Result<(), String> {
+    let Some(trace) = trace else {
+        return Ok(());
+    };
+    let existing_call_ids = mcp_trace_anchors(run)?;
+    let rows = pending_action_repository::list_mcp_actions_for_assistant_run(
+        connection,
+        &trace.conversation_id,
+        &trace.assistant_message_id,
+        &trace.run_id,
+    )
+    .map_err(storage_error)?;
+    let mut projected = run
+        .get("mcpInvocations")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| "current AgentRun MCP invocations must be an array".to_string())?;
+
+    for item in &trace.items {
+        let ConversationTurnTraceItem::ToolCall {
+            call_id,
+            tool,
+            provenance: crate::AgentToolIdentity::Mcp { provenance },
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if existing_call_ids.contains_key(call_id) {
+            continue;
+        }
+        let matching = rows
+            .iter()
+            .filter(|row| row.tool_call_id.as_deref() == Some(call_id.as_str()))
+            .collect::<Vec<_>>();
+        let [row] = matching.as_slice() else {
+            continue;
+        };
+        // Terminal automatic journals deliberately scrub this public action. If no prior safe
+        // projection exists, trace provenance alone cannot recover the one-time invocation UUID
+        // or historical display name, so leave the item generic instead of inventing facts.
+        let Ok(crate::AgentProposedAction::McpToolCall { approval }) =
+            serde_json::from_str::<crate::AgentProposedAction>(&row.action_json)
+        else {
+            continue;
+        };
+        let identity = &approval.identity;
+        let expected_storage_id = format!(
+            "v2:{}:{}:{}",
+            identity.run_id.len(),
+            identity.run_id,
+            identity.action_id
+        );
+        if row.action_id != expected_storage_id
+            || row.run_id != trace.run_id
+            || identity.call_id != *call_id
+            || identity.provenance != *provenance
+            || approval.call.id != *call_id
+            || approval.call.tool != *tool
+            || approval.summary.server_id != provenance.server_id
+            || approval.summary.scope != provenance.scope
+            || approval.summary.raw_tool_name != provenance.raw_tool_name
+            || approval.summary.model_tool_name != provenance.model_tool_name
+            || !approval.summary.external
+        {
+            continue;
+        }
+        let terminal_result = trace.items.iter().find_map(|candidate| {
+            let ConversationTurnTraceItem::ToolResult {
+                call_id: result_call_id,
+                observation,
+                success,
+                ..
+            } = candidate
+            else {
+                return None;
+            };
+            (result_call_id == call_id).then_some((observation, *success))
+        });
+        let duration_ms = u64::try_from(row.updated_at.saturating_sub(row.created_at)).unwrap_or(0);
+        let lifecycle = if let Some((observation, success)) = terminal_result {
+            project_terminal_mcp_trace_lifecycle(observation, success, duration_ms)
+        } else {
+            match row.status.as_str() {
+                "pending" => Some((
+                    "pending_approval",
+                    "definitely_not_dispatched",
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )),
+                "approved" => Some((
+                    "approved",
+                    "definitely_not_dispatched",
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )),
+                "executing" => Some((
+                    "dispatching",
+                    "possibly_dispatched",
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )),
+                _ => None,
+            }
+        };
+        let Some((state, dispatch, outcome, is_error, error_code, duration, truncated)) = lifecycle
+        else {
+            continue;
+        };
+        let mut invocation = serde_json::json!({
+            "actionId": identity.action_id,
+            "invocationId": identity.invocation_id,
+            "callId": identity.call_id,
+            "serverId": provenance.server_id,
+            "serverDisplayName": approval.summary.server_display_name,
+            "scope": provenance.scope,
+            "rawToolName": provenance.raw_tool_name,
+            "modelToolName": provenance.model_tool_name,
+            "external": true,
+            "state": state,
+            "dispatchCertainty": dispatch,
+            "outputTruncated": truncated,
+        });
+        let object = invocation
+            .as_object_mut()
+            .expect("MCP invocation projection is an object");
+        if let Some(display_reason) = &approval.summary.display_reason {
+            object.insert("displayReason".to_string(), display_reason.clone().into());
+        }
+        if let Some(outcome) = outcome {
+            object.insert("outcome".to_string(), outcome.into());
+        }
+        if let Some(is_error) = is_error {
+            object.insert("isError".to_string(), is_error.into());
+        }
+        if let Some(error_code) = error_code {
+            object.insert("errorCode".to_string(), error_code.into());
+        }
+        if let Some(duration) = duration {
+            object.insert("durationMs".to_string(), duration.into());
+        }
+        projected.push(invocation);
+    }
+    run.insert("mcpInvocations".to_string(), projected.into());
+    Ok(())
+}
+
+type ProjectedMcpLifecycle<'a> = (
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    Option<bool>,
+    Option<&'a str>,
+    Option<u64>,
+    bool,
+);
+
+fn project_terminal_mcp_trace_lifecycle(
+    observation: &serde_json::Value,
+    success: bool,
+    duration_ms: u64,
+) -> Option<ProjectedMcpLifecycle<'_>> {
+    let value = observation.as_object()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("mcp_tool")
+        || value.get("external").and_then(serde_json::Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    let status = value.get("status")?.as_str()?;
+    let outcome = value.get("outcome")?.as_str()?;
+    let dispatch = value.get("dispatchCertainty")?.as_str()?;
+    let truncated = value
+        .get("truncatedAtSource")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let code = value
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 128
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    match (status, outcome, dispatch, success) {
+        ("completed", "succeeded", "response_received", true) => Some((
+            "completed",
+            dispatch,
+            Some(outcome),
+            Some(false),
+            None,
+            Some(duration_ms),
+            truncated,
+        )),
+        ("completed", "tool_error", "response_received", false) => Some((
+            "completed",
+            dispatch,
+            Some(outcome),
+            Some(true),
+            Some(code.unwrap_or("mcp.tool_error")),
+            Some(duration_ms),
+            truncated,
+        )),
+        ("rejected", "rejected", "definitely_not_dispatched", false) => Some((
+            "rejected",
+            dispatch,
+            Some(outcome),
+            None,
+            Some(code.unwrap_or("mcp.approval_rejected")),
+            None,
+            false,
+        )),
+        ("cancelled", "cancelled", "definitely_not_dispatched", false) => Some((
+            "cancelled",
+            dispatch,
+            Some(outcome),
+            None,
+            Some(code.unwrap_or("mcp.tool_cancelled")),
+            None,
+            false,
+        )),
+        ("expired", "expired", "definitely_not_dispatched", false) => Some((
+            "expired",
+            dispatch,
+            Some(outcome),
+            None,
+            Some(code.unwrap_or("mcp.approval_payload_expired")),
+            None,
+            false,
+        )),
+        ("payload_unavailable", "payload_unavailable", "definitely_not_dispatched", false) => {
+            Some((
+                "payload_unavailable",
+                dispatch,
+                Some(outcome),
+                Some(true),
+                Some(code.unwrap_or("mcp.approval_payload_unavailable")),
+                None,
+                false,
+            ))
+        }
+        ("policy_denied", "policy_denied", "definitely_not_dispatched", false) => Some((
+            "policy_denied",
+            dispatch,
+            Some(outcome),
+            None,
+            Some(code.unwrap_or("mcp.approval_policy_denied")),
+            None,
+            false,
+        )),
+        ("outcome_unknown", "outcome_unknown", "possibly_dispatched", false) => Some((
+            "outcome_unknown",
+            dispatch,
+            Some(outcome),
+            None,
+            Some(code.unwrap_or("mcp.tool_outcome_unknown")),
+            None,
+            false,
+        )),
+        ("failed", "output_too_large", "response_received", false) => Some((
+            "failed",
+            dispatch,
+            Some(outcome),
+            Some(true),
+            Some(code.unwrap_or("mcp.tool_output_too_large")),
+            Some(duration_ms),
+            true,
+        )),
+        ("failed", "timed_out", "definitely_not_dispatched", false) => Some((
+            "failed",
+            dispatch,
+            Some(outcome),
+            Some(true),
+            Some(code.unwrap_or("mcp.tool_timeout")),
+            Some(duration_ms),
+            false,
+        )),
+        ("failed", "transport_error", "definitely_not_dispatched" | "response_received", false) => {
+            Some((
+                "failed",
+                dispatch,
+                Some(outcome),
+                Some(true),
+                Some(code.unwrap_or("mcp.tool_failed")),
+                Some(duration_ms),
+                truncated && dispatch == "response_received",
+            ))
+        }
+        _ => None,
+    }
 }
 
 fn mcp_trace_anchors(

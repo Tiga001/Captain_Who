@@ -1,9 +1,46 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use crate::provider_profile::ReasoningEffort;
 
 pub const AGENT_GRAPH_SCHEMA_VERSION: u32 = 1;
+
+/// Derives the one trusted root-Agent identity for a Conversation.
+///
+/// Keeping this in core prevents a lazily enabled Harness and a collaboration-owned
+/// Conversation fork from inventing different root identities for the same durable Conversation.
+pub fn root_agent_id_for_conversation(conversation_id: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(conversation_id.as_bytes()));
+    format!("agent-root-{}", &digest[..32])
+}
+
+/// Derives the stable idempotency key used whenever core binds a Conversation to its root Agent.
+pub fn root_agent_creation_request_id(conversation_id: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(conversation_id.as_bytes()));
+    format!("harness-root-{}", &digest[..32])
+}
+
+/// Applies the persisted root task-name constraints without changing the user-visible title.
+pub fn bounded_root_agent_task_name(title: &str) -> String {
+    let normalized = title
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let title = normalized.trim();
+    let title = if title.is_empty() { "Root" } else { title };
+    let mut boundary = title.len().min(256);
+    while boundary > 0 && !title.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    title[..boundary].to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

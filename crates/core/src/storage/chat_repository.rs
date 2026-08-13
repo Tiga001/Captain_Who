@@ -4,24 +4,226 @@ use crate::storage::models::{
 use crate::storage::{
     context_compaction_repository, now_ms, provider_continuation_repository, world_state_repository,
 };
-use crate::AgentMcpServerScope;
+use crate::{AgentMcpServerScope, AgentMcpToolApproval, AgentMcpToolInvocationEvent};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
 
-pub(crate) struct McpInvocationTerminalProjection<'a> {
-    pub action_id: &'a str,
-    pub invocation_id: &'a str,
-    pub call_id: &'a str,
-    pub server_id: &'a str,
-    pub server_display_name: &'a str,
-    pub scope: &'a AgentMcpServerScope,
-    pub raw_tool_name: &'a str,
-    pub model_tool_name: &'a str,
-    pub state: &'static str,
-    pub dispatch_certainty: &'static str,
-    pub outcome: &'static str,
-    pub is_error: Option<bool>,
-    pub error_code: &'static str,
+/// Persists one Renderer-safe MCP lifecycle card from the Host-authenticated frozen approval.
+///
+/// Raw arguments, result content and diagnostics never enter this projection. The helper may
+/// create the canonical AgentRun presentation skeleton, but it cannot change the durable
+/// conversation trace or invent an invocation identity.
+pub(crate) fn upsert_message_mcp_invocation_event(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    approval: &AgentMcpToolApproval,
+    invocation: &AgentMcpToolInvocationEvent,
+    updated_at: i64,
+) -> rusqlite::Result<()> {
+    let identity = &approval.identity;
+    if invocation.action_id != identity.action_id
+        || invocation.invocation_id != identity.invocation_id
+        || invocation.call_id != identity.call_id
+        || invocation.server_id != identity.provenance.server_id
+        || invocation.server_display_name != approval.summary.server_display_name
+        || invocation.raw_tool_name != identity.provenance.raw_tool_name
+        || invocation.model_tool_name != identity.provenance.model_tool_name
+        || !invocation.external
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let Some((existing_agent_run_json, started_at)) = connection
+        .query_row(
+            "SELECT agent_run_json, created_at
+             FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let preserved_terminal = existing_agent_run_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .filter(|run| current_agent_run_projection_is_safe(run, &identity.run_id))
+        .and_then(|run| {
+            let status = run.get("status")?.as_str()?;
+            matches!(status, "completed" | "failed" | "cancelled").then(|| {
+                (
+                    status.to_string(),
+                    run.get("completedAt")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(updated_at),
+                )
+            })
+        });
+    let (run_status, completed_at) = preserved_terminal
+        .as_ref()
+        .map(|(status, completed_at)| (status.as_str(), Some(*completed_at)))
+        .unwrap_or(("running", None));
+    let canonical = canonical_agent_run_lifecycle_projection(
+        existing_agent_run_json.as_deref(),
+        &identity.run_id,
+        run_status,
+        started_at,
+        updated_at,
+        completed_at,
+    )?;
+    let mut value = serde_json::from_str::<serde_json::Value>(&canonical)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let run = value.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
+    let mut projected = serde_json::json!({
+        "actionId": invocation.action_id,
+        "invocationId": invocation.invocation_id,
+        "callId": invocation.call_id,
+        "serverId": invocation.server_id,
+        "serverDisplayName": invocation.server_display_name,
+        "scope": approval.summary.scope,
+        "rawToolName": invocation.raw_tool_name,
+        "modelToolName": invocation.model_tool_name,
+        "external": true,
+        "state": invocation.state,
+        "dispatchCertainty": invocation.dispatch_certainty,
+        "outputTruncated": invocation.output_truncated,
+    });
+    let projected = projected
+        .as_object_mut()
+        .expect("MCP invocation projection is an object");
+    for (field, value) in [
+        (
+            "displayReason",
+            invocation
+                .display_reason
+                .as_ref()
+                .map(|value| serde_json::Value::String(value.clone())),
+        ),
+        (
+            "outcome",
+            invocation
+                .outcome
+                .map(|value| serde_json::to_value(value).expect("serialize MCP outcome")),
+        ),
+        ("isError", invocation.is_error.map(serde_json::Value::Bool)),
+        (
+            "errorCode",
+            invocation
+                .error_code
+                .as_ref()
+                .map(|value| serde_json::Value::String(value.clone())),
+        ),
+        (
+            "durationMs",
+            invocation.duration_ms.map(serde_json::Value::from),
+        ),
+    ] {
+        if let Some(value) = value {
+            projected.insert(field.to_string(), value);
+        }
+    }
+    let projected = serde_json::Value::Object(projected.clone());
+
+    let invocations = run
+        .get_mut("mcpInvocations")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    let matching = invocations
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            candidate
+                .get("invocationId")
+                .and_then(serde_json::Value::as_str)
+                == Some(identity.invocation_id.as_str())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if matching.len() > 1
+        || invocations.iter().any(|candidate| {
+            candidate
+                .get("invocationId")
+                .and_then(serde_json::Value::as_str)
+                != Some(identity.invocation_id.as_str())
+                && (candidate
+                    .get("actionId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(identity.action_id.as_str())
+                    || candidate.get("callId").and_then(serde_json::Value::as_str)
+                        == Some(identity.call_id.as_str()))
+        })
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let Some(index) = matching.first().copied() {
+        let current = invocations[index]
+            .as_object()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        for field in [
+            "actionId",
+            "invocationId",
+            "callId",
+            "serverId",
+            "serverDisplayName",
+            "scope",
+            "rawToolName",
+            "modelToolName",
+            "external",
+        ] {
+            if current.get(field) != projected.get(field) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        invocations[index] = projected;
+    } else {
+        invocations.push(projected);
+    }
+
+    if let Some(tool_calls) = run
+        .get_mut("toolCalls")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        tool_calls.retain(|call| {
+            call.get("id").and_then(serde_json::Value::as_str) != Some(identity.call_id.as_str())
+        });
+    }
+    if let Some(tool_results) = run
+        .get_mut("toolResults")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        tool_results.retain(|result| {
+            result.get("callId").and_then(serde_json::Value::as_str)
+                != Some(identity.call_id.as_str())
+        });
+    }
+    let timeline = run
+        .get_mut("timeline")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    timeline.retain(|item| {
+        !((item.get("type").and_then(serde_json::Value::as_str) == Some("tool_call")
+            && item.get("callId").and_then(serde_json::Value::as_str)
+                == Some(identity.call_id.as_str()))
+            || (item.get("type").and_then(serde_json::Value::as_str) == Some("mcp_tool_call")
+                && item.get("invocationId").and_then(serde_json::Value::as_str)
+                    == Some(identity.invocation_id.as_str())))
+    });
+    timeline.push(serde_json::json!({
+        "id": format!("mcp-invocation-{}", identity.invocation_id),
+        "type": "mcp_tool_call",
+        "invocationId": identity.invocation_id,
+    }));
+    if !current_agent_run_projection_is_safe(run, &identity.run_id) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let next_agent_run_json = serde_json::to_string(&value)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute(
+        "UPDATE messages SET agent_run_json = ?1 WHERE conversation_id = ?2 AND id = ?3",
+        params![next_agent_run_json, conversation_id, message_id],
+    )?;
+    Ok(())
 }
 
 struct StoredImmutableMessage {
@@ -125,6 +327,35 @@ pub fn get_conversation(
         conversation.messages = list_messages(connection, &conversation.id)?;
     }
     Ok(conversation)
+}
+
+/// Removes transport-only Agent input projections from the user-facing root chat surface.
+///
+/// The rows remain durable Conversation/Context facts and child observer snapshots keep their
+/// authenticated origins. Only the interactive root presentation hides them, so a child result
+/// can never reappear after reload as a forged human `role=user` bubble.
+pub fn retain_user_facing_root_messages(
+    connection: &Connection,
+    conversation: &mut ChatConversationRecord,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(
+        "SELECT id FROM messages
+         WHERE conversation_id = ?1
+           AND (
+               input_origin_kind = 'agent'
+               OR (
+                   input_origin_kind = 'snapshot'
+                   AND snapshot_original_origin_kind = 'agent'
+               )
+           )",
+    )?;
+    let internal_ids = statement
+        .query_map([conversation.id.as_str()], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    conversation
+        .messages
+        .retain(|message| !internal_ids.contains(&message.id));
+    Ok(())
 }
 
 pub fn get_assistant_message_created_at(
@@ -728,127 +959,6 @@ pub fn update_message_run_terminal_state(
     connection.execute(
         "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
         params![completed_at, conversation_id],
-    )?;
-    Ok(())
-}
-
-/// Settles the Renderer-safe projection of one typed MCP invocation.
-///
-/// The current projection must already contain exactly one matching Host-generated invocation.
-/// Recovery may advance its lifecycle, but it never manufactures a missing card, deduplicates a
-/// corrupt array, or rewrites drifted immutable identity fields.
-pub(crate) fn update_message_mcp_invocation_terminal_state(
-    connection: &Connection,
-    conversation_id: &str,
-    message_id: &str,
-    projection: &McpInvocationTerminalProjection<'_>,
-) -> rusqlite::Result<()> {
-    let existing_agent_run_json = connection
-        .query_row(
-            "SELECT agent_run_json FROM messages WHERE conversation_id = ?1 AND id = ?2",
-            params![conversation_id, message_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten();
-    let Some(raw) = existing_agent_run_json else {
-        return Ok(());
-    };
-    let mut value = serde_json::from_str::<serde_json::Value>(&raw)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let run = value.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
-    let scope = serde_json::to_value(projection.scope)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    let invocations = run
-        .get_mut("mcpInvocations")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or(rusqlite::Error::InvalidQuery)?;
-    let mut matching_index = None;
-    for (index, candidate) in invocations.iter().enumerate() {
-        let candidate = candidate.as_object().ok_or(rusqlite::Error::InvalidQuery)?;
-        for field in [
-            "actionId",
-            "invocationId",
-            "callId",
-            "serverId",
-            "serverDisplayName",
-            "rawToolName",
-            "modelToolName",
-            "state",
-            "dispatchCertainty",
-        ] {
-            if candidate
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(|value| value.is_empty())
-            {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-        }
-        if candidate.get("external") != Some(&serde_json::Value::Bool(true))
-            || !candidate
-                .get("outputTruncated")
-                .is_some_and(serde_json::Value::is_boolean)
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        if candidate
-            .get("invocationId")
-            .and_then(serde_json::Value::as_str)
-            == Some(projection.invocation_id)
-            && matching_index.replace(index).is_some()
-        {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-    }
-    let Some(index) = matching_index else {
-        return Err(rusqlite::Error::InvalidQuery);
-    };
-    let invocation = invocations[index]
-        .as_object_mut()
-        .expect("validated current MCP invocation object");
-    for (field, expected) in [
-        ("actionId", projection.action_id),
-        ("callId", projection.call_id),
-        ("serverId", projection.server_id),
-        ("serverDisplayName", projection.server_display_name),
-        ("rawToolName", projection.raw_tool_name),
-        ("modelToolName", projection.model_tool_name),
-    ] {
-        if invocation.get(field).and_then(serde_json::Value::as_str) != Some(expected) {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-    }
-    if invocation
-        .get("scope")
-        .is_some_and(|existing| existing != &scope)
-    {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    invocation.insert("state".to_string(), projection.state.into());
-    invocation.insert(
-        "dispatchCertainty".to_string(),
-        projection.dispatch_certainty.into(),
-    );
-    invocation.insert("outcome".to_string(), projection.outcome.into());
-    invocation.insert("errorCode".to_string(), projection.error_code.into());
-    invocation.insert("outputTruncated".to_string(), false.into());
-    match projection.is_error {
-        Some(is_error) => {
-            invocation.insert("isError".to_string(), is_error.into());
-        }
-        None => {
-            invocation.remove("isError");
-        }
-    }
-
-    let next_agent_run_json = serde_json::to_string(&value)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    connection.execute(
-        "UPDATE messages
-         SET agent_run_json = ?1
-         WHERE conversation_id = ?2 AND id = ?3",
-        params![next_agent_run_json, conversation_id, message_id],
     )?;
     Ok(())
 }

@@ -20,6 +20,7 @@ export interface FileWriteToolActivityGroupItem {
 
 interface FileWriteToolActivityGroupProps {
   items: FileWriteToolActivityGroupItem[]
+  observerRootConversationId?: string
 }
 
 type FileWriteOperation = 'create' | 'update'
@@ -238,9 +239,11 @@ function getGroupLabel(items: FileWriteToolActivityGroupItem[], t: Translate): s
 
 function FileWriteEntry({
   item,
+  observerRootConversationId,
   standalone
 }: {
   item: FileWriteToolActivityGroupItem
+  observerRootConversationId?: string
   standalone: boolean
 }): JSX.Element {
   const { t } = useFrontendConfig()
@@ -264,8 +267,12 @@ function FileWriteEntry({
     let cancelled = false
     const request =
       previewSource === 'diff'
-        ? getAgentFileWriteDiff(item.draftId).then((page) => page.patch)
-        : readAgentFileDraft(item.draftId).then((page) => page.content)
+        ? getAgentFileWriteDiff(item.draftId, 0, 50_000, observerRootConversationId).then(
+            (page) => page.patch
+          )
+        : readAgentFileDraft(item.draftId, 0, 50_000, observerRootConversationId).then(
+            (page) => page.content
+          )
     void request
       .then((content) => {
         if (!cancelled) {
@@ -282,7 +289,7 @@ function FileWriteEntry({
     return () => {
       cancelled = true
     }
-  }, [expanded, item.draft, item.draftId, previewSource])
+  }, [expanded, item.draft, item.draftId, observerRootConversationId, previewSource])
 
   const toggleExpanded = (): void => {
     if (!expanded) {
@@ -358,11 +365,20 @@ function FileWriteEntry({
 }
 
 export function FileWriteToolActivityGroup({
-  items
+  items,
+  observerRootConversationId
 }: FileWriteToolActivityGroupProps): JSX.Element | null {
   const { t } = useFrontendConfig()
   if (items.length === 0) return null
-  if (items.length === 1) return <FileWriteEntry item={items[0]} standalone />
+  if (items.length === 1) {
+    return (
+      <FileWriteEntry
+        item={items[0]}
+        observerRootConversationId={observerRootConversationId}
+        standalone
+      />
+    )
+  }
 
   return (
     <AgentActivityDisclosure
@@ -374,7 +390,12 @@ export function FileWriteToolActivityGroup({
     >
       <div className="agent-activity__details file-write-activity__details">
         {items.map((item) => (
-          <FileWriteEntry item={item} key={item.draftId} standalone={false} />
+          <FileWriteEntry
+            item={item}
+            key={item.draftId}
+            observerRootConversationId={observerRootConversationId}
+            standalone={false}
+          />
         ))}
       </div>
     </AgentActivityDisclosure>

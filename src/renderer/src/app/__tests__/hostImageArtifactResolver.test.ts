@@ -66,6 +66,33 @@ describe('Host image Artifact resolver', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:artifact')
   })
 
+  it('forwards exact root-scoped observer authority without changing the Artifact identity', async () => {
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:observer-artifact')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    mocks.readArtifact.mockResolvedValue({
+      ok: true,
+      value: {
+        schemaVersion: 1,
+        artifact,
+        fileName: `generated-image-${sha256.slice(0, 12)}.png`,
+        bytes
+      }
+    } satisfies HostInvocationResult<ImageGenerationArtifactContent>)
+
+    const resolved = await hostImageArtifactResolver.resolve(artifact, {
+      conversationId: 'conversation-child',
+      observerRootConversationId: 'conversation-root'
+    })
+
+    expect(mocks.readArtifact).toHaveBeenCalledWith({
+      schemaVersion: 1,
+      artifact,
+      conversationId: 'conversation-child',
+      observerRootConversationId: 'conversation-root'
+    })
+    resolved.release?.()
+  })
+
   it('rejects structured Host failures and changed frozen identity', async () => {
     mocks.readArtifact.mockResolvedValueOnce({
       ok: false,

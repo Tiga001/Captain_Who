@@ -9,6 +9,7 @@ import { deleteStoredConversation } from '../features/storage/storageClient'
 interface AppShellSettingsViewProps {
   conversations: ChatConversation[]
   initialPage: SettingsPageId
+  initialProjectId?: string | null
   onBack: () => void
   onConversationPatch: (conversationId: string, patch: Partial<ChatConversation>) => void
   onConversationsChange: Dispatch<SetStateAction<ChatConversation[]>>
@@ -21,6 +22,7 @@ interface AppShellSettingsViewProps {
 export function AppShellSettingsView({
   conversations,
   initialPage,
+  initialProjectId,
   onBack,
   onConversationPatch,
   onConversationsChange,
@@ -33,6 +35,7 @@ export function AppShellSettingsView({
     <SettingsPage
       conversations={conversations}
       initialPage={initialPage}
+      initialProjectId={initialProjectId}
       projects={projects}
       uiPreferences={uiPreferences}
       onBack={onBack}

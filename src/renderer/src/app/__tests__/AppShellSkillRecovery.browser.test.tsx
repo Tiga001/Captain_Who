@@ -124,6 +124,12 @@ vi.mock('../../features/gitReview/useGitRepositoryCapability', () => ({
   useGitRepositoryCapability: () => ({ status: 'unavailable' })
 }))
 
+// This suite is the legacy/no-child AppShell baseline. Collaboration is covered by its own
+// root-scoped integration tests and must not alter the old single-Agent fixture.
+vi.mock('../../features/agentCollaboration/useCollaborationStore', () => ({
+  useOptionalCollaborationStore: () => null
+}))
+
 vi.mock('../../features/agent/agentClient', () => ({
   approveAgentAction: vi.fn(),
   cancelAgentAction: vi.fn(),
@@ -131,12 +137,14 @@ vi.mock('../../features/agent/agentClient', () => ({
   getContextWindowSnapshot: testState.getContextWindowSnapshot,
   getProviderTransitionStatus: testState.getProviderTransitionStatus,
   getAgentCommandSession: testState.getAgentCommandSession,
+  getAgentFileWriteDiff: vi.fn(),
   listAgentCommandSessions: testState.listAgentCommandSessions,
   listPendingAgentActions: testState.listPendingAgentActions,
   onAgentEvent: testState.onAgentEvent,
   onProviderTransition: testState.onProviderTransition,
   preflightProviderTransition: testState.preflightProviderTransition,
   rejectAgentAction: vi.fn(),
+  readAgentFileDraft: vi.fn(),
   startConversationTurn: testState.startConversationTurn,
   startProviderTransition: testState.startProviderTransition,
   steerAgentRun: testState.steerAgentRun

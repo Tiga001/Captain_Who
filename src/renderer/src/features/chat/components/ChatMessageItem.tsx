@@ -80,11 +80,14 @@ const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
 
 interface ChatMessageItemProps {
+  agentLabelsById?: Readonly<Record<string, string>>
   conversationId?: string
   editSelectedModelAvailable?: boolean
   editSelectedModelSupportsImage?: boolean
   isLastAssistantMessage?: boolean
   message: ChatMessage
+  mode?: 'interactive' | 'observer'
+  parentAgentId?: string | null
   projectId?: string | null
   onApprove?: (
     messageId: string,
@@ -96,8 +99,11 @@ interface ChatMessageItemProps {
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
+  onTimelineCollapsedChange?: (messageId: string, collapsed: boolean) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
+  observerRootConversationId?: string
   showTokenUsageDetails: boolean
+  timelineCollapsedOverride?: boolean
   turnDiffSummary?: GitTurnDiffSummary
 }
 
@@ -326,11 +332,15 @@ function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) 
 }
 
 function AgentTimelineItemView({
+  conversationId,
   item,
+  observerRootConversationId,
   projectId,
   run
 }: {
+  conversationId?: string
   item: RenderableTimelineItem
+  observerRootConversationId?: string
   projectId?: string | null
   run: ChatAgentRunView
 }) {
@@ -353,7 +363,14 @@ function AgentTimelineItemView({
   if (item.type === 'read_group') {
     const items = getReadGroupItems(run, item.callIds)
     if (items.length === 0) return null
-    return <ReadToolActivityGroup items={items} projectId={projectId} />
+    return (
+      <ReadToolActivityGroup
+        conversationId={conversationId}
+        items={items}
+        observerRootConversationId={observerRootConversationId}
+        projectId={projectId}
+      />
+    )
   }
 
   if (item.type === 'search_group') {
@@ -389,7 +406,12 @@ function AgentTimelineItemView({
   if (item.type === 'write_file_group') {
     const items = getWriteFileGroupItems(run, item.callIds)
     if (items.length === 0) return null
-    return <FileWriteToolActivityGroup items={items} />
+    return (
+      <FileWriteToolActivityGroup
+        items={items}
+        observerRootConversationId={observerRootConversationId}
+      />
+    )
   }
 
   if (item.type === 'conversation_history_group') {
@@ -436,8 +458,10 @@ function AgentTimelineItemView({
       <AgentToolActivity
         cancelled={settledStatus === 'cancelled'}
         call={call}
+        conversationId={conversationId}
         diff={diff}
         mcpInvocation={mcpInvocation}
+        observerRootConversationId={observerRootConversationId}
         projectId={projectId}
         previousTodoResult={previousTodoResult}
         readActivity={readActivity}
@@ -461,16 +485,24 @@ function AgentTimelineItemView({
 function AgentRunView({
   conversationId,
   message,
+  mode,
   onReviewLastTurn,
+  onTimelineCollapsedChange,
   onUiStateChange,
+  observerRootConversationId,
   projectId,
+  timelineCollapsedOverride,
   turnDiffSummary
 }: {
   conversationId?: string
   message: ChatMessage
+  mode: 'interactive' | 'observer'
   onReviewLastTurn?: (filePath?: string) => void
+  onTimelineCollapsedChange?: (messageId: string, collapsed: boolean) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
+  observerRootConversationId?: string
   projectId?: string | null
+  timelineCollapsedOverride?: boolean
   turnDiffSummary?: GitTurnDiffSummary
 }) {
   const { t } = useFrontendConfig()
@@ -587,7 +619,7 @@ function AgentRunView({
 
   const hasGuidance = timeline.some((item) => item.type === 'user_guidance')
   const timelineCollapsed = canToggleTimeline
-    ? (message.uiState?.timelineCollapsed ?? !hasGuidance)
+    ? (timelineCollapsedOverride ?? message.uiState?.timelineCollapsed ?? !hasGuidance)
     : false
   const showTimeline = hasTimeline && !(canToggleTimeline && timelineCollapsed)
   const showFinalContent =
@@ -615,16 +647,27 @@ function AgentRunView({
         collapsed={timelineCollapsed}
         isThinking={headerState.isThinking}
         label={headerState.label}
-        onToggle={() =>
+        onToggle={() => {
+          if (onTimelineCollapsedChange) {
+            onTimelineCollapsedChange(message.id, !timelineCollapsed)
+            return
+          }
           onUiStateChange?.(message.id, {
             ...message.uiState,
             timelineCollapsed: !timelineCollapsed
           })
-        }
+        }}
       />
       {showTimeline &&
         displayTimeline.map((item) => (
-          <AgentTimelineItemView item={item} key={item.id} projectId={projectId} run={run} />
+          <AgentTimelineItemView
+            conversationId={conversationId}
+            item={item}
+            key={item.id}
+            observerRootConversationId={observerRootConversationId}
+            projectId={projectId}
+            run={run}
+          />
         ))}
       {showFinalContent && (
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
@@ -632,15 +675,25 @@ function AgentRunView({
       {isRunSettled(run) && (
         <ImageGenerationArtifactsCard
           conversationId={conversationId}
+          observerRootConversationId={observerRootConversationId}
           resolver={hostImageArtifactResolver}
           run={run}
         />
       )}
       {isRunSettled(run) && (
-        <OfficeArtifactsCard conversationId={conversationId} projectId={projectId} run={run} />
+        <OfficeArtifactsCard
+          conversationId={conversationId}
+          observerRootConversationId={observerRootConversationId}
+          projectId={projectId}
+          run={run}
+        />
       )}
       {isRunSettled(run) && turnDiffSummary && (
-        <EditSummaryCard onReview={onReviewLastTurn} summary={turnDiffSummary} />
+        <EditSummaryCard
+          onReview={onReviewLastTurn}
+          readOnly={mode === 'observer'}
+          summary={turnDiffSummary}
+        />
       )}
       {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
       {showTokenLimitNotice && (
@@ -666,9 +719,13 @@ function AgentRunView({
 function MessageContent({
   conversationId,
   message,
+  mode = 'interactive',
   onReviewLastTurn,
+  onTimelineCollapsedChange,
   onUiStateChange,
+  observerRootConversationId,
   projectId,
+  timelineCollapsedOverride,
   turnDiffSummary
 }: ChatMessageItemProps) {
   if (message.role === 'assistant') {
@@ -676,9 +733,13 @@ function MessageContent({
       <AgentRunView
         conversationId={conversationId}
         message={message}
+        mode={mode}
         onReviewLastTurn={onReviewLastTurn}
+        onTimelineCollapsedChange={onTimelineCollapsedChange}
         onUiStateChange={onUiStateChange}
+        observerRootConversationId={observerRootConversationId}
         projectId={projectId}
+        timelineCollapsedOverride={timelineCollapsedOverride}
         turnDiffSummary={turnDiffSummary}
       />
     )
@@ -881,21 +942,64 @@ function MessageAttachments({
   )
 }
 
+function MessageInputOrigin({
+  agentLabelsById,
+  message,
+  parentAgentId
+}: {
+  agentLabelsById?: Readonly<Record<string, string>>
+  message: ChatMessage
+  parentAgentId?: string | null
+}) {
+  const { t } = useFrontendConfig()
+  if (message.role !== 'user' || !message.inputOrigin) return null
+  const origin = message.inputOrigin
+  if (origin.kind === 'human') return null
+
+  const senderAgentId = origin.senderAgentId
+  const senderLabel = senderAgentId ? agentLabelsById?.[senderAgentId] : undefined
+  const relationLabel = senderAgentId
+    ? senderAgentId === parentAgentId
+      ? t('chat.fromParentAgent')
+      : t('chat.fromCollaboratingAgent')
+    : t('chat.historicalContext')
+
+  return (
+    <div
+      className="chat-message__input-origin"
+      data-input-origin={origin.kind}
+      data-sender-agent-id={senderAgentId ?? undefined}
+    >
+      <span>{relationLabel}</span>
+      {senderLabel ? <strong>{senderLabel}</strong> : null}
+      {origin.kind === 'historical_snapshot' && senderAgentId ? (
+        <span>{t('chat.historicalContext')}</span>
+      ) : null}
+    </div>
+  )
+}
+
 export function ChatMessageItem({
+  agentLabelsById,
   conversationId,
   editSelectedModelAvailable = true,
   editSelectedModelSupportsImage = true,
   isLastAssistantMessage = false,
   message,
+  mode = 'interactive',
   onApprove,
   onCancel,
   onEditSubmit,
   onContinueInNewTask,
   onReject,
   onReviewLastTurn,
+  onTimelineCollapsedChange,
   onUiStateChange,
+  observerRootConversationId,
+  parentAgentId,
   projectId,
   showTokenUsageDetails,
+  timelineCollapsedOverride,
   turnDiffSummary
 }: ChatMessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
@@ -940,6 +1044,11 @@ export function ChatMessageItem({
       data-status={message.status}
       key={message.id}
     >
+      <MessageInputOrigin
+        agentLabelsById={agentLabelsById}
+        message={message}
+        parentAgentId={parentAgentId}
+      />
       {message.role === 'user' && (
         <MessageAttachments attachments={message.attachments} messageId={message.id} />
       )}
@@ -962,13 +1071,17 @@ export function ChatMessageItem({
           <MessageContent
             conversationId={conversationId}
             message={message}
+            mode={mode}
             onApprove={onApprove}
             onCancel={onCancel}
             onReject={onReject}
             onReviewLastTurn={onReviewLastTurn}
+            onTimelineCollapsedChange={onTimelineCollapsedChange}
             onUiStateChange={onUiStateChange}
+            observerRootConversationId={observerRootConversationId}
             projectId={projectId}
             showTokenUsageDetails={showTokenUsageDetails}
+            timelineCollapsedOverride={timelineCollapsedOverride}
             turnDiffSummary={turnDiffSummary}
           />
         </div>

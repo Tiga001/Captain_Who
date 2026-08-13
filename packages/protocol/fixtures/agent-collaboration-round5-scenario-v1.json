@@ -1,0 +1,316 @@
+{
+  "schemaVersion": 1,
+  "scenario": "deterministic_six_tool_roundtrip",
+  "harness": {
+    "toolCalls": [
+      "spawn_agent",
+      "spawn_agent",
+      "send_message",
+      "followup_task",
+      "list_agents",
+      "wait_agent",
+      "wait_agent",
+      "interrupt_agent"
+    ],
+    "children": [
+      {
+        "taskName": "security_review",
+        "modelConfigId": "model-1",
+        "templateMachineKey": "reviewer"
+      },
+      {
+        "taskName": "compatibility_review",
+        "modelConfigId": "model-2",
+        "templateMachineKey": null
+      }
+    ],
+    "minimumParallelChildren": 2
+  },
+  "runningTree": {
+    "schemaVersion": 1,
+    "workspaceId": "project-a",
+    "projectId": "project-a",
+    "rootAgentId": "agent-root",
+    "rootConversationId": "conversation-root",
+    "agents": [
+      {
+        "agentId": "agent-root",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": null,
+        "conversationId": "conversation-root",
+        "projectId": "project-a",
+        "taskName": "root",
+        "taskPath": "/root",
+        "lifecycle": "active",
+        "displayStatus": "idle",
+        "latestActivityAt": 1720000000000,
+        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+      },
+      {
+        "agentId": "agent-review",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": "agent-root",
+        "conversationId": "conversation-review",
+        "projectId": "project-a",
+        "taskName": "security_review",
+        "taskPath": "/root/security_review",
+        "lifecycle": "active",
+        "displayStatus": "running",
+        "latestActivityAt": 1720000001000,
+        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+      },
+      {
+        "agentId": "agent-compatibility",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": "agent-root",
+        "conversationId": "conversation-compatibility",
+        "projectId": "project-a",
+        "taskName": "compatibility_review",
+        "taskPath": "/root/compatibility_review",
+        "lifecycle": "active",
+        "displayStatus": "waiting_approval",
+        "latestActivityAt": 1720000002000,
+        "model": { "modelConfigId": "model-2", "displayName": "Model Two" }
+      }
+    ],
+    "lastSequence": 12
+  },
+  "settledTree": {
+    "schemaVersion": 1,
+    "workspaceId": "project-a",
+    "projectId": "project-a",
+    "rootAgentId": "agent-root",
+    "rootConversationId": "conversation-root",
+    "agents": [
+      {
+        "agentId": "agent-root",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": null,
+        "conversationId": "conversation-root",
+        "projectId": "project-a",
+        "taskName": "root",
+        "taskPath": "/root",
+        "lifecycle": "active",
+        "displayStatus": "idle",
+        "latestActivityAt": 1720000000000,
+        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+      },
+      {
+        "agentId": "agent-review",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": "agent-root",
+        "conversationId": "conversation-review",
+        "projectId": "project-a",
+        "taskName": "security_review",
+        "taskPath": "/root/security_review",
+        "lifecycle": "active",
+        "displayStatus": "latest_completed",
+        "latestActivityAt": 1720000003000,
+        "model": { "modelConfigId": "model-1", "displayName": "Model One" }
+      },
+      {
+        "agentId": "agent-compatibility",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": "agent-root",
+        "conversationId": "conversation-compatibility",
+        "projectId": "project-a",
+        "taskName": "compatibility_review",
+        "taskPath": "/root/compatibility_review",
+        "lifecycle": "active",
+        "displayStatus": "latest_interrupted",
+        "latestActivityAt": 1720000004000,
+        "model": { "modelConfigId": "model-2", "displayName": "Model Two" }
+      }
+    ],
+    "lastSequence": 13
+  },
+  "settledEventPage": {
+    "schemaVersion": 1,
+    "rootAgentId": "agent-root",
+    "rootConversationId": "conversation-root",
+    "events": [
+      {
+        "schemaVersion": 1,
+        "eventId": "event-13",
+        "sequence": 13,
+        "workspaceId": "project-a",
+        "projectId": "project-a",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "agentId": "agent-review",
+        "conversationId": "conversation-review",
+        "turnId": "turn-review",
+        "runId": "run-review",
+        "messageId": "assistant-review",
+        "kind": "turn_updated",
+        "resourceRevision": 3,
+        "occurredAt": 1720000003000
+      }
+    ],
+    "lastSequence": 13,
+    "hasMore": false
+  },
+  "observerConversations": [
+    {
+      "schemaVersion": 1,
+      "agentId": "agent-review",
+      "rootConversationId": "conversation-root",
+      "conversationId": "conversation-review",
+      "projectId": "project-a",
+      "modelId": "model-1",
+      "title": "security_review",
+      "createdAt": 1720000000000,
+      "updatedAt": 1720000002000,
+      "messages": [
+        {
+          "messageId": "task-review",
+          "role": "user",
+          "content": "Inspect the authentication boundary.",
+          "createdAt": 1720000000000,
+          "status": "sent",
+          "inputOrigin": {
+            "kind": "agent",
+            "senderAgentId": "agent-root",
+            "sourceAgentMessageId": "mailbox-review",
+            "snapshotSourceConversationId": null,
+            "snapshotSourceMessageId": null
+          },
+          "attachments": [],
+          "agentRunJson": null,
+          "uiStateJson": null
+        },
+        {
+          "messageId": "assistant-review",
+          "role": "assistant",
+          "content": "Review stream: ",
+          "createdAt": 1720000001000,
+          "status": "pending",
+          "inputOrigin": null,
+          "attachments": [],
+          "agentRunJson": "{\"runId\":\"run-review\",\"status\":\"running\",\"startedAt\":1720000001000,\"toolDefinitions\":[],\"toolCalls\":[],\"toolResults\":[],\"webSearchActivities\":[],\"readActivities\":[],\"approvals\":[],\"diffs\":[],\"fileDrafts\":[],\"mcpInvocations\":[],\"messageStreamCheckpoints\":{},\"timeline\":[],\"usage\":{\"inputTokens\":11,\"outputTokens\":7,\"totalTokens\":18}}",
+          "uiStateJson": null
+        }
+      ]
+    },
+    {
+      "schemaVersion": 1,
+      "agentId": "agent-compatibility",
+      "rootConversationId": "conversation-root",
+      "conversationId": "conversation-compatibility",
+      "projectId": "project-a",
+      "modelId": "model-2",
+      "title": "compatibility_review",
+      "createdAt": 1720000000000,
+      "updatedAt": 1720000002000,
+      "messages": [
+        {
+          "messageId": "task-compatibility",
+          "role": "user",
+          "content": "Inspect the compatibility boundary.",
+          "createdAt": 1720000000000,
+          "status": "sent",
+          "inputOrigin": {
+            "kind": "agent",
+            "senderAgentId": "agent-root",
+            "sourceAgentMessageId": "mailbox-compatibility",
+            "snapshotSourceConversationId": null,
+            "snapshotSourceMessageId": null
+          },
+          "attachments": [],
+          "agentRunJson": null,
+          "uiStateJson": null
+        },
+        {
+          "messageId": "assistant-compatibility",
+          "role": "assistant",
+          "content": "Compatibility stream: ",
+          "createdAt": 1720000001000,
+          "status": "pending",
+          "inputOrigin": null,
+          "attachments": [],
+          "agentRunJson": "{\"runId\":\"run-compatibility\",\"status\":\"running\",\"startedAt\":1720000001000,\"toolDefinitions\":[],\"toolCalls\":[],\"toolResults\":[],\"webSearchActivities\":[],\"readActivities\":[],\"approvals\":[],\"diffs\":[],\"fileDrafts\":[],\"mcpInvocations\":[],\"messageStreamCheckpoints\":{},\"timeline\":[],\"usage\":{\"inputTokens\":19,\"outputTokens\":14,\"totalTokens\":33}}",
+          "uiStateJson": null
+        }
+      ]
+    }
+  ],
+  "approvalList": {
+    "schemaVersion": 1,
+    "approvals": [
+      {
+        "schemaVersion": 1,
+        "approvalId": "approval-approve",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "sourceAgentId": "agent-compatibility",
+        "sourceTaskPath": "/root/compatibility_review",
+        "sourceConversationId": "conversation-compatibility",
+        "runId": "run-compatibility",
+        "actionId": "call-approve",
+        "actionType": "tool_call",
+        "toolName": "read_file",
+        "action": {
+          "type": "tool_call",
+          "call": {
+            "id": "call-approve",
+            "tool": "read_file",
+            "args": { "path": "README.md" },
+            "approvalStatus": "required",
+            "reason": "Inspect a controlled fixture."
+          }
+        },
+        "status": "pending",
+        "createdAt": 1720000001000,
+        "updatedAt": 1720000001000
+      },
+      {
+        "schemaVersion": 1,
+        "approvalId": "approval-reject",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "sourceAgentId": "agent-review",
+        "sourceTaskPath": "/root/security_review",
+        "sourceConversationId": "conversation-review",
+        "runId": "run-review",
+        "actionId": "call-reject",
+        "actionType": "tool_call",
+        "toolName": "web_fetch",
+        "action": {
+          "type": "tool_call",
+          "call": {
+            "id": "call-reject",
+            "tool": "web_fetch",
+            "args": { "url": "https://example.invalid" },
+            "approvalStatus": "required",
+            "reason": "This external action is rejected by the fixture user."
+          }
+        },
+        "status": "pending",
+        "createdAt": 1720000001001,
+        "updatedAt": 1720000001001
+      }
+    ]
+  },
+  "approvalDecisions": {
+    "approve": {
+      "schemaVersion": 1,
+      "approvalId": "approval-approve",
+      "accepted": true,
+      "alreadySettled": false,
+      "status": "approved"
+    },
+    "reject": {
+      "schemaVersion": 1,
+      "approvalId": "approval-reject",
+      "accepted": true,
+      "alreadySettled": false,
+      "status": "rejected"
+    }
+  }
+}

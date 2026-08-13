@@ -15,7 +15,23 @@
   ],
   "notifications": {
     "event": "agent.collaboration.event",
+    "observerEvent": "agent.collaboration.observerEvent",
     "resync": "agent.collaboration.resync"
+  },
+  "observerEvent": {
+    "schemaVersion": 1,
+    "rootAgentId": "agent-root",
+    "rootConversationId": "conversation-root",
+    "agentId": "agent-child",
+    "conversationId": "conversation-child",
+    "runId": "run-child",
+    "assistantMessageId": "message-assistant",
+    "event": {
+      "type": "message_delta",
+      "runId": "run-child",
+      "streamId": "stream-child",
+      "delta": "live"
+    }
   },
   "tree": {
     "schemaVersion": 1,

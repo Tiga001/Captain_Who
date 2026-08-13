@@ -622,6 +622,52 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     let traces = storage
         .list_conversation_turn_traces(ROOT_CONVERSATION_ID)
         .unwrap();
+    // This shared scenario is consumed by the strict Rust/TypeScript protocol tests and the
+    // renderer AppShell browser fixture. Keep it anchored to facts produced by this real
+    // deterministic Provider -> Runtime -> Host adapter -> application-service chain instead of
+    // letting the browser invent a parallel orchestration story.
+    let round5_scenario: Value = serde_json::from_str(include_str!(
+        "../../../../../../packages/protocol/fixtures/agent-collaboration-round5-scenario-v1.json"
+    ))
+    .unwrap();
+    let expected_tool_calls = round5_scenario["harness"]["toolCalls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect::<Vec<_>>();
+    let actual_tool_calls = traces
+        .iter()
+        .flat_map(|trace| trace.items.iter())
+        .filter_map(|item| match item {
+            mycopilot_core::ConversationTurnTraceItem::ToolCall { tool, .. } => Some(tool.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual_tool_calls, expected_tool_calls);
+    assert!(
+        maximum_active_children.load(Ordering::SeqCst)
+            >= round5_scenario["harness"]["minimumParallelChildren"]
+                .as_u64()
+                .unwrap() as usize
+    );
+    let expected_children = round5_scenario["harness"]["children"].as_array().unwrap();
+    for expected in expected_children {
+        let node = tree
+            .iter()
+            .find(|node| node.task_name == expected["taskName"].as_str().unwrap())
+            .expect("shared Round 5 fixture child must be produced by the real Harness");
+        assert_eq!(
+            node.model_snapshot.as_ref().unwrap().model_config_id,
+            expected["modelConfigId"].as_str().unwrap()
+        );
+        assert_eq!(
+            node.template_snapshot
+                .as_ref()
+                .map(|template| template.machine_key.as_str()),
+            expected["templateMachineKey"].as_str()
+        );
+    }
     let wait_results = traces
         .iter()
         .flat_map(|trace| trace.items.iter())

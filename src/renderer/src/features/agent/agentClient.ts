@@ -131,15 +131,27 @@ export function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
 export function readAgentFileDraft(
   draftId: string,
   offset = 0,
-  maxChars = 50_000
+  maxChars = 50_000,
+  observerRootConversationId?: string
 ): Promise<AgentFileDraftContentPage> {
-  return hostClient.agent.readFileDraft({ draftId, offset, maxChars })
+  return hostClient.agent.readFileDraft({
+    draftId,
+    offset,
+    maxChars,
+    ...(observerRootConversationId ? { observerRootConversationId } : {})
+  })
 }
 
 export function getAgentFileWriteDiff(
   draftId: string,
   offset = 0,
-  maxChars = 50_000
+  maxChars = 50_000,
+  observerRootConversationId?: string
 ): Promise<AgentFileWriteDiffPage> {
-  return hostClient.agent.getFileWriteDiff({ draftId, offset, maxChars })
+  return hostClient.agent.getFileWriteDiff({
+    draftId,
+    offset,
+    maxChars,
+    ...(observerRootConversationId ? { observerRootConversationId } : {})
+  })
 }

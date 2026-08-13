@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 const rpcRequest = vi.hoisted(() => vi.fn())
 const onNotification = vi.hoisted(() => vi.fn())
@@ -11,6 +13,22 @@ vi.mock('./jsonRpcClient', () => ({
 }))
 
 import { CoreServer } from './coreServer'
+
+const round5Scenario = JSON.parse(
+  readFileSync(
+    fileURLToPath(
+      new URL(
+        '../../../packages/protocol/fixtures/agent-collaboration-round5-scenario-v1.json',
+        import.meta.url
+      )
+    ),
+    'utf8'
+  )
+) as {
+  runningTree: unknown
+  observerConversations: unknown[]
+  settledEventPage: { events: unknown[] }
+}
 
 const root = {
   agentId: 'agent-root',
@@ -57,6 +75,42 @@ describe('CoreServer collaboration client', () => {
     await expect(
       server.getCollaborationTree({ rootConversationId: 'legacy-conversation' })
     ).resolves.toEqual({ schemaVersion: 1, materialized: false, tree: null })
+  })
+
+  it('strictly accepts the shared Round 5 tree, observer and event identities at JSON-RPC', async () => {
+    rpcRequest
+      .mockResolvedValueOnce({
+        schemaVersion: 1,
+        materialized: true,
+        tree: round5Scenario.runningTree
+      })
+      .mockResolvedValueOnce(round5Scenario.observerConversations[0])
+    let receiver: ((value: unknown) => void) | undefined
+    onNotification.mockImplementation((_method, handler) => {
+      receiver = handler
+      return () => undefined
+    })
+    const server = new CoreServer()
+
+    await expect(
+      server.getCollaborationTree({ rootConversationId: 'conversation-root' })
+    ).resolves.toMatchObject({ tree: { agents: expect.any(Array), lastSequence: 12 } })
+    await expect(
+      server.loadCollaborationObserverConversation({
+        rootConversationId: 'conversation-root',
+        conversationId: 'conversation-review'
+      })
+    ).resolves.toMatchObject({
+      agentId: 'agent-review',
+      conversationId: 'conversation-review'
+    })
+
+    const handler = vi.fn()
+    server.onCollaborationEvent(handler)
+    receiver?.(round5Scenario.settledEventPage.events[0])
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ rootConversationId: 'conversation-root', sequence: 13 })
+    )
   })
 
   it('rejects a structurally valid response routed from another root', async () => {
@@ -140,5 +194,34 @@ describe('CoreServer collaboration client', () => {
     expect(onNotification).toHaveBeenCalledWith('agent.collaboration.resync', expect.any(Function))
     expect(handler).toHaveBeenCalledTimes(1)
     expect(handler).toHaveBeenCalledWith({ schemaVersion: 1, reason: 'core_started' })
+  })
+
+  it('strictly parses the exact child observer notification and drops a forged one', () => {
+    let receiver: ((value: unknown) => void) | undefined
+    onNotification.mockImplementation((_method, handler) => {
+      receiver = handler
+      return () => undefined
+    })
+    const handler = vi.fn()
+    new CoreServer().onCollaborationObserverEvent(handler)
+    const notification = {
+      schemaVersion: 1,
+      rootAgentId: 'agent-root',
+      rootConversationId: 'conversation-root',
+      agentId: 'agent-child',
+      conversationId: 'conversation-child',
+      runId: 'run-child',
+      assistantMessageId: 'assistant-child',
+      event: { type: 'message_delta', runId: 'run-child', delta: 'hello' }
+    }
+    receiver?.(notification)
+    receiver?.({ ...notification, event: { ...notification.event, secret: 'forged' } })
+
+    expect(onNotification).toHaveBeenCalledWith(
+      'agent.collaboration.observerEvent',
+      expect.any(Function)
+    )
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledWith(notification)
   })
 })

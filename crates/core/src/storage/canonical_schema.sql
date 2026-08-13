@@ -2139,6 +2139,11 @@ CREATE TRIGGER validate_child_context_snapshot_message_insert
                 SELECT 1 FROM child_context_snapshots AS snapshot
                 WHERE snapshot.target_conversation_id = NEW.conversation_id
                   AND snapshot.source_conversation_id = NEW.snapshot_source_conversation_id
+            ) AND NOT EXISTS (
+                SELECT 1 FROM conversation_forks AS fork
+                WHERE fork.fork_authority = 'collaboration_root'
+                  AND fork.target_conversation_id = NEW.conversation_id
+                  AND fork.source_conversation_id = NEW.snapshot_source_conversation_id
             ) THEN RAISE(ABORT, 'invalid child context snapshot message') END;
             SELECT CASE WHEN NOT EXISTS (
                 SELECT 1
@@ -2173,6 +2178,55 @@ CREATE TRIGGER validate_child_context_snapshot_message_insert
                             IS source.snapshot_original_mailbox_message_id)
                   )
             ) THEN RAISE(ABORT, 'child context snapshot source facts do not match') END;
+        END;
+CREATE TRIGGER validate_context_snapshot_message_update
+        BEFORE UPDATE OF
+            input_origin_kind, input_origin_agent_id, source_agent_message_id,
+            snapshot_source_conversation_id, snapshot_source_message_id,
+            snapshot_original_origin_kind, snapshot_original_agent_id,
+            snapshot_original_mailbox_message_id
+        ON messages
+        WHEN NEW.input_origin_kind = 'snapshot' AND OLD.input_origin_kind IS NOT 'snapshot'
+        BEGIN
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1 FROM conversation_forks AS fork
+                WHERE fork.fork_authority = 'collaboration_root'
+                  AND fork.target_conversation_id = NEW.conversation_id
+                  AND fork.source_conversation_id = NEW.snapshot_source_conversation_id
+            ) THEN RAISE(ABORT, 'invalid collaboration root fork snapshot message') END;
+            SELECT CASE WHEN NOT EXISTS (
+                SELECT 1
+                FROM messages AS source
+                WHERE source.conversation_id = NEW.snapshot_source_conversation_id
+                  AND source.id = NEW.snapshot_source_message_id
+                  AND source.role = NEW.role
+                  AND source.content = NEW.content
+                  AND source.status IS NEW.status
+                  AND source.created_at = NEW.created_at
+                  AND (
+                    (source.role = 'assistant'
+                        AND NEW.snapshot_original_origin_kind IS NULL
+                        AND NEW.snapshot_original_agent_id IS NULL
+                        AND NEW.snapshot_original_mailbox_message_id IS NULL)
+                    OR (source.role = 'user'
+                        AND (source.input_origin_kind IS NULL
+                            OR source.input_origin_kind = 'human')
+                        AND NEW.snapshot_original_origin_kind = 'human'
+                        AND NEW.snapshot_original_agent_id IS NULL
+                        AND NEW.snapshot_original_mailbox_message_id IS NULL)
+                    OR (source.role = 'user'
+                        AND source.input_origin_kind = 'agent'
+                        AND NEW.snapshot_original_origin_kind = 'agent'
+                        AND NEW.snapshot_original_agent_id = source.input_origin_agent_id
+                        AND NEW.snapshot_original_mailbox_message_id = source.source_agent_message_id)
+                    OR (source.role = 'user'
+                        AND source.input_origin_kind = 'snapshot'
+                        AND NEW.snapshot_original_origin_kind = source.snapshot_original_origin_kind
+                        AND NEW.snapshot_original_agent_id IS source.snapshot_original_agent_id
+                        AND NEW.snapshot_original_mailbox_message_id
+                            IS source.snapshot_original_mailbox_message_id)
+                  )
+            ) THEN RAISE(ABORT, 'collaboration root fork snapshot source facts do not match') END;
         END;
 CREATE TRIGGER validate_agent_message_projection_insert
         BEFORE INSERT ON messages
@@ -2816,22 +2870,65 @@ CREATE TABLE conversation_forks (
             source_conversation_id TEXT NOT NULL,
             source_message_id TEXT NOT NULL,
             target_message_id TEXT NOT NULL,
+            fork_authority TEXT NOT NULL DEFAULT 'legacy' CHECK (
+                fork_authority IN ('legacy', 'collaboration_root')
+            ),
+            source_root_agent_id TEXT,
+            target_root_agent_id TEXT,
             source_fork_point_json TEXT NOT NULL CHECK (
                 json_valid(source_fork_point_json)
             ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
-            FOREIGN KEY (target_message_id) REFERENCES messages(id) ON DELETE CASCADE
+            FOREIGN KEY (target_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (source_root_agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_root_agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            CHECK (
+                (fork_authority = 'legacy'
+                    AND source_root_agent_id IS NULL
+                    AND target_root_agent_id IS NULL)
+                OR (fork_authority = 'collaboration_root'
+                    AND source_root_agent_id IS NOT NULL
+                    AND target_root_agent_id IS NOT NULL
+                    AND source_root_agent_id != target_root_agent_id)
+            )
         );
 CREATE TRIGGER prevent_agent_bound_conversation_fork_insert
         BEFORE INSERT ON conversation_forks
-        WHEN EXISTS (
-            SELECT 1 FROM agent_nodes
-            WHERE conversation_id = NEW.source_conversation_id
-               OR conversation_id = NEW.target_conversation_id
+        WHEN (
+            NEW.fork_authority = 'legacy'
+            AND EXISTS (
+                SELECT 1 FROM agent_nodes
+                WHERE conversation_id = NEW.source_conversation_id
+                   OR conversation_id = NEW.target_conversation_id
+            )
+        ) OR (
+            NEW.fork_authority = 'collaboration_root'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM agent_nodes AS source
+                INNER JOIN agent_nodes AS target
+                    ON target.agent_id = NEW.target_root_agent_id
+                WHERE source.agent_id = NEW.source_root_agent_id
+                  AND source.parent_agent_id IS NULL
+                  AND source.lifecycle = 'active'
+                  AND source.conversation_id = NEW.source_conversation_id
+                  AND source.root_conversation_id = NEW.source_conversation_id
+                  AND target.parent_agent_id IS NULL
+                  AND target.lifecycle = 'active'
+                  AND target.conversation_id = NEW.target_conversation_id
+                  AND target.root_conversation_id = NEW.target_conversation_id
+                  AND target.project_id IS source.project_id
+                  AND target.root_agent_id != source.root_agent_id
+            )
         )
         BEGIN
-            SELECT RAISE(ABORT, 'Agent-bound conversations require collaboration-owned forking');
+            SELECT RAISE(ABORT, 'invalid Agent-bound Conversation fork authority');
+        END;
+CREATE TRIGGER prevent_conversation_fork_update
+        BEFORE UPDATE ON conversation_forks
+        BEGIN
+            SELECT RAISE(ABORT, 'Conversation fork receipt is immutable');
         END;
 CREATE TABLE conversation_context_adaptation_requirements (
             conversation_id TEXT PRIMARY KEY,

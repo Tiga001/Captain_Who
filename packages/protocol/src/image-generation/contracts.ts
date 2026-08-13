@@ -224,6 +224,12 @@ export interface ImageGenerationArtifactReadInput {
    * remain readable without it; command-produced images and documents require an exact grant.
    */
   conversationId?: string
+  /**
+   * Exact root authority for a read-only child Conversation observer. This field never grants
+   * access by itself: the backend verifies that `conversationId` is a direct or transitive child
+   * in this root tree before consulting the immutable Artifact grant.
+   */
+  observerRootConversationId?: string
 }
 
 /**

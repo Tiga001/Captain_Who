@@ -6,6 +6,7 @@ import type {
   AgentDetailRequest,
   AgentObserverConversationRequest,
   AgentObserverConversation,
+  AgentObserverEventEnvelope,
   AgentTemplate,
   AgentTemplateCreateRequest,
   AgentTemplateDeleteRequest,
@@ -61,6 +62,12 @@ export async function loadCollaborationObserverConversation(
   input: AgentObserverConversationRequest
 ): Promise<AgentObserverConversation | null> {
   return unwrapHostInvocation(await hostClient.agent.loadCollaborationObserverConversation(input))
+}
+
+export function onCollaborationObserverEvent(
+  handler: (event: AgentObserverEventEnvelope) => void
+): () => void {
+  return hostClient.agent.onCollaborationObserverEvent(handler)
 }
 
 export async function listAgentTemplates(

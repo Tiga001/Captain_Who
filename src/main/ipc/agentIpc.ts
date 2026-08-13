@@ -32,6 +32,14 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     }
   })
 
+  coreServer.onCollaborationObserverEvent?.((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.collaborationObserverEvent, event)
+      }
+    }
+  })
+
   coreServer.onCollaborationResync?.((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {

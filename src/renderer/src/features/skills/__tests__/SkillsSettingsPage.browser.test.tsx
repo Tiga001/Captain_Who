@@ -61,6 +61,9 @@ vi.mock('../../storage/storageClient', () => ({
 vi.mock('../../settings/pages/AppearanceSettingsPage', () => ({
   AppearanceSettingsPage: () => <div>appearance-page</div>
 }))
+vi.mock('../../settings/pages/AgentTemplatesSettingsPage', () => ({
+  AgentTemplatesSettingsPage: () => <div>agent-templates-page</div>
+}))
 vi.mock('../../settings/pages/ArchivedConversationsSettingsPage', () => ({
   ArchivedConversationsSettingsPage: () => <div>archived-page</div>
 }))

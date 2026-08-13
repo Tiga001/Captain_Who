@@ -39,6 +39,7 @@ pub use agent_collaboration_event::*;
 pub use agent_collaboration_harness::*;
 pub use agent_delivery::*;
 pub use agent_graph::{
+    bounded_root_agent_task_name, root_agent_creation_request_id, root_agent_id_for_conversation,
     AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentDisplayStatus,
     AgentDisplayStatusSnapshot, AgentForkTurns, AgentGraphError, AgentLifecycle,
     AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord, AgentMessageDispatch,

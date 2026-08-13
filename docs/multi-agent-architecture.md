@@ -629,14 +629,25 @@ store 忽略重复/其他 root，按持久日志验证连续 sequence，遇缺�
 专用严格 DTO，保留安全的完整 chat display 投影（attachments、Agent run/UI state）并为每个 user-role
 输入附带可信 human/agent/historical-snapshot origin；UI 不得把 agent-origin 显示成“你”。
 
-协议版本本轮为 `schemaVersion=1`，canonical storage 为 v7；v6 及更早开发库继续采用既有
-reset-required、原库不改写策略。本轮只交付 renderer client/store/hook，不实现右侧栏、聊天卡片或视觉
-交互。
+跨进程协作 DTO 仍为 `schemaVersion=1`。第 4 轮冻结的 canonical storage 是 v7；第 5 轮为根 Agent
+Conversation 的 provenance-aware fork authority 升至 v8。v7 及更早开发库继续采用既有
+reset-required、原库不改写策略。
 
 ### 第 5 轮：前端复用与完整用户体验
 
 把现有聊天 Surface 拆成 interactive/observer 两种模式；子 Agent observer 放在右侧栏指挥中心，
 复用消息、Markdown、Tool、Artifact、错误、stream 和 Usage 展示。用户仍只操作根 Agent。
+
+协作能力懒物化 root 后，根 Conversation 继续新任务使用唯一既有 `conversation_forks` receipt 的
+`collaboration_root` authority：同一 `BEGIN IMMEDIATE` 创建目标 Conversation、独立 root Agent、fork
+receipt 和带来源的历史 snapshot。Agent-origin 输入保留 original Agent/Mailbox provenance，在面向用户的
+根历史与搜索中隐藏、在 Context/审计中保留；子 Conversation 和活跃 Turn 仍 fail closed。重复 request ID
+只按不可变 receipt/根身份返回原目标，不受之后 lifecycle 展示状态漂移影响。
+
+后台 child 没有 renderer 写入 `agent_run_json` 时，observer 展示由 server 从 durable trace、Command
+Session、Skill 与 MCP action journal 生成 renderer-safe projection。MCP 参数、结果正文和 diagnostics 不
+进入该投影；旧版本已经 scrub 且从未落安全 invocation receipt 的 MCP 历史降级为 generic Tool，不伪造
+执行身份。
 
 ### 第 6 轮：可靠性、迁移与发布门禁
 

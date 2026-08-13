@@ -23,6 +23,8 @@ interface ReadToolActivityProps {
   activity?: ChatReadActivity
   artifactResolver?: ImageArtifactResolver
   call: AgentToolCall
+  conversationId?: string
+  observerRootConversationId?: string
   projectId?: string | null
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
@@ -31,7 +33,9 @@ interface ReadToolActivityProps {
 export interface ReadToolActivityGroupItem extends ReadToolActivityProps {}
 
 interface ReadToolActivityGroupProps {
+  conversationId?: string
   items: ReadToolActivityGroupItem[]
+  observerRootConversationId?: string
   projectId?: string | null
 }
 
@@ -344,6 +348,8 @@ function ReadActivityCard({
   activity,
   artifactResolver = lazyHostImageArtifactResolver,
   call,
+  conversationId,
+  observerRootConversationId,
   projectId,
   result
 }: ReadToolActivityProps) {
@@ -366,7 +372,10 @@ function ReadActivityCard({
     try {
       const generatedArtifact = generatedArtifactFromResult(sourcePath, result)
       if (generatedArtifact) {
-        const resolved = await artifactResolver.resolve(generatedArtifact)
+        const resolved = await artifactResolver.resolve(generatedArtifact, {
+          ...(conversationId ? { conversationId } : {}),
+          ...(observerRootConversationId ? { observerRootConversationId } : {})
+        })
         openResolvedArtifact(generatedArtifact, resolved, openImagePreview)
         return
       }
@@ -407,6 +416,8 @@ function ReadActivityDetails({
   activity,
   artifactResolver,
   call,
+  conversationId,
+  observerRootConversationId,
   projectId,
   result,
   settledStatus
@@ -421,6 +432,8 @@ function ReadActivityDetails({
           activity={activity}
           artifactResolver={artifactResolver}
           call={call}
+          conversationId={conversationId}
+          observerRootConversationId={observerRootConversationId}
           projectId={projectId}
           result={result}
           settledStatus={settledStatus}
@@ -434,6 +447,8 @@ export function ReadToolActivity({
   activity,
   artifactResolver,
   call,
+  conversationId,
+  observerRootConversationId,
   projectId,
   result,
   settledStatus
@@ -460,6 +475,8 @@ export function ReadToolActivity({
         activity={activity}
         artifactResolver={artifactResolver}
         call={call}
+        conversationId={conversationId}
+        observerRootConversationId={observerRootConversationId}
         projectId={projectId}
         result={result}
         settledStatus={settledStatus}
@@ -468,7 +485,12 @@ export function ReadToolActivity({
   )
 }
 
-export function ReadToolActivityGroup({ items, projectId }: ReadToolActivityGroupProps) {
+export function ReadToolActivityGroup({
+  conversationId,
+  items,
+  observerRootConversationId,
+  projectId
+}: ReadToolActivityGroupProps) {
   const { t } = useFrontendConfig()
   const firstItem = items[0]
   if (!firstItem) return null
@@ -478,6 +500,8 @@ export function ReadToolActivityGroup({ items, projectId }: ReadToolActivityGrou
         activity={firstItem.activity}
         artifactResolver={firstItem.artifactResolver}
         call={firstItem.call}
+        conversationId={conversationId}
+        observerRootConversationId={observerRootConversationId}
         projectId={projectId}
         result={firstItem.result}
         settledStatus={firstItem.settledStatus}
@@ -510,6 +534,8 @@ export function ReadToolActivityGroup({ items, projectId }: ReadToolActivityGrou
               activity={item.activity}
               artifactResolver={item.artifactResolver}
               call={item.call}
+              conversationId={conversationId}
+              observerRootConversationId={observerRootConversationId}
               key={item.call.id}
               projectId={projectId}
               result={item.result}

@@ -18,6 +18,7 @@ interface AgentApprovalDialogTarget {
 }
 
 interface AgentApprovalDialogProps {
+  allowRememberForRun?: boolean
   target: AgentApprovalDialogTarget
   mcpInvocationState?: AgentMcpToolInvocationState
   onApprove?: (
@@ -127,6 +128,7 @@ function canRememberForRun(action: StandardAgentProposedAction) {
 
 interface StandardAgentApprovalDialogProps {
   action: StandardAgentProposedAction
+  allowRememberForRun: boolean
   messageId: string
   onApprove?: AgentApprovalDialogProps['onApprove']
   onReject?: AgentApprovalDialogProps['onReject']
@@ -134,6 +136,7 @@ interface StandardAgentApprovalDialogProps {
 
 function StandardAgentApprovalDialog({
   action,
+  allowRememberForRun,
   messageId,
   onApprove,
   onReject
@@ -149,7 +152,7 @@ function StandardAgentApprovalDialog({
     (action.type === 'command' && /[\r\n]/u.test(code))
   const policyHint = getApprovalPolicyHint(action, t)
   const rememberPrefix = getRememberCommandPrefix(action)
-  const showRememberChoice = canRememberForRun(action)
+  const showRememberChoice = allowRememberForRun && canRememberForRun(action)
 
   useEffect(() => {
     setRejectMessage('')
@@ -209,6 +212,7 @@ function StandardAgentApprovalDialog({
 }
 
 export function AgentApprovalDialog({
+  allowRememberForRun = true,
   target,
   mcpInvocationState,
   onApprove,
@@ -242,6 +246,7 @@ export function AgentApprovalDialog({
   return (
     <StandardAgentApprovalDialog
       action={target.action}
+      allowRememberForRun={allowRememberForRun}
       messageId={target.messageId}
       onApprove={onApprove}
       onReject={onReject}

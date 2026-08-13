@@ -88,12 +88,36 @@ export function parseImageGenerationArtifactReadInput(
 ): ImageGenerationArtifactReadInput {
   const context = 'Image generation Artifact read request'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['schemaVersion', 'artifact', 'conversationId'] as const, context)
+  expectOnlyKeys(
+    record,
+    ['schemaVersion', 'artifact', 'conversationId', 'observerRootConversationId'] as const,
+    context
+  )
   expectSchemaVersion(record, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION, context)
   const artifact = parseManagedArtifactReadIdentity(record.artifact, `${context}.artifact`)
   const conversationId = optionalNonEmptyString(record.conversationId, `${context}.conversationId`)
+  const observerRootConversationId = optionalNonEmptyString(
+    record.observerRootConversationId,
+    `${context}.observerRootConversationId`
+  )
   if (conversationId && (conversationId.length > 512 || hasAsciiControlCharacter(conversationId))) {
     throw invalidProtocolValue(`${context}.conversationId`, 'must be a bounded safe identifier')
+  }
+  if (
+    observerRootConversationId &&
+    (observerRootConversationId.length > 512 ||
+      hasAsciiControlCharacter(observerRootConversationId))
+  ) {
+    throw invalidProtocolValue(
+      `${context}.observerRootConversationId`,
+      'must be a bounded safe identifier'
+    )
+  }
+  if (observerRootConversationId && !conversationId) {
+    throw invalidProtocolValue(
+      `${context}.observerRootConversationId`,
+      'requires an exact child conversationId'
+    )
   }
   const maximumBytes =
     artifact.kind === 'image'
@@ -105,7 +129,8 @@ export function parseImageGenerationArtifactReadInput(
   return {
     schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
     artifact,
-    ...(conversationId ? { conversationId } : {})
+    ...(conversationId ? { conversationId } : {}),
+    ...(observerRootConversationId ? { observerRootConversationId } : {})
   }
 }
 
