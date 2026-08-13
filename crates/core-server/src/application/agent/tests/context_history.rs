@@ -1342,3 +1342,163 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
         2
     );
 }
+
+#[test]
+#[ignore = "release profile: 500 durable Turns through real ContextAssembler and compaction"]
+fn five_hundred_turn_context_compaction_release_profile() {
+    const LOGICAL_TURNS: usize = 500;
+    const MESSAGE_BODY_BYTES: usize = 320;
+
+    let total_started = std::time::Instant::now();
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("context-500.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+
+    let seed_started = std::time::Instant::now();
+    let mut messages = Vec::with_capacity(LOGICAL_TURNS * 2);
+    for turn in 0..LOGICAL_TURNS {
+        let user_created_at = i64::try_from(turn * 2 + 1).unwrap();
+        let assistant_created_at = user_created_at + 1;
+        messages.push(ChatMessageRecord {
+            id: format!("user-profile-{turn:03}"),
+            role: "user".to_string(),
+            content: format!("turn {turn:03} request {}", "u".repeat(MESSAGE_BODY_BYTES)),
+            created_at: user_created_at,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+        messages.push(ChatMessageRecord {
+            id: format!("assistant-profile-{turn:03}"),
+            role: "assistant".to_string(),
+            content: format!("turn {turn:03} response {}", "a".repeat(MESSAGE_BODY_BYTES)),
+            created_at: assistant_created_at,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+    }
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-500-profile".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "500 Turn context profile".to_string(),
+            messages,
+            created_at: 1,
+            updated_at: i64::try_from(LOGICAL_TURNS * 2).unwrap(),
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    for turn in 0..LOGICAL_TURNS {
+        let assistant_message_id = format!("assistant-profile-{turn:03}");
+        let created_at = i64::try_from(turn * 2 + 2).unwrap();
+        storage
+            .replace_conversation_turn_trace(
+                &mycopilot_core::completed_conversation_trace_without_items(
+                    &format!("run-profile-{turn:03}"),
+                    "conversation-500-profile",
+                    &assistant_message_id,
+                ),
+                created_at,
+                created_at,
+            )
+            .unwrap();
+    }
+    let seed_elapsed = seed_started.elapsed();
+
+    let service = AgentService::new(storage.clone());
+    let snapshot_input = AgentContextWindowSnapshotInput {
+        conversation_id: Some("conversation-500-profile".to_string()),
+        project_id: None,
+        model_id: "model-1".to_string(),
+        max_tokens: Some(30_000),
+        prompt_preferences: None,
+        permissions: AgentPermissions::default(),
+        skills: Vec::new(),
+    };
+    let pre_assembly_started = std::time::Instant::now();
+    let before = service
+        .get_context_window_snapshot(snapshot_input.clone())
+        .unwrap()
+        .snapshot
+        .unwrap();
+    let pre_assembly_elapsed = pre_assembly_started.elapsed();
+    assert!(
+        before
+            .input_capacity_tokens
+            .is_some_and(|capacity| before.input_tokens > capacity),
+        "the profile must reach the real over-capacity compaction condition"
+    );
+
+    let compaction_started = std::time::Instant::now();
+    let last_assistant = format!("assistant-profile-{:03}", LOGICAL_TURNS - 1);
+    let prefix = storage
+        .prepare_context_compaction_prefix(
+            "conversation-500-profile",
+            &ContextJournalCursor::message(&last_assistant),
+        )
+        .unwrap();
+    let compacted_source_items = prefix.source_items.len();
+    storage
+        .commit_context_compaction_prefix(
+            &prefix,
+            test_compaction_draft(
+                &prefix,
+                "summary-500-profile",
+                "The preceding 500 logical turns are durably summarized for this profile.",
+                before.input_tokens,
+                i64::try_from(LOGICAL_TURNS * 2 + 1).unwrap(),
+            ),
+            &last_assistant,
+        )
+        .unwrap();
+    service.invalidate_conversation_context_state("conversation-500-profile");
+    let compaction_elapsed = compaction_started.elapsed();
+
+    let post_assembly_started = std::time::Instant::now();
+    let after = service
+        .get_context_window_snapshot(snapshot_input)
+        .unwrap()
+        .snapshot
+        .unwrap();
+    let post_assembly_elapsed = post_assembly_started.elapsed();
+    assert!(after.input_tokens < before.input_tokens);
+    assert_eq!(
+        storage
+            .load_conversation("conversation-500-profile")
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        LOGICAL_TURNS * 2,
+        "compaction must not delete the durable Conversation history"
+    );
+    assert_eq!(
+        storage
+            .get_active_context_compaction_summary("conversation-500-profile")
+            .unwrap()
+            .as_ref()
+            .map(|summary| summary.id.as_str()),
+        Some("summary-500-profile")
+    );
+    let sqlite_bytes = std::fs::metadata(&database_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    eprintln!(
+        "context_compaction_profile logical_turns={LOGICAL_TURNS} messages={} source_items={compacted_source_items} pre_input_tokens={} post_input_tokens={} sqlite_bytes={sqlite_bytes} seed_ms={} pre_assemble_ms={} compact_ms={} post_assemble_ms={} total_ms={}",
+        LOGICAL_TURNS * 2,
+        before.input_tokens,
+        after.input_tokens,
+        seed_elapsed.as_millis(),
+        pre_assembly_elapsed.as_millis(),
+        compaction_elapsed.as_millis(),
+        post_assembly_elapsed.as_millis(),
+        total_started.elapsed().as_millis(),
+    );
+}

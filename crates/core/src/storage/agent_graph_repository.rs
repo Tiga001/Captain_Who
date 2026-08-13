@@ -4607,6 +4607,95 @@ mod tests {
     }
 
     #[test]
+    fn followup_and_dispatch_projection_faults_leave_one_recoverable_fifo_fact() {
+        let mut connection = setup_tree();
+        let followup = SendAgentMessageRequest {
+            sender_agent_id: "agent-root".to_string(),
+            recipient_agent_id: "agent-child".to_string(),
+            request_id: "faulted-followup".to_string(),
+            content: "deliver exactly once after recovery".to_string(),
+        };
+        connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_followup_wake
+                 BEFORE INSERT ON agent_wake_requests
+                 WHEN NEW.source_agent_message_id IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT, 'fault between Mailbox and Wake'); END;",
+            )
+            .unwrap();
+        assert!(follow_up_agent(&mut connection, &followup, 30).is_err());
+        let (message_count, wake_count): (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM agent_mailbox_messages),
+                        (SELECT COUNT(*) FROM agent_wake_requests)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((message_count, wake_count), (0, 0));
+        connection
+            .execute_batch("DROP TRIGGER fail_followup_wake;")
+            .unwrap();
+
+        let durable = follow_up_agent(&mut connection, &followup, 31).unwrap();
+        let wake = durable.deferred_wake.as_ref().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_dispatch_projection
+                 BEFORE INSERT ON messages
+                 WHEN NEW.source_agent_message_id IS NOT NULL
+                 BEGIN SELECT RAISE(ABORT, 'fault between projection and claim'); END;",
+            )
+            .unwrap();
+        assert!(claim_next_dispatchable_agent_wake(
+            &mut connection,
+            "claim-before-projection-fault",
+            32,
+        )
+        .is_err());
+        assert_eq!(
+            get_agent_wake(&connection, &wake.wake_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentWakeStatus::Queued
+        );
+        assert_eq!(
+            get_agent_message(&connection, &durable.message.message_id)
+                .unwrap()
+                .unwrap()
+                .delivery_status,
+            AgentMailboxDeliveryStatus::Queued
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_dispatch_projection;")
+            .unwrap();
+
+        let claimed =
+            claim_next_dispatchable_agent_wake(&mut connection, "claim-after-projection-fault", 33)
+                .unwrap()
+                .unwrap();
+        assert_eq!(claimed.wake_id, wake.wake_id);
+        let projected = get_agent_message(&connection, &durable.message.message_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            projected.delivery_status,
+            AgentMailboxDeliveryStatus::Acknowledged
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE source_agent_message_id = ?1",
+                    [&durable.message.message_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn projection_preserves_fifo_reorders_before_active_assistant_and_satisfies_deferred_wake() {
         let mut connection = setup_tree();
         let active_wake = enqueue_agent_wake(&mut connection, &wake_input("display-active"), 18)
@@ -5133,6 +5222,172 @@ mod tests {
                 .status,
             AgentDisplayStatus::LatestFailed
         );
+    }
+
+    #[test]
+    fn terminal_result_faults_rollback_and_recover_exactly_once_after_restart() {
+        for fault in ["result_outbox", "parent_wake"] {
+            let mut connection = setup_tree();
+            add_grandchild(&mut connection);
+            let wake_id = format!("wake-fault-{fault}");
+            enqueue_agent_wake(
+                &mut connection,
+                &EnqueueAgentWakeInput {
+                    wake_id: wake_id.clone(),
+                    root_agent_id: "agent-root".to_string(),
+                    agent_id: "agent-grand".to_string(),
+                    requester_agent_id: "agent-child".to_string(),
+                    request_id: format!("request-fault-{fault}"),
+                    source_agent_message_id: None,
+                },
+                20,
+            )
+            .unwrap();
+            let claimed =
+                claim_next_dispatchable_agent_wake(&mut connection, "claim-before-fault", 21)
+                    .unwrap()
+                    .unwrap();
+            let lease_expires_at = claimed.lease_expires_at.unwrap();
+            transition_agent_wake(
+                &mut connection,
+                &wake_id,
+                AgentWakeStatus::Claimed,
+                AgentWakeStatus::Running,
+                Some("claim-before-fault"),
+                22,
+            )
+            .unwrap();
+            let run_id = format!("run-fault-{fault}");
+            let assistant_message_id = format!("assistant-fault-{fault}");
+            connection
+                .execute(
+                    "INSERT INTO messages (
+                         id, conversation_id, role, content, status, created_at, position
+                     ) VALUES (?1, 'conversation-grand', 'assistant', 'durable terminal',
+                               'sent', 22,
+                               (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                                WHERE conversation_id = 'conversation-grand'))",
+                    [&assistant_message_id],
+                )
+                .unwrap();
+            crate::storage::conversation_trace_repository::replace_trace(
+                &mut connection,
+                &crate::completed_conversation_trace_without_items(
+                    &run_id,
+                    "conversation-grand",
+                    &assistant_message_id,
+                ),
+                22,
+                23,
+            )
+            .unwrap();
+            connection
+                .execute(
+                    "UPDATE agent_wake_requests
+                     SET run_id = ?1, assistant_message_id = ?2
+                     WHERE wake_id = ?3",
+                    params![&run_id, &assistant_message_id, &wake_id],
+                )
+                .unwrap();
+
+            match fault {
+                "result_outbox" => connection
+                    .execute_batch(
+                        "CREATE TEMP TRIGGER fail_result_outbox
+                         BEFORE INSERT ON agent_mailbox_messages
+                         WHEN NEW.kind = 'result'
+                         BEGIN SELECT RAISE(ABORT, 'fault after terminal trace'); END;",
+                    )
+                    .unwrap(),
+                "parent_wake" => connection
+                    .execute_batch(
+                        "CREATE TEMP TRIGGER fail_parent_result_wake
+                         BEFORE INSERT ON agent_wake_requests
+                         WHEN NEW.source_agent_message_id IS NOT NULL
+                         BEGIN SELECT RAISE(ABORT, 'fault after result outbox'); END;",
+                    )
+                    .unwrap(),
+                _ => unreachable!(),
+            }
+            let first_finish = FinishAgentTurnResultInput {
+                wake_id: wake_id.clone(),
+                expected_status: AgentWakeStatus::Running,
+                claim_token: "claim-before-fault".to_string(),
+                terminal_status: AgentWakeStatus::Completed,
+                run_id: Some(run_id.clone()),
+                assistant_message_id: Some(assistant_message_id.clone()),
+                summary: "durable terminal".to_string(),
+                terminal_error: None,
+            };
+            assert!(finish_agent_turn_with_result(&mut connection, &first_finish, 24).is_err());
+            assert_eq!(
+                get_agent_wake(&connection, &wake_id)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                AgentWakeStatus::Running,
+                "{fault} must not partially terminalize the Wake"
+            );
+            assert_eq!(
+                crate::storage::conversation_trace_repository::get_trace_for_message(
+                    &connection,
+                    &assistant_message_id,
+                )
+                .unwrap()
+                .unwrap()
+                .terminal_status,
+                crate::ConversationTurnTraceTerminalStatus::Completed,
+                "the pre-existing terminal trace remains the recovery truth"
+            );
+            let (result_count, wake_count): (i64, i64) = connection
+                .query_row(
+                    "SELECT
+                         (SELECT COUNT(*) FROM agent_mailbox_messages WHERE kind = 'result'),
+                         (SELECT COUNT(*) FROM agent_wake_requests)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((result_count, wake_count), (0, 1));
+
+            connection
+                .execute_batch(match fault {
+                    "result_outbox" => "DROP TRIGGER fail_result_outbox;",
+                    "parent_wake" => "DROP TRIGGER fail_parent_result_wake;",
+                    _ => unreachable!(),
+                })
+                .unwrap();
+            let recovered =
+                recover_agent_wakes(&mut connection, "claim-after-restart", lease_expires_at)
+                    .unwrap();
+            assert_eq!(recovered.actions.len(), 1);
+            let AgentWakeRecoveryAction::Observe(recovered_wake) = &recovered.actions[0] else {
+                panic!("terminal trace must be observed, never replayed: {fault}");
+            };
+            let recovered_finish = FinishAgentTurnResultInput {
+                claim_token: recovered_wake.claim_token.clone().unwrap(),
+                ..first_finish
+            };
+            let settled =
+                finish_agent_turn_with_result(&mut connection, &recovered_finish, 25).unwrap();
+            assert_eq!(
+                settled.parent_wake.as_ref().unwrap().agent_id,
+                "agent-child"
+            );
+            let retry =
+                finish_agent_turn_with_result(&mut connection, &recovered_finish, 26).unwrap();
+            assert_eq!(retry.envelope, settled.envelope);
+            let (result_count, wake_count): (i64, i64) = connection
+                .query_row(
+                    "SELECT
+                         (SELECT COUNT(*) FROM agent_mailbox_messages WHERE kind = 'result'),
+                         (SELECT COUNT(*) FROM agent_wake_requests)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((result_count, wake_count), (1, 2));
+        }
     }
 
     #[test]

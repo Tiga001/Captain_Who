@@ -34,7 +34,7 @@ export function AgentObserverConversationSurface({
       </div>
     )
   }
-  if (error || !conversation) {
+  if (!conversation) {
     return (
       <div className="agent-center__state" role="alert">
         <p>{t('agentCenter.observerUnavailable')}</p>
@@ -46,13 +46,23 @@ export function AgentObserverConversationSurface({
   }
 
   return (
-    <ConversationSurface
-      agentLabelsById={agentLabelsById}
-      conversation={conversation}
-      mode="observer"
-      parentAgentId={agent.parentAgentId}
-      rootConversationId={rootConversationId}
-      showTokenUsageDetails={showTokenUsageDetails}
-    />
+    <div className="agent-center__observer-content">
+      {error ? (
+        <div className="agent-center__state agent-center__state--refresh-error" role="alert">
+          <span>{t('agentCenter.observerUnavailable')}</span>
+          <button onClick={reload} type="button">
+            {t('agentCenter.retry')}
+          </button>
+        </div>
+      ) : null}
+      <ConversationSurface
+        agentLabelsById={agentLabelsById}
+        conversation={conversation}
+        mode="observer"
+        parentAgentId={agent.parentAgentId}
+        rootConversationId={rootConversationId}
+        showTokenUsageDetails={showTokenUsageDetails}
+      />
+    </div>
   )
 }

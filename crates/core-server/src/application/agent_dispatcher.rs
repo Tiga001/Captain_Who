@@ -1741,12 +1741,19 @@ mod tests {
         }
 
         fn gated() -> (Self, HashMap<String, oneshot::Sender<()>>) {
+            Self::gated_agents(["agent-a", "agent-b", "agent-c"])
+        }
+
+        fn gated_agents(
+            agents: impl IntoIterator<Item = impl Into<String>>,
+        ) -> (Self, HashMap<String, oneshot::Sender<()>>) {
             let mut receivers = HashMap::new();
             let mut senders = HashMap::new();
-            for agent in ["agent-a", "agent-b", "agent-c"] {
+            for agent in agents {
+                let agent = agent.into();
                 let (sender, receiver) = oneshot::channel();
-                senders.insert(agent.to_string(), sender);
-                receivers.insert(agent.to_string(), receiver);
+                senders.insert(agent.clone(), sender);
+                receivers.insert(agent, receiver);
             }
             (
                 Self {
@@ -2195,6 +2202,69 @@ mod tests {
         gates.remove("agent-c").unwrap().send(()).unwrap();
         wait_for_settled(&store, 3).await;
         dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn thirty_two_agents_respect_limit_four_fifo_and_leave_no_ghost_activity() {
+        const AGENT_COUNT: usize = 32;
+        const GLOBAL_LIMIT: usize = 4;
+
+        let store = Arc::new(FakeStore::default());
+        let agents = (0..AGENT_COUNT)
+            .map(|index| format!("agent-{index:02}"))
+            .collect::<Vec<_>>();
+        for (index, agent_id) in agents.iter().enumerate() {
+            store.push(u64::try_from(index + 1).unwrap(), agent_id);
+        }
+        let (executor, mut gates) = FakeExecutor::gated_agents(agents.iter().cloned());
+        let executor = Arc::new(executor);
+        let dispatcher = AgentDispatcher::start_with_clock(
+            store.clone(),
+            executor.clone(),
+            Arc::new(TestClock::default()),
+            AgentTurnConcurrencyGate::new(GLOBAL_LIMIT).unwrap(),
+            AgentDispatcherConfig {
+                global_concurrency_limit: GLOBAL_LIMIT,
+                idle_poll_interval: Duration::from_secs(60),
+                ..AgentDispatcherConfig::default()
+            },
+        )
+        .unwrap();
+        dispatcher.notify_work_available();
+
+        for completed_before_wave in (0..AGENT_COUNT).step_by(GLOBAL_LIMIT) {
+            let admitted = completed_before_wave + GLOBAL_LIMIT;
+            wait_for_starts(&executor, admitted).await;
+            let state = store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert_eq!(
+                state.claimed.as_slice(),
+                &agents[..admitted],
+                "durable claims must remain FIFO at every concurrency wave"
+            );
+            assert_eq!(state.active_agents.len(), GLOBAL_LIMIT);
+            drop(state);
+            for agent_id in &agents[completed_before_wave..admitted] {
+                gates.remove(agent_id).unwrap().send(()).unwrap();
+            }
+        }
+
+        wait_for_settled(&store, AGENT_COUNT).await;
+        assert_eq!(executor.max_active.load(Ordering::SeqCst), GLOBAL_LIMIT);
+        assert_eq!(executor.active.load(Ordering::SeqCst), 0);
+        {
+            let state = store
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            assert_eq!(state.settled.len(), AGENT_COUNT);
+            assert!(state.active_agents.is_empty());
+        }
+        let turn_concurrency = dispatcher.shared.turn_concurrency.clone();
+        dispatcher.shutdown().await.unwrap();
+        assert_eq!(turn_concurrency.active(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -76,6 +76,122 @@ fn persists_usage_for_failed_runs() {
 }
 
 #[test]
+fn sibling_conversation_usage_owners_remain_independent() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: "project-shared".to_string(),
+            name: "Shared project".to_string(),
+            path: None,
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    for (conversation_id, assistant_message_id, model_id) in [
+        ("conversation-child-a", "assistant-child-a", "model-a"),
+        ("conversation-child-b", "assistant-child-b", "model-b"),
+    ] {
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: conversation_id.to_string(),
+                project_id: Some("project-shared".to_string()),
+                model_id: Some(model_id.to_string()),
+                title: conversation_id.to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: assistant_message_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+    }
+    let service = AgentService::new(Arc::clone(&storage));
+    for (run_id, conversation_id, assistant_message_id, model_id, model_name, total_tokens) in [
+        (
+            "run-child-a",
+            "conversation-child-a",
+            "assistant-child-a",
+            "model-a",
+            "Model A",
+            11,
+        ),
+        (
+            "run-child-b",
+            "conversation-child-b",
+            "assistant-child-b",
+            "model-b",
+            "Model B",
+            29,
+        ),
+    ] {
+        service.register_usage_context(
+            run_id,
+            AgentRunUsageContext {
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                run_id: run_id.to_string(),
+                project_id: Some("project-shared".to_string()),
+                model_id: model_id.to_string(),
+                model_name: model_name.to_string(),
+                provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+                input_price: None,
+                cached_input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        service
+            .persist_run_usage(
+                run_id,
+                AgentRunStatus::Completed,
+                Some(AgentUsage {
+                    input_tokens: Some(total_tokens - 1),
+                    output_tokens: Some(1),
+                    output_thinking_tokens: None,
+                    total_tokens: Some(total_tokens),
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    billable_request_count: Some(1),
+                }),
+                None,
+            )
+            .unwrap();
+    }
+
+    let child_a = storage
+        .load_agent_usage_for_owner("run-child-a", "conversation-child-a", "assistant-child-a")
+        .unwrap()
+        .unwrap();
+    let child_b = storage
+        .load_agent_usage_for_owner("run-child-b", "conversation-child-b", "assistant-child-b")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (child_a.model_id.as_str(), child_a.total_tokens),
+        ("model-a", Some(11))
+    );
+    assert_eq!(
+        (child_b.model_id.as_str(), child_b.total_tokens),
+        ("model-b", Some(29))
+    );
+    assert!(storage
+        .load_agent_usage_for_owner("run-child-a", "conversation-child-b", "assistant-child-b",)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

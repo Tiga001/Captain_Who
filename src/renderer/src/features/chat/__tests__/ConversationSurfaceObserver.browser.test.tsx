@@ -363,3 +363,78 @@ it('resets observer-local Timeline disclosure state when switching conversations
   ).toBe('child-b')
   expect(screen.container.textContent).not.toContain('notes.md')
 })
+
+it('renders a long child history without introducing any observer write surface', async () => {
+  const conversation = longObserverConversation(120)
+  const screen = await render(
+    <ConversationSurface
+      agentLabelsById={{ 'parent-agent': 'Root planner' }}
+      conversation={conversation}
+      mode="observer"
+      parentAgentId="parent-agent"
+      rootConversationId="root-conversation"
+      showTokenUsageDetails={false}
+    />
+  )
+
+  expect(screen.container.querySelectorAll('[data-message-id]')).toHaveLength(240)
+  expect(screen.container.textContent).toContain('Parent task 000')
+  expect(screen.container.textContent).toContain('Child answer 119')
+  expect(
+    screen.container
+      .querySelector('.conversation-surface')
+      ?.getAttribute('data-conversation-surface-mode')
+  ).toBe('observer')
+  for (const selector of [
+    '.chat-conversation-page__composer',
+    '.chat-composer',
+    'textarea',
+    '[contenteditable="true"]',
+    '.agent-approval-dialog',
+    '[aria-label="chat.send"]',
+    '[aria-label="chat.editMessage"]',
+    '[aria-label="chat.continueInNewTask"]',
+    '[aria-label="chat.favoriteMessage"]'
+  ]) {
+    expect(screen.container.querySelector(selector), `observer exposed ${selector}`).toBeNull()
+  }
+})
+
+function longObserverConversation(turns: number): ChatConversation {
+  const messages: ChatConversation['messages'] = []
+  for (let turn = 0; turn < turns; turn += 1) {
+    const suffix = String(turn).padStart(3, '0')
+    messages.push(
+      {
+        id: `parent-task-${suffix}`,
+        role: 'user',
+        content: `Parent task ${suffix}`,
+        createdAt: turn * 2 + 1,
+        status: 'sent',
+        inputOrigin: {
+          kind: 'agent',
+          senderAgentId: 'parent-agent',
+          sourceAgentMessageId: `mailbox-${suffix}`,
+          snapshotSourceConversationId: null,
+          snapshotSourceMessageId: null
+        }
+      },
+      {
+        id: `child-answer-${suffix}`,
+        role: 'assistant',
+        content: `Child answer ${suffix}`,
+        createdAt: turn * 2 + 2,
+        status: 'sent'
+      }
+    )
+  }
+  return {
+    id: 'long-child-conversation',
+    projectId: 'project-1',
+    modelId: 'child-model',
+    title: 'Long child observer',
+    createdAt: 1,
+    updatedAt: turns * 2,
+    messages
+  }
+}

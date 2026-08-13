@@ -1,8 +1,10 @@
 import type { AgentDisplayStatusView, AgentSummary, AgentTreeSnapshot } from '@mycopilot/protocol'
+import { PanelTop } from 'lucide-react'
 import { page, userEvent } from 'vitest/browser'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type { CollaborationStoreSnapshot } from '../../agentCollaboration/collaborationStore'
+import type { RightSidebarModuleDefinition } from '../rightSidebarTypes'
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ language: 'en-US', t: (key: string) => key })
@@ -10,6 +12,23 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 
 const { RightSidebar } = await import('../RightSidebar')
 const NOOP = () => undefined
+const KEEP_ALIVE_TEST_MODULE: RightSidebarModuleDefinition = {
+  contextBinding: 'global',
+  createPage: ({ pageId }) => ({
+    id: pageId,
+    moduleId: 'terminal',
+    title: 'rightSidebar.terminal',
+    workspaceKey: null
+  }),
+  icon: PanelTop,
+  id: 'terminal',
+  instancePolicy: 'single',
+  render: () => <div data-testid="keep-alive-test-surface">terminal</div>,
+  retention: 'keep-alive',
+  surfaceKind: 'react',
+  titleKey: 'rightSidebar.terminal',
+  unavailablePagePolicy: 'retain-page'
+}
 
 describe('Agent Center right sidebar', () => {
   it('preserves the legacy home when the active root has no child and appears dynamically later', async () => {
@@ -129,6 +148,31 @@ describe('Agent Center right sidebar', () => {
       .toBeVisible()
     expect(screen.container.querySelector('[data-testid="agent-observer-child-a"]')).toBeNull()
   })
+
+  it('keeps the exact observer DOM mounted while another retained sidebar page is foregrounded', async () => {
+    const screen = await render(
+      <NarrowSidebar
+        activeConversationId="root-a"
+        snapshot={snapshot('root-a', [agent('root-a', 'child-a', 'running')])}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'rightSidebar.agentCenter' }).click()
+    await screen.getByRole('button', { name: 'agentCenter.open child-a' }).click()
+    const observer = screen.getByTestId('agent-observer-child-a').element()
+    const agentCenterPage = observer.closest<HTMLElement>('.right-sidebar__page')
+    if (!agentCenterPage) throw new Error('Missing Agent Center page')
+
+    await screen.getByRole('button', { name: 'rightSidebar.newPanel' }).click()
+    await screen.getByRole('menuitem', { name: 'rightSidebar.terminal' }).click()
+    await expect.element(screen.getByTestId('keep-alive-test-surface')).toBeVisible()
+    expect(agentCenterPage.getAttribute('aria-hidden')).toBe('true')
+    expect(screen.getByTestId('agent-observer-child-a').element()).toBe(observer)
+
+    await screen.getByRole('tab', { name: 'rightSidebar.agentCenter' }).click()
+    await expect.element(screen.getByTestId('agent-observer-child-a')).toBeVisible()
+    expect(screen.getByTestId('agent-observer-child-a').element()).toBe(observer)
+  })
 })
 
 function NarrowSidebar({
@@ -148,6 +192,7 @@ function NarrowSidebar({
         collaborationSnapshot={snapshot}
         isMaximized={false}
         isOpen
+        modules={[KEEP_ALIVE_TEST_MODULE]}
         onToggleMaximized={NOOP}
         renderAgentObserver={({ agent }) => (
           <div className="chat-conversation-page" data-testid={`agent-observer-${agent.agentId}`}>

@@ -225,6 +225,49 @@ it('keeps the current child visible while a same-scope durable refresh is pendin
   await expect.element(screen.getByText('new durable timeline')).toBeVisible()
 })
 
+it('retains an authorized same-scope snapshot when refresh fails and recovers on retry', async () => {
+  mocks.load
+    .mockReset()
+    .mockResolvedValueOnce(observer('child-a', 'stable authorized timeline'))
+    .mockRejectedValueOnce(new Error('temporary observer transport failure'))
+    .mockResolvedValueOnce(observer('child-a', 'recovered durable timeline'))
+
+  const screen = await render(<HookProbe conversationId="child-a" invalidationVersion={10} />)
+  await expect.element(screen.getByText('stable authorized timeline')).toBeVisible()
+
+  await screen.rerender(<HookProbe conversationId="child-a" invalidationVersion={11} />)
+  await expect.element(screen.getByRole('button', { name: 'reload' })).toBeVisible()
+  expect(screen.container.textContent).toContain('stable authorized timeline')
+  expect(screen.container.querySelector('[data-error]')?.getAttribute('data-error')).toBe(
+    'temporary observer transport failure'
+  )
+
+  await screen.getByRole('button', { name: 'reload' }).click()
+  await expect.element(screen.getByText('recovered durable timeline')).toBeVisible()
+  expect(screen.container.textContent).not.toContain('stable authorized timeline')
+})
+
+it('fails closed when exact observer identity changes even if the conversation id is unchanged', async () => {
+  const failedIdentityLoad = deferred<AgentObserverConversation | null>()
+  mocks.load
+    .mockReset()
+    .mockResolvedValueOnce(observer('child-a', 'old exact identity'))
+    .mockReturnValueOnce(failedIdentityLoad.promise)
+
+  const screen = await render(<HookProbe conversationId="child-a" rootAgentId="root-agent-a" />)
+  await expect.element(screen.getByText('old exact identity')).toBeVisible()
+
+  await screen.rerender(<HookProbe conversationId="child-a" rootAgentId="root-agent-b" />)
+  expect(screen.container.textContent).not.toContain('old exact identity')
+  expect(screen.container.querySelector('[data-loading]')?.getAttribute('data-loading')).toBe(
+    'true'
+  )
+
+  failedIdentityLoad.resolve(null)
+  await expect.element(screen.getByRole('button', { name: 'reload' })).toBeVisible()
+  expect(screen.container.textContent).not.toContain('old exact identity')
+})
+
 it('streams only an exact root/agent/conversation/run/message observer envelope', async () => {
   mocks.load
     .mockReset()

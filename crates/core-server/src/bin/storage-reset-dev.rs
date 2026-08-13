@@ -1348,6 +1348,86 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_reset_failure_preserves_current_v8_source_and_recovery_backup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let secret = "confirmed-reset-failure-secret";
+        populated_storage(fixture.path(), secret);
+        let database = fixture.path().join(DATABASE_FILE_NAME);
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE models SET provider_protocol_revision = 'provider-protocol-v1:not-a-uuid'",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let source_digest = file_digest(&database).unwrap();
+
+        let error = execute(options(fixture.path(), true)).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("current Provider Protocol revision"));
+        assert!(!error.to_string().contains(secret));
+        assert_eq!(file_digest(&database).unwrap(), source_digest);
+
+        let backup_directory = fixture.path().join(BACKUP_DIRECTORY_NAME);
+        let backups = fs::read_dir(&backup_directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(|name| {
+                        name.starts_with("storage-reset-dev-") && name.ends_with(".sqlite")
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            backups.len(),
+            1,
+            "one immutable recovery snapshot must remain"
+        );
+        // A canonical v8 database uses WAL mode. Exercise the actual recovery shape by restoring
+        // the immutable snapshot to a writable database identity instead of mutating the only
+        // backup merely to inspect it.
+        let recovered_database = fixture.path().join("recovered-v8.sqlite");
+        fs::copy(&backups[0], &recovered_database).unwrap();
+        let backup = Connection::open(&recovered_database).unwrap();
+        mycopilot_core::storage::migrations::run_migrations(&backup).unwrap();
+        assert_eq!(pragma_rows(&backup, "PRAGMA quick_check").unwrap(), ["ok"]);
+        assert_eq!(
+            backup
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            backup
+                .query_row(
+                    "SELECT api_token FROM model_provider_settings WHERE id = 'default'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            secret
+        );
+        drop(backup);
+        remove_database_files(&recovered_database);
+
+        let temporary_files = fs::read_dir(fixture.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".storage.sqlite.reset-dev-"))
+            .collect::<Vec<_>>();
+        assert!(
+            temporary_files.is_empty(),
+            "failed reset leaked temporary database files: {temporary_files:?}"
+        );
+    }
+
+    #[test]
     fn confirmed_reset_backs_up_and_restores_only_configuration() {
         let fixture = tempfile::tempdir().unwrap();
         let secret = "reset-test-api-token";

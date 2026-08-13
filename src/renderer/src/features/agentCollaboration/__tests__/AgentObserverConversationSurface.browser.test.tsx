@@ -44,6 +44,38 @@ it('exposes the production retry action when initial observer hydration cannot s
   expect(mocks.reload).toHaveBeenCalledOnce()
 })
 
+it('keeps a previously authorized observer surface visible with a refresh recovery alert', async () => {
+  mocks.reload.mockReset()
+  mocks.useObserverConversation.mockReturnValue({
+    conversation: {
+      id: 'child-conversation',
+      projectId: 'project',
+      modelId: null,
+      title: 'Child',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1
+    },
+    error: 'temporary refresh failure',
+    loading: false,
+    reload: mocks.reload
+  })
+  const screen = await render(
+    <AgentObserverConversationSurface
+      agent={agent()}
+      agentLabelsById={{}}
+      invalidationVersion="1:2"
+      rootConversationId="root-conversation"
+      showTokenUsageDetails={false}
+    />
+  )
+
+  expect(screen.container.querySelector('[data-testid="observer-surface"]')).not.toBeNull()
+  await expect.element(screen.getByRole('alert')).toBeVisible()
+  await screen.getByRole('button', { name: 'agentCenter.retry' }).click()
+  expect(mocks.reload).toHaveBeenCalledOnce()
+})
+
 function agent(): AgentSummary {
   return {
     agentId: 'agent-child',

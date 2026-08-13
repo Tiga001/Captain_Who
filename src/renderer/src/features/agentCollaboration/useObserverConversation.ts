@@ -32,6 +32,7 @@ export interface ObserverConversationState {
 interface ScopedObserverConversationState extends Omit<ObserverConversationState, 'reload'> {
   conversationId: string
   rootConversationId: string
+  scopeKey: string
 }
 
 type ObserverLoadWindow = {
@@ -54,6 +55,7 @@ export function useObserverConversation({
   rootAgentId,
   rootConversationId
 }: UseObserverConversationInput): ObserverConversationState {
+  const scopeKey = `${rootAgentId}\u0000${rootConversationId}\u0000${agentId}\u0000${conversationId}`
   const requestGenerationRef = useRef(0)
   const arrivalSequenceRef = useRef(0)
   const activeLoadWindowRef = useRef<ObserverLoadWindow | null>(null)
@@ -64,7 +66,8 @@ export function useObserverConversation({
     conversationId,
     error: null,
     loading: true,
-    rootConversationId
+    rootConversationId,
+    scopeKey
   })
   const reload = useCallback(() => {
     overflowInvalidationRef.current = null
@@ -74,8 +77,6 @@ export function useObserverConversation({
     () => ({ agentId, rootAgentId, rootConversationId, conversationId }),
     [agentId, conversationId, rootAgentId, rootConversationId]
   )
-  const scopeKey = `${rootAgentId}\u0000${rootConversationId}\u0000${agentId}\u0000${conversationId}`
-
   useEffect(() => {
     activeLoadWindowRef.current = null
     overflowInvalidationRef.current = null
@@ -145,15 +146,14 @@ export function useObserverConversation({
     }
     activeLoadWindowRef.current = loadWindow
     setState((current) => {
-      const sameScope =
-        current.rootConversationId === rootConversationId &&
-        current.conversationId === conversationId
+      const sameScope = current.scopeKey === scopeKey
       return {
         conversation: sameScope ? current.conversation : null,
         conversationId,
         error: null,
         loading: true,
-        rootConversationId
+        rootConversationId,
+        scopeKey
       }
     })
 
@@ -196,19 +196,24 @@ export function useObserverConversation({
           conversationId,
           error: null,
           loading: false,
-          rootConversationId
+          rootConversationId,
+          scopeKey
         })
       })
       .catch((error: unknown) => {
         if (cancelled || requestGenerationRef.current !== generation) return
         if (activeLoadWindowRef.current === loadWindow) activeLoadWindowRef.current = null
-        setState({
-          conversation: null,
+        setState((current) => ({
+          // A same-scope refresh is only an invalidation of freshness, not of the already
+          // authorized snapshot. Keep it readable while exposing a retry. Initial loads and
+          // exact identity changes still fail closed with no previous child content.
+          conversation: current.scopeKey === scopeKey ? current.conversation : null,
           conversationId,
           error: error instanceof Error ? error.message : String(error),
           loading: false,
-          rootConversationId
-        })
+          rootConversationId,
+          scopeKey
+        }))
       })
 
     return () => {
@@ -226,7 +231,7 @@ export function useObserverConversation({
     scopeKey
   ])
 
-  if (state.rootConversationId !== rootConversationId || state.conversationId !== conversationId) {
+  if (state.scopeKey !== scopeKey) {
     return { conversation: null, error: null, loading: true, reload }
   }
 

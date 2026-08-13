@@ -65,6 +65,38 @@ async function settle(): Promise<void> {
 }
 
 describe('CollaborationStore', () => {
+  it('releases 1,000 transient subscribers without duplicate delivery or residue', async () => {
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => null),
+      listEvents: vi.fn(),
+      subscribe: () => () => undefined,
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    let activeSubscriber = -1
+    let activeDeliveries = 0
+    let staleDeliveries = 0
+
+    for (let subscriber = 0; subscriber < 1_000; subscriber += 1) {
+      const unsubscribe = store.subscribe(() => {
+        if (activeSubscriber === subscriber) activeDeliveries += 1
+        else staleDeliveries += 1
+      })
+      activeSubscriber = subscriber
+      await store.hydrate()
+      activeSubscriber = -1
+      unsubscribe()
+
+      // A second publication in every round proves that the just-released listener and all
+      // earlier listeners are absent, rather than merely checking a private Set size.
+      await store.hydrate()
+    }
+
+    expect(activeDeliveries).toBe(2_000)
+    expect(staleDeliveries).toBe(0)
+    expect(source.getTree).toHaveBeenCalledTimes(2_000)
+  })
+
   it('ignores duplicates and other roots, then closes an event gap from the durable log', async () => {
     let handler: ((value: CollaborationEventEnvelope) => void) | undefined
     let authoritative = tree('root-conversation', 2)
@@ -106,6 +138,61 @@ describe('CollaborationStore', () => {
       limit: 256,
       rootConversationId: 'root-conversation'
     })
+  })
+
+  it('replays a 520-event durable history in bounded pages despite duplicate and out-of-order notifications', async () => {
+    let handler: ((value: CollaborationEventEnvelope) => void) | undefined
+    const childA = 'agent-child-a'
+    const childB = 'agent-child-b'
+    const durableEvents = Array.from({ length: 520 }, (_, index) => {
+      const sequence = index + 1
+      return event('root-conversation', sequence, sequence % 2 === 0 ? childB : childA)
+    })
+    let exposeEvents = false
+    let authoritative: AgentTreeSnapshot = {
+      ...tree('root-conversation', 0),
+      agents: [childSummary(childA, 'child-a'), childSummary(childB, 'child-b')]
+    }
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => authoritative),
+      listEvents: vi.fn(async ({ afterSequence, limit }) => {
+        if (!exposeEvents) return page('root-conversation', [])
+        const events = durableEvents.slice(afterSequence, afterSequence + limit)
+        return page('root-conversation', events, afterSequence + events.length < 520)
+      }),
+      subscribe: (next) => {
+        handler = next
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await settle()
+    await settle()
+    vi.mocked(source.listEvents).mockClear()
+
+    exposeEvents = true
+    authoritative = { ...authoritative, lastSequence: 520 }
+    // Notifications only lower latency. They may duplicate or arrive out of order; the store
+    // must validate and replay the monotonic durable log instead of reducing these envelopes.
+    handler?.(durableEvents[519]!)
+    handler?.(durableEvents[2]!)
+    handler?.(durableEvents[519]!)
+
+    await vi.waitFor(() => expect(store.getSnapshot().tree?.lastSequence).toBe(520))
+    expect(store.getSnapshot()).toMatchObject({
+      agentInvalidationSequences: { [childA]: 519, [childB]: 520 },
+      error: false,
+      loading: false,
+      tree: { lastSequence: 520 }
+    })
+    expect(vi.mocked(source.listEvents).mock.calls.map(([input]) => input.afterSequence)).toEqual(
+      expect.arrayContaining([0, 256, 512])
+    )
+    expect(vi.mocked(source.listEvents).mock.calls.every(([input]) => input.limit === 256)).toBe(
+      true
+    )
   })
 
   it('rehydrates independently after a window reload', async () => {

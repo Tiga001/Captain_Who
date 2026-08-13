@@ -804,11 +804,15 @@ mod tests {
         ProjectRecord,
     };
     use crate::{
-        AgentMailboxDeliveryStatus, AgentWakeStatus, ConversationMessageOrigin,
-        ConversationTurnTrace, ConversationTurnTraceTerminalStatus, CreateAgentTemplateInput,
-        EnsureRootAgentInput, ProviderProfileConfig, ProviderProtocolDialect, ReasoningEffort,
-        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        AgentGraphError, AgentMailboxDeliveryStatus, AgentMailboxKind, AgentWakeStatus,
+        ConversationMessageOrigin, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+        CreateAgentTemplateInput, EnqueueAgentMessageInput, EnsureRootAgentInput,
+        FinishAgentWakeWithResultInput, ProviderProfileConfig, ProviderProtocolDialect,
+        ReasoningEffort, SendAgentMessageRequest, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     struct Fixture {
@@ -2604,5 +2608,329 @@ mod tests {
                 limit: 64,
             })
         ));
+    }
+
+    /// Deterministic release profile for the collaboration persistence boundary.
+    ///
+    /// Kept ignored in the ordinary unit suite because it intentionally performs at least ten
+    /// thousand durable SQLite commits. The repository release-gate script runs it explicitly and
+    /// rejects environment overrides below the documented minimums.
+    #[test]
+    #[ignore = "run with pnpm test:multi-agent-release"]
+    fn release_profile_tree_mailbox_event_contention_and_restart_recovery() {
+        const CONFIGURED_TREE_NODES: usize = 64;
+        const WRITERS: usize = 4;
+        let fact_count = release_profile_usize("MYCOPILOT_MULTI_AGENT_PROFILE_FACTS", 10_000);
+        let restart_count = release_profile_usize("MYCOPILOT_MULTI_AGENT_PROFILE_RESTARTS", 20);
+        assert!(
+            fact_count >= 10_000,
+            "release profile requires >=10000 facts"
+        );
+        assert!(
+            restart_count >= 20,
+            "release profile requires >=20 restarts"
+        );
+
+        let profile_started = Instant::now();
+        let fixture = Fixture::new(Some("model-a"));
+        let database_path = fixture._directory.path().join("storage.sqlite");
+        let limits = AgentTreeResourceLimits::default();
+        assert_eq!(limits.max_nodes as usize, CONFIGURED_TREE_NODES);
+
+        let mut children = Vec::with_capacity(CONFIGURED_TREE_NODES - 1);
+        for index in 0..(CONFIGURED_TREE_NODES - 1) {
+            let created = fixture
+                .service
+                .create_child_agent_with_limits(
+                    &spawn_input(
+                        &format!("release-spawn-{index}"),
+                        &format!("release_child_{index:02}"),
+                    ),
+                    limits,
+                )
+                .unwrap();
+            children.push(created);
+        }
+        assert_eq!(
+            fixture.service.list_agent_tree("agent-root").unwrap().len(),
+            64
+        );
+        assert_eq!(
+            fixture
+                .service
+                .create_child_agent_with_limits(
+                    &spawn_input("release-spawn-over-limit", "release_child_over_limit"),
+                    limits,
+                )
+                .unwrap_err(),
+            ChildAgentSpawnError::ResourceLimit {
+                resource: "tree_nodes",
+                limit: 64,
+            }
+        );
+
+        // Settle every initial Wake through the durable result/outbox transaction. The root stays
+        // idle: results are pending Mailbox facts and never create a root Wake.
+        for (index, child) in children.iter().enumerate() {
+            let token = format!("release-claim-{index}");
+            let claimed = fixture
+                .service
+                .claim_next_agent_wake(&child.agent.agent_id, &token)
+                .unwrap()
+                .unwrap();
+            fixture
+                .service
+                .transition_agent_wake(
+                    &claimed.wake_id,
+                    AgentWakeStatus::Claimed,
+                    AgentWakeStatus::Running,
+                    Some(&token),
+                )
+                .unwrap();
+            fixture
+                .service
+                .finish_agent_wake_with_result(&FinishAgentWakeWithResultInput {
+                    wake_id: claimed.wake_id,
+                    expected_status: AgentWakeStatus::Running,
+                    claim_token: token,
+                    terminal_status: AgentWakeStatus::Completed,
+                    terminal_error: None,
+                    result_message: EnqueueAgentMessageInput {
+                        message_id: format!("release-result-{index}"),
+                        root_agent_id: "agent-root".to_string(),
+                        sender_agent_id: child.agent.agent_id.clone(),
+                        recipient_agent_id: "agent-root".to_string(),
+                        request_id: format!("release-result-request-{index}"),
+                        kind: AgentMailboxKind::Result,
+                        content: format!("result {index}"),
+                        projection_message_id: format!("release-result-projection-{index}"),
+                    },
+                })
+                .unwrap();
+        }
+
+        let child_ids = Arc::new(
+            children
+                .iter()
+                .map(|child| child.agent.agent_id.clone())
+                .collect::<Vec<_>>(),
+        );
+        let errors = Arc::new(AtomicUsize::new(0));
+        let busy_errors = Arc::new(AtomicUsize::new(0));
+        let maximum_enqueue_micros = Arc::new(AtomicU64::new(0));
+        std::thread::scope(|scope| {
+            for writer_index in 0..WRITERS {
+                // Production serializes writes through StorageState's SQLite mutex. Four caller
+                // threads still exercise the public contention boundary without inventing a
+                // second in-process database owner that Core Server never creates.
+                let service = &fixture.service;
+                let child_ids = Arc::clone(&child_ids);
+                let errors = Arc::clone(&errors);
+                let busy_errors = Arc::clone(&busy_errors);
+                let maximum_enqueue_micros = Arc::clone(&maximum_enqueue_micros);
+                scope.spawn(move || {
+                    for sequence in (writer_index..fact_count).step_by(WRITERS) {
+                        let input = SendAgentMessageRequest {
+                            sender_agent_id: "agent-root".to_string(),
+                            recipient_agent_id: child_ids[sequence % child_ids.len()].clone(),
+                            request_id: format!("release-message-{sequence}"),
+                            content: format!("release payload {sequence}"),
+                        };
+                        let started = Instant::now();
+                        if let Err(error) = service.send_agent_message(&input) {
+                            errors.fetch_add(1, Ordering::Relaxed);
+                            if matches!(&error, AgentGraphError::StorageUnavailable(message) if message.contains("busy") || message.contains("locked"))
+                            {
+                                busy_errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        maximum_enqueue_micros.fetch_max(
+                            started.elapsed().as_micros().try_into().unwrap_or(u64::MAX),
+                            Ordering::Relaxed,
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            errors.load(Ordering::Relaxed),
+            0,
+            "all durable sends converge (sqlite_busy_errors={})",
+            busy_errors.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            busy_errors.load(Ordering::Relaxed),
+            0,
+            "no SQLITE_BUSY escapes"
+        );
+
+        // Retry a deterministic sample after the concurrent writers have committed. Idempotency
+        // returns the original fact and does not advance the event sequence.
+        for sequence in (0..fact_count).step_by(997) {
+            let dispatch = fixture
+                .service
+                .send_agent_message(&SendAgentMessageRequest {
+                    sender_agent_id: "agent-root".to_string(),
+                    recipient_agent_id: child_ids[sequence % child_ids.len()].clone(),
+                    request_id: format!("release-message-{sequence}"),
+                    content: format!("release payload {sequence}"),
+                })
+                .unwrap();
+            assert_eq!(
+                dispatch.message.request_id,
+                format!("release-message-{sequence}")
+            );
+        }
+
+        // Twenty deterministic pre-dispatch crashes. Each cycle leaves one claimed Wake behind,
+        // opens a new StorageService (the process-restart boundary), advances the fake recovery
+        // clock past the half-open lease, reclaims the same durable Wake, and cancels it without a
+        // second Turn. This is deliberately stronger than repeatedly opening an idle database.
+        let restart_clock_base = now_ms();
+        let mut maximum_restart_micros = 0_u128;
+        for restart in 0..restart_count {
+            let target = &child_ids[restart % child_ids.len()];
+            fixture
+                .service
+                .follow_up_agent(&SendAgentMessageRequest {
+                    sender_agent_id: "agent-root".to_string(),
+                    recipient_agent_id: target.clone(),
+                    request_id: format!("release-restart-followup-{restart}"),
+                    content: format!("recover this durable follow-up {restart}"),
+                })
+                .unwrap();
+            let claimed_at = restart_clock_base + (restart as i64 * 100_000);
+            let stale_claim = format!("release-stale-claim-{restart}");
+            let claimed = fixture
+                .service
+                .claim_next_dispatchable_agent_wake_at(&stale_claim, claimed_at)
+                .unwrap()
+                .unwrap();
+            assert_eq!(claimed.agent_id, *target);
+
+            let started = Instant::now();
+            let reopened = StorageService::open(&database_path).unwrap();
+            let recovered_at = claimed_at + 60_001;
+            let recovered = reopened
+                .recover_agent_wakes_at(&format!("release-recovery-{restart}"), recovered_at)
+                .unwrap();
+            assert_eq!(recovered.requeued_before_dispatch, 1);
+            assert!(recovered.actions.is_empty());
+            let retry_claim = format!("release-retry-claim-{restart}");
+            let retry = reopened
+                .claim_next_dispatchable_agent_wake_at(&retry_claim, recovered_at + 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(retry.wake_id, claimed.wake_id);
+            reopened
+                .transition_agent_wake_at(
+                    &retry.wake_id,
+                    AgentWakeStatus::Claimed,
+                    AgentWakeStatus::Cancelled,
+                    Some(&retry_claim),
+                    recovered_at + 2,
+                )
+                .unwrap();
+            maximum_restart_micros = maximum_restart_micros.max(started.elapsed().as_micros());
+        }
+
+        let query_started = Instant::now();
+        let connection = fixture.service.state.connection().unwrap();
+        let ordinary_messages = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_mailbox_messages WHERE kind = 'message'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        let result_messages = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_mailbox_messages WHERE kind = 'result'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        let (event_count, maximum_event_sequence) = connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(root_sequence), 0)
+                   FROM agent_collaboration_events
+                  WHERE root_agent_id = 'agent-root'",
+                [],
+                |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?)),
+            )
+            .unwrap();
+        let ghost_wakes = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_wake_requests
+                  WHERE status IN ('claimed', 'running', 'waiting_for_approval')",
+                [],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap();
+        let query_micros = query_started.elapsed().as_micros();
+        drop(connection);
+
+        assert_eq!(ordinary_messages, fact_count);
+        assert_eq!(result_messages, CONFIGURED_TREE_NODES - 1);
+        assert!(
+            event_count >= fact_count,
+            "every message commit invalidates the tree"
+        );
+        assert_eq!(
+            event_count, maximum_event_sequence,
+            "root sequence has no gap"
+        );
+        assert_eq!(ghost_wakes, 0);
+
+        let event_catchup_started = Instant::now();
+        let mut event_cursor = 0_u64;
+        let mut observed_events = 0_usize;
+        let mut maximum_event_page_micros = 0_u128;
+        loop {
+            let page_started = Instant::now();
+            let page = fixture
+                .service
+                .list_agent_collaboration_events("agent-root", event_cursor, 512)
+                .unwrap();
+            maximum_event_page_micros =
+                maximum_event_page_micros.max(page_started.elapsed().as_micros());
+            if page.is_empty() {
+                break;
+            }
+            for event in &page {
+                event_cursor += 1;
+                assert_eq!(event.root_sequence, event_cursor, "catch-up sequence gap");
+            }
+            observed_events += page.len();
+        }
+        let event_catchup_micros = event_catchup_started.elapsed().as_micros();
+        assert_eq!(observed_events, event_count);
+
+        let reopened = StorageService::open(&database_path).unwrap();
+        assert_eq!(reopened.list_agent_tree("agent-root").unwrap().len(), 64);
+        assert!(
+            reopened
+                .latest_agent_collaboration_event_sequence("agent-root")
+                .unwrap()
+                >= fact_count as u64
+        );
+
+        let database_bytes = std::fs::metadata(&database_path).unwrap().len();
+        eprintln!(
+            "ROUND6_METRIC tree_nodes=64 facts={fact_count} results={result_messages} events={event_count} writers={WRITERS} sqlite_busy_errors=0 max_enqueue_us={} query_us={query_micros} event_catchup_us={event_catchup_micros} max_event_page_us={maximum_event_page_micros} restarts={restart_count} max_restart_us={maximum_restart_micros} database_bytes={database_bytes} wall_ms={}",
+            maximum_enqueue_micros.load(Ordering::Relaxed),
+            profile_started.elapsed().as_millis(),
+        );
+    }
+
+    fn release_profile_usize(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| panic!("{name} must be a positive integer"))
+            })
+            .unwrap_or(default)
     }
 }

@@ -362,6 +362,32 @@ function emitObserverEvent(event: AgentObserverEventEnvelope): void {
   for (const listener of scenarioState.observerEventListeners) listener(event)
 }
 
+async function captureStableScreenshot(element: Element, path: string): Promise<void> {
+  const staticMotionStyle = document.createElement('style')
+  staticMotionStyle.textContent = `
+    *, *::before, *::after {
+      animation: none !important;
+      caret-color: transparent !important;
+      transition: none !important;
+    }
+  `
+  document.head.append(staticMotionStyle)
+  try {
+    await document.fonts.ready
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+    const first = await page.screenshot({ base64: true, element, path })
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    })
+    const repeated = await page.screenshot({ element, save: false })
+    expect(repeated).toBe(first.base64)
+  } finally {
+    staticMotionStyle.remove()
+  }
+}
+
 beforeEach(resetScenario)
 
 describe('AppShell deterministic collaboration scenario', () => {
@@ -376,10 +402,10 @@ describe('AppShell deterministic collaboration scenario', () => {
     expect(screen.container.textContent).toContain('Model One')
     expect(screen.container.textContent).toContain('Model Two')
     expect(screen.container.querySelectorAll('[data-approval-id]')).toHaveLength(2)
-    await page.screenshot({
-      element: screen.container.querySelector('.main-panel__surface') ?? screen.container,
-      path: '__screenshots__/AppShellCollaborationScenario.browser.test.tsx/root-collaboration.png'
-    })
+    await captureStableScreenshot(
+      screen.container.querySelector('.main-panel__surface') ?? screen.container,
+      '__screenshots__/AppShellCollaborationScenario.browser.test.tsx/root-collaboration.png'
+    )
 
     const approveCard = screen.container.querySelector<HTMLElement>(
       '[data-approval-id="approval-approve"]'
@@ -421,6 +447,7 @@ describe('AppShell deterministic collaboration scenario', () => {
       }
     ])
 
+    const rootAgentListenerCount = scenarioState.agentEventListeners.size
     await expect.element(rejectionScreen.getByRole('button', { name: 'Subagents' })).toBeVisible()
     await page
       .elementLocator(rejectionScreen.getByRole('button', { name: 'Subagents' }).element())
@@ -442,6 +469,8 @@ describe('AppShell deterministic collaboration scenario', () => {
     await expect
       .poll(() => scenarioState.observerLoadRequests)
       .toContain('conversation-root:conversation-review')
+    expect(scenarioState.observerEventListeners.size).toBe(1)
+    expect(scenarioState.agentEventListeners.size).toBe(rootAgentListenerCount + 1)
     await expect
       .poll(
         () => rejectionScreen.container.querySelector('.agent-center__state')?.textContent ?? ''
@@ -576,11 +605,20 @@ describe('AppShell deterministic collaboration scenario', () => {
       transform: 'translateY(0)'
     })
     document.body.append(visualCopy)
-    await page.screenshot({
-      element: visualCopy,
-      path: '__screenshots__/AppShellCollaborationScenario.browser.test.tsx/agent-observer.png'
-    })
+    await captureStableScreenshot(
+      visualCopy,
+      '__screenshots__/AppShellCollaborationScenario.browser.test.tsx/agent-observer.png'
+    )
     visualCopy.remove()
+
+    // Root scope changes must unmount the retained detail observer and release both live channels;
+    // a keep-alive sidebar page may persist, but a child subscription may not cross roots.
+    await rejectionScreen.getByRole('button', { name: 'select-conversation-other' }).click()
+    await expect.poll(() => scenarioState.observerEventListeners.size).toBe(0)
+    expect(scenarioState.agentEventListeners.size).toBe(rootAgentListenerCount)
+    expect(
+      rejectionScreen.container.querySelector('[data-conversation-surface-mode="observer"]')
+    ).toBeNull()
   })
 
   it('converges through the durable sequence, survives remount and drops the old root scope', async () => {

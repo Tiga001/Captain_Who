@@ -24,6 +24,7 @@
     "test:artifact-runtime": "node --test scripts/prepare-artifact-runtime.test.mjs",
     "test:rust": "cargo test --workspace",
     "test:web": "vitest run",
+    "test:multi-agent-release": "node scripts/run-multi-agent-release-gate.mjs",
     "test:web:install": "playwright install chromium",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
