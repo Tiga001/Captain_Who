@@ -47,6 +47,12 @@ impl StorageService {
                          ON message.id = trace.assistant_message_id
                         AND message.conversation_id = trace.conversation_id
                      WHERE trace.terminal_status = 'in_progress'
+                       AND NOT EXISTS (
+                           SELECT 1 FROM agent_wake_requests AS wake
+                           WHERE wake.status IN ('running', 'waiting_for_approval')
+                             AND wake.run_id = trace.run_id
+                             AND wake.assistant_message_id = trace.assistant_message_id
+                       )
                      ORDER BY trace.created_at ASC, trace.assistant_message_id ASC",
                 )
                 .map_err(storage_error)?;

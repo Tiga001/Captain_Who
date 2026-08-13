@@ -1,3 +1,4 @@
+mod agent_delivery;
 mod agent_graph;
 pub mod artifact_runtime;
 mod cancellation;
@@ -32,17 +33,24 @@ mod turn_diff;
 mod usage;
 pub mod world_state;
 
+pub use agent_delivery::*;
 pub use agent_graph::{
-    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentForkTurns, AgentGraphError,
-    AgentLifecycle, AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord,
+    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentDisplayStatus,
+    AgentDisplayStatusSnapshot, AgentForkTurns, AgentGraphError, AgentLifecycle,
+    AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord, AgentMessageDispatch,
     AgentModelSelectionSnapshot, AgentModelSelectionSource, AgentModelUnavailableReason,
-    AgentNodeRecord, AgentTemplateError, AgentTemplateModelUnavailableReason, AgentTemplateRecord,
-    AgentTemplateSnapshot, AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnError,
+    AgentNodeRecord, AgentResultArtifactKind, AgentResultArtifactReference, AgentTemplateError,
+    AgentTemplateModelUnavailableReason, AgentTemplateRecord, AgentTemplateSnapshot,
+    AgentTurnResultEnvelope, AgentTurnResultSettlement, AgentWakeRecoveryAction,
+    AgentWakeRecoveryBatch, AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnError,
     ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
     CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
-    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentWakeWithResultInput, IdempotentCreate,
-    ResolvedAgentTemplateForSpawn, TrustedActiveChildWakeBundle, UpdateAgentTemplateInput,
-    AGENT_GRAPH_SCHEMA_VERSION,
+    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentTurnResultInput,
+    FinishAgentWakeWithResultInput, IdempotentCreate, InterruptAgentExecutionOutcome,
+    ResolvedAgentTemplateForSpawn, SendAgentMessageRequest, TrustedActiveChildWakeBundle,
+    TrustedAgentWakeTurnAdmission, UpdateAgentTemplateInput, AGENT_GRAPH_SCHEMA_VERSION,
+    AGENT_RESULT_ENVELOPE_SCHEMA_VERSION, AGENT_RESULT_SUMMARY_MAX_BYTES,
+    AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES,
 };
 pub use cancellation::AgentCancellationToken;
 pub use context::{
@@ -264,10 +272,11 @@ pub use runtime::{
     AgentContextCompactionPrepareRequest, AgentContextCompactionServices,
     AgentContextWindowObserver, AgentConversationTraceObserver, AgentEventEmitter,
     AgentHostActionExecutor, AgentModelRequestObserver, AgentResolvedSkillActivation, AgentRuntime,
-    AgentRuntimeHostServices, AgentSkillActivationResolver, AgentSkillCheckpointAuthority,
-    AgentSteerEnqueueOutcome, AgentSteerInputQueue, AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS,
-    AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS, AGENT_COMMAND_SESSION_MAX_WAIT_MS,
-    AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
+    AgentRuntimeHostServices, AgentSamplingBoundaryDelivery, AgentSamplingBoundaryInbox,
+    AgentSamplingBoundaryMessage, AgentSamplingBoundaryRequest, AgentSkillActivationResolver,
+    AgentSkillCheckpointAuthority, AgentSteerEnqueueOutcome, AgentSteerInputQueue,
+    AGENT_COMMAND_SESSION_DEFAULT_WAIT_MS, AGENT_COMMAND_SESSION_INTERRUPT_WAIT_MS,
+    AGENT_COMMAND_SESSION_MAX_WAIT_MS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 pub use system_paths::expand_system_path;
 pub use tools::{

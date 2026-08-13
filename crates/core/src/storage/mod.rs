@@ -1,5 +1,6 @@
 pub mod agent_action_audit_repository;
 pub mod agent_command_session_repository;
+pub mod agent_delivery_repository;
 pub mod agent_graph_repository;
 pub mod agent_prompt_preferences_repository;
 pub mod agent_template_repository;

@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 5;
+pub const STORAGE_SCHEMA_VERSION: i32 = 6;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:5ded7ec02894107e9175625db6685ab3e5e0a6042b28f0f3df340f7d3ec0f81f";
+    "sha256:6b70e69c40e01ef79c00edd2deef1e83224ca5016f3cb4fffb9c795d91550e2d";
 
 /// Opens the single supported development schema.
 ///
@@ -164,11 +164,14 @@ mod tests {
             "prevent_child_agent_conversation_model_update",
             "agent_mailbox_messages",
             "validate_agent_mailbox_active_participants_insert",
+            "validate_agent_mailbox_unbound_quota_insert",
+            "validate_agent_mailbox_kind_authority_insert",
             "agent_mailbox_recipient_pending",
             "agent_mailbox_claim_token_identity",
             "agent_mailbox_one_claimed_per_recipient",
             "validate_agent_mailbox_projection_identity_insert",
             "prevent_agent_mailbox_identity_update",
+            "prevent_agent_mailbox_delete",
             "validate_agent_mailbox_delivery_transition",
             "prevent_agent_mailbox_claim_reassignment",
             "validate_agent_mailbox_lease_update",
@@ -176,14 +179,46 @@ mod tests {
             "prevent_agent_mailbox_acknowledgement_rewrite",
             "agent_wake_requests",
             "validate_agent_wake_active_target_insert",
+            "validate_agent_wake_source_authority_insert",
+            "validate_agent_wake_claim_source_delivered",
             "agent_wake_one_active_turn",
             "agent_wake_dispatch_queue",
             "agent_wake_claim_token_identity",
             "prevent_agent_wake_identity_update",
+            "prevent_agent_wake_delete",
             "validate_agent_wake_transition",
+            "validate_agent_wake_status_revision",
             "prevent_agent_wake_claim_reassignment",
             "validate_agent_wake_lease_update",
             "validate_agent_wake_result_kind",
+            "prevent_agent_wake_execution_identity_rewrite",
+            "validate_agent_wake_execution_identity_bind",
+            "agent_interrupt_requests",
+            "prevent_agent_interrupt_request_rewrite",
+            "agent_model_batch_receipts",
+            "agent_model_batch_receipts_conversation_run",
+            "validate_agent_model_batch_receipt_identity_insert",
+            "prevent_agent_model_batch_receipt_identity_update",
+            "prevent_agent_model_batch_receipt_reopen",
+            "prevent_agent_model_batch_receipt_delete",
+            "agent_model_batch_receipt_replays",
+            "validate_agent_model_batch_receipt_replay_insert",
+            "prevent_agent_model_batch_receipt_replay_update",
+            "prevent_agent_model_batch_receipt_replay_delete",
+            "agent_model_batch_receipt_items",
+            "agent_model_batch_receipt_items_sequence",
+            "validate_agent_model_batch_receipt_item_insert",
+            "prevent_agent_model_batch_receipt_item_update",
+            "prevent_agent_model_batch_receipt_item_delete",
+            "agent_model_batch_receipt_targets",
+            "validate_agent_model_batch_receipt_target_insert",
+            "prevent_agent_model_batch_receipt_target_update",
+            "prevent_agent_model_batch_receipt_target_delete",
+            "validate_agent_wake_satisfied_receipt",
+            "agent_collaboration_cursors",
+            "agent_collaboration_cursors_target",
+            "validate_agent_collaboration_cursor_authority_insert",
+            "validate_agent_collaboration_cursor_update",
             "prevent_agent_wake_claim_time_rewrite",
             "prevent_agent_wake_start_time_rewrite",
             "prevent_agent_wake_terminal_rewrite",
@@ -433,7 +468,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 5, found 3"));
+            .contains("expected schema version 6, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -482,7 +517,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 5, found 4"));
+            .contains("expected schema version 6, found 4"));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -496,6 +531,57 @@ mod tests {
                 .unwrap(),
             "do not rewrite"
         );
+    }
+
+    #[test]
+    fn a_v5_database_requires_reset_without_rewriting_the_fixture() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v5.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE legacy_v5_sentinel (
+                         id TEXT PRIMARY KEY,
+                         payload TEXT NOT NULL
+                     );
+                     INSERT INTO legacy_v5_sentinel (id, payload)
+                     VALUES ('sentinel', 'round-2 baseline remains untouched');
+                     PRAGMA user_version = 5;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("expected schema version 6, found 5"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 5);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload FROM legacy_v5_sentinel WHERE id = 'sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "round-2 baseline remains untouched"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE name = 'agent_model_batch_receipts'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
     }
 
     #[test]

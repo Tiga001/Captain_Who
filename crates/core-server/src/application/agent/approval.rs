@@ -21,6 +21,37 @@ pub(super) fn publish_inline_file_write_tool_result(
 }
 
 impl AgentService {
+    /// Host-internal cancellation for one trusted child Wake run. A live Runtime uses the normal
+    /// run token; a durable approval has no worker, so its exact action is atomically cancelled
+    /// through the existing pending-action settlement path.
+    pub(crate) fn interrupt_agent_wake_run(&self, run_id: &str) -> Result<bool, String> {
+        if self.cancel_run(run_id) {
+            return Ok(true);
+        }
+        let action_ids = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+            .filter(|record| record.snapshot.run_id == run_id)
+            .filter(|record| {
+                matches!(
+                    record.snapshot.status,
+                    PendingActionStatus::Pending
+                        | PendingActionStatus::Approved
+                        | PendingActionStatus::Executing
+                )
+            })
+            .map(|record| record.snapshot.action_id.clone())
+            .collect::<Vec<_>>();
+        for action_id in action_ids {
+            if self.cancel_action(run_id, &action_id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn validate_provider_continuations_before_dispatch(
         &self,
         record: &PendingActionRecord,
@@ -345,6 +376,7 @@ impl AgentService {
         // both durable facts exist may the in-memory accelerator release this logical Turn.
         if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
             self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
+            self.release_turn_concurrency_permit(&record.snapshot.run_id);
         }
         Ok(true)
     }
@@ -419,6 +451,7 @@ impl AgentService {
         self.invalidate_mcp_pending_payload(&record.snapshot.action);
         if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
             self.release_conversation_turn_if_current(conversation_id, &record.snapshot.run_id);
+            self.release_turn_concurrency_permit(&record.snapshot.run_id);
         }
         Ok(Some(AgentActionExecutionOutput {
             action_id: record.snapshot.action_id,

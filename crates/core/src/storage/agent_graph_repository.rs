@@ -3,22 +3,38 @@
 //! SQLite is the coordination source of truth. Runtime notifications may observe these records,
 //! but no in-memory queue is allowed to substitute for them.
 
+use crate::storage::{
+    chat_repository, conversation_model_context_repository, conversation_trace_repository,
+};
 use crate::{
-    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentGraphError, AgentLifecycle,
-    AgentMailboxDeliveryStatus, AgentMailboxKind, AgentMailboxMessageRecord,
-    AgentModelSelectionSnapshot, AgentModelSelectionSource, AgentNodeRecord, AgentTemplateSnapshot,
+    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentDisplayStatus,
+    AgentDisplayStatusSnapshot, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
+    AgentMailboxKind, AgentMailboxMessageRecord, AgentMessageDispatch, AgentModelSelectionSnapshot,
+    AgentModelSelectionSource, AgentNodeRecord, AgentResultArtifactKind,
+    AgentResultArtifactReference, AgentTemplateSnapshot, AgentTurnResultEnvelope,
+    AgentTurnResultSettlement, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
     AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnRecord, ConversationMessageOrigin,
     CreateAgentNodeInput, EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
-    FinishAgentWakeWithResultInput, IdempotentCreate, ReasoningEffort,
-    TrustedActiveChildWakeBundle, AGENT_GRAPH_SCHEMA_VERSION,
+    FinishAgentTurnResultInput, FinishAgentWakeWithResultInput, IdempotentCreate,
+    InterruptAgentExecutionOutcome, ReasoningEffort, SendAgentMessageRequest,
+    TrustedActiveChildWakeBundle, AGENT_GRAPH_SCHEMA_VERSION, AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use sha2::{Digest, Sha256};
 
 const MAX_ID_BYTES: usize = 128;
 const MAX_REQUEST_ID_BYTES: usize = 256;
 const MAX_TASK_NAME_BYTES: usize = 256;
 const MAX_TASK_PATH_BYTES: usize = 2_048;
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
+const MAX_UNBOUND_MAILBOX_MESSAGES_PER_RECIPIENT: u64 = 1_024;
+const MAX_UNBOUND_MAILBOX_BYTES_PER_RECIPIENT: u64 = 16 * 1_024 * 1_024;
+const MAX_UNBOUND_ORDINARY_MAILBOX_MESSAGES_PER_RECIPIENT: u64 = 960;
+const MAX_UNBOUND_ORDINARY_MAILBOX_BYTES_PER_RECIPIENT: u64 = 15 * 1_024 * 1_024;
+const MAX_RESULT_SUMMARY_BYTES: usize = crate::AGENT_RESULT_SUMMARY_MAX_BYTES;
+const MAX_TERMINAL_ERROR_BYTES: usize = crate::AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES;
+const MAX_RESULT_ARTIFACTS: usize = 256;
+const MAX_PROJECT_BATCH: usize = 1_024;
 const WAKE_LEASE_DURATION_MS: i64 = 60_000;
 
 const NODE_SELECT: &str = "
@@ -46,8 +62,8 @@ const MESSAGE_SELECT: &str = "
 const WAKE_SELECT: &str = "
     SELECT sequence, wake_id, schema_version, root_agent_id, agent_id,
            requester_agent_id, request_id, source_agent_message_id, status,
-           claim_token, lease_expires_at, result_message_id, terminal_error,
-           created_at, claimed_at, started_at, completed_at
+           status_revision, claim_token, lease_expires_at, result_message_id, terminal_error,
+           run_id, assistant_message_id, created_at, claimed_at, started_at, completed_at
     FROM agent_wake_requests";
 
 pub fn ensure_root_agent(
@@ -368,6 +384,34 @@ pub(crate) fn resolve_running_child_wake_bundle(
     Ok(bundle)
 }
 
+/// Resolves the exact durable capability consumed by atomic Turn admission. Dispatcher owns only
+/// a claimed Wake; the shared Turn transaction changes it to running while binding run IDs.
+pub(crate) fn resolve_claimed_agent_wake_bundle(
+    connection: &Connection,
+    agent_id: &str,
+    wake_id: &str,
+    source_agent_message_id: &str,
+    claim_token: &str,
+    observed_at: i64,
+) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
+    validate_id("claim_token", claim_token)?;
+    validate_time(observed_at)?;
+    let bundle =
+        resolve_child_bundle(connection, agent_id, wake_id, source_agent_message_id, true)?;
+    if bundle.initial_wake.status != AgentWakeStatus::Claimed
+        || bundle.initial_wake.claim_token.as_deref() != Some(claim_token)
+        || bundle
+            .initial_wake
+            .lease_expires_at
+            .is_none_or(|lease_expires_at| lease_expires_at <= observed_at)
+    {
+        return Err(conflict(
+            "Agent Wake execution requires the exact claimed capability with an unexpired lease",
+        ));
+    }
+    Ok(bundle)
+}
+
 /// Recovers the exact active Wake capability carried across an approval checkpoint.
 ///
 /// The checkpoint contributes only the previously authenticated collaboration identity. Wake and
@@ -471,25 +515,38 @@ fn resolve_child_bundle(
             params![
                 &task_message.projection_message_id,
                 &agent.conversation_id,
-                parent_id,
+                &task_message.sender_agent_id,
                 source_agent_message_id,
             ],
             |row| row.get::<_, bool>(0),
         )
         .map_err(read_error)?;
+    let sender = query_node(connection, &task_message.sender_agent_id)?
+        .ok_or_else(|| corrupt("Wake source sender Agent no longer exists"))?;
+    let source_authorized = match task_message.kind {
+        AgentMailboxKind::Task => task_message.sender_agent_id == parent_id,
+        AgentMailboxKind::Followup => {
+            is_strict_descendant(connection, &sender.agent_id, &agent.agent_id)?
+        }
+        AgentMailboxKind::Result => {
+            sender.parent_agent_id.as_deref() == Some(agent.agent_id.as_str())
+        }
+        AgentMailboxKind::Message => false,
+    };
     if (require_active
         && (agent.lifecycle != AgentLifecycle::Active
-            || parent.lifecycle != AgentLifecycle::Active))
+            || parent.lifecycle != AgentLifecycle::Active
+            || sender.lifecycle != AgentLifecycle::Active))
         || parent.root_agent_id != agent.root_agent_id
         || parent.root_conversation_id != agent.root_conversation_id
+        || sender.root_agent_id != agent.root_agent_id
         || task_message.root_agent_id != agent.root_agent_id
-        || task_message.sender_agent_id != parent_id
         || task_message.recipient_agent_id != agent.agent_id
-        || task_message.kind != AgentMailboxKind::Task
+        || !source_authorized
         || task_message.delivery_status != AgentMailboxDeliveryStatus::Acknowledged
         || initial_wake.root_agent_id != agent.root_agent_id
         || initial_wake.agent_id != agent.agent_id
-        || initial_wake.requester_agent_id != parent_id
+        || initial_wake.requester_agent_id != task_message.sender_agent_id
         || initial_wake.source_agent_message_id.as_deref() != Some(source_agent_message_id)
         || !projection_exists
     {
@@ -511,6 +568,10 @@ fn resolve_child_bundle(
             conversation_id: agent.conversation_id.clone(),
             task_name: agent.task_name.clone(),
             task_path: agent.task_path.clone(),
+            source_agent_id: sender.agent_id.clone(),
+            source_kind: task_message.kind,
+            source_task_name: sender.task_name.clone(),
+            source_task_path: sender.task_path.clone(),
             source_agent_message_id: task_message.message_id.clone(),
             entrusted_task: task_message.content.clone(),
             template_instructions: agent
@@ -586,6 +647,161 @@ pub fn list_agent_tree(
         &format!("{NODE_SELECT} WHERE root_agent_id = ?1 ORDER BY created_at, agent_id"),
         [root_agent_id],
     )
+}
+
+pub fn get_agent_display_status(
+    connection: &Connection,
+    agent_id: &str,
+) -> Result<AgentDisplayStatusSnapshot, AgentGraphError> {
+    validate_id("agent_id", agent_id)?;
+    let agent = query_node(connection, agent_id)?
+        .ok_or_else(|| AgentGraphError::AgentNotFound(agent_id.to_string()))?;
+    let latest_wake = connection
+        .query_row(
+            &format!("{WAKE_SELECT} WHERE agent_id = ?1 ORDER BY sequence DESC LIMIT 1"),
+            [agent_id],
+            read_wake_row,
+        )
+        .optional()
+        .map_err(read_error)?
+        .map(decode_wake)
+        .transpose()?;
+    // A newer deferred follow-up may be satisfied by an already-running Turn's safe sampling
+    // boundary. It must not hide that older Turn's still-active state. Keep the newest Wake facts
+    // below for cursor/version observation, while deriving display state from active execution
+    // first and the latest real Turn outcome second. `satisfied` is a delivery/coalescing outcome,
+    // not a completed Agent task.
+    let active_wake = connection
+        .query_row(
+            &format!(
+                "{WAKE_SELECT}
+                 WHERE agent_id = ?1
+                   AND status IN ('queued', 'claimed', 'running', 'waiting_for_approval')
+                 ORDER BY CASE status
+                     WHEN 'waiting_for_approval' THEN 0
+                     WHEN 'running' THEN 1
+                     WHEN 'claimed' THEN 2
+                     ELSE 3
+                 END,
+                 sequence
+                 LIMIT 1"
+            ),
+            [agent_id],
+            read_wake_row,
+        )
+        .optional()
+        .map_err(read_error)?
+        .map(decode_wake)
+        .transpose()?;
+    // Root Agents do not need a Wake for a human-started Turn. The Conversation trace is the
+    // durable execution truth for that path, and pending/approved actions are the durable signal
+    // that the active Turn is waiting for approval.
+    let active_turn_waiting_for_approval = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM agent_pending_actions AS action
+                 WHERE action.run_id = trace.run_id
+                   AND action.conversation_id = trace.conversation_id
+                   AND action.assistant_message_id = trace.assistant_message_id
+                   AND action.status IN ('pending', 'approved')
+             )
+             FROM conversation_turn_traces AS trace
+             WHERE trace.conversation_id = ?1 AND trace.terminal_status = 'in_progress'
+             LIMIT 1",
+            [&agent.conversation_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map_err(read_error)?;
+    let latest_execution_outcome =
+        if active_wake.is_none() && active_turn_waiting_for_approval.is_none() {
+            connection
+                .query_row(
+                    "SELECT status
+                 FROM (
+                     SELECT status, completed_at AS occurred_at, 0 AS source_priority,
+                            sequence AS source_sequence
+                     FROM agent_wake_requests
+                     WHERE agent_id = ?1
+                       AND status IN (
+                           'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown'
+                       )
+                     UNION ALL
+                     SELECT terminal_status AS status, completed_at AS occurred_at,
+                            1 AS source_priority, rowid AS source_sequence
+                     FROM conversation_turn_traces
+                     WHERE conversation_id = ?2 AND terminal_status != 'in_progress'
+                 )
+                 ORDER BY occurred_at DESC, source_priority, source_sequence DESC
+                 LIMIT 1",
+                    params![agent_id, &agent.conversation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(read_error)?
+                .map(|status| match status.as_str() {
+                    "completed" => Ok(AgentWakeStatus::Completed),
+                    "failed" => Ok(AgentWakeStatus::Failed),
+                    "cancelled" => Ok(AgentWakeStatus::Cancelled),
+                    "interrupted" => Ok(AgentWakeStatus::Interrupted),
+                    "outcome_unknown" => Ok(AgentWakeStatus::OutcomeUnknown),
+                    _ => Err(corrupt("latest Agent execution outcome is invalid")),
+                })
+                .transpose()?
+        } else {
+            None
+        };
+    let status = match agent.lifecycle {
+        AgentLifecycle::Archived => AgentDisplayStatus::Archived,
+        AgentLifecycle::Disabled => AgentDisplayStatus::Disabled,
+        AgentLifecycle::Active => {
+            let wake_status = active_wake.as_ref().map(|wake| wake.status);
+            if wake_status == Some(AgentWakeStatus::WaitingForApproval)
+                || active_turn_waiting_for_approval == Some(true)
+            {
+                AgentDisplayStatus::WaitingApproval
+            } else if wake_status == Some(AgentWakeStatus::Running)
+                || active_turn_waiting_for_approval == Some(false)
+            {
+                AgentDisplayStatus::Running
+            } else if matches!(
+                wake_status,
+                Some(AgentWakeStatus::Queued | AgentWakeStatus::Claimed)
+            ) {
+                AgentDisplayStatus::Queued
+            } else {
+                match latest_execution_outcome {
+                    Some(AgentWakeStatus::Completed) => AgentDisplayStatus::LatestCompleted,
+                    Some(AgentWakeStatus::Failed) => AgentDisplayStatus::LatestFailed,
+                    Some(AgentWakeStatus::Interrupted | AgentWakeStatus::Cancelled) => {
+                        AgentDisplayStatus::LatestInterrupted
+                    }
+                    Some(AgentWakeStatus::OutcomeUnknown) => {
+                        AgentDisplayStatus::LatestOutcomeUnknown
+                    }
+                    None | Some(AgentWakeStatus::Satisfied) => AgentDisplayStatus::Idle,
+                    Some(
+                        AgentWakeStatus::Queued
+                        | AgentWakeStatus::Claimed
+                        | AgentWakeStatus::Running
+                        | AgentWakeStatus::WaitingForApproval,
+                    ) => {
+                        return Err(corrupt(
+                            "display outcome query unexpectedly returned an active Wake",
+                        ))
+                    }
+                }
+            }
+        }
+    };
+    Ok(AgentDisplayStatusSnapshot {
+        agent_id: agent.agent_id,
+        status,
+        agent_revision: agent.revision,
+        latest_wake_id: latest_wake.as_ref().map(|wake| wake.wake_id.clone()),
+        latest_wake_sequence: latest_wake.as_ref().map(|wake| wake.sequence),
+        latest_wake_status_revision: latest_wake.as_ref().map(|wake| wake.status_revision),
+    })
 }
 
 pub fn transition_agent_lifecycle(
@@ -764,6 +980,105 @@ pub fn enqueue_agent_message(
     Ok(outcome)
 }
 
+/// Application-level send: one immutable same-tree Mailbox fact, no projection and no Wake.
+pub fn send_agent_message(
+    connection: &mut Connection,
+    input: &SendAgentMessageRequest,
+    created_at: i64,
+) -> Result<AgentMessageDispatch, AgentGraphError> {
+    let transaction = immediate(connection)?;
+    let message = enqueue_application_message_in_transaction(
+        &transaction,
+        input,
+        AgentMailboxKind::Message,
+        created_at,
+    )?;
+    transaction.commit().map_err(write_error)?;
+    Ok(AgentMessageDispatch {
+        message,
+        deferred_wake: None,
+    })
+}
+
+/// Application-level follow-up: persists the message and its deferred Wake in one transaction.
+/// Delivery remains queued until Dispatcher admission or a running Turn's safe sampling boundary.
+pub fn follow_up_agent(
+    connection: &mut Connection,
+    input: &SendAgentMessageRequest,
+    created_at: i64,
+) -> Result<AgentMessageDispatch, AgentGraphError> {
+    let transaction = immediate(connection)?;
+    let sender = ensure_active_agent(&transaction, &input.sender_agent_id)?;
+    let target = ensure_active_agent(&transaction, &input.recipient_agent_id)?;
+    if !is_strict_descendant(&transaction, &sender.agent_id, &target.agent_id)? {
+        return Err(conflict(
+            "follow-up authority is limited to a caller's strict descendants",
+        ));
+    }
+    let message = enqueue_application_message_in_transaction(
+        &transaction,
+        input,
+        AgentMailboxKind::Followup,
+        created_at,
+    )?;
+    let wake_input = EnqueueAgentWakeInput {
+        wake_id: stable_fact_id("wake", &[&input.sender_agent_id, &input.request_id]),
+        root_agent_id: sender.root_agent_id,
+        agent_id: input.recipient_agent_id.clone(),
+        requester_agent_id: input.sender_agent_id.clone(),
+        request_id: stable_fact_id(
+            "followup-request",
+            &[&input.sender_agent_id, &input.request_id],
+        ),
+        source_agent_message_id: Some(message.message_id.clone()),
+    };
+    let deferred_wake = enqueue_wake_in_transaction(&transaction, &wake_input, created_at)?
+        .record()
+        .clone();
+    transaction.commit().map_err(write_error)?;
+    Ok(AgentMessageDispatch {
+        message,
+        deferred_wake: Some(deferred_wake),
+    })
+}
+
+fn enqueue_application_message_in_transaction(
+    connection: &Connection,
+    input: &SendAgentMessageRequest,
+    kind: AgentMailboxKind,
+    created_at: i64,
+) -> Result<AgentMailboxMessageRecord, AgentGraphError> {
+    validate_id("sender_agent_id", &input.sender_agent_id)?;
+    validate_id("recipient_agent_id", &input.recipient_agent_id)?;
+    validate_request_id(&input.request_id)?;
+    validate_trimmed("content", &input.content, MAX_MESSAGE_BYTES)?;
+    let sender = ensure_active_agent(connection, &input.sender_agent_id)?;
+    ensure_active_pair(
+        connection,
+        &sender.root_agent_id,
+        &input.sender_agent_id,
+        &input.recipient_agent_id,
+    )?;
+    let message = EnqueueAgentMessageInput {
+        message_id: stable_fact_id("mailbox", &[&input.sender_agent_id, &input.request_id]),
+        root_agent_id: sender.root_agent_id,
+        sender_agent_id: input.sender_agent_id.clone(),
+        recipient_agent_id: input.recipient_agent_id.clone(),
+        request_id: input.request_id.clone(),
+        kind,
+        content: input.content.clone(),
+        projection_message_id: stable_fact_id(
+            "message",
+            &[&input.sender_agent_id, &input.request_id],
+        ),
+    };
+    Ok(
+        enqueue_message_in_transaction(connection, &message, created_at)?
+            .record()
+            .clone(),
+    )
+}
+
 pub fn get_agent_message(
     connection: &Connection,
     message_id: &str,
@@ -791,7 +1106,7 @@ pub fn claim_next_agent_message(
         if existing.delivery_status == AgentMailboxDeliveryStatus::Claimed
             && existing
                 .lease_expires_at
-                .is_some_and(|deadline| claimed_at > deadline)
+                .is_some_and(|deadline| claimed_at >= deadline)
         {
             return Err(conflict("Mailbox claim lease has expired"));
         }
@@ -880,7 +1195,7 @@ pub fn renew_agent_message_lease(
     let current_deadline = current
         .lease_expires_at
         .ok_or_else(|| corrupt("claimed Mailbox message has no lease deadline"))?;
-    if renewed_at > current_deadline {
+    if renewed_at >= current_deadline {
         return Err(conflict("Mailbox claim lease has expired"));
     }
     let advanced_deadline = next_deadline.max(current_deadline.saturating_add(1));
@@ -1001,19 +1316,44 @@ fn acknowledge_message_in_transaction(
     }
     if current
         .lease_expires_at
-        .is_none_or(|deadline| acknowledged_at > deadline)
+        .is_none_or(|deadline| acknowledged_at >= deadline)
     {
         return Err(conflict("Mailbox claim lease has expired"));
     }
     let recipient = query_node(transaction, &current.recipient_agent_id)?
         .ok_or_else(|| corrupt("Mailbox recipient Agent is missing"))?;
-    let position = transaction
+    let active_assistant_position = transaction
+        .query_row(
+            "SELECT message.position
+             FROM conversation_turn_traces AS trace
+             JOIN messages AS message ON message.id = trace.assistant_message_id
+             WHERE trace.conversation_id = ?1 AND trace.terminal_status = 'in_progress'
+             LIMIT 1",
+            [&recipient.conversation_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(read_error)?;
+    let append_position = transaction
         .query_row(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM messages WHERE conversation_id = ?1",
             [&recipient.conversation_id],
             |row| row.get::<_, i64>(0),
         )
         .map_err(read_error)?;
+    let position = active_assistant_position.unwrap_or(append_position);
+    if let Some(active_position) = active_assistant_position {
+        // Runtime-visible collaboration input belongs immediately before the pending assistant.
+        // Projected mailbox rows already inserted for this Turn remain before it and are never
+        // rewritten; only the pending assistant and any later ordinary rows move right.
+        transaction
+            .execute(
+                "UPDATE messages SET position = position + 1
+                 WHERE conversation_id = ?1 AND position >= ?2",
+                params![&recipient.conversation_id, active_position],
+            )
+            .map_err(write_error)?;
+    }
     transaction
         .execute(
             "INSERT INTO messages (
@@ -1051,6 +1391,240 @@ fn acknowledge_message_in_transaction(
     let acknowledged = query_message(transaction, message_id)?
         .ok_or_else(|| corrupt("acknowledged Mailbox message could not be read back"))?;
     Ok(acknowledged)
+}
+
+/// Projects queued Mailbox facts at a caller-owned transaction boundary. This is shared by the
+/// Dispatcher admission path and the model-batch receipt path so projection ordering is defined
+/// once. A claimed-but-unexpired row is never stolen; an expired claim is recoverable.
+pub(crate) fn project_pending_agent_messages_in_transaction(
+    connection: &Connection,
+    recipient_agent_id: &str,
+    claim_token_prefix: &str,
+    projected_at: i64,
+    maximum: usize,
+) -> Result<Vec<AgentMailboxMessageRecord>, AgentGraphError> {
+    validate_id("recipient_agent_id", recipient_agent_id)?;
+    validate_id("claim_token_prefix", claim_token_prefix)?;
+    validate_time(projected_at)?;
+    if maximum == 0 || maximum > MAX_PROJECT_BATCH {
+        return Err(invalid(
+            "maximum",
+            format!("must be between 1 and {MAX_PROJECT_BATCH}"),
+        ));
+    }
+    ensure_active_agent(connection, recipient_agent_id)?;
+    project_queued_agent_messages_through_sequence(
+        connection,
+        recipient_agent_id,
+        claim_token_prefix,
+        projected_at,
+        None,
+        maximum,
+    )
+}
+
+/// Makes the exact source of a queued Wake model/history-visible before the same outer
+/// transaction claims that Wake. FIFO is preserved by projecting every earlier queued item for
+/// the recipient first. Initial tasks already projected by ChildAgentFactory are idempotent.
+pub(crate) fn project_agent_wake_source_in_transaction(
+    connection: &Connection,
+    wake_id: &str,
+    claim_token_prefix: &str,
+    projected_at: i64,
+) -> Result<Vec<AgentMailboxMessageRecord>, AgentGraphError> {
+    validate_id("wake_id", wake_id)?;
+    let wake = query_wake(connection, wake_id)?
+        .ok_or_else(|| AgentGraphError::WakeNotFound(wake_id.to_string()))?;
+    if wake.status != AgentWakeStatus::Queued {
+        return Err(conflict(
+            "only a queued Wake source can be projected for dispatch",
+        ));
+    }
+    let Some(source_id) = wake.source_agent_message_id.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let source = query_message(connection, source_id)?
+        .ok_or_else(|| corrupt("queued Wake source Mailbox message is missing"))?;
+    if source.recipient_agent_id != wake.agent_id
+        || source.sender_agent_id != wake.requester_agent_id
+        || source.root_agent_id != wake.root_agent_id
+    {
+        return Err(corrupt(
+            "queued Wake source identity does not match its Mailbox fact",
+        ));
+    }
+    validate_wake_source_authority(connection, &source, &wake.agent_id)?;
+    if source.delivery_status == AgentMailboxDeliveryStatus::Acknowledged {
+        ensure_projection_exists(connection, &source)?;
+        return Ok(Vec::new());
+    }
+    let projected = project_queued_agent_messages_through_sequence(
+        connection,
+        &wake.agent_id,
+        claim_token_prefix,
+        projected_at,
+        Some(source.sequence),
+        usize::MAX,
+    )?;
+    let delivered = query_message(connection, source_id)?
+        .ok_or_else(|| corrupt("projected Wake source disappeared"))?;
+    if delivered.delivery_status != AgentMailboxDeliveryStatus::Acknowledged {
+        return Err(conflict(
+            "Wake source could not be projected without overtaking an earlier Mailbox item",
+        ));
+    }
+    Ok(projected)
+}
+
+/// Marks a deferred Wake satisfied when its exact source message was bound to an already-running
+/// model batch. The caller owns the surrounding receipt transaction, making duplicate delivery
+/// and a second Turn mutually exclusive across crashes.
+pub(crate) fn satisfy_agent_wake_by_source_message_in_transaction(
+    connection: &Connection,
+    source_message_id: &str,
+    satisfied_at: i64,
+) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+    validate_id("source_message_id", source_message_id)?;
+    validate_time(satisfied_at)?;
+    let wake = connection
+        .query_row(
+            &format!("{WAKE_SELECT} WHERE source_agent_message_id = ?1"),
+            [source_message_id],
+            read_wake_row,
+        )
+        .optional()
+        .map_err(read_error)?
+        .map(decode_wake)
+        .transpose()?;
+    let Some(wake) = wake else {
+        return Ok(None);
+    };
+    if wake.status == AgentWakeStatus::Satisfied {
+        return Ok(Some(wake));
+    }
+    if wake.status != AgentWakeStatus::Queued {
+        // Claimed/running means the dispatcher won the race; another terminal state is immutable.
+        return Ok(None);
+    }
+    connection
+        .execute(
+            "UPDATE agent_wake_requests
+             SET status = 'satisfied', status_revision = status_revision + 1,
+                 completed_at = ?1
+             WHERE wake_id = ?2 AND status = 'queued'",
+            params![satisfied_at, &wake.wake_id],
+        )
+        .map_err(write_error)?;
+    query_wake(connection, &wake.wake_id)
+}
+
+fn project_queued_agent_messages_through_sequence(
+    connection: &Connection,
+    recipient_agent_id: &str,
+    claim_token_prefix: &str,
+    projected_at: i64,
+    through_sequence: Option<u64>,
+    maximum: usize,
+) -> Result<Vec<AgentMailboxMessageRecord>, AgentGraphError> {
+    let through_sequence = through_sequence
+        .map(|value| i64::try_from(value).map_err(|_| corrupt("Mailbox sequence is too large")))
+        .transpose()?;
+    let live_claim = connection
+        .query_row(
+            "SELECT message_id, lease_expires_at
+             FROM agent_mailbox_messages
+             WHERE recipient_agent_id = ?1 AND delivery_status = 'claimed'
+             ORDER BY sequence LIMIT 1",
+            [recipient_agent_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(read_error)?;
+    if let Some((message_id, deadline)) = live_claim {
+        if projected_at < deadline {
+            return Err(conflict(format!(
+                "Mailbox message `{message_id}` is held by another live claim"
+            )));
+        }
+        connection
+            .execute(
+                "UPDATE agent_mailbox_messages
+                 SET delivery_status = 'queued', claim_token = NULL, lease_expires_at = NULL,
+                     claimed_at = NULL
+                 WHERE message_id = ?1 AND delivery_status = 'claimed'
+                   AND lease_expires_at <= ?2",
+                params![message_id, projected_at],
+            )
+            .map_err(write_error)?;
+    }
+
+    let mut projected = Vec::new();
+    while projected.len() < maximum {
+        let next = connection
+            .query_row(
+                "SELECT message_id, sequence
+                 FROM agent_mailbox_messages
+                 WHERE recipient_agent_id = ?1 AND delivery_status = 'queued'
+                   AND (?2 IS NULL OR sequence <= ?2)
+                 ORDER BY sequence LIMIT 1",
+                params![recipient_agent_id, through_sequence],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(read_error)?;
+        let Some((message_id, _sequence)) = next else {
+            break;
+        };
+        let claim_token = stable_fact_id(
+            "mailbox-claim",
+            &[claim_token_prefix, recipient_agent_id, message_id.as_str()],
+        );
+        let deadline = projected_at
+            .checked_add(WAKE_LEASE_DURATION_MS)
+            .ok_or_else(|| invalid("projected_at", "cannot compute Mailbox lease"))?;
+        let changed = connection
+            .execute(
+                "UPDATE agent_mailbox_messages
+                 SET delivery_status = 'claimed', claim_token = ?1, lease_expires_at = ?2,
+                     claimed_at = ?3
+                 WHERE message_id = ?4 AND delivery_status = 'queued'",
+                params![claim_token, deadline, projected_at, message_id],
+            )
+            .map_err(write_error)?;
+        if changed != 1 {
+            return Err(conflict("Mailbox FIFO projection lost its claim race"));
+        }
+        projected.push(acknowledge_message_in_transaction(
+            connection,
+            &message_id,
+            &claim_token,
+            projected_at,
+        )?);
+    }
+    Ok(projected)
+}
+
+fn ensure_projection_exists(
+    connection: &Connection,
+    message: &AgentMailboxMessageRecord,
+) -> Result<(), AgentGraphError> {
+    let exists = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM messages
+                 WHERE id = ?1 AND source_agent_message_id = ?2
+             )",
+            params![&message.projection_message_id, &message.message_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(read_error)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(corrupt(
+            "acknowledged Mailbox message is missing its Conversation projection",
+        ))
+    }
 }
 
 /// Persists the first parent task, its unique model/history projection and the initial queued
@@ -1271,21 +1845,22 @@ fn enqueue_wake_in_transaction(
         if source.root_agent_id != input.root_agent_id
             || source.sender_agent_id != input.requester_agent_id
             || source.recipient_agent_id != input.agent_id
-            || source.delivery_status != AgentMailboxDeliveryStatus::Acknowledged
         {
             return Err(conflict(
-                "Wake source message is not an acknowledged delivery for this request",
+                "Wake source message does not belong to this request",
             ));
         }
+        validate_wake_source_authority(transaction, &source, input.agent_id.as_str())?;
     }
     transaction
         .execute(
             "INSERT INTO agent_wake_requests (
                  wake_id, schema_version, root_agent_id, agent_id, requester_agent_id,
-                 request_id, source_agent_message_id, status, claim_token, lease_expires_at,
-                 result_message_id, terminal_error, created_at, claimed_at, started_at, completed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', NULL, NULL, NULL,
-                       NULL, ?8, NULL, NULL, NULL)",
+                 request_id, source_agent_message_id, status, status_revision, claim_token,
+                 lease_expires_at, result_message_id, terminal_error, run_id,
+                 assistant_message_id, created_at, claimed_at, started_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', 1, NULL, NULL, NULL,
+                       NULL, NULL, NULL, ?8, NULL, NULL, NULL)",
             params![
                 &input.wake_id,
                 i64::from(AGENT_GRAPH_SCHEMA_VERSION),
@@ -1347,7 +1922,7 @@ pub fn claim_next_agent_wake(
             .execute(
                 "UPDATE agent_wake_requests
                  SET claim_token = NULL, lease_expires_at = NULL, claimed_at = NULL,
-                     status = 'queued'
+                     status = 'queued', status_revision = status_revision + 1
                  WHERE wake_id = ?1 AND status = 'claimed' AND lease_expires_at <= ?2",
                 params![stale_wake_id, claimed_at],
             )
@@ -1385,7 +1960,8 @@ pub fn claim_next_agent_wake(
     transaction
         .execute(
             "UPDATE agent_wake_requests
-             SET status = 'claimed', claim_token = ?1, lease_expires_at = ?2, claimed_at = ?3
+             SET status = 'claimed', status_revision = status_revision + 1,
+                 claim_token = ?1, lease_expires_at = ?2, claimed_at = ?3
              WHERE wake_id = ?4 AND status = 'queued'",
             params![claim_token, lease_expires_at, claimed_at, &wake_id],
         )
@@ -1394,6 +1970,440 @@ pub fn claim_next_agent_wake(
         .ok_or_else(|| corrupt("claimed Wake could not be read back"))?;
     transaction.commit().map_err(write_error)?;
     Ok(Some(wake))
+}
+
+/// Claims the globally oldest Wake whose Agent has neither another active Wake nor an active
+/// Conversation Turn. The Wake source projection and claim share this `BEGIN IMMEDIATE`
+/// transaction, closing the projection-without-execution crash window for follow-ups/results.
+pub fn claim_next_dispatchable_agent_wake(
+    connection: &mut Connection,
+    claim_token: &str,
+    claimed_at: i64,
+) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+    validate_id("claim_token", claim_token)?;
+    validate_time(claimed_at)?;
+    let transaction = immediate(connection)?;
+    if let Some(existing) = query_wake_by_claim_token(&transaction, claim_token)? {
+        transaction.commit().map_err(write_error)?;
+        return Ok(Some(existing));
+    }
+    let next_id = transaction
+        .query_row(
+            "SELECT wake.wake_id
+             FROM agent_wake_requests AS wake
+             JOIN agent_nodes AS agent ON agent.agent_id = wake.agent_id
+             WHERE wake.status = 'queued'
+               AND agent.lifecycle = 'active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_wake_requests AS active
+                   WHERE active.agent_id = wake.agent_id
+                     AND active.status IN ('claimed', 'running', 'waiting_for_approval')
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_turn_traces AS trace
+                   WHERE trace.conversation_id = agent.conversation_id
+                     AND trace.terminal_status = 'in_progress'
+               )
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_mailbox_messages AS mailbox
+                   WHERE mailbox.recipient_agent_id = wake.agent_id
+                     AND mailbox.delivery_status = 'claimed'
+                     AND mailbox.lease_expires_at > ?1
+               )
+             ORDER BY wake.sequence, wake.wake_id
+             LIMIT 1",
+            [claimed_at],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(read_error)?;
+    let Some(wake_id) = next_id else {
+        transaction.commit().map_err(write_error)?;
+        return Ok(None);
+    };
+    let projection_prefix = stable_fact_id("wake-dispatch-projection", &[claim_token, &wake_id]);
+    project_agent_wake_source_in_transaction(
+        &transaction,
+        &wake_id,
+        &projection_prefix,
+        claimed_at,
+    )?;
+    let lease_expires_at = claimed_at
+        .checked_add(WAKE_LEASE_DURATION_MS)
+        .ok_or_else(|| invalid("claimed_at", "cannot compute the Wake lease deadline"))?;
+    let changed = transaction
+        .execute(
+            "UPDATE agent_wake_requests
+             SET status = 'claimed', status_revision = status_revision + 1,
+                 claim_token = ?1, lease_expires_at = ?2, claimed_at = ?3
+             WHERE wake_id = ?4 AND status = 'queued'",
+            params![claim_token, lease_expires_at, claimed_at, &wake_id],
+        )
+        .map_err(write_error)?;
+    if changed != 1 {
+        return Err(conflict("global Wake claim lost its durable CAS"));
+    }
+    let wake = query_wake(&transaction, &wake_id)?
+        .ok_or_else(|| corrupt("globally claimed Wake disappeared"))?;
+    transaction.commit().map_err(write_error)?;
+    Ok(Some(wake))
+}
+
+/// Reconciles leases left by an earlier Host without replaying a possibly side-effecting Turn.
+/// Claimed work has not crossed atomic Turn admission and is safely requeued. Running work always
+/// has immutable run/assistant identity: terminal traces and resumable approvals are rebound for
+/// observation, a missing trace is definitely pre-Runtime, and an in-progress non-approval trace
+/// becomes outcome-unknown.
+pub fn recover_agent_wakes(
+    connection: &mut Connection,
+    recovery_token_prefix: &str,
+    recovered_at: i64,
+) -> Result<AgentWakeRecoveryBatch, AgentGraphError> {
+    validate_id("recovery_token_prefix", recovery_token_prefix)?;
+    validate_time(recovered_at)?;
+    let transaction = immediate(connection)?;
+    let requeued_before_dispatch = transaction
+        .execute(
+            "UPDATE agent_wake_requests
+             SET status = 'queued', status_revision = status_revision + 1,
+                 claim_token = NULL, lease_expires_at = NULL, claimed_at = NULL
+             WHERE status = 'claimed' AND lease_expires_at <= ?1",
+            [recovered_at],
+        )
+        .map_err(write_error)?;
+
+    let mut statement = transaction
+        .prepare(&format!(
+            "{WAKE_SELECT}
+             WHERE status IN ('running', 'waiting_for_approval')
+               AND lease_expires_at <= ?1
+             ORDER BY sequence, wake_id"
+        ))
+        .map_err(read_error)?;
+    let expired = statement
+        .query_map([recovered_at], read_wake_row)
+        .map_err(read_error)?
+        .map(|row| row.map_err(read_error).and_then(decode_wake))
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let mut actions = Vec::with_capacity(expired.len());
+    for mut wake in expired {
+        let (Some(run_id), Some(assistant_message_id)) =
+            (wake.run_id.as_deref(), wake.assistant_message_id.as_deref())
+        else {
+            return Err(corrupt(
+                "active Wake is missing its immutable Turn identity",
+            ));
+        };
+        let trace_status = transaction
+            .query_row(
+                "SELECT terminal_status FROM conversation_turn_traces
+                 WHERE assistant_message_id = ?1 AND run_id = ?2",
+                params![assistant_message_id, run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(read_error)?;
+        let has_pending_approval = transaction
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM agent_pending_actions
+                     WHERE run_id = ?1 AND assistant_message_id = ?2
+                       AND status IN ('pending', 'approved', 'executing')
+                 )",
+                params![run_id, assistant_message_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(read_error)?;
+        let action = match trace_status.as_deref() {
+            None => AgentWakeRecoveryAction::FailBeforeRuntime(wake.clone()),
+            Some("completed" | "failed" | "cancelled") => {
+                AgentWakeRecoveryAction::Observe(wake.clone())
+            }
+            Some("in_progress") if has_pending_approval => {
+                AgentWakeRecoveryAction::Observe(wake.clone())
+            }
+            Some("in_progress") => AgentWakeRecoveryAction::OutcomeUnknown(wake.clone()),
+            Some(_) => {
+                return Err(corrupt(
+                    "active Wake references an invalid Turn trace status",
+                ))
+            }
+        };
+        let recovery_token = stable_fact_id(
+            "wake-recovery-claim",
+            &[recovery_token_prefix, &wake.wake_id],
+        );
+        let deadline = recovered_at
+            .checked_add(WAKE_LEASE_DURATION_MS)
+            .ok_or_else(|| invalid("recovered_at", "cannot compute recovery lease"))?;
+        let changed = transaction
+            .execute(
+                "UPDATE agent_wake_requests
+                 SET claim_token = ?1, lease_expires_at = ?2, claimed_at = ?6
+                 WHERE wake_id = ?3 AND status = ?4 AND claim_token = ?5
+                   AND lease_expires_at <= ?6",
+                params![
+                    &recovery_token,
+                    deadline,
+                    &wake.wake_id,
+                    wake.status.as_str(),
+                    &wake.claim_token,
+                    recovered_at,
+                ],
+            )
+            .map_err(write_error)?;
+        if changed != 1 {
+            return Err(conflict("expired Wake recovery lost its ownership CAS"));
+        }
+        wake.claim_token = Some(recovery_token);
+        wake.lease_expires_at = Some(deadline);
+        actions.push(match action {
+            AgentWakeRecoveryAction::Observe(_) => AgentWakeRecoveryAction::Observe(wake),
+            AgentWakeRecoveryAction::FailBeforeRuntime(_) => {
+                AgentWakeRecoveryAction::FailBeforeRuntime(wake)
+            }
+            AgentWakeRecoveryAction::OutcomeUnknown(_) => {
+                AgentWakeRecoveryAction::OutcomeUnknown(wake)
+            }
+        });
+    }
+    transaction.commit().map_err(write_error)?;
+    Ok(AgentWakeRecoveryBatch {
+        requeued_before_dispatch,
+        actions,
+    })
+}
+
+/// Authorizes an internal management interrupt against one strict descendant. A queued or
+/// claimed-before-admission Wake is atomically cancelled. Once atomic Turn admission has bound a
+/// run identity, persistence is left untouched here and the Host must propagate cancellation to
+/// that exact run; its durable observer later settles the Wake as `interrupted` with a result.
+pub fn interrupt_agent_execution(
+    connection: &mut Connection,
+    caller_agent_id: &str,
+    target_agent_id: &str,
+    request_id: &str,
+    interrupted_at: i64,
+) -> Result<InterruptAgentExecutionOutcome, AgentGraphError> {
+    validate_id("caller_agent_id", caller_agent_id)?;
+    validate_id("target_agent_id", target_agent_id)?;
+    validate_request_id(request_id)?;
+    validate_time(interrupted_at)?;
+    let transaction = immediate(connection)?;
+    let caller = ensure_active_agent(&transaction, caller_agent_id)?;
+    let target = ensure_active_agent(&transaction, target_agent_id)?;
+    if caller.root_agent_id != target.root_agent_id {
+        return Err(conflict("interrupt authority cannot cross Agent trees"));
+    }
+    if !is_strict_descendant(&transaction, &caller.agent_id, &target.agent_id)? {
+        return Err(conflict(
+            "interrupt authority is limited to a caller's strict descendants",
+        ));
+    }
+    if let Some((persisted_target, disposition)) =
+        query_interrupt_receipt(&transaction, caller_agent_id, request_id)?
+    {
+        if persisted_target != target_agent_id {
+            return Err(conflict(
+                "interrupt request ID is already bound to another target",
+            ));
+        }
+        transaction.commit().map_err(write_error)?;
+        return Ok(disposition);
+    }
+
+    let active = query_wakes(
+        &transaction,
+        &format!(
+            "{WAKE_SELECT}
+             WHERE agent_id = ?1
+               AND status IN ('claimed', 'running', 'waiting_for_approval')
+             ORDER BY sequence, wake_id LIMIT 1"
+        ),
+        [target_agent_id],
+    )?
+    .into_iter()
+    .next();
+    if let Some(wake) = active {
+        if matches!(
+            wake.status,
+            AgentWakeStatus::Running | AgentWakeStatus::WaitingForApproval
+        ) {
+            let run_id = wake
+                .run_id
+                .clone()
+                .ok_or_else(|| corrupt("active admitted Wake is missing run identity"))?;
+            let outcome = InterruptAgentExecutionOutcome::ActiveTurn {
+                wake_id: wake.wake_id.clone(),
+                run_id: run_id.clone(),
+            };
+            insert_interrupt_receipt(
+                &transaction,
+                &caller,
+                &target,
+                request_id,
+                &outcome,
+                interrupted_at,
+            )?;
+            transaction.commit().map_err(write_error)?;
+            return Ok(outcome);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE agent_wake_requests
+                 SET status = 'cancelled', status_revision = status_revision + 1,
+                     completed_at = ?1
+                 WHERE wake_id = ?2 AND status = 'claimed' AND run_id IS NULL",
+                params![interrupted_at, &wake.wake_id],
+            )
+            .map_err(write_error)?;
+        if changed != 1 {
+            return Err(conflict("claimed Wake interrupt lost its durable CAS"));
+        }
+        let outcome = InterruptAgentExecutionOutcome::QueuedWakeCancelled {
+            wake_id: wake.wake_id,
+        };
+        insert_interrupt_receipt(
+            &transaction,
+            &caller,
+            &target,
+            request_id,
+            &outcome,
+            interrupted_at,
+        )?;
+        transaction.commit().map_err(write_error)?;
+        return Ok(outcome);
+    }
+
+    let queued_id = transaction
+        .query_row(
+            "SELECT wake_id FROM agent_wake_requests
+             WHERE agent_id = ?1 AND status = 'queued'
+             ORDER BY sequence, wake_id LIMIT 1",
+            [target_agent_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(read_error)?;
+    let Some(wake_id) = queued_id else {
+        insert_interrupt_receipt(
+            &transaction,
+            &caller,
+            &target,
+            request_id,
+            &InterruptAgentExecutionOutcome::NoPendingExecution,
+            interrupted_at,
+        )?;
+        transaction.commit().map_err(write_error)?;
+        return Ok(InterruptAgentExecutionOutcome::NoPendingExecution);
+    };
+    let changed = transaction
+        .execute(
+            "UPDATE agent_wake_requests
+             SET status = 'cancelled', status_revision = status_revision + 1,
+                 completed_at = ?1
+             WHERE wake_id = ?2 AND status = 'queued'",
+            params![interrupted_at, &wake_id],
+        )
+        .map_err(write_error)?;
+    if changed != 1 {
+        return Err(conflict("queued Wake interrupt lost its durable CAS"));
+    }
+    let outcome = InterruptAgentExecutionOutcome::QueuedWakeCancelled { wake_id };
+    insert_interrupt_receipt(
+        &transaction,
+        &caller,
+        &target,
+        request_id,
+        &outcome,
+        interrupted_at,
+    )?;
+    transaction.commit().map_err(write_error)?;
+    Ok(outcome)
+}
+
+fn query_interrupt_receipt(
+    connection: &Connection,
+    caller_agent_id: &str,
+    request_id: &str,
+) -> Result<Option<(String, InterruptAgentExecutionOutcome)>, AgentGraphError> {
+    let row = connection
+        .query_row(
+            "SELECT target_agent_id, disposition, wake_id, run_id
+             FROM agent_interrupt_requests
+             WHERE caller_agent_id = ?1 AND request_id = ?2",
+            params![caller_agent_id, request_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(read_error)?;
+    row.map(|(target, disposition, wake_id, run_id)| {
+        let outcome = match (disposition.as_str(), wake_id, run_id) {
+            ("no_pending_execution", None, None) => {
+                InterruptAgentExecutionOutcome::NoPendingExecution
+            }
+            ("queued_wake_cancelled", Some(wake_id), None) => {
+                InterruptAgentExecutionOutcome::QueuedWakeCancelled { wake_id }
+            }
+            ("active_turn", Some(wake_id), Some(run_id)) => {
+                InterruptAgentExecutionOutcome::ActiveTurn { wake_id, run_id }
+            }
+            _ => {
+                return Err(corrupt(
+                    "Agent interrupt receipt has invalid disposition facts",
+                ))
+            }
+        };
+        Ok((target, outcome))
+    })
+    .transpose()
+}
+
+fn insert_interrupt_receipt(
+    connection: &Connection,
+    caller: &AgentNodeRecord,
+    target: &AgentNodeRecord,
+    request_id: &str,
+    outcome: &InterruptAgentExecutionOutcome,
+    created_at: i64,
+) -> Result<(), AgentGraphError> {
+    let (disposition, wake_id, run_id) = match outcome {
+        InterruptAgentExecutionOutcome::NoPendingExecution => ("no_pending_execution", None, None),
+        InterruptAgentExecutionOutcome::QueuedWakeCancelled { wake_id } => {
+            ("queued_wake_cancelled", Some(wake_id.as_str()), None)
+        }
+        InterruptAgentExecutionOutcome::ActiveTurn { wake_id, run_id } => {
+            ("active_turn", Some(wake_id.as_str()), Some(run_id.as_str()))
+        }
+    };
+    connection
+        .execute(
+            "INSERT INTO agent_interrupt_requests (
+                 caller_agent_id, request_id, root_agent_id, target_agent_id,
+                 disposition, wake_id, run_id, created_at, dispatched_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            params![
+                &caller.agent_id,
+                request_id,
+                &caller.root_agent_id,
+                &target.agent_id,
+                disposition,
+                wake_id,
+                run_id,
+                created_at
+            ],
+        )
+        .map_err(write_error)?;
+    Ok(())
 }
 
 pub fn renew_agent_wake_lease(
@@ -1421,7 +2431,7 @@ pub fn renew_agent_wake_lease(
     let current_deadline = current
         .lease_expires_at
         .ok_or_else(|| corrupt("active Wake has no lease deadline"))?;
-    if renewed_at > current_deadline {
+    if renewed_at >= current_deadline {
         return Err(conflict("Wake lease has already expired"));
     }
     let advanced_deadline = lease_expires_at.max(current_deadline.saturating_add(1));
@@ -1481,13 +2491,16 @@ pub fn transition_agent_wake(
     if current.status != AgentWakeStatus::Queued
         && current
             .lease_expires_at
-            .is_none_or(|deadline| transitioned_at > deadline)
+            .is_none_or(|deadline| transitioned_at >= deadline)
     {
         return Err(conflict("Wake lease has expired"));
     }
-    if requested_status == AgentWakeStatus::Completed {
+    if matches!(
+        requested_status,
+        AgentWakeStatus::Completed | AgentWakeStatus::Satisfied
+    ) {
         return Err(conflict(
-            "completed Wake must be settled atomically with a result message",
+            "completed/satisfied Wake must be settled by its atomic result or receipt API",
         ));
     }
 
@@ -1516,12 +2529,13 @@ pub fn transition_agent_wake(
                     "queued Wake must be claimed through the claim API",
                 ));
             }
-            AgentWakeStatus::Completed => unreachable!(),
+            AgentWakeStatus::Completed | AgentWakeStatus::Satisfied => unreachable!(),
         };
     transaction
         .execute(
             "UPDATE agent_wake_requests
-             SET status = ?1, claim_token = ?2, lease_expires_at = ?3, claimed_at = ?4,
+             SET status = ?1, status_revision = status_revision + 1,
+                 claim_token = ?2, lease_expires_at = ?3, claimed_at = ?4,
                  started_at = ?5, completed_at = ?6, terminal_error = ?7
              WHERE wake_id = ?8 AND status = ?9",
             params![
@@ -1548,6 +2562,8 @@ pub fn finish_agent_wake_with_result(
     input: &FinishAgentWakeWithResultInput,
     completed_at: i64,
 ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
+    // Round-1 repository compatibility primitive. Production Dispatcher/Host paths must call
+    // `finish_agent_turn_with_result`, which constructs and freezes the typed result envelope.
     validate_time(completed_at)?;
     validate_id("claim_token", &input.claim_token)?;
     if !matches!(
@@ -1608,13 +2624,19 @@ pub fn finish_agent_wake_with_result(
     }
     if wake
         .lease_expires_at
-        .is_none_or(|deadline| completed_at > deadline)
+        .is_none_or(|deadline| completed_at >= deadline)
     {
         return Err(conflict("Wake lease has expired"));
     }
+    let child = query_node(&transaction, &wake.agent_id)?
+        .ok_or_else(|| corrupt("Wake child Agent is missing"))?;
+    let direct_parent_id = child
+        .parent_agent_id
+        .as_deref()
+        .ok_or_else(|| conflict("root Agent Wake cannot emit a child result"))?;
     if input.result_message.root_agent_id != wake.root_agent_id
         || input.result_message.sender_agent_id != wake.agent_id
-        || input.result_message.recipient_agent_id != wake.requester_agent_id
+        || input.result_message.recipient_agent_id != direct_parent_id
     {
         return Err(conflict("Wake result participants do not match the Wake"));
     }
@@ -1623,7 +2645,8 @@ pub fn finish_agent_wake_with_result(
     transaction
         .execute(
             "UPDATE agent_wake_requests
-             SET status = ?1, result_message_id = ?2, terminal_error = ?3, completed_at = ?4
+             SET status = ?1, status_revision = status_revision + 1,
+                 result_message_id = ?2, terminal_error = ?3, completed_at = ?4
              WHERE wake_id = ?5 AND status = ?6 AND claim_token = ?7",
             params![
                 input.terminal_status.as_str(),
@@ -1640,6 +2663,430 @@ pub fn finish_agent_wake_with_result(
         .ok_or_else(|| corrupt("settled Wake could not be read back"))?;
     transaction.commit().map_err(write_error)?;
     Ok(settled)
+}
+
+/// Atomically records a delegated Turn's durable terminal fact and its direct-parent result
+/// Outbox. Non-root parents receive a deferred Wake in the same transaction; root parents never
+/// start a background model Turn merely because a child reported a result.
+pub fn finish_agent_turn_with_result(
+    connection: &mut Connection,
+    input: &FinishAgentTurnResultInput,
+    completed_at: i64,
+) -> Result<AgentTurnResultSettlement, AgentGraphError> {
+    validate_time(completed_at)?;
+    validate_id("wake_id", &input.wake_id)?;
+    validate_id("claim_token", &input.claim_token)?;
+    validate_trimmed("summary", &input.summary, MAX_RESULT_SUMMARY_BYTES)?;
+    if let Some(error) = input.terminal_error.as_deref() {
+        validate_trimmed("terminal_error", error, MAX_TERMINAL_ERROR_BYTES)?;
+    }
+    if input.run_id.is_some() != input.assistant_message_id.is_some() {
+        return Err(invalid(
+            "run_id",
+            "run_id and assistant_message_id must both be present or both be absent",
+        ));
+    }
+    if let Some(run_id) = input.run_id.as_deref() {
+        validate_trimmed("run_id", run_id, 2_048)?;
+    }
+    if let Some(turn_id) = input.assistant_message_id.as_deref() {
+        validate_trimmed("assistant_message_id", turn_id, 2_048)?;
+    }
+    if !matches!(
+        input.terminal_status,
+        AgentWakeStatus::Completed
+            | AgentWakeStatus::Failed
+            | AgentWakeStatus::Interrupted
+            | AgentWakeStatus::OutcomeUnknown
+    ) {
+        return Err(invalid(
+            "terminal_status",
+            "result settlement requires completed, failed, interrupted, or outcome_unknown",
+        ));
+    }
+    if input.terminal_status == AgentWakeStatus::Completed && input.terminal_error.is_some() {
+        return Err(invalid(
+            "terminal_error",
+            "a completed child Turn cannot carry a terminal error",
+        ));
+    }
+
+    let transaction = immediate(connection)?;
+    let wake = query_wake(&transaction, &input.wake_id)?
+        .ok_or_else(|| AgentGraphError::WakeNotFound(input.wake_id.clone()))?;
+    let child = query_node(&transaction, &wake.agent_id)?
+        .ok_or_else(|| corrupt("settling Wake child Agent is missing"))?;
+    let parent_id = child
+        .parent_agent_id
+        .as_deref()
+        .ok_or_else(|| conflict("a root Agent Wake cannot emit a delegated child result"))?;
+    let parent = query_node(&transaction, parent_id)?
+        .ok_or_else(|| corrupt("settling Wake direct parent Agent is missing"))?;
+    if wake.root_agent_id != child.root_agent_id || parent.root_agent_id != child.root_agent_id {
+        return Err(corrupt("settling Wake does not belong to one Agent tree"));
+    }
+    if wake.run_id != input.run_id || wake.assistant_message_id != input.assistant_message_id {
+        return Err(conflict(
+            "result execution identity does not match the durable Wake",
+        ));
+    }
+
+    // Conservative crash recovery owns the exact child trace that generic startup reconciliation
+    // deliberately skipped. Terminalize that trace and the result Outbox in this one transaction,
+    // otherwise an `outcome_unknown` Wake would leave the Agent Conversation permanently busy.
+    if matches!(
+        input.terminal_status,
+        AgentWakeStatus::OutcomeUnknown | AgentWakeStatus::Failed
+    ) {
+        if let (Some(run_id), Some(assistant_message_id), Some(reason)) = (
+            input.run_id.as_deref(),
+            input.assistant_message_id.as_deref(),
+            input.terminal_error.as_deref(),
+        ) {
+            terminalize_recovered_agent_trace_in_transaction(
+                &transaction,
+                &child.conversation_id,
+                run_id,
+                assistant_message_id,
+                reason,
+                completed_at,
+            )?;
+        }
+    }
+
+    if wake.status.is_terminal() {
+        if wake.status != input.terminal_status
+            || wake.claim_token.as_deref() != Some(input.claim_token.as_str())
+            || wake.terminal_error != input.terminal_error
+        {
+            return Err(conflict(
+                "Wake already settled with different terminal facts",
+            ));
+        }
+        let result_id = wake
+            .result_message_id
+            .as_deref()
+            .ok_or_else(|| corrupt("terminal delegated Wake is missing its result Outbox"))?;
+        let result_message = query_message(&transaction, result_id)?
+            .ok_or_else(|| corrupt("terminal delegated Wake result Outbox is missing"))?;
+        let envelope: AgentTurnResultEnvelope = serde_json::from_str(&result_message.content)
+            .map_err(|_| corrupt("terminal delegated Wake result envelope is invalid"))?;
+        if envelope.schema_version != AGENT_RESULT_ENVELOPE_SCHEMA_VERSION
+            || envelope.child_agent_id != child.agent_id
+            || envelope.task_name != child.task_name
+            || envelope.task_path != child.task_path
+            || envelope.wake_id != wake.wake_id
+            || envelope.turn_id != input.assistant_message_id
+            || envelope.run_id != input.run_id
+            || envelope.status != input.terminal_status
+            || envelope.summary != input.summary
+            || envelope.terminal_error != input.terminal_error
+            || result_message.kind != AgentMailboxKind::Result
+            || result_message.sender_agent_id != child.agent_id
+            || result_message.recipient_agent_id != parent.agent_id
+            || result_message.root_agent_id != wake.root_agent_id
+            || result_message.message_id != stable_fact_id("mailbox-result", &[&wake.wake_id])
+            || result_message.request_id != format!("result:{}", wake.wake_id)
+            || result_message.projection_message_id
+                != stable_fact_id("message-result", &[&wake.wake_id])
+        {
+            return Err(conflict("terminal delegated Wake result payload differs"));
+        }
+        validate_result_artifact_refs(&envelope.artifact_refs)?;
+        let parent_wake = query_wake_by_request(
+            &transaction,
+            &child.agent_id,
+            &format!("result-wake:{}", wake.wake_id),
+        )?;
+        if parent.parent_agent_id.is_some() != parent_wake.is_some() {
+            return Err(corrupt(
+                "terminal delegated result has an invalid direct-parent deferred Wake",
+            ));
+        }
+        transaction.commit().map_err(write_error)?;
+        return Ok(AgentTurnResultSettlement {
+            wake,
+            result_message,
+            parent_wake,
+            envelope,
+        });
+    }
+
+    let artifact_refs = list_result_artifacts_for_run(
+        &transaction,
+        &child.conversation_id,
+        input.run_id.as_deref(),
+    )?;
+    let envelope = AgentTurnResultEnvelope {
+        schema_version: AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
+        child_agent_id: child.agent_id.clone(),
+        task_name: child.task_name.clone(),
+        task_path: child.task_path.clone(),
+        wake_id: wake.wake_id.clone(),
+        turn_id: input.assistant_message_id.clone(),
+        run_id: input.run_id.clone(),
+        status: input.terminal_status,
+        summary: input.summary.clone(),
+        artifact_refs,
+        terminal_error: input.terminal_error.clone(),
+    };
+    let content = serde_json::to_string(&envelope)
+        .map_err(|_| corrupt("Agent result envelope could not be serialized"))?;
+    let result_input = EnqueueAgentMessageInput {
+        message_id: stable_fact_id("mailbox-result", &[&wake.wake_id]),
+        root_agent_id: wake.root_agent_id.clone(),
+        sender_agent_id: child.agent_id.clone(),
+        recipient_agent_id: parent.agent_id.clone(),
+        request_id: format!("result:{}", wake.wake_id),
+        kind: AgentMailboxKind::Result,
+        content,
+        projection_message_id: stable_fact_id("message-result", &[&wake.wake_id]),
+    };
+
+    if wake.status != input.expected_status
+        || wake.claim_token.as_deref() != Some(input.claim_token.as_str())
+    {
+        return Err(conflict(
+            "Wake status or claim token does not match settlement",
+        ));
+    }
+    if wake
+        .lease_expires_at
+        .is_none_or(|deadline| completed_at >= deadline)
+    {
+        return Err(conflict("Wake lease has expired"));
+    }
+    if !wake.status.can_transition_to(input.terminal_status) {
+        return Err(AgentGraphError::IllegalTransition {
+            current: wake.status,
+            requested: input.terminal_status,
+        });
+    }
+
+    let result_message = enqueue_message_in_transaction(&transaction, &result_input, completed_at)?
+        .record()
+        .clone();
+    transaction
+        .execute(
+            "UPDATE agent_wake_requests
+             SET status = ?1, status_revision = status_revision + 1,
+                 result_message_id = ?2, terminal_error = ?3, completed_at = ?4
+             WHERE wake_id = ?5 AND status = ?6 AND claim_token = ?7",
+            params![
+                input.terminal_status.as_str(),
+                &result_message.message_id,
+                &input.terminal_error,
+                completed_at,
+                &wake.wake_id,
+                input.expected_status.as_str(),
+                &input.claim_token,
+            ],
+        )
+        .map_err(write_error)?;
+    let settled_wake = query_wake(&transaction, &wake.wake_id)?
+        .ok_or_else(|| corrupt("settled delegated Wake disappeared"))?;
+
+    let parent_wake = if parent.parent_agent_id.is_some() {
+        Some(
+            enqueue_wake_in_transaction(
+                &transaction,
+                &EnqueueAgentWakeInput {
+                    wake_id: stable_fact_id("wake-result", &[&wake.wake_id]),
+                    root_agent_id: wake.root_agent_id,
+                    agent_id: parent.agent_id,
+                    requester_agent_id: child.agent_id,
+                    request_id: format!("result-wake:{}", wake.wake_id),
+                    source_agent_message_id: Some(result_message.message_id.clone()),
+                },
+                completed_at,
+            )?
+            .record()
+            .clone(),
+        )
+    } else {
+        None
+    };
+    transaction.commit().map_err(write_error)?;
+    Ok(AgentTurnResultSettlement {
+        wake: settled_wake,
+        result_message,
+        parent_wake,
+        envelope,
+    })
+}
+
+fn terminalize_recovered_agent_trace_in_transaction(
+    connection: &Connection,
+    conversation_id: &str,
+    run_id: &str,
+    assistant_message_id: &str,
+    reason: &str,
+    completed_at: i64,
+) -> Result<(), AgentGraphError> {
+    let Some(trace) =
+        conversation_trace_repository::get_trace_for_message(connection, assistant_message_id)
+            .map_err(read_error)?
+    else {
+        // A failed pre-Runtime preparation intentionally has no surviving trace.
+        return Ok(());
+    };
+    if trace.run_id != run_id || trace.conversation_id != conversation_id {
+        return Err(conflict(
+            "recovered trace identity does not match Wake identity",
+        ));
+    }
+    if trace.terminal_status != crate::ConversationTurnTraceTerminalStatus::InProgress {
+        return Ok(());
+    }
+    let model_context_items = conversation_model_context_repository::get_log_for_message(
+        connection,
+        assistant_message_id,
+    )
+    .map_err(read_error)?
+    .map(|log| log.items)
+    .unwrap_or_default();
+    let next_sequence = trace
+        .items
+        .last()
+        .map(crate::ConversationTurnTraceItem::sequence)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let terminal = crate::terminal_conversation_trace_from_snapshot(
+        crate::ConversationTraceSnapshot {
+            items: trace.items,
+            model_context_items,
+            next_sequence,
+            truncated: trace.truncated,
+        },
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        crate::ConversationTurnTraceTerminalStatus::Failed,
+        reason,
+    )
+    .map_err(|error| {
+        corrupt(format!(
+            "could not terminalize recovered Agent trace: {error}"
+        ))
+    })?;
+    let created_at = connection
+        .query_row(
+            "SELECT created_at FROM conversation_turn_traces WHERE assistant_message_id = ?1",
+            [assistant_message_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(read_error)?;
+    conversation_trace_repository::commit_trace_in_connection(
+        connection,
+        &terminal.trace,
+        created_at,
+        completed_at.max(created_at),
+    )
+    .map_err(write_error)?;
+    conversation_model_context_repository::commit_items_in_connection(
+        connection,
+        conversation_id,
+        assistant_message_id,
+        &terminal.model_context_items,
+    )
+    .map_err(write_error)?;
+    chat_repository::reconcile_message_run_terminal_state(
+        connection,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        "error",
+        "failed",
+        completed_at.max(created_at),
+    )
+    .map_err(write_error)?;
+    connection
+        .execute(
+            "UPDATE agent_usage_records
+             SET status = 'failed', error = ?1, completed_at = ?2
+             WHERE run_id = ?3 AND conversation_id = ?4 AND message_id = ?5",
+            params![
+                reason,
+                completed_at.max(created_at),
+                run_id,
+                conversation_id,
+                assistant_message_id
+            ],
+        )
+        .map_err(write_error)?;
+    Ok(())
+}
+
+fn list_result_artifacts_for_run(
+    connection: &Connection,
+    conversation_id: &str,
+    run_id: Option<&str>,
+) -> Result<Vec<AgentResultArtifactReference>, AgentGraphError> {
+    let Some(run_id) = run_id else {
+        return Ok(Vec::new());
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT artifact.artifact_id, artifact.kind, artifact.media_type
+             FROM managed_artifact_grants AS grant_record
+             JOIN managed_artifacts AS artifact
+               ON artifact.artifact_id = grant_record.artifact_id
+             WHERE grant_record.conversation_id = ?1 AND grant_record.run_id = ?2
+             ORDER BY artifact.artifact_id, artifact.kind, artifact.media_type
+             LIMIT ?3",
+        )
+        .map_err(read_error)?;
+    let rows = statement
+        .query_map(
+            params![conversation_id, run_id, (MAX_RESULT_ARTIFACTS + 1) as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(read_error)?;
+    let refs = rows
+        .map(|row| {
+            let (artifact_id, kind, media_type) = row.map_err(read_error)?;
+            let kind = match kind.as_str() {
+                "image" => AgentResultArtifactKind::Image,
+                "document" => AgentResultArtifactKind::Document,
+                _ => return Err(corrupt("managed Artifact kind is invalid")),
+            };
+            Ok(AgentResultArtifactReference {
+                artifact_id,
+                kind,
+                media_type,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_result_artifact_refs(&refs)?;
+    Ok(refs)
+}
+
+fn validate_result_artifact_refs(
+    refs: &[AgentResultArtifactReference],
+) -> Result<(), AgentGraphError> {
+    if refs.len() > MAX_RESULT_ARTIFACTS {
+        return Err(conflict(format!(
+            "a child result may reference at most {MAX_RESULT_ARTIFACTS} managed Artifacts"
+        )));
+    }
+    let mut previous = None;
+    for artifact in refs {
+        validate_trimmed("artifact_id", &artifact.artifact_id, 256)?;
+        validate_trimmed("artifact_media_type", &artifact.media_type, 256)?;
+        if previous.is_some_and(|value: &str| value >= artifact.artifact_id.as_str()) {
+            return Err(corrupt(
+                "Agent result Artifact references are not strictly sorted and unique",
+            ));
+        }
+        previous = Some(artifact.artifact_id.as_str());
+    }
+    Ok(())
 }
 
 fn enqueue_message_in_transaction(
@@ -1665,6 +3112,65 @@ fn enqueue_message_in_transaction(
     )?;
     if query_message(transaction, &input.message_id)?.is_some() {
         return Err(conflict("Mailbox message ID is already in use"));
+    }
+    let (unbound_count, unbound_bytes, ordinary_count, ordinary_bytes): (i64, i64, i64, i64) =
+        transaction
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(length(CAST(mailbox.content AS BLOB))), 0),
+                    COALESCE(SUM(CASE WHEN mailbox.kind IN ('message', 'followup')
+                                      THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN mailbox.kind IN ('message', 'followup')
+                                      THEN length(CAST(mailbox.content AS BLOB)) ELSE 0 END), 0)
+             FROM agent_mailbox_messages AS mailbox
+             WHERE mailbox.recipient_agent_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_model_batch_receipt_items AS item
+                   WHERE item.message_id = mailbox.message_id
+               )",
+                [&input.recipient_agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(read_error)?;
+    let unbound_count = u64::try_from(unbound_count)
+        .map_err(|_| corrupt("unbound Mailbox message count is invalid"))?;
+    let unbound_bytes = u64::try_from(unbound_bytes)
+        .map_err(|_| corrupt("unbound Mailbox byte count is invalid"))?;
+    let ordinary_count = u64::try_from(ordinary_count)
+        .map_err(|_| corrupt("ordinary unbound Mailbox message count is invalid"))?;
+    let ordinary_bytes = u64::try_from(ordinary_bytes)
+        .map_err(|_| corrupt("ordinary unbound Mailbox byte count is invalid"))?;
+    let ordinary = matches!(
+        input.kind,
+        AgentMailboxKind::Message | AgentMailboxKind::Followup
+    );
+    if ordinary && ordinary_count >= MAX_UNBOUND_ORDINARY_MAILBOX_MESSAGES_PER_RECIPIENT {
+        return Err(AgentGraphError::ResourceLimit {
+            resource: "ordinary unbound Mailbox messages per recipient",
+            limit: MAX_UNBOUND_ORDINARY_MAILBOX_MESSAGES_PER_RECIPIENT,
+        });
+    }
+    if ordinary
+        && ordinary_bytes.saturating_add(input.content.len() as u64)
+            > MAX_UNBOUND_ORDINARY_MAILBOX_BYTES_PER_RECIPIENT
+    {
+        return Err(AgentGraphError::ResourceLimit {
+            resource: "ordinary unbound Mailbox bytes per recipient",
+            limit: MAX_UNBOUND_ORDINARY_MAILBOX_BYTES_PER_RECIPIENT,
+        });
+    }
+    if unbound_count >= MAX_UNBOUND_MAILBOX_MESSAGES_PER_RECIPIENT {
+        return Err(AgentGraphError::ResourceLimit {
+            resource: "unbound Mailbox messages per recipient",
+            limit: MAX_UNBOUND_MAILBOX_MESSAGES_PER_RECIPIENT,
+        });
+    }
+    if unbound_bytes.saturating_add(input.content.len() as u64)
+        > MAX_UNBOUND_MAILBOX_BYTES_PER_RECIPIENT
+    {
+        return Err(AgentGraphError::ResourceLimit {
+            resource: "unbound Mailbox bytes per recipient",
+            limit: MAX_UNBOUND_MAILBOX_BYTES_PER_RECIPIENT,
+        });
     }
     let projection_id_in_use = transaction
         .query_row(
@@ -2119,6 +3625,19 @@ fn query_wake(
         .transpose()
 }
 
+fn query_wakes<P: rusqlite::Params>(
+    connection: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<AgentWakeRequestRecord>, AgentGraphError> {
+    let mut statement = connection.prepare(sql).map_err(read_error)?;
+    let rows = statement
+        .query_map(params, read_wake_row)
+        .map_err(read_error)?;
+    rows.map(|row| row.map_err(read_error).and_then(decode_wake))
+        .collect()
+}
+
 fn query_wake_by_request(
     connection: &Connection,
     requester_agent_id: &str,
@@ -2163,14 +3682,17 @@ fn read_wake_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WakeRow> {
         request_id: row.get(6)?,
         source_agent_message_id: row.get(7)?,
         status: row.get(8)?,
-        claim_token: row.get(9)?,
-        lease_expires_at: row.get(10)?,
-        result_message_id: row.get(11)?,
-        terminal_error: row.get(12)?,
-        created_at: row.get(13)?,
-        claimed_at: row.get(14)?,
-        started_at: row.get(15)?,
-        completed_at: row.get(16)?,
+        status_revision: row.get(9)?,
+        claim_token: row.get(10)?,
+        lease_expires_at: row.get(11)?,
+        result_message_id: row.get(12)?,
+        terminal_error: row.get(13)?,
+        run_id: row.get(14)?,
+        assistant_message_id: row.get(15)?,
+        created_at: row.get(16)?,
+        claimed_at: row.get(17)?,
+        started_at: row.get(18)?,
+        completed_at: row.get(19)?,
     })
 }
 
@@ -2184,10 +3706,13 @@ struct WakeRow {
     request_id: String,
     source_agent_message_id: Option<String>,
     status: String,
+    status_revision: i64,
     claim_token: Option<String>,
     lease_expires_at: Option<i64>,
     result_message_id: Option<String>,
     terminal_error: Option<String>,
+    run_id: Option<String>,
+    assistant_message_id: Option<String>,
     created_at: i64,
     claimed_at: Option<i64>,
     started_at: Option<i64>,
@@ -2205,10 +3730,13 @@ fn decode_wake(row: WakeRow) -> Result<AgentWakeRequestRecord, AgentGraphError> 
         request_id: row.request_id,
         source_agent_message_id: row.source_agent_message_id,
         status: AgentWakeStatus::parse(&row.status)?,
+        status_revision: positive_u64(row.status_revision, "Wake status revision")?,
         claim_token: row.claim_token,
         lease_expires_at: row.lease_expires_at,
         result_message_id: row.result_message_id,
         terminal_error: row.terminal_error,
+        run_id: row.run_id,
+        assistant_message_id: row.assistant_message_id,
         created_at: row.created_at,
         claimed_at: row.claimed_at,
         started_at: row.started_at,
@@ -2390,6 +3918,58 @@ fn ensure_active_pair(
     Ok(())
 }
 
+fn is_strict_descendant(
+    connection: &Connection,
+    ancestor_agent_id: &str,
+    descendant_agent_id: &str,
+) -> Result<bool, AgentGraphError> {
+    connection
+        .query_row(
+            "WITH RECURSIVE ancestors(agent_id, parent_agent_id) AS (
+                 SELECT agent_id, parent_agent_id
+                 FROM agent_nodes WHERE agent_id = ?1
+                 UNION ALL
+                 SELECT parent.agent_id, parent.parent_agent_id
+                 FROM agent_nodes AS parent
+                 JOIN ancestors AS child ON parent.agent_id = child.parent_agent_id
+             )
+             SELECT EXISTS(
+                 SELECT 1 FROM ancestors
+                 WHERE agent_id = ?2 AND agent_id != ?1
+             )",
+            params![descendant_agent_id, ancestor_agent_id],
+            |row| row.get(0),
+        )
+        .map_err(read_error)
+}
+
+fn validate_wake_source_authority(
+    connection: &Connection,
+    source: &AgentMailboxMessageRecord,
+    target_agent_id: &str,
+) -> Result<(), AgentGraphError> {
+    let sender = ensure_active_agent(connection, &source.sender_agent_id)?;
+    let target = ensure_active_agent(connection, target_agent_id)?;
+    let authorized = match source.kind {
+        AgentMailboxKind::Task => {
+            target.parent_agent_id.as_deref() == Some(sender.agent_id.as_str())
+        }
+        AgentMailboxKind::Followup => {
+            is_strict_descendant(connection, &sender.agent_id, &target.agent_id)?
+        }
+        AgentMailboxKind::Result => {
+            sender.parent_agent_id.as_deref() == Some(target.agent_id.as_str())
+        }
+        AgentMailboxKind::Message => false,
+    };
+    if !authorized {
+        return Err(conflict(
+            "Wake source violates task/follow-up/result tree authority",
+        ));
+    }
+    Ok(())
+}
+
 fn node_matches_create(record: &AgentNodeRecord, input: &CreateAgentNodeInput) -> bool {
     record.agent_id == input.agent_id
         && record.root_agent_id == input.root_agent_id
@@ -2521,6 +4101,15 @@ fn decode_bool(value: i64, label: &str) -> Result<bool, AgentGraphError> {
         1 => Ok(true),
         _ => Err(corrupt(format!("{label} is not boolean"))),
     }
+}
+
+fn stable_fact_id(prefix: &str, parts: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!("{prefix}-{:x}", digest.finalize())
 }
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> AgentGraphError {
@@ -2711,6 +4300,24 @@ mod tests {
         }
     }
 
+    fn add_grandchild(connection: &mut Connection) -> AgentNodeRecord {
+        create_agent_node(
+            connection,
+            &child_input(
+                "agent-grand",
+                "agent-root",
+                "agent-child",
+                "conversation-grand",
+                "details",
+                "/root/review/details",
+            ),
+            12,
+        )
+        .unwrap()
+        .record()
+        .clone()
+    }
+
     #[test]
     fn root_and_multilevel_tree_are_idempotent_and_tree_scoped() {
         let mut connection = setup_tree();
@@ -2781,6 +4388,907 @@ mod tests {
             14,
         );
         assert!(matches!(duplicate_name, Err(AgentGraphError::Conflict(_))));
+    }
+
+    #[test]
+    fn application_send_and_followup_are_durable_idempotent_and_tree_authorized() {
+        let mut connection = setup_tree();
+        add_grandchild(&mut connection);
+
+        let send = SendAgentMessageRequest {
+            sender_agent_id: "agent-grand".to_string(),
+            recipient_agent_id: "agent-root".to_string(),
+            request_id: "send-only-1".to_string(),
+            content: "status update only".to_string(),
+        };
+        let sent = send_agent_message(&mut connection, &send, 20).unwrap();
+        assert!(sent.deferred_wake.is_none());
+        assert_eq!(
+            sent.message.delivery_status,
+            AgentMailboxDeliveryStatus::Queued
+        );
+        assert_eq!(
+            send_agent_message(&mut connection, &send, 21).unwrap(),
+            sent
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_wake_requests
+                     WHERE source_agent_message_id = ?1",
+                    [&sent.message.message_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        let followup = SendAgentMessageRequest {
+            sender_agent_id: "agent-root".to_string(),
+            recipient_agent_id: "agent-grand".to_string(),
+            request_id: "followup-1".to_string(),
+            content: "please check one more edge".to_string(),
+        };
+        let followed = follow_up_agent(&mut connection, &followup, 22).unwrap();
+        assert_eq!(followed.message.kind, AgentMailboxKind::Followup);
+        assert_eq!(
+            followed.message.delivery_status,
+            AgentMailboxDeliveryStatus::Queued
+        );
+        assert_eq!(
+            followed.deferred_wake.as_ref().unwrap().status,
+            AgentWakeStatus::Queued
+        );
+        assert_eq!(
+            follow_up_agent(&mut connection, &followup, 23).unwrap(),
+            followed
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE source_agent_message_id = ?1",
+                    [&followed.message.message_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "follow-up is not projected before dispatcher/safe-boundary delivery"
+        );
+
+        let upward = SendAgentMessageRequest {
+            sender_agent_id: "agent-grand".to_string(),
+            recipient_agent_id: "agent-child".to_string(),
+            request_id: "illegal-followup-upward".to_string(),
+            content: "not a management follow-up".to_string(),
+        };
+        assert!(matches!(
+            follow_up_agent(&mut connection, &upward, 24),
+            Err(AgentGraphError::Conflict(_))
+        ));
+        let blank = SendAgentMessageRequest {
+            sender_agent_id: "agent-root".to_string(),
+            recipient_agent_id: "agent-child".to_string(),
+            request_id: "blank-message".to_string(),
+            content: "   ".to_string(),
+        };
+        assert!(matches!(
+            send_agent_message(&mut connection, &blank, 24),
+            Err(AgentGraphError::InvalidInput {
+                field: "content",
+                ..
+            })
+        ));
+
+        insert_conversation(&connection, "conversation-wild", Some("project-a"));
+        create_agent_node(
+            &mut connection,
+            &child_input(
+                "agent-wild",
+                "agent-root",
+                "agent-root",
+                "conversation-wild",
+                "%_wild",
+                "/root/%_wild",
+            ),
+            25,
+        )
+        .unwrap();
+        let wildcard_sibling = SendAgentMessageRequest {
+            sender_agent_id: "agent-wild".to_string(),
+            recipient_agent_id: "agent-grand".to_string(),
+            request_id: "wildcard-must-not-authorize".to_string(),
+            content: "must remain a sibling".to_string(),
+        };
+        assert!(matches!(
+            follow_up_agent(&mut connection, &wildcard_sibling, 26),
+            Err(AgentGraphError::Conflict(_))
+        ));
+        let forged_followup = EnqueueAgentMessageInput {
+            message_id: "message-wildcard-forged".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            sender_agent_id: "agent-wild".to_string(),
+            recipient_agent_id: "agent-grand".to_string(),
+            request_id: "wildcard-forged-low-level".to_string(),
+            kind: AgentMailboxKind::Followup,
+            content: "must also fail at the canonical DB boundary".to_string(),
+            projection_message_id: "projection-wildcard-forged".to_string(),
+        };
+        assert!(
+            enqueue_agent_message(&mut connection, &forged_followup, 27).is_err(),
+            "the canonical trigger must not treat `%`/`_` task names as path wildcards"
+        );
+        let forged_result = EnqueueAgentMessageInput {
+            message_id: "message-forged-result".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            sender_agent_id: "agent-root".to_string(),
+            recipient_agent_id: "agent-child".to_string(),
+            request_id: "forged-result-low-level".to_string(),
+            kind: AgentMailboxKind::Result,
+            content: "a parent cannot forge its child's result".to_string(),
+            projection_message_id: "projection-forged-result".to_string(),
+        };
+        assert!(enqueue_agent_message(&mut connection, &forged_result, 28).is_err());
+    }
+
+    #[test]
+    fn projection_preserves_fifo_reorders_before_active_assistant_and_satisfies_deferred_wake() {
+        let mut connection = setup_tree();
+        let active_wake = enqueue_agent_wake(&mut connection, &wake_input("display-active"), 18)
+            .unwrap()
+            .record()
+            .clone();
+        claim_next_agent_wake(&mut connection, "agent-child", "display-active-claim", 19)
+            .unwrap()
+            .unwrap();
+        transition_agent_wake(
+            &mut connection,
+            &active_wake.wake_id,
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Running,
+            Some("display-active-claim"),
+            20,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-running', 'conversation-child', 'assistant',
+                     'Thinking...', 'pending', 20, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-running",
+            "conversation-child",
+            "assistant-running",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &trace,
+            20,
+            20,
+        )
+        .unwrap();
+
+        let send = send_agent_message(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "fifo-send".to_string(),
+                content: "earlier send".to_string(),
+            },
+            21,
+        )
+        .unwrap();
+        let followup = follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "fifo-followup".to_string(),
+                content: "later follow-up".to_string(),
+            },
+            21,
+        )
+        .unwrap();
+        let delivery = crate::storage::agent_delivery_repository::bind_safe_boundary(
+            &mut connection,
+            &crate::BindAgentSafeBoundaryInput {
+                conversation_id: "conversation-child".to_string(),
+                run_id: "run-running".to_string(),
+                assistant_message_id: "assistant-running".to_string(),
+                model_batch_index: 1,
+                expected_next_trace_sequence: 0,
+                maximum: 16,
+            },
+            22,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            delivery
+                .messages
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                send.message.message_id.as_str(),
+                followup.message.message_id.as_str()
+            ]
+        );
+        let satisfied = get_agent_wake(
+            &connection,
+            &followup.deferred_wake.as_ref().unwrap().wake_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(satisfied.status, AgentWakeStatus::Satisfied);
+        assert_eq!(satisfied.status_revision, 2);
+        let retry = crate::storage::agent_delivery_repository::bind_safe_boundary(
+            &mut connection,
+            &crate::BindAgentSafeBoundaryInput {
+                conversation_id: "conversation-child".to_string(),
+                run_id: "run-running".to_string(),
+                assistant_message_id: "assistant-running".to_string(),
+                model_batch_index: 1,
+                expected_next_trace_sequence: 0,
+                maximum: 16,
+            },
+            24,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry, delivery);
+        assert_eq!(
+            get_agent_wake(
+                &connection,
+                &followup.deferred_wake.as_ref().unwrap().wake_id,
+            )
+            .unwrap()
+            .unwrap()
+            .status_revision,
+            2
+        );
+
+        let order = connection
+            .prepare(
+                "SELECT id FROM messages
+                 WHERE conversation_id = 'conversation-child' ORDER BY position",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            order,
+            vec![
+                send.message.projection_message_id,
+                followup.message.projection_message_id,
+                "assistant-running".to_string(),
+            ]
+        );
+        let running_display = get_agent_display_status(&connection, "agent-child").unwrap();
+        assert_eq!(running_display.status, AgentDisplayStatus::Running);
+        assert_eq!(
+            running_display.latest_wake_id.as_deref(),
+            followup
+                .deferred_wake
+                .as_ref()
+                .map(|wake| wake.wake_id.as_str()),
+            "cursor facts still describe the newest satisfied Wake"
+        );
+        assert_eq!(running_display.latest_wake_status_revision, Some(2));
+
+        transition_agent_wake(
+            &mut connection,
+            &active_wake.wake_id,
+            AgentWakeStatus::Running,
+            AgentWakeStatus::Interrupted,
+            Some("display-active-claim"),
+            25,
+        )
+        .unwrap();
+        let mut terminal_trace =
+            crate::storage::conversation_trace_repository::get_trace_for_message(
+                &connection,
+                "assistant-running",
+            )
+            .unwrap()
+            .unwrap();
+        terminal_trace.terminal_status = crate::ConversationTurnTraceTerminalStatus::Cancelled;
+        terminal_trace.terminal_error = Some("interrupted by test".to_string());
+        crate::storage::conversation_trace_repository::replace_trace(
+            &mut connection,
+            &terminal_trace,
+            20,
+            25,
+        )
+        .unwrap();
+        assert_eq!(
+            get_agent_display_status(&connection, "agent-child")
+                .unwrap()
+                .status,
+            AgentDisplayStatus::LatestInterrupted,
+            "satisfied is not itself a completed task and falls back to the last Turn outcome"
+        );
+    }
+
+    #[test]
+    fn root_display_uses_durable_human_turn_and_approval_state_without_a_wake() {
+        let mut connection = setup_tree();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-root-running', 'conversation-root', 'assistant',
+                     'Working...', 'pending', 20, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-root-running",
+            "conversation-root",
+            "assistant-root-running",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &trace,
+            20,
+            20,
+        )
+        .unwrap();
+
+        let running = get_agent_display_status(&connection, "agent-root").unwrap();
+        assert_eq!(running.status, AgentDisplayStatus::Running);
+        assert!(running.latest_wake_id.is_none());
+
+        connection
+            .execute(
+                "INSERT INTO agent_pending_actions (
+                     action_id, run_id, conversation_id, assistant_message_id,
+                     action_type, tool_name, tool_call_id, status, target_status,
+                     action_json, agent_input_json, created_at, updated_at
+                 ) VALUES (
+                     'approval-root-running', 'run-root-running', 'conversation-root',
+                     'assistant-root-running', 'tool_approval', 'write_file', 'call-root',
+                     'pending', NULL, '{}', '{}', 21, 21
+                 )",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            get_agent_display_status(&connection, "agent-root")
+                .unwrap()
+                .status,
+            AgentDisplayStatus::WaitingApproval
+        );
+
+        crate::storage::conversation_trace_repository::replace_trace(
+            &mut connection,
+            &crate::completed_conversation_trace_without_items(
+                "run-root-running",
+                "conversation-root",
+                "assistant-root-running",
+            ),
+            20,
+            22,
+        )
+        .unwrap();
+        assert_eq!(
+            get_agent_display_status(&connection, "agent-root")
+                .unwrap()
+                .status,
+            AgentDisplayStatus::LatestCompleted
+        );
+
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-root-failed', 'conversation-root', 'assistant',
+                     'Failed', 'error', 23, 1
+                 )",
+                [],
+            )
+            .unwrap();
+        let failed_active = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-root-failed",
+            "conversation-root",
+            "assistant-root-failed",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &failed_active,
+            23,
+            23,
+        )
+        .unwrap();
+        crate::storage::conversation_trace_repository::replace_trace(
+            &mut connection,
+            &crate::failed_conversation_trace_without_items(
+                "run-root-failed",
+                "conversation-root",
+                "assistant-root-failed",
+                "provider unavailable",
+            ),
+            23,
+            24,
+        )
+        .unwrap();
+        assert_eq!(
+            get_agent_display_status(&connection, "agent-root")
+                .unwrap()
+                .status,
+            AgentDisplayStatus::LatestFailed
+        );
+    }
+
+    #[test]
+    fn child_result_is_frozen_direct_parent_outbox_and_root_is_not_auto_woken() {
+        let mut connection = setup_tree();
+        add_grandchild(&mut connection);
+        let followup = follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-grand".to_string(),
+                request_id: "grand-task".to_string(),
+                content: "perform nested check".to_string(),
+            },
+            30,
+        )
+        .unwrap();
+        let wake_id = followup.deferred_wake.unwrap().wake_id;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        project_agent_wake_source_in_transaction(&transaction, &wake_id, "grand-project", 31)
+            .unwrap();
+        transaction.commit().unwrap();
+        let _claimed = claim_next_agent_wake(&mut connection, "agent-grand", "grand-claim", 32)
+            .unwrap()
+            .unwrap();
+        transition_agent_wake(
+            &mut connection,
+            &wake_id,
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Running,
+            Some("grand-claim"),
+            33,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-grand', 'conversation-grand', 'assistant',
+                     'nested review complete', 'sent', 33,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                      WHERE conversation_id = 'conversation-grand')
+                 )",
+                [],
+            )
+            .unwrap();
+        crate::storage::conversation_trace_repository::replace_trace(
+            &mut connection,
+            &crate::completed_conversation_trace_without_items(
+                "run-grand",
+                "conversation-grand",
+                "assistant-grand",
+            ),
+            33,
+            33,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE agent_wake_requests
+                 SET run_id = 'run-grand', assistant_message_id = 'assistant-grand'
+                 WHERE wake_id = ?1",
+                [&wake_id],
+            )
+            .unwrap();
+        let artifact_id = format!("sha256:{}", "a".repeat(64));
+        connection
+            .execute(
+                "INSERT INTO managed_artifacts (
+                     artifact_id, schema_version, kind, storage_relative_path, format,
+                     media_type, size_bytes, sha256, width, height, created_at
+                 ) VALUES (?1, 1, 'document', 'objects/result.pdf', 'pdf',
+                           'application/pdf', 10, ?2, NULL, NULL, 34)",
+                params![&artifact_id, "a".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO managed_artifact_grants (
+                     artifact_id, conversation_id, run_id, call_id, created_at
+                 ) VALUES (?1, 'conversation-grand', 'run-grand', 'call-one', 34)",
+                [&artifact_id],
+            )
+            .unwrap();
+        let finish = FinishAgentTurnResultInput {
+            wake_id: wake_id.clone(),
+            expected_status: AgentWakeStatus::Running,
+            claim_token: "grand-claim".to_string(),
+            terminal_status: AgentWakeStatus::Completed,
+            run_id: Some("run-grand".to_string()),
+            assistant_message_id: Some("assistant-grand".to_string()),
+            summary: "nested review complete".to_string(),
+            terminal_error: None,
+        };
+        let settled = finish_agent_turn_with_result(&mut connection, &finish, 35).unwrap();
+        assert_eq!(settled.result_message.sender_agent_id, "agent-grand");
+        assert_eq!(settled.result_message.recipient_agent_id, "agent-child");
+        assert_eq!(settled.envelope.artifact_refs.len(), 1);
+        assert!(settled.parent_wake.is_some());
+        assert!(!settled.result_message.content.contains("usage"));
+
+        let later_artifact_id = format!("sha256:{}", "b".repeat(64));
+        connection
+            .execute(
+                "INSERT INTO managed_artifacts (
+                     artifact_id, schema_version, kind, storage_relative_path, format,
+                     media_type, size_bytes, sha256, width, height, created_at
+                 ) VALUES (?1, 1, 'document', 'objects/later.pdf', 'pdf',
+                           'application/pdf', 10, ?2, NULL, NULL, 36)",
+                params![&later_artifact_id, "b".repeat(64)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO managed_artifact_grants (
+                     artifact_id, conversation_id, run_id, call_id, created_at
+                 ) VALUES (?1, 'conversation-grand', 'run-grand', 'call-later', 36)",
+                [&later_artifact_id],
+            )
+            .unwrap();
+        let retry = finish_agent_turn_with_result(&mut connection, &finish, 37).unwrap();
+        assert_eq!(retry.envelope, settled.envelope);
+        assert_eq!(retry.envelope.artifact_refs.len(), 1);
+
+        let parent_wake = settled.parent_wake.as_ref().unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-parent-running', 'conversation-child', 'assistant',
+                     'Handling child result', 'pending', 38,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                      WHERE conversation_id = 'conversation-child')
+                 )",
+                [],
+            )
+            .unwrap();
+        let parent_trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-parent-running",
+            "conversation-child",
+            "assistant-parent-running",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &parent_trace,
+            38,
+            38,
+        )
+        .unwrap();
+        let delivered_result = crate::storage::agent_delivery_repository::bind_safe_boundary(
+            &mut connection,
+            &crate::BindAgentSafeBoundaryInput {
+                conversation_id: "conversation-child".to_string(),
+                run_id: "run-parent-running".to_string(),
+                assistant_message_id: "assistant-parent-running".to_string(),
+                model_batch_index: 1,
+                expected_next_trace_sequence: 0,
+                maximum: 16,
+            },
+            39,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(delivered_result.messages.len(), 1);
+        assert_eq!(
+            delivered_result.messages[0].message_id,
+            settled.result_message.message_id
+        );
+        assert_eq!(
+            get_agent_wake(&connection, &parent_wake.wake_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentWakeStatus::Satisfied
+        );
+        let mut terminal_parent_trace =
+            crate::storage::conversation_trace_repository::get_trace_for_message(
+                &connection,
+                "assistant-parent-running",
+            )
+            .unwrap()
+            .unwrap();
+        terminal_parent_trace.terminal_status =
+            crate::ConversationTurnTraceTerminalStatus::Completed;
+        terminal_parent_trace.terminal_error = None;
+        crate::storage::conversation_trace_repository::replace_trace(
+            &mut connection,
+            &terminal_parent_trace,
+            38,
+            40,
+        )
+        .unwrap();
+
+        enqueue_agent_wake(&mut connection, &wake_input("root-result"), 41).unwrap();
+        let root_child_wake =
+            claim_next_agent_wake(&mut connection, "agent-child", "root-result-claim", 42)
+                .unwrap()
+                .unwrap();
+        let root_settlement = finish_agent_turn_with_result(
+            &mut connection,
+            &FinishAgentTurnResultInput {
+                wake_id: root_child_wake.wake_id,
+                expected_status: AgentWakeStatus::Claimed,
+                claim_token: "root-result-claim".to_string(),
+                terminal_status: AgentWakeStatus::Failed,
+                run_id: None,
+                assistant_message_id: None,
+                summary: "provider unavailable before Turn admission".to_string(),
+                terminal_error: Some("model disabled".to_string()),
+            },
+            43,
+        )
+        .unwrap();
+        assert!(root_settlement.parent_wake.is_none());
+        assert_eq!(
+            root_settlement.result_message.recipient_agent_id,
+            "agent-root"
+        );
+        assert_eq!(
+            get_agent_display_status(&connection, "agent-child")
+                .unwrap()
+                .status,
+            AgentDisplayStatus::LatestFailed
+        );
+    }
+
+    #[test]
+    fn interrupt_request_is_tree_scoped_and_idempotent_across_multiple_wakes() {
+        let mut connection = setup_tree();
+        enqueue_agent_wake(&mut connection, &wake_input("interrupt-one"), 20).unwrap();
+        enqueue_agent_wake(&mut connection, &wake_input("interrupt-two"), 21).unwrap();
+
+        let first = interrupt_agent_execution(
+            &mut connection,
+            "agent-root",
+            "agent-child",
+            "interrupt-request-one",
+            22,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            InterruptAgentExecutionOutcome::QueuedWakeCancelled {
+                wake_id: "wake-interrupt-one".to_string()
+            }
+        );
+        let retry = interrupt_agent_execution(
+            &mut connection,
+            "agent-root",
+            "agent-child",
+            "interrupt-request-one",
+            23,
+        )
+        .unwrap();
+        assert_eq!(retry, first, "a retry cannot cancel the next queued Wake");
+        assert_eq!(
+            get_agent_wake(&connection, "wake-interrupt-two")
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentWakeStatus::Queued
+        );
+
+        let second = interrupt_agent_execution(
+            &mut connection,
+            "agent-root",
+            "agent-child",
+            "interrupt-request-two",
+            24,
+        )
+        .unwrap();
+        assert_eq!(
+            second,
+            InterruptAgentExecutionOutcome::QueuedWakeCancelled {
+                wake_id: "wake-interrupt-two".to_string()
+            }
+        );
+        assert!(interrupt_agent_execution(
+            &mut connection,
+            "agent-child",
+            "agent-root",
+            "interrupt-upward-forbidden",
+            25,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn global_claim_skips_live_mailbox_claim_and_recovers_when_it_expires() {
+        let mut connection = setup_tree();
+        add_grandchild(&mut connection);
+        enqueue_agent_message(
+            &mut connection,
+            &message_input(
+                "live-claim",
+                "agent-root",
+                "agent-child",
+                AgentMailboxKind::Message,
+            ),
+            20,
+        )
+        .unwrap();
+        let live_mailbox =
+            claim_next_agent_message(&mut connection, "agent-child", "live-mailbox", 21)
+                .unwrap()
+                .unwrap();
+        enqueue_agent_wake(&mut connection, &wake_input("blocked-oldest"), 22).unwrap();
+        enqueue_agent_wake(
+            &mut connection,
+            &EnqueueAgentWakeInput {
+                wake_id: "wake-later-agent".to_string(),
+                root_agent_id: "agent-root".to_string(),
+                agent_id: "agent-grand".to_string(),
+                requester_agent_id: "agent-child".to_string(),
+                request_id: "request-later-agent".to_string(),
+                source_agent_message_id: None,
+            },
+            23,
+        )
+        .unwrap();
+
+        let later = claim_next_dispatchable_agent_wake(&mut connection, "claim-later-agent", 24)
+            .unwrap()
+            .unwrap();
+        assert_eq!(later.wake_id, "wake-later-agent");
+        transition_agent_wake(
+            &mut connection,
+            &later.wake_id,
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Cancelled,
+            Some("claim-later-agent"),
+            25,
+        )
+        .unwrap();
+
+        let recovered_oldest = claim_next_dispatchable_agent_wake(
+            &mut connection,
+            "claim-oldest-after-mailbox-expiry",
+            live_mailbox.lease_expires_at.unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovered_oldest.wake_id, "wake-blocked-oldest");
+    }
+
+    #[test]
+    fn expired_running_wake_becomes_outcome_unknown_and_releases_conversation() {
+        let mut connection = setup_tree();
+        let followup = follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "crash-followup".to_string(),
+                content: "perform side-effecting review".to_string(),
+            },
+            20,
+        )
+        .unwrap();
+        let wake_id = followup.deferred_wake.unwrap().wake_id;
+        let claimed = claim_next_dispatchable_agent_wake(&mut connection, "claim-before-crash", 21)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.wake_id, wake_id);
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-crashed', 'conversation-child', 'assistant',
+                     'Working...', 'pending', 22,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                      WHERE conversation_id = 'conversation-child')
+                 )",
+                [],
+            )
+            .unwrap();
+        let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-crashed",
+            "conversation-child",
+            "assistant-crashed",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &trace,
+            22,
+            22,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE agent_wake_requests
+                 SET status = 'running', status_revision = status_revision + 1,
+                     run_id = 'run-crashed', assistant_message_id = 'assistant-crashed',
+                     started_at = 22
+                 WHERE wake_id = ?1",
+                [&wake_id],
+            )
+            .unwrap();
+        let revision_before_recovery = get_agent_wake(&connection, &wake_id)
+            .unwrap()
+            .unwrap()
+            .status_revision;
+
+        let recovered = recover_agent_wakes(&mut connection, "replacement-host", 60_022).unwrap();
+        assert_eq!(recovered.actions.len(), 1);
+        let AgentWakeRecoveryAction::OutcomeUnknown(rebound) = &recovered.actions[0] else {
+            panic!("possibly dispatched Turn must not be replayed");
+        };
+        assert_ne!(rebound.claim_token.as_deref(), Some("claim-before-crash"));
+        assert_eq!(rebound.status_revision, revision_before_recovery);
+        finish_agent_turn_with_result(
+            &mut connection,
+            &FinishAgentTurnResultInput {
+                wake_id: wake_id.clone(),
+                expected_status: AgentWakeStatus::Running,
+                claim_token: rebound.claim_token.clone().unwrap(),
+                terminal_status: AgentWakeStatus::OutcomeUnknown,
+                run_id: Some("run-crashed".to_string()),
+                assistant_message_id: Some("assistant-crashed".to_string()),
+                summary: "result unknown after Host crash".to_string(),
+                terminal_error: Some("possibly dispatched; not replayed".to_string()),
+            },
+            60_023,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::storage::conversation_trace_repository::get_trace_for_message(
+                &connection,
+                "assistant-crashed"
+            )
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+            crate::ConversationTurnTraceTerminalStatus::Failed
+        );
+
+        let next = follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "after-crash-followup".to_string(),
+                content: "continue safely".to_string(),
+            },
+            60_024,
+        )
+        .unwrap();
+        let claimed_next =
+            claim_next_dispatchable_agent_wake(&mut connection, "claim-after-crash", 60_025)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            Some(claimed_next.wake_id),
+            next.deferred_wake.map(|wake| wake.wake_id)
+        );
     }
 
     #[test]
@@ -3313,9 +5821,16 @@ mod tests {
             ..wake_input("before-delivery")
         };
         assert!(matches!(
-            enqueue_agent_wake(&mut connection, &wake_before_delivery, 30),
-            Err(AgentGraphError::Conflict(_))
+            enqueue_agent_wake(&mut connection, &wake_before_delivery, 30).unwrap(),
+            IdempotentCreate::Created(_)
         ));
+        assert!(claim_next_agent_wake(
+            &mut connection,
+            "agent-child",
+            "claim-undelivered-wake",
+            30,
+        )
+        .is_err());
         claim_next_agent_message(&mut connection, "agent-child", "claim-wake-source", 31).unwrap();
         let (acknowledged_source, atomic_wake) = acknowledge_agent_task_with_projection_and_wake(
             &mut connection,
@@ -3470,6 +5985,112 @@ mod tests {
             first_deadline,
         )
         .is_err());
+    }
+
+    #[test]
+    fn lease_deadline_is_half_open_and_fences_old_mailbox_and_wake_holders() {
+        let mut connection = setup_tree();
+
+        let mailbox = message_input(
+            "half-open-mailbox",
+            "agent-root",
+            "agent-child",
+            AgentMailboxKind::Message,
+        );
+        enqueue_agent_message(&mut connection, &mailbox, 100).unwrap();
+        let claimed_message =
+            claim_next_agent_message(&mut connection, "agent-child", "old-mailbox-holder", 101)
+                .unwrap()
+                .unwrap();
+        let mailbox_deadline = claimed_message.lease_expires_at.unwrap();
+        assert!(renew_agent_message_lease(
+            &mut connection,
+            &mailbox.message_id,
+            "old-mailbox-holder",
+            mailbox_deadline,
+        )
+        .is_err());
+        assert!(acknowledge_agent_message_with_projection(
+            &mut connection,
+            &mailbox.message_id,
+            "old-mailbox-holder",
+            mailbox_deadline,
+        )
+        .is_err());
+        let new_message_holder = claim_next_agent_message(
+            &mut connection,
+            "agent-child",
+            "new-mailbox-holder",
+            mailbox_deadline,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(new_message_holder.message_id, mailbox.message_id);
+
+        enqueue_agent_wake(&mut connection, &wake_input("half-open-wake"), 200).unwrap();
+        let claimed = claim_next_agent_wake(&mut connection, "agent-child", "old-wake-holder", 201)
+            .unwrap()
+            .unwrap();
+        let wake_deadline = claimed.lease_expires_at.unwrap();
+        assert!(renew_agent_wake_lease(
+            &mut connection,
+            &claimed.wake_id,
+            "old-wake-holder",
+            wake_deadline,
+        )
+        .is_err());
+        assert!(transition_agent_wake(
+            &mut connection,
+            &claimed.wake_id,
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Running,
+            Some("old-wake-holder"),
+            wake_deadline,
+        )
+        .is_err());
+        let legacy_finish = FinishAgentWakeWithResultInput {
+            wake_id: claimed.wake_id.clone(),
+            expected_status: AgentWakeStatus::Claimed,
+            claim_token: "old-wake-holder".to_string(),
+            terminal_status: AgentWakeStatus::Failed,
+            terminal_error: Some("expired".to_string()),
+            result_message: message_input(
+                "half-open-result",
+                "agent-child",
+                "agent-root",
+                AgentMailboxKind::Result,
+            ),
+        };
+        assert!(
+            finish_agent_wake_with_result(&mut connection, &legacy_finish, wake_deadline,).is_err()
+        );
+        let typed_finish = FinishAgentTurnResultInput {
+            wake_id: claimed.wake_id.clone(),
+            expected_status: AgentWakeStatus::Claimed,
+            claim_token: "old-wake-holder".to_string(),
+            terminal_status: AgentWakeStatus::Failed,
+            run_id: None,
+            assistant_message_id: None,
+            summary: "expired before admission".to_string(),
+            terminal_error: Some("expired".to_string()),
+        };
+        assert!(
+            finish_agent_turn_with_result(&mut connection, &typed_finish, wake_deadline,).is_err()
+        );
+
+        let recovery =
+            recover_agent_wakes(&mut connection, "deadline-recovery", wake_deadline).unwrap();
+        assert_eq!(recovery.requeued_before_dispatch, 1);
+        let replacement = claim_next_agent_wake(
+            &mut connection,
+            "agent-child",
+            "new-wake-holder",
+            wake_deadline,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replacement.wake_id, claimed.wake_id);
+        assert_eq!(replacement.claim_token.as_deref(), Some("new-wake-holder"));
     }
 
     #[test]

@@ -31,6 +31,47 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
 }
 
 #[test]
+fn safe_boundary_delivery_uses_one_byte_exact_authenticated_envelope() {
+    let delivery = AgentSamplingBoundaryDelivery {
+        receipt_id: "receipt-safe".into(),
+        messages: vec![AgentSamplingBoundaryMessage {
+            trace_sequence: 0,
+            message_id: "message-safe".into(),
+            sender_agent_id: "agent-child".into(),
+            sender_task_name: "child".into(),
+            sender_task_path: "/root/child".into(),
+            kind: crate::AgentMailboxKind::Result,
+            content: "  exact payload  ".into(),
+            created_at: 1,
+        }],
+    };
+    let mut context = ContextFrame::new(Vec::new());
+    let recorder = Arc::new(Mutex::new(ConversationTraceRecorder::default()));
+    apply_agent_mailbox_delivery(&delivery, &mut context, &recorder, None, "assistant-safe")
+        .unwrap();
+    let snapshot = recorder
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .snapshot();
+    let trace_content = match &snapshot.items[0] {
+        ConversationTurnTraceItem::AgentMailboxDelivery { content, .. } => content.clone(),
+        item => panic!("unexpected trace item: {item:?}"),
+    };
+    let model_content = snapshot.model_context_items[0].content.clone();
+    let live_content = context.to_messages()[0].content().to_string();
+    assert_eq!(trace_content, model_content);
+    assert_eq!(model_content, live_content);
+    let envelope: serde_json::Value = serde_json::from_str(&live_content).unwrap();
+    assert_eq!(envelope["type"], "agent_collaboration_input");
+    assert_eq!(envelope["payload"], "exact payload");
+    assert!(envelope["payload"]
+        .as_str()
+        .unwrap()
+        .find("agent_collaboration_input")
+        .is_none());
+}
+
+#[test]
 fn resume_accepts_only_tool_provenance_from_the_frozen_registry() {
     let registry = ToolRegistry::defaults_with_search(None);
     let registered_call = AgentToolCall {
@@ -3199,6 +3240,10 @@ fn collaboration_identity_is_stable_prompt_configuration_not_run_world_state() {
             conversation_id: "conversation-child".to_string(),
             task_name: "review".to_string(),
             task_path: "/root/review".to_string(),
+            source_agent_id: "agent-root".to_string(),
+            source_kind: crate::AgentMailboxKind::Task,
+            source_task_name: "root".to_string(),
+            source_task_path: "/root".to_string(),
             source_agent_message_id: "mailbox-task-1".to_string(),
             entrusted_task: "Review the change and report evidence.".to_string(),
             template_instructions: Some("Prefer concrete file references.".to_string()),
@@ -4456,6 +4501,17 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                         is_error: false,
                     }
                 }
+                ConversationTurnTraceItem::AgentMailboxDelivery { content, .. } => {
+                    crate::ConversationModelContextItem {
+                        sequence,
+                        ordinal: 0,
+                        role: "user".to_string(),
+                        content: content.clone(),
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                        is_error: false,
+                    }
+                }
                 ConversationTurnTraceItem::ToolCall {
                     call_id,
                     tool,
@@ -4800,6 +4856,10 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         "stable-test-revision".to_string(),
         "dynamic-test-revision".to_string(),
         "effective-test-revision".to_string(),
+        vec![
+            "read_file".to_string(),
+            "skill_dynamic_test_tool".to_string(),
+        ],
         dynamic_run_world_state,
         vec![dynamic_tool.clone()],
     );

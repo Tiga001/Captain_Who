@@ -316,7 +316,8 @@ impl ContinuitySelector {
                     ConversationTurnTraceItem::AssistantNarration { .. } => {
                         increment(&mut self.archived_counts, COUNT_NARRATION);
                     }
-                    ConversationTurnTraceItem::UserGuidance { .. } => {
+                    ConversationTurnTraceItem::UserGuidance { .. }
+                    | ConversationTurnTraceItem::AgentMailboxDelivery { .. } => {
                         increment(&mut self.archived_counts, COUNT_GUIDANCE);
                         let reference = history_ref_from_cursor(cursor);
                         push_bounded(

@@ -8,6 +8,7 @@ use super::*;
 // caller is the Round 3 Dispatcher; keeping it crate-private is more important than fabricating a
 // renderer route merely to satisfy dead-code analysis.
 #[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum AgentTurnStart {
     HumanRoot(HumanRootTurnStart),
     AgentWake(TrustedAgentWakeTurnStart),
@@ -37,6 +38,7 @@ pub(crate) struct TrustedAgentWakeTurnStart {
     source_message_id: String,
     claim_token: String,
     collaboration_identity: AgentCollaborationIdentity,
+    global_permit: Option<crate::application::agent_dispatcher::AgentTurnConcurrencyPermit>,
 }
 
 impl TrustedAgentWakeTurnStart {
@@ -80,7 +82,22 @@ impl TrustedAgentWakeTurnStart {
             source_message_id,
             claim_token,
             collaboration_identity,
+            global_permit: None,
         })
+    }
+
+    pub(crate) fn with_global_permit(
+        mut self,
+        permit: crate::application::agent_dispatcher::AgentTurnConcurrencyPermit,
+    ) -> Self {
+        self.global_permit = Some(permit);
+        self
+    }
+
+    fn take_global_permit(
+        &mut self,
+    ) -> Option<crate::application::agent_dispatcher::AgentTurnConcurrencyPermit> {
+        self.global_permit.take()
     }
 
     pub(crate) fn wake_id(&self) -> &str {
@@ -130,16 +147,14 @@ pub(super) struct RuntimeTurnSegmentOutcome {
     pub(super) terminal_event_gate: Arc<AgentTerminalEventGate>,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(super) enum PreparedTurnRollback {
     Human {
         user_message_id: String,
         previous: Option<mycopilot_core::storage::models::ChatConversationRecord>,
         previous_world_state_was_empty: bool,
     },
-    AgentWake {
-        previous: mycopilot_core::storage::models::ChatConversationRecord,
-        previous_world_state_was_empty: bool,
-    },
+    AgentWake,
 }
 
 impl AgentService {
@@ -160,7 +175,7 @@ impl AgentService {
 
     fn start_trusted_agent_wake_turn(
         &self,
-        start: TrustedAgentWakeTurnStart,
+        mut start: TrustedAgentWakeTurnStart,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         let _admission = self
@@ -169,7 +184,7 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner());
         let factory = ChildAgentFactory::new(Arc::clone(&self.storage));
         let spawn = factory
-            .resolve_trusted_running_wake(
+            .resolve_trusted_claimed_wake(
                 start.agent_id(),
                 start.wake_id(),
                 start.source_message_id(),
@@ -184,6 +199,9 @@ impl AgentService {
                 .into());
         }
         let conversation_id = spawn.agent.conversation_id.clone();
+        let global_permit = start
+            .take_global_permit()
+            .ok_or_else(|| "可信 Wake 缺少进程级 Agent Turn 并发许可。".to_string())?;
         if self.is_project_deleting(spawn.agent.project_id.as_deref())
             || self.is_conversation_deleting(Some(&conversation_id))
         {
@@ -208,13 +226,10 @@ impl AgentService {
             previous_conversation.ok_or_else(|| "子 Agent Conversation 不存在。".to_string())?;
         let expected_revision = expected_revision
             .ok_or_else(|| "子 Agent Conversation 缺少 Turn admission revision。".to_string())?;
-        let previous_world_state_was_empty = self
-            .storage
-            .list_active_conversation_world_state_records(&conversation_id)?
-            .is_empty();
         let run_id = next_run_id();
         let assistant_message_id = create_id("message");
         self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
+        self.register_turn_concurrency_permit(&run_id, global_permit)?;
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
         let prepared = match prepare_agent_wake_turn(
@@ -225,27 +240,24 @@ impl AgentService {
             &run_id,
             previous_conversation.clone(),
             expected_revision,
+            mycopilot_core::TrustedAgentWakeTurnAdmission {
+                agent_id: start.agent_id().to_string(),
+                wake_id: start.wake_id().to_string(),
+                claim_token: start.claim_token().to_string(),
+                source_agent_message_id: start.source_message_id().to_string(),
+            },
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
+                self.release_turn_concurrency_permit(&run_id);
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                let cause = error.to_string();
-                return Err(
-                    match self.storage.rollback_agent_wake_turn_preparation(
-                        &conversation_id,
-                        &assistant_message_id,
-                        Some(&run_id),
-                        &previous_conversation,
-                        previous_world_state_was_empty,
-                    ) {
-                        Ok(()) => cause.into(),
-                        Err(rollback) => {
-                            format!("{cause}；同时无法回滚子 Agent provisional Turn：{rollback}")
-                                .into()
-                        }
-                    },
-                );
+                // If atomic admission already committed, deleting the assistant/trace would also
+                // delete its turn-start receipt and make the old task appear undelivered to a
+                // later follow-up. Dispatcher re-reads the Wake: a still-Claimed Wake is a
+                // definitely-not-admitted failure, while Running carries the immutable exact Turn
+                // identity and is terminalized together with its result Outbox.
+                return Err(error.to_string().into());
             }
         };
 
@@ -253,10 +265,7 @@ impl AgentService {
             prepared,
             cancellation_token,
             notifications,
-            PreparedTurnRollback::AgentWake {
-                previous: previous_conversation,
-                previous_world_state_was_empty,
-            },
+            PreparedTurnRollback::AgentWake,
         )
     }
 
@@ -282,16 +291,7 @@ impl AgentService {
                 previous.as_ref(),
                 *previous_world_state_was_empty,
             ),
-            PreparedTurnRollback::AgentWake {
-                previous,
-                previous_world_state_was_empty,
-            } => self.storage.rollback_agent_wake_turn_preparation(
-                conversation_id,
-                assistant_message_id,
-                provisional_run_id,
-                previous,
-                *previous_world_state_was_empty,
-            ),
+            PreparedTurnRollback::AgentWake => Ok(()),
         };
         match result {
             Ok(()) => cause.into(),
@@ -324,28 +324,38 @@ impl AgentService {
             Ok(projection) => RunContextToolProjection::new(projection),
             Err(error) => {
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                self.release_turn_concurrency_permit(&run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                return Err(self.rollback_prepared_initial_turn(
-                    &conversation_id,
-                    &assistant_message_id,
-                    Some(&run_id),
-                    &rollback,
-                    error,
-                ));
+                return Err(match rollback {
+                    PreparedTurnRollback::AgentWake => error.into(),
+                    rollback => self.rollback_prepared_initial_turn(
+                        &conversation_id,
+                        &assistant_message_id,
+                        Some(&run_id),
+                        &rollback,
+                        error,
+                    ),
+                });
             }
         };
         self.register_usage_context(&run_id, prepared.usage_context.clone());
         if self.is_agent_input_scope_deleting(&prepared.agent_input) {
             self.release_conversation_turn_if_current(&conversation_id, &run_id);
+            self.release_turn_concurrency_permit(&run_id);
             self.discard_usage_context(&run_id);
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-            return Err(self.rollback_prepared_initial_turn(
-                &conversation_id,
-                &assistant_message_id,
-                Some(&run_id),
-                &rollback,
-                "项目或会话正在移除，无法开始新的 agent 运行。",
-            ));
+            return Err(match rollback {
+                PreparedTurnRollback::AgentWake => "项目或会话正在移除，无法开始新的 agent 运行。"
+                    .to_string()
+                    .into(),
+                rollback => self.rollback_prepared_initial_turn(
+                    &conversation_id,
+                    &assistant_message_id,
+                    Some(&run_id),
+                    &rollback,
+                    "项目或会话正在移除，无法开始新的 agent 运行。",
+                ),
+            });
         }
 
         let steer_input = self.register_active_run_control(
@@ -408,6 +418,7 @@ impl AgentService {
                 drop(deletion_lifecycle);
                 service
                     .release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
+                service.release_turn_concurrency_permit(&worker_run_id);
                 service.discard_usage_context(&worker_run_id);
                 service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
                 return;
@@ -421,6 +432,9 @@ impl AgentService {
                         &worker_assistant_message_id,
                         &mut agent_output,
                     );
+                    if persisted.is_ok() {
+                        service.notify_durable_turn_observers(&worker_assistant_message_id);
+                    }
                     let durable_terminal = persisted.is_ok() && committed_durable_context;
                     if durable_terminal {
                         service.emit_terminal_context_window_snapshot(
@@ -476,6 +490,9 @@ impl AgentService {
                         usage.clone(),
                         &conversation_turn_trace,
                     );
+                    if persisted.is_ok() {
+                        service.notify_durable_turn_observers(&worker_assistant_message_id);
+                    }
                     let durable_terminal = persisted.is_ok();
                     let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
                     if durable_terminal {
@@ -524,6 +541,7 @@ impl AgentService {
             if durable_terminal {
                 service
                     .release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
+                service.release_turn_concurrency_permit(&worker_run_id);
             }
             if !keep_trace_snapshot {
                 service.discard_trace_snapshot(&worker_run_id);
@@ -670,13 +688,19 @@ impl AgentService {
             .active_conversation_turns
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let mut permits = self
+            .active_turn_permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         active_turns.clear();
+        permits.clear();
         for trace in durable {
+            let run_id = trace.run_id.clone();
             if active_turns
                 .insert(
                     trace.conversation_id.clone(),
                     ActiveConversationTurn {
-                        run_id: trace.run_id,
+                        run_id: run_id.clone(),
                         assistant_message_id: trace.assistant_message_id,
                     },
                 )
@@ -687,8 +711,128 @@ impl AgentService {
                     trace.conversation_id
                 ));
             }
+            // Startup may find more durable Turns than a newly lowered limit. Recovered permits
+            // count every survivor, deliberately blocking new root and child admission until the
+            // active count falls below the configured process limit.
+            permits.insert(run_id, self.turn_concurrency_gate.adopt_recovered());
         }
         Ok(())
+    }
+
+    /// Returns the process-local accelerator used by the Agent dispatcher while it observes a
+    /// durable Turn. Callers must inspect SQLite before obtaining this value and once again after
+    /// obtaining it; `Notify` is deliberately not an execution or completion source of truth.
+    pub(crate) fn durable_turn_notification(
+        &self,
+        assistant_message_id: &str,
+    ) -> Arc<tokio::sync::Notify> {
+        let mut notifications = self
+            .durable_turn_notifications
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Arc::clone(
+            notifications
+                .entry(assistant_message_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Notify::new())),
+        )
+    }
+
+    /// Publishes only after the durable Conversation boundary has committed. Notifications may
+    /// be coalesced or lost across restart; every observer therefore re-reads SQLite.
+    pub(super) fn notify_durable_turn_observers(&self, assistant_message_id: &str) {
+        let notification = self
+            .durable_turn_notifications
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(assistant_message_id)
+            .cloned();
+        if let Some(notification) = notification {
+            notification.notify_waiters();
+        }
+    }
+
+    pub(crate) fn turn_concurrency_gate(
+        &self,
+    ) -> crate::application::agent_dispatcher::AgentTurnConcurrencyGate {
+        self.turn_concurrency_gate.clone()
+    }
+
+    pub(super) fn register_turn_concurrency_permit(
+        &self,
+        run_id: &str,
+        permit: crate::application::agent_dispatcher::AgentTurnConcurrencyPermit,
+    ) -> Result<(), AgentServiceError> {
+        let mut permits = self
+            .active_turn_permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if permits.contains_key(run_id) {
+            return Err(
+                format!("Agent Turn {run_id} already owns a global concurrency permit").into(),
+            );
+        }
+        permits.insert(run_id.to_string(), permit);
+        Ok(())
+    }
+
+    pub(super) fn ensure_turn_concurrency_permit(
+        &self,
+        run_id: &str,
+    ) -> Result<(), AgentServiceError> {
+        if self
+            .active_turn_permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(run_id)
+        {
+            return Ok(());
+        }
+        let permit = self
+            .turn_concurrency_gate
+            .try_acquire()
+            .map_err(AgentServiceError::from)?;
+        self.register_turn_concurrency_permit(run_id, permit)
+    }
+
+    pub(super) fn release_turn_concurrency_permit(&self, run_id: &str) {
+        self.active_turn_permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(run_id);
+    }
+
+    pub(crate) fn retain_recovered_turn_concurrency_permit(
+        &self,
+        run_id: &str,
+    ) -> Option<crate::application::agent_dispatcher::AgentTurnConcurrencyPermit> {
+        self.active_turn_permits
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned()
+    }
+
+    /// Called only after conservative Wake recovery atomically committed the terminal trace and
+    /// direct-parent result Outbox. Exact identity checks prevent a stale observer from releasing
+    /// a newer Conversation Turn.
+    pub(crate) fn retire_recovered_turn_after_settlement(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        assistant_message_id: &str,
+    ) {
+        let should_release = self
+            .active_conversation_turns
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(conversation_id)
+            .is_some_and(|active| {
+                active.run_id == run_id && active.assistant_message_id == assistant_message_id
+            });
+        if should_release {
+            self.release_conversation_turn_if_current(conversation_id, run_id);
+            self.release_turn_concurrency_permit(run_id);
+        }
     }
 
     /// Runs exactly one Runtime segment. Initial root/wake execution and approval continuation
@@ -856,6 +1000,9 @@ impl AgentService {
             model_skill_activation_resolver(self.storage.clone(), self.skills.clone()),
         );
         host_services = host_services.with_steer_input(steer_input.clone());
+        host_services = host_services.with_collaboration_inbox(Arc::new(
+            PersistentAgentSamplingBoundaryInbox::new(Arc::clone(&self.storage)),
+        ));
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
         }

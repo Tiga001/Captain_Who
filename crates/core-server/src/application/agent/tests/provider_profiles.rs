@@ -74,6 +74,51 @@ async fn collect_until_done(
     .expect("timed out waiting for Agent terminal event")
 }
 
+async fn wait_for_terminal_agent_wake(
+    storage: &StorageService,
+    wake_id: &str,
+) -> mycopilot_core::AgentWakeRequestRecord {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let wake = storage
+                .get_agent_wake(wake_id)
+                .unwrap()
+                .expect("Wake must remain durable while Dispatcher observes it");
+            if matches!(
+                wake.status,
+                mycopilot_core::AgentWakeStatus::Completed
+                    | mycopilot_core::AgentWakeStatus::Failed
+                    | mycopilot_core::AgentWakeStatus::Interrupted
+                    | mycopilot_core::AgentWakeStatus::OutcomeUnknown
+                    | mycopilot_core::AgentWakeStatus::Cancelled
+            ) {
+                return wake;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timed out waiting for Dispatcher Wake settlement")
+}
+
+struct AdvancingDispatcherClock(std::sync::atomic::AtomicI64);
+
+impl AdvancingDispatcherClock {
+    fn new(initial: i64) -> Self {
+        Self(std::sync::atomic::AtomicI64::new(initial))
+    }
+
+    fn reset(&self, value: i64) {
+        self.0.store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl crate::application::agent_dispatcher::AgentDispatcherClock for AdvancingDispatcherClock {
+    fn now_ms(&self) -> i64 {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 fn provider_message_text(message: &Value) -> String {
     fn collect(value: &Value, output: &mut String) {
         match value {
@@ -92,6 +137,16 @@ fn provider_message_text(message: &Value) -> String {
     let mut output = String::new();
     collect(&message["content"], &mut output);
     output
+}
+
+fn provider_request_message_text(request: &Value) -> String {
+    request["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(provider_message_text)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn save_provider_profile_fixture(
@@ -602,14 +657,6 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
         .unwrap()
         .unwrap();
     assert_eq!(claimed.wake_id, spawn.initial_wake.wake_id);
-    storage
-        .transition_agent_wake(
-            &claimed.wake_id,
-            mycopilot_core::AgentWakeStatus::Claimed,
-            mycopilot_core::AgentWakeStatus::Running,
-            Some(claim_token),
-        )
-        .unwrap();
 
     let service =
         AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
@@ -622,7 +669,8 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
         claim_token.to_string(),
         spawn.collaboration_identity.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_global_permit(service.turn_concurrency_gate().try_acquire().unwrap());
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let turn = service
         .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)
@@ -708,6 +756,447 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     }));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dispatcher_runs_two_persisted_children_and_an_idle_followup_through_the_shared_loop() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for answer in [
+            "First child result.",
+            "Second child result.",
+            "First child follow-up result.",
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(read_provider_request(&mut stream).await);
+            write_provider_stream(
+                &mut stream,
+                json!({ "role": "assistant", "content": answer }),
+                "stop",
+            )
+            .await;
+        }
+        requests
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_provider_profile_fixture(
+        &storage,
+        &format!("http://{address}/v1/chat/completions"),
+        None,
+    );
+    let root_conversation_id = "conversation-dispatcher-closed-loop";
+    let root_agent_id = "agent-dispatcher-closed-loop";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: root_conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Dispatcher closed loop".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: root_agent_id.to_string(),
+            conversation_id: root_conversation_id.to_string(),
+            creation_request_id: "ensure-dispatcher-root".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+
+    let factory =
+        crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage));
+    let first = factory
+        .create_child(&mycopilot_core::CreateChildAgentInput {
+            parent_agent_id: root_agent_id.to_string(),
+            creation_request_id: "spawn-dispatcher-first".to_string(),
+            task_name: "first_review".to_string(),
+            task: "Inspect the first subsystem.".to_string(),
+            template_machine_key: None,
+            explicit_model_id: None,
+            reasoning_effort: None,
+            fork_turns: mycopilot_core::AgentForkTurns::None,
+        })
+        .unwrap();
+    let second = factory
+        .create_child(&mycopilot_core::CreateChildAgentInput {
+            parent_agent_id: root_agent_id.to_string(),
+            creation_request_id: "spawn-dispatcher-second".to_string(),
+            task_name: "second_review".to_string(),
+            task: "Inspect the second subsystem.".to_string(),
+            template_machine_key: None,
+            explicit_model_id: None,
+            reasoning_effort: None,
+            fork_turns: mycopilot_core::AgentForkTurns::None,
+        })
+        .unwrap();
+
+    let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        Arc::clone(&storage),
+        None,
+        1,
+    )
+    .unwrap();
+    let gate = service.turn_concurrency_gate();
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let store: Arc<dyn crate::application::agent_dispatcher::AgentDispatcherStore> = Arc::new(
+        crate::application::agent_dispatcher::SqliteAgentDispatcherStore::new(Arc::clone(&storage)),
+    );
+    let executor: Arc<dyn crate::application::agent_dispatcher::AgentWakeTurnExecutionPort> =
+        Arc::new(
+            crate::application::agent_dispatcher::SharedAgentTurnExecutionPort::new(
+                service.clone(),
+                Arc::clone(&storage),
+                notifications,
+            )
+            .with_fallback_poll_interval(Duration::from_millis(5)),
+        );
+    let dispatcher = crate::application::agent_dispatcher::AgentDispatcher::start(
+        store,
+        executor,
+        gate.clone(),
+        crate::application::agent_dispatcher::AgentDispatcherConfig {
+            global_concurrency_limit: 1,
+            wake_lease_renew_interval: Duration::from_millis(50),
+            idle_poll_interval: Duration::from_millis(5),
+            shutdown_grace: Duration::from_secs(2),
+        },
+    )
+    .unwrap();
+    dispatcher.notify_work_available();
+
+    let first_terminal = wait_for_terminal_agent_wake(&storage, &first.initial_wake.wake_id).await;
+    let second_terminal =
+        wait_for_terminal_agent_wake(&storage, &second.initial_wake.wake_id).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatcher.wait_until_turns_settled(),
+    )
+    .await
+    .expect("Dispatcher must release its result-settlement permit");
+    assert_eq!(
+        first_terminal.status,
+        mycopilot_core::AgentWakeStatus::Completed
+    );
+    assert_eq!(
+        second_terminal.status,
+        mycopilot_core::AgentWakeStatus::Completed
+    );
+    assert_eq!(
+        gate.active(),
+        0,
+        "settled children must return the shared slot"
+    );
+
+    for (terminal, child_agent_id) in [
+        (&first_terminal, first.agent.agent_id.as_str()),
+        (&second_terminal, second.agent.agent_id.as_str()),
+    ] {
+        let result = storage
+            .get_agent_message(
+                terminal
+                    .result_message_id
+                    .as_deref()
+                    .expect("completed delegated Wake has a result Outbox"),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.kind, mycopilot_core::AgentMailboxKind::Result);
+        assert_eq!(result.sender_agent_id, child_agent_id);
+        assert_eq!(result.recipient_agent_id, root_agent_id);
+        assert_eq!(
+            result.delivery_status,
+            mycopilot_core::AgentMailboxDeliveryStatus::Queued
+        );
+    }
+    assert!(storage
+        .list_conversation_turn_traces(root_conversation_id)
+        .unwrap()
+        .is_empty());
+    assert!(storage
+        .load_conversation(root_conversation_id)
+        .unwrap()
+        .unwrap()
+        .messages
+        .is_empty());
+    assert!(storage
+        .claim_next_agent_wake(root_agent_id, "root-must-not-auto-wake")
+        .unwrap()
+        .is_none());
+
+    let followup =
+        crate::application::agent_collaboration::AgentMessagingService::new(Arc::clone(&storage))
+            .follow_up(&mycopilot_core::SendAgentMessageRequest {
+                sender_agent_id: root_agent_id.to_string(),
+                recipient_agent_id: first.agent.agent_id.clone(),
+                request_id: "follow-up-first-child".to_string(),
+                content: "Now verify the follow-up condition.".to_string(),
+            })
+            .unwrap();
+    let followup_wake = followup
+        .deferred_wake
+        .expect("follow-up must leave a durable execution opportunity");
+    dispatcher.notify_work_available();
+    let followup_terminal = wait_for_terminal_agent_wake(&storage, &followup_wake.wake_id).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatcher.wait_until_turns_settled(),
+    )
+    .await
+    .expect("follow-up settlement must release its shared permit");
+    assert_eq!(
+        followup_terminal.status,
+        mycopilot_core::AgentWakeStatus::Completed
+    );
+    assert_eq!(gate.active(), 0);
+    assert_eq!(
+        storage
+            .list_conversation_turn_traces(&first.agent.conversation_id)
+            .unwrap()
+            .len(),
+        2,
+        "an idle child must reuse its persistent Conversation for follow-up"
+    );
+    let followup_result = storage
+        .get_agent_message(
+            followup_terminal
+                .result_message_id
+                .as_deref()
+                .expect("follow-up has a result Outbox"),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(followup_result.sender_agent_id, first.agent.agent_id);
+    assert_eq!(followup_result.recipient_agent_id, root_agent_id);
+    assert!(storage
+        .claim_next_agent_wake(root_agent_id, "root-still-must-not-auto-wake")
+        .unwrap()
+        .is_none());
+
+    dispatcher.shutdown().await.unwrap();
+    let requests = model_server.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let request_messages = requests
+        .iter()
+        .map(provider_request_message_text)
+        .collect::<Vec<_>>();
+    assert!(
+        request_messages[..2]
+            .iter()
+            .any(|content| content.contains("first subsystem")),
+        "messages={request_messages:?} requests={requests:#?}"
+    );
+    assert!(
+        request_messages[..2]
+            .iter()
+            .any(|content| content.contains("second subsystem")),
+        "messages={request_messages:?} requests={requests:#?}"
+    );
+    assert!(
+        request_messages[2].contains("Now verify the follow-up condition."),
+        "{request_messages:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_followup() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_provider_request(&mut stream).await;
+        write_provider_stream(
+            &mut stream,
+            json!({ "role": "assistant", "content": "Recovered child follow-up result." }),
+            "stop",
+        )
+        .await;
+        request
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    save_provider_profile_fixture(
+        &storage,
+        &format!("http://{address}/v1/chat/completions"),
+        None,
+    );
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-recovery-root".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Recovery root".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: "agent-recovery-root".to_string(),
+            conversation_id: "conversation-recovery-root".to_string(),
+            creation_request_id: "ensure-recovery-root".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    let child =
+        crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage))
+            .create_child(&mycopilot_core::CreateChildAgentInput {
+                parent_agent_id: "agent-recovery-root".to_string(),
+                creation_request_id: "spawn-recovery-child".to_string(),
+                task_name: "recovery_review".to_string(),
+                task: "Start a potentially side-effecting review.".to_string(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: mycopilot_core::AgentForkTurns::None,
+            })
+            .unwrap();
+
+    let admitted_at = mycopilot_core::storage::now_ms();
+    let claimed = storage
+        .claim_next_dispatchable_agent_wake_at("crashed-host", admitted_at)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.wake_id, child.initial_wake.wake_id);
+    let (conversation, revision) = storage
+        .load_conversation_for_turn(&child.agent.conversation_id)
+        .unwrap();
+    let mut conversation = conversation.unwrap();
+    let revision = revision.unwrap();
+    let run_id = "run-crashed-after-runtime-admission";
+    let assistant_message_id = "assistant-crashed-after-runtime-admission";
+    conversation.messages.push(ChatMessageRecord {
+        id: assistant_message_id.to_string(),
+        role: "assistant".to_string(),
+        content: "Work may have crossed an external side-effect boundary.".to_string(),
+        created_at: admitted_at + 1,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    conversation.updated_at = admitted_at + 1;
+    let trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+        run_id,
+        &child.agent.conversation_id,
+        assistant_message_id,
+    );
+    storage
+        .save_conversation_and_begin_turn_with_preloaded_agent_messages(
+            conversation,
+            Some(revision),
+            Some(&mycopilot_core::TrustedAgentWakeTurnAdmission {
+                agent_id: child.agent.agent_id.clone(),
+                wake_id: claimed.wake_id.clone(),
+                claim_token: claimed.claim_token.clone().unwrap(),
+                source_agent_message_id: claimed.source_agent_message_id.clone().unwrap(),
+            }),
+            &[claimed.source_agent_message_id.clone().unwrap()],
+            &trace,
+            admitted_at + 1,
+            admitted_at + 1,
+        )
+        .unwrap();
+    let running = storage.get_agent_wake(&claimed.wake_id).unwrap().unwrap();
+    assert_eq!(running.status, mycopilot_core::AgentWakeStatus::Running);
+
+    // A fresh AgentService reconstructs both Conversation occupancy and the process-global slot
+    // from the durable in-progress trace. Dispatcher recovery must retire both only after the
+    // outcome_unknown result transaction commits.
+    let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        Arc::clone(&storage),
+        None,
+        1,
+    )
+    .unwrap();
+    let gate = service.turn_concurrency_gate();
+    assert_eq!(gate.active(), 1);
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let store: Arc<dyn crate::application::agent_dispatcher::AgentDispatcherStore> = Arc::new(
+        crate::application::agent_dispatcher::SqliteAgentDispatcherStore::new(Arc::clone(&storage)),
+    );
+    let executor: Arc<dyn crate::application::agent_dispatcher::AgentWakeTurnExecutionPort> =
+        Arc::new(
+            crate::application::agent_dispatcher::SharedAgentTurnExecutionPort::new(
+                service.clone(),
+                Arc::clone(&storage),
+                notifications,
+            )
+            .with_fallback_poll_interval(Duration::from_millis(5)),
+        );
+    let recovery_at = running.lease_expires_at.unwrap();
+    let clock = Arc::new(AdvancingDispatcherClock::new(recovery_at));
+    let dispatcher = crate::application::agent_dispatcher::AgentDispatcher::start_with_clock(
+        store,
+        executor,
+        clock.clone(),
+        gate.clone(),
+        crate::application::agent_dispatcher::AgentDispatcherConfig {
+            global_concurrency_limit: 1,
+            wake_lease_renew_interval: Duration::from_millis(50),
+            idle_poll_interval: Duration::from_millis(5),
+            shutdown_grace: Duration::from_secs(2),
+        },
+    )
+    .unwrap();
+    let recovered = wait_for_terminal_agent_wake(&storage, &claimed.wake_id).await;
+    assert_eq!(
+        recovered.status,
+        mycopilot_core::AgentWakeStatus::OutcomeUnknown
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatcher.wait_until_turns_settled(),
+    )
+    .await
+    .expect("recovery settlement must retire startup occupancy and its counted permit");
+    assert_eq!(gate.active(), 0);
+    clock.reset(mycopilot_core::storage::now_ms());
+
+    let followup =
+        crate::application::agent_collaboration::AgentMessagingService::new(Arc::clone(&storage))
+            .follow_up(&mycopilot_core::SendAgentMessageRequest {
+                sender_agent_id: "agent-recovery-root".to_string(),
+                recipient_agent_id: child.agent.agent_id.clone(),
+                request_id: "follow-up-after-unknown".to_string(),
+                content: "Continue only with a safe read-only check.".to_string(),
+            })
+            .unwrap();
+    let followup_wake = followup.deferred_wake.unwrap();
+    dispatcher.notify_work_available();
+    let completed = wait_for_terminal_agent_wake(&storage, &followup_wake.wake_id).await;
+    assert_eq!(completed.status, mycopilot_core::AgentWakeStatus::Completed);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        dispatcher.wait_until_turns_settled(),
+    )
+    .await
+    .expect("a later child Turn must return the same shared permit");
+    assert_eq!(gate.active(), 0);
+    assert_eq!(
+        storage
+            .list_conversation_turn_traces(&child.agent.conversation_id)
+            .unwrap()
+            .len(),
+        2
+    );
+    dispatcher.shutdown().await.unwrap();
+    let request = model_server.await.unwrap();
+    assert!(provider_request_message_text(&request).contains("safe read-only check"));
+}
+
 #[test]
 fn trusted_child_wake_fails_closed_when_its_selected_model_is_disabled() {
     let fixture = tempdir().unwrap();
@@ -755,14 +1244,7 @@ fn trusted_child_wake_fails_closed_when_its_selected_model_is_disabled() {
         .claim_next_agent_wake(&spawn.agent.agent_id, claim_token)
         .unwrap()
         .unwrap();
-    storage
-        .transition_agent_wake(
-            &spawn.initial_wake.wake_id,
-            mycopilot_core::AgentWakeStatus::Claimed,
-            mycopilot_core::AgentWakeStatus::Running,
-            Some(claim_token),
-        )
-        .unwrap();
+    let service = AgentService::new(Arc::clone(&storage));
     let trusted = TrustedAgentWakeTurnStart::new(
         spawn.initial_wake.wake_id.clone(),
         spawn.agent.agent_id.clone(),
@@ -771,8 +1253,8 @@ fn trusted_child_wake_fails_closed_when_its_selected_model_is_disabled() {
         claim_token.to_string(),
         spawn.collaboration_identity,
     )
-    .unwrap();
-    let service = AgentService::new(Arc::clone(&storage));
+    .unwrap()
+    .with_global_permit(service.turn_concurrency_gate().try_acquire().unwrap());
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let error = service
         .execute_turn(AgentTurnStart::AgentWake(trusted), notifications)

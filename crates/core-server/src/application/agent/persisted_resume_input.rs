@@ -596,6 +596,10 @@ mod tests {
             conversation_id: "conversation-child".to_string(),
             task_name: "review".to_string(),
             task_path: "/root/review".to_string(),
+            source_agent_id: "agent-root".to_string(),
+            source_kind: mycopilot_core::AgentMailboxKind::Task,
+            source_task_name: "root".to_string(),
+            source_task_path: "/root".to_string(),
             source_agent_message_id: "mailbox-task-1".to_string(),
             entrusted_task: "Review the change and report evidence.\nInclude file locations."
                 .to_string(),

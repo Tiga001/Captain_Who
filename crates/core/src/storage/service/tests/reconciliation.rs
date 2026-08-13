@@ -29,6 +29,17 @@ fn current_model_context_for_trace(
                 tool_calls: Vec::new(),
                 is_error: false,
             }),
+            ConversationTurnTraceItem::AgentMailboxDelivery {
+                sequence, content, ..
+            } => Some(crate::ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
             ConversationTurnTraceItem::ToolCall {
                 sequence,
                 call_id,

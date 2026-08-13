@@ -636,7 +636,29 @@ impl StorageService {
         &self,
         conversation: ChatConversationRecord,
         expected_revision: Option<i64>,
-        trusted_agent_id: Option<&str>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+    ) -> Result<ChatConversationRecord, String> {
+        self.save_conversation_and_begin_turn_with_preloaded_agent_messages(
+            conversation,
+            expected_revision,
+            trusted_wake,
+            &[],
+            trace,
+            trace_created_at,
+            trace_updated_at,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_conversation_and_begin_turn_with_preloaded_agent_messages(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        preloaded_agent_message_ids: &[String],
         trace: &ConversationTurnTrace,
         trace_created_at: i64,
         trace_updated_at: i64,
@@ -661,9 +683,9 @@ impl StorageService {
             )
             .optional()
             .map_err(storage_error)?;
-        match (trusted_agent_id, bound_agent.as_ref()) {
-            (Some(expected_agent_id), Some((agent_id, _, lifecycle)))
-                if agent_id == expected_agent_id && lifecycle == "active" => {}
+        match (trusted_wake, bound_agent.as_ref()) {
+            (Some(trusted), Some((agent_id, _, lifecycle)))
+                if agent_id == &trusted.agent_id && lifecycle == "active" => {}
             (Some(_), _) => {
                 return Err(
                     "Trusted Agent Turn no longer owns an active bound Conversation.".to_string(),
@@ -678,6 +700,74 @@ impl StorageService {
             }
             (None, None) => {}
         }
+        let claimed_wake = if let Some(trusted) = trusted_wake {
+            let wake = transaction
+                .query_row(
+                    "SELECT agent_id, source_agent_message_id, status, claim_token,
+                            lease_expires_at, run_id, assistant_message_id
+                     FROM agent_wake_requests WHERE wake_id = ?1",
+                    [&trusted.wake_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(storage_error)?
+                .ok_or_else(|| "Trusted Agent Wake no longer exists.".to_string())?;
+            if wake.0 != trusted.agent_id
+                || wake.1.as_deref() != Some(trusted.source_agent_message_id.as_str())
+                || wake.2 != "claimed"
+                || wake.3.as_deref() != Some(trusted.claim_token.as_str())
+                || wake.4.is_none_or(|deadline| trace_updated_at >= deadline)
+                || wake.5.is_some()
+                || wake.6.is_some()
+            {
+                return Err(
+                    "Trusted Agent Wake claim is stale, mismatched, or already dispatched."
+                        .to_string(),
+                );
+            }
+            let source_is_projected = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1
+                         FROM agent_mailbox_messages AS mailbox
+                         JOIN messages AS projection
+                           ON projection.source_agent_message_id = mailbox.message_id
+                          AND projection.id = mailbox.projection_message_id
+                         JOIN agent_nodes AS recipient
+                           ON recipient.agent_id = mailbox.recipient_agent_id
+                         WHERE mailbox.message_id = ?1
+                           AND mailbox.delivery_status = 'acknowledged'
+                           AND recipient.agent_id = ?2
+                           AND projection.conversation_id = recipient.conversation_id
+                           AND projection.role = 'user'
+                           AND projection.input_origin_kind = 'agent'
+                           AND projection.input_origin_agent_id = mailbox.sender_agent_id
+                           AND projection.content = mailbox.content
+                     )",
+                    rusqlite::params![&trusted.source_agent_message_id, &trusted.agent_id],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage_error)?;
+            if !source_is_projected {
+                return Err(
+                    "Trusted Agent Wake source has not been durably projected and acknowledged."
+                        .to_string(),
+                );
+            }
+            Some(trusted)
+        } else {
+            None
+        };
         let current_revision = transaction
             .query_row(
                 "SELECT revision FROM conversations WHERE id = ?1",
@@ -716,6 +806,45 @@ impl StorageService {
             trace_updated_at,
         )
         .map_err(storage_error)?;
+        agent_delivery_repository::bind_turn_start_messages_in_transaction(
+            &transaction,
+            &crate::BindAgentTurnStartInput {
+                conversation_id: conversation.id.clone(),
+                run_id: trace.run_id.clone(),
+                assistant_message_id: trace.assistant_message_id.clone(),
+                model_batch_index: 1,
+            },
+            preloaded_agent_message_ids,
+            trace_updated_at,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(trusted) = claimed_wake {
+            let changed = transaction
+                .execute(
+                    "UPDATE agent_wake_requests
+                     SET status = 'running', status_revision = status_revision + 1,
+                         run_id = ?1, assistant_message_id = ?2, started_at = ?3
+                     WHERE wake_id = ?4 AND agent_id = ?5 AND status = 'claimed'
+                       AND claim_token = ?6 AND source_agent_message_id = ?7
+                       AND lease_expires_at > ?3 AND run_id IS NULL
+                       AND assistant_message_id IS NULL",
+                    rusqlite::params![
+                        &trace.run_id,
+                        &trace.assistant_message_id,
+                        trace_updated_at,
+                        &trusted.wake_id,
+                        &trusted.agent_id,
+                        &trusted.claim_token,
+                        &trusted.source_agent_message_id,
+                    ],
+                )
+                .map_err(storage_error)?;
+            if changed != 1 {
+                return Err(
+                    "Trusted Agent Wake lost its claim during atomic Turn admission.".to_string(),
+                );
+            }
+        }
         transaction.commit().map_err(storage_error)?;
         Ok(conversation)
     }
@@ -1213,6 +1342,7 @@ fn project_guidance_timeline(
                     }
                 }
                 ConversationTurnTraceItem::ToolResult { .. }
+                | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
         }

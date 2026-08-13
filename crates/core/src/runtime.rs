@@ -402,6 +402,7 @@ impl AgentRuntime {
             command_runtime_profile_resolver,
             command_session_executor,
             steer_input,
+            collaboration_inbox,
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -803,6 +804,36 @@ impl AgentRuntime {
                                     &mut run_context,
                                 )?;
                             }
+                        }
+                    }
+                    if let (Some(inbox), Some(conversation_id), Some(assistant_message_id)) = (
+                        collaboration_inbox.as_ref(),
+                        trace_conversation_id.as_deref(),
+                        trace_assistant_message_id.as_deref(),
+                    ) {
+                        let expected_next_trace_sequence = conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .next_sequence();
+                        if let Some(delivery) = inbox.bind_for_model_batch(
+                            AgentSamplingBoundaryRequest {
+                                conversation_id: conversation_id.to_string(),
+                                run_id: run_id.clone(),
+                                assistant_message_id: assistant_message_id.to_string(),
+                                model_batch_index: u64::try_from(
+                                    next_model_request_index.saturating_add(1),
+                                )
+                                .unwrap_or(u64::MAX),
+                                expected_next_trace_sequence,
+                            },
+                        )? {
+                            apply_agent_mailbox_delivery(
+                                &delivery,
+                                &mut active_context,
+                                &conversation_trace,
+                                trace_observer.as_ref(),
+                                assistant_message_id,
+                            )?;
                         }
                     }
                     let model_request_index = next_model_request_index;
@@ -3829,6 +3860,58 @@ fn apply_steer_inputs(
     }
 
     Ok(baseline)
+}
+
+fn apply_agent_mailbox_delivery(
+    delivery: &AgentSamplingBoundaryDelivery,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    assistant_message_id: &str,
+) -> AgentResult<()> {
+    let mut newly_recorded = Vec::new();
+    {
+        let mut recorder = conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for message in &delivery.messages {
+            if let Some(content) = recorder
+                .record_agent_mailbox_delivery(
+                    message.trace_sequence,
+                    &delivery.receipt_id,
+                    &message.message_id,
+                    &message.sender_agent_id,
+                    &message.sender_task_name,
+                    &message.sender_task_path,
+                    message.kind,
+                    &message.content,
+                    message.created_at,
+                )
+                .map_err(AgentError::new)?
+            {
+                newly_recorded.push((message.clone(), content));
+            }
+        }
+    }
+    if newly_recorded.is_empty() {
+        return Ok(());
+    }
+    publish_trace_snapshot(conversation_trace, trace_observer)?;
+    for (message, content) in newly_recorded {
+        active_context.push(ContextItem::new(
+            LlmMessage::text(LlmMessageRole::User, content),
+            with_trace_origin(
+                ContextMetadata::new(
+                    ContextSource::UserGuidance,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+                Some(assistant_message_id),
+                Some(message.trace_sequence),
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn with_trace_origin(

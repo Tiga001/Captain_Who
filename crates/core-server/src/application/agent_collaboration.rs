@@ -1,16 +1,19 @@
 //! Application boundary for persistent Agent collaboration facts.
 //!
-//! This service deliberately does not own or call the Agent Loop. Round 2 can compose a unified
-//! Turn executor beside this boundary; the graph repository never becomes a Runtime dependency.
+//! This service deliberately does not own or call the Agent Loop. The unified Turn executor and
+//! Dispatcher compose beside this boundary; the graph repository never becomes a Runtime
+//! dependency.
 
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxMessageRecord,
-    AgentNodeRecord, AgentTemplateError, AgentTemplateRecord, AgentWakeRequestRecord,
-    AgentWakeStatus, ChildAgentSpawnError, ChildAgentSpawnRecord, ConversationMessageOrigin,
+    AgentNodeRecord, AgentSamplingBoundaryDelivery, AgentSamplingBoundaryInbox,
+    AgentSamplingBoundaryMessage, AgentSamplingBoundaryRequest, AgentTemplateError,
+    AgentTemplateRecord, AgentWakeRequestRecord, AgentWakeStatus, BindAgentSafeBoundaryInput,
+    ChildAgentSpawnError, ChildAgentSpawnRecord, ConversationMessageOrigin,
     CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
-    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentWakeWithResultInput, IdempotentCreate,
-    ResolvedAgentTemplateForSpawn, TrustedActiveChildWakeBundle, UpdateAgentTemplateInput,
+    EnqueueAgentWakeInput, EnsureRootAgentInput, IdempotentCreate, ResolvedAgentTemplateForSpawn,
+    TrustedActiveChildWakeBundle, UpdateAgentTemplateInput,
 };
 use std::sync::Arc;
 
@@ -23,6 +26,66 @@ pub(crate) struct AgentCollaborationService {
     storage: Arc<StorageService>,
 }
 
+/// Storage-backed implementation of Core's single pre-sampling collaboration port. Installing it
+/// for every Runtime segment is harmless for legacy Conversations: unbound Conversations return
+/// `None`, while graph-bound root and child Turns share the same exact admission path.
+pub(crate) struct PersistentAgentSamplingBoundaryInbox {
+    storage: Arc<StorageService>,
+}
+
+impl PersistentAgentSamplingBoundaryInbox {
+    pub(crate) fn new(storage: Arc<StorageService>) -> Self {
+        Self { storage }
+    }
+}
+
+impl AgentSamplingBoundaryInbox for PersistentAgentSamplingBoundaryInbox {
+    fn bind_for_model_batch(
+        &self,
+        request: AgentSamplingBoundaryRequest,
+    ) -> mycopilot_core::AgentResult<Option<AgentSamplingBoundaryDelivery>> {
+        let delivery = self
+            .storage
+            .bind_agent_safe_boundary(&BindAgentSafeBoundaryInput {
+                conversation_id: request.conversation_id,
+                run_id: request.run_id,
+                assistant_message_id: request.assistant_message_id,
+                model_batch_index: request.model_batch_index,
+                expected_next_trace_sequence: request.expected_next_trace_sequence,
+                maximum: 1_024,
+            })
+            .map_err(|error| mycopilot_core::AgentError::new(error.to_string()))?;
+        delivery
+            .map(|delivery| {
+                let messages = delivery
+                    .messages
+                    .into_iter()
+                    .map(|message| {
+                        Ok(AgentSamplingBoundaryMessage {
+                            trace_sequence: message.trace_sequence.ok_or_else(|| {
+                                mycopilot_core::AgentError::new(
+                                    "safe-boundary receipt item is missing trace identity",
+                                )
+                            })?,
+                            message_id: message.message_id,
+                            sender_agent_id: message.sender_agent_id,
+                            sender_task_name: message.sender_task_name,
+                            sender_task_path: message.sender_task_path,
+                            kind: message.kind,
+                            content: message.content,
+                            created_at: message.created_at,
+                        })
+                    })
+                    .collect::<mycopilot_core::AgentResult<Vec<_>>>()?;
+                Ok(AgentSamplingBoundaryDelivery {
+                    receipt_id: delivery.receipt.receipt_id,
+                    messages,
+                })
+            })
+            .transpose()
+    }
+}
+
 /// The only application entry point allowed to create child Agent identities.
 ///
 /// It intentionally has no Runtime or transport dependency. A dispatcher can later consume the
@@ -31,6 +94,60 @@ pub(crate) struct AgentCollaborationService {
 #[derive(Clone)]
 pub(crate) struct ChildAgentFactory {
     storage: Arc<StorageService>,
+}
+
+/// Narrow Host/application boundary for durable Agent-to-Agent communication. Transport and model
+/// tools are intentionally absent until Round 4.
+#[derive(Clone)]
+pub(crate) struct AgentMessagingService {
+    storage: Arc<StorageService>,
+    wait_notifications: crate::application::agent_wait::AgentWaitNotifications,
+}
+
+impl AgentMessagingService {
+    pub(crate) fn new(storage: Arc<StorageService>) -> Self {
+        Self {
+            storage,
+            wait_notifications: crate::application::agent_wait::shared_agent_wait_notifications(),
+        }
+    }
+
+    pub(crate) fn send_message(
+        &self,
+        input: &mycopilot_core::SendAgentMessageRequest,
+    ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        let dispatch = self.storage.send_agent_message(input)?;
+        self.wait_notifications
+            .notify_caller(&dispatch.message.recipient_agent_id);
+        Ok(dispatch)
+    }
+
+    pub(crate) fn follow_up(
+        &self,
+        input: &mycopilot_core::SendAgentMessageRequest,
+    ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        let dispatch = self.storage.follow_up_agent(input)?;
+        self.wait_notifications
+            .notify_caller(&dispatch.message.recipient_agent_id);
+        Ok(dispatch)
+    }
+
+    pub(crate) fn finish_turn_result(
+        &self,
+        input: &mycopilot_core::FinishAgentTurnResultInput,
+    ) -> Result<mycopilot_core::AgentTurnResultSettlement, AgentGraphError> {
+        let settlement = self.storage.finish_agent_turn_with_result(input)?;
+        self.wait_notifications
+            .notify_caller(&settlement.result_message.recipient_agent_id);
+        Ok(settlement)
+    }
+
+    pub(crate) fn display_status(
+        &self,
+        agent_id: &str,
+    ) -> Result<mycopilot_core::AgentDisplayStatusSnapshot, AgentGraphError> {
+        self.storage.get_agent_display_status(agent_id)
+    }
 }
 
 impl ChildAgentFactory {
@@ -53,6 +170,21 @@ impl ChildAgentFactory {
         claim_token: &str,
     ) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
         self.storage.resolve_running_child_agent_wake(
+            agent_id,
+            wake_id,
+            source_agent_message_id,
+            claim_token,
+        )
+    }
+
+    pub(crate) fn resolve_trusted_claimed_wake(
+        &self,
+        agent_id: &str,
+        wake_id: &str,
+        source_agent_message_id: &str,
+        claim_token: &str,
+    ) -> Result<ChildAgentSpawnRecord, AgentGraphError> {
+        self.storage.resolve_claimed_agent_wake(
             agent_id,
             wake_id,
             source_agent_message_id,
@@ -223,13 +355,6 @@ impl AgentCollaborationService {
     ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
         self.storage
             .transition_agent_wake(wake_id, expected_status, requested_status, claim_token)
-    }
-
-    pub(crate) fn finish_wake_with_result(
-        &self,
-        input: &FinishAgentWakeWithResultInput,
-    ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
-        self.storage.finish_agent_wake_with_result(input)
     }
 
     pub(crate) fn create_template(

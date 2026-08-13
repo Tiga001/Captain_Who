@@ -104,7 +104,7 @@ pub(crate) struct ModelToolResultGate {
 }
 
 impl ModelToolResultGate {
-    pub(super) fn new(budget: ContextTextBudget) -> Self {
+    pub(crate) fn new(budget: ContextTextBudget) -> Self {
         assert_eq!(
             budget.max_tokens(),
             MODEL_TOOL_RESULT_MAX_TOKENS,

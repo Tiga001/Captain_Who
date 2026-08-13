@@ -207,17 +207,66 @@ impl StorageService {
         )
     }
 
+    pub fn claim_next_dispatchable_agent_wake(
+        &self,
+        claim_token: &str,
+    ) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+        self.claim_next_dispatchable_agent_wake_at(claim_token, now_ms())
+    }
+
+    pub fn claim_next_dispatchable_agent_wake_at(
+        &self,
+        claim_token: &str,
+        claimed_at: i64,
+    ) -> Result<Option<AgentWakeRequestRecord>, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::claim_next_dispatchable_agent_wake(
+            &mut connection,
+            claim_token,
+            claimed_at,
+        )
+    }
+
+    pub fn recover_agent_wakes(
+        &self,
+        recovery_token_prefix: &str,
+    ) -> Result<crate::AgentWakeRecoveryBatch, AgentGraphError> {
+        self.recover_agent_wakes_at(recovery_token_prefix, now_ms())
+    }
+
+    pub fn recover_agent_wakes_at(
+        &self,
+        recovery_token_prefix: &str,
+        recovered_at: i64,
+    ) -> Result<crate::AgentWakeRecoveryBatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::recover_agent_wakes(
+            &mut connection,
+            recovery_token_prefix,
+            recovered_at,
+        )
+    }
+
     pub fn renew_agent_wake_lease(
         &self,
         wake_id: &str,
         claim_token: &str,
+    ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
+        self.renew_agent_wake_lease_at(wake_id, claim_token, now_ms())
+    }
+
+    pub fn renew_agent_wake_lease_at(
+        &self,
+        wake_id: &str,
+        claim_token: &str,
+        renewed_at: i64,
     ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
         let mut connection = self.state.connection().map_err(unavailable)?;
         agent_graph_repository::renew_agent_wake_lease(
             &mut connection,
             wake_id,
             claim_token,
-            now_ms(),
+            renewed_at,
         )
     }
 
@@ -228,9 +277,7 @@ impl StorageService {
         requested_status: AgentWakeStatus,
         claim_token: Option<&str>,
     ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
-        let mut connection = self.state.connection().map_err(unavailable)?;
-        agent_graph_repository::transition_agent_wake(
-            &mut connection,
+        self.transition_agent_wake_at(
             wake_id,
             expected_status,
             requested_status,
@@ -239,11 +286,108 @@ impl StorageService {
         )
     }
 
+    pub fn transition_agent_wake_at(
+        &self,
+        wake_id: &str,
+        expected_status: AgentWakeStatus,
+        requested_status: AgentWakeStatus,
+        claim_token: Option<&str>,
+        transitioned_at: i64,
+    ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::transition_agent_wake(
+            &mut connection,
+            wake_id,
+            expected_status,
+            requested_status,
+            claim_token,
+            transitioned_at,
+        )
+    }
+
     pub fn finish_agent_wake_with_result(
         &self,
         input: &FinishAgentWakeWithResultInput,
     ) -> Result<AgentWakeRequestRecord, AgentGraphError> {
+        // Round-1 compatibility only. Production Dispatcher/Host code must use
+        // `finish_agent_turn_with_result`; the application layer intentionally does not expose
+        // this caller-shaped payload API.
         let mut connection = self.state.connection().map_err(unavailable)?;
         agent_graph_repository::finish_agent_wake_with_result(&mut connection, input, now_ms())
+    }
+
+    pub fn resolve_claimed_agent_wake(
+        &self,
+        agent_id: &str,
+        wake_id: &str,
+        source_agent_message_id: &str,
+        claim_token: &str,
+    ) -> Result<crate::ChildAgentSpawnRecord, AgentGraphError> {
+        let connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::resolve_claimed_agent_wake_bundle(
+            &connection,
+            agent_id,
+            wake_id,
+            source_agent_message_id,
+            claim_token,
+            now_ms(),
+        )
+    }
+
+    pub fn send_agent_message(
+        &self,
+        input: &crate::SendAgentMessageRequest,
+    ) -> Result<crate::AgentMessageDispatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::send_agent_message(&mut connection, input, now_ms())
+    }
+
+    pub fn follow_up_agent(
+        &self,
+        input: &crate::SendAgentMessageRequest,
+    ) -> Result<crate::AgentMessageDispatch, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::follow_up_agent(&mut connection, input, now_ms())
+    }
+
+    pub fn finish_agent_turn_with_result(
+        &self,
+        input: &crate::FinishAgentTurnResultInput,
+    ) -> Result<crate::AgentTurnResultSettlement, AgentGraphError> {
+        self.finish_agent_turn_with_result_at(input, now_ms())
+    }
+
+    pub fn finish_agent_turn_with_result_at(
+        &self,
+        input: &crate::FinishAgentTurnResultInput,
+        completed_at: i64,
+    ) -> Result<crate::AgentTurnResultSettlement, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::finish_agent_turn_with_result(&mut connection, input, completed_at)
+    }
+
+    pub fn interrupt_agent_execution_at(
+        &self,
+        caller_agent_id: &str,
+        target_agent_id: &str,
+        request_id: &str,
+        interrupted_at: i64,
+    ) -> Result<crate::InterruptAgentExecutionOutcome, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::interrupt_agent_execution(
+            &mut connection,
+            caller_agent_id,
+            target_agent_id,
+            request_id,
+            interrupted_at,
+        )
+    }
+
+    pub fn get_agent_display_status(
+        &self,
+        agent_id: &str,
+    ) -> Result<crate::AgentDisplayStatusSnapshot, AgentGraphError> {
+        let connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::get_agent_display_status(&connection, agent_id)
     }
 }

@@ -594,6 +594,10 @@ fn collaboration_identity(
         conversation_id: agent.conversation_id.clone(),
         task_name: agent.task_name.clone(),
         task_path: agent.task_path.clone(),
+        source_agent_id: parent.agent_id.clone(),
+        source_kind: task_message.kind,
+        source_task_name: parent.task_name.clone(),
+        source_task_path: parent.task_path.clone(),
         source_agent_message_id: task_message.message_id.clone(),
         entrusted_task: task_message.content.clone(),
         template_instructions: agent

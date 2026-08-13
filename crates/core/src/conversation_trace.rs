@@ -307,7 +307,8 @@ fn validate_model_item_against_trace(
                 && item.tool_calls.is_empty()
                 && !item.content.trim().is_empty()
         }
-        ConversationTurnTraceItem::UserGuidance { .. } => {
+        ConversationTurnTraceItem::UserGuidance { .. }
+        | ConversationTurnTraceItem::AgentMailboxDelivery { .. } => {
             item.role == "user"
                 && item.tool_call_id.is_none()
                 && item.tool_calls.is_empty()
@@ -364,6 +365,21 @@ pub enum ConversationTurnTraceItem {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<ConversationTraceAttachment>,
+        created_at: i64,
+        truncated: bool,
+    },
+    /// Host-authenticated collaboration input admitted at the single pre-sampling boundary.
+    /// The Mailbox row remains transport truth; this item proves which Turn/model timeline
+    /// consumed it.
+    AgentMailboxDelivery {
+        sequence: u64,
+        receipt_id: String,
+        message_id: String,
+        sender_agent_id: String,
+        sender_task_name: String,
+        sender_task_path: String,
+        kind: crate::AgentMailboxKind,
+        content: String,
         created_at: i64,
         truncated: bool,
     },
@@ -460,6 +476,7 @@ impl ConversationTurnTraceItem {
         match self {
             Self::AssistantNarration { sequence, .. }
             | Self::UserGuidance { sequence, .. }
+            | Self::AgentMailboxDelivery { sequence, .. }
             | Self::ToolCall { sequence, .. }
             | Self::ToolResult { sequence, .. }
             | Self::CommandSessionLifecycle { sequence, .. } => *sequence,
@@ -470,6 +487,7 @@ impl ConversationTurnTraceItem {
         match self {
             Self::AssistantNarration { .. } => "assistant_narration",
             Self::UserGuidance { .. } => "user_guidance",
+            Self::AgentMailboxDelivery { .. } => "agent_mailbox_delivery",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::CommandSessionLifecycle { .. } => "command_session_lifecycle",
@@ -596,6 +614,37 @@ impl ConversationTurnTrace {
                             ensure_no_binary_text("user guidance attachment MIME type", mime_type)?;
                         }
                     }
+                }
+                ConversationTurnTraceItem::AgentMailboxDelivery {
+                    receipt_id,
+                    message_id,
+                    sender_agent_id,
+                    sender_task_name,
+                    sender_task_path,
+                    content,
+                    created_at,
+                    ..
+                } => {
+                    if pending_call.is_some() {
+                        return Err(
+                            "conversation trace Agent mailbox delivery cannot split a tool exchange"
+                                .to_string(),
+                        );
+                    }
+                    if receipt_id.trim().is_empty()
+                        || message_id.trim().is_empty()
+                        || sender_agent_id.trim().is_empty()
+                        || sender_task_name.trim().is_empty()
+                        || sender_task_path.trim().is_empty()
+                        || content.trim().is_empty()
+                        || *created_at < 0
+                    {
+                        return Err(
+                            "conversation trace Agent mailbox delivery identity is invalid"
+                                .to_string(),
+                        );
+                    }
+                    ensure_no_binary_text("Agent mailbox delivery", content)?;
                 }
                 ConversationTurnTraceItem::ToolCall {
                     call_id,
@@ -1243,7 +1292,11 @@ pub fn conversation_trace_snapshot_with_recovered_tool_result(
             truncated: trace.truncated,
         });
     let model_result = crate::tools::model_projection_for_persisted_continuation(result);
-    let model_observation = render_tool_observation(&model_result);
+    let model_observation = crate::context::ModelToolResultGate::new(
+        crate::context::ContextTextBudget::heuristic(crate::context::MODEL_TOOL_RESULT_MAX_TOKENS),
+    )
+    .project(&call.id, !model_result.ok, &model_result, None)
+    .content;
     record_model_tool_exchange_with_projection(
         &mut recorder,
         &call,
@@ -1602,7 +1655,7 @@ impl ConversationTraceRecorder {
         }
     }
 
-    fn from_durable_snapshot(snapshot: ConversationTraceSnapshot) -> Self {
+    pub(crate) fn from_durable_snapshot(snapshot: ConversationTraceSnapshot) -> Self {
         let inferred_next = snapshot
             .items
             .iter()
@@ -1830,6 +1883,116 @@ impl ConversationTraceRecorder {
         });
         self.truncated |= content_redacted || attachment_redacted;
         Some(sequence)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_agent_mailbox_delivery(
+        &mut self,
+        expected_sequence: u64,
+        receipt_id: &str,
+        message_id: &str,
+        sender_agent_id: &str,
+        sender_task_name: &str,
+        sender_task_path: &str,
+        kind: crate::AgentMailboxKind,
+        content: &str,
+        created_at: i64,
+    ) -> Result<Option<String>, String> {
+        let content = content.trim();
+        if receipt_id.trim().is_empty()
+            || message_id.trim().is_empty()
+            || sender_agent_id.trim().is_empty()
+            || sender_task_name.trim().is_empty()
+            || sender_task_path.trim().is_empty()
+            || content.is_empty()
+            || created_at < 0
+        {
+            return Err("Agent mailbox delivery identity is invalid".to_string());
+        }
+        let (expected_envelope, envelope_truncated) = project_agent_mailbox_model_envelope(
+            sender_agent_id,
+            sender_task_name,
+            sender_task_path,
+            kind,
+            content,
+        )?;
+        if let Some(existing) = self.items.iter().find(|item| {
+            matches!(
+                item,
+                ConversationTurnTraceItem::AgentMailboxDelivery {
+                    message_id: existing_message,
+                    ..
+                } if existing_message == message_id
+            )
+        }) {
+            return match existing {
+                ConversationTurnTraceItem::AgentMailboxDelivery {
+                    sequence,
+                    receipt_id: existing_receipt,
+                    message_id: existing_message,
+                    sender_agent_id: existing_sender,
+                    sender_task_name: existing_task_name,
+                    sender_task_path: existing_task_path,
+                    kind: existing_kind,
+                    content: existing_content,
+                    created_at: existing_created_at,
+                    ..
+                } if *sequence == expected_sequence
+                    && existing_receipt == receipt_id
+                    && existing_message == message_id
+                    && existing_sender == sender_agent_id
+                    && existing_task_name == sender_task_name
+                    && existing_task_path == sender_task_path
+                    && *existing_kind == kind
+                    && existing_content == &expected_envelope
+                    && *existing_created_at == created_at =>
+                {
+                    Ok(None)
+                }
+                _ => Err("Agent mailbox delivery identity conflicts with the trace".to_string()),
+            };
+        }
+        if self.next_sequence != expected_sequence {
+            return Err(format!(
+                "Agent mailbox delivery expected trace sequence {expected_sequence}, current is {}",
+                self.next_sequence
+            ));
+        }
+        if matches!(
+            self.items.last(),
+            Some(ConversationTurnTraceItem::ToolCall { .. })
+        ) {
+            return Err(
+                "Agent mailbox delivery cannot split an unresolved tool exchange".to_string(),
+            );
+        }
+        let (content, sanitizer_truncated) = sanitize_text(&expected_envelope);
+        let truncated = envelope_truncated || sanitizer_truncated;
+        self.items
+            .push(ConversationTurnTraceItem::AgentMailboxDelivery {
+                sequence: expected_sequence,
+                receipt_id: receipt_id.to_string(),
+                message_id: message_id.to_string(),
+                sender_agent_id: sender_agent_id.to_string(),
+                sender_task_name: sender_task_name.to_string(),
+                sender_task_path: sender_task_path.to_string(),
+                kind,
+                content: content.clone(),
+                created_at,
+                truncated,
+            });
+        self.record_model_message(
+            expected_sequence,
+            0,
+            &LlmMessage::text(crate::llm::LlmMessageRole::User, content.clone()),
+        )?;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.truncated |= truncated;
+        Ok(Some(content))
+    }
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
     }
 
     #[cfg(test)]
@@ -2270,6 +2433,34 @@ fn project_durable_trace_items(
                     truncated: item_truncated,
                 }
             }
+            ConversationTurnTraceItem::AgentMailboxDelivery {
+                sequence,
+                receipt_id,
+                message_id,
+                sender_agent_id,
+                sender_task_name,
+                sender_task_path,
+                kind,
+                content,
+                created_at,
+                truncated,
+            } => {
+                let (content, content_truncated) = project_user_guidance(content);
+                let item_truncated = *truncated || content_truncated;
+                trace_truncated |= item_truncated;
+                ConversationTurnTraceItem::AgentMailboxDelivery {
+                    sequence: *sequence,
+                    receipt_id: receipt_id.clone(),
+                    message_id: message_id.clone(),
+                    sender_agent_id: sender_agent_id.clone(),
+                    sender_task_name: sender_task_name.clone(),
+                    sender_task_path: sender_task_path.clone(),
+                    kind: *kind,
+                    content,
+                    created_at: *created_at,
+                    truncated: item_truncated,
+                }
+            }
             ConversationTurnTraceItem::ToolCall {
                 sequence,
                 call_id,
@@ -2522,6 +2713,67 @@ fn sanitize_optional_text(value: Option<&str>) -> (Option<String>, bool) {
         .map(sanitize_text)
         .map(|(value, redacted)| (Some(value), redacted))
         .unwrap_or((None, false))
+}
+
+/// Canonical model-visible wrapper for a Host-authenticated collaboration fact. Keeping this in
+/// the shared trace layer guarantees the live Context, durable model log, and history replay use
+/// byte-identical identity framing while the Mailbox retains the original payload unchanged.
+pub(crate) const AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES: usize = 32 * 1_024;
+
+/// Produces the one canonical model-visible representation used by the live Runtime, durable
+/// trace, checkpoint/resume and history replay. The Mailbox payload remains untouched; only this
+/// projection is deterministically bounded.
+pub(crate) fn project_agent_mailbox_model_envelope(
+    sender_agent_id: &str,
+    sender_task_name: &str,
+    sender_task_path: &str,
+    kind: crate::AgentMailboxKind,
+    payload: &str,
+) -> Result<(String, bool), String> {
+    const SUFFIX: &str = "\n...[agent mailbox payload truncated]";
+    let encode = |payload: &str, truncated: bool| {
+        serde_json::to_string(&serde_json::json!({
+            "type": "agent_collaboration_input",
+            "origin": "agent",
+            "isHuman": false,
+            "senderAgentId": sender_agent_id,
+            "senderTaskName": sender_task_name,
+            "senderTaskPath": sender_task_path,
+            "kind": kind.as_str(),
+            "payload": payload,
+            "payloadTruncated": truncated,
+        }))
+        .map_err(|error| format!("cannot encode Agent collaboration envelope: {error}"))
+    };
+    let full = encode(payload, false)?;
+    if full.len() <= AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES {
+        return Ok((full, false));
+    }
+    let boundaries = std::iter::once(0)
+        .chain(payload.char_indices().map(|(index, _)| index).skip(1))
+        .chain(std::iter::once(payload.len()))
+        .collect::<Vec<_>>();
+    let mut low = 0usize;
+    let mut high = boundaries.len().saturating_sub(1);
+    let mut best = String::new();
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        let boundary = boundaries[middle];
+        let projected = format!("{}{}", &payload[..boundary], SUFFIX);
+        let encoded = encode(&projected, true)?;
+        if encoded.len() <= AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES {
+            best = encoded;
+            low = middle.saturating_add(1);
+        } else if middle == 0 {
+            break;
+        } else {
+            high = middle.saturating_sub(1);
+        }
+    }
+    if best.is_empty() {
+        return Err("Agent collaboration identity exceeds the model envelope budget".to_string());
+    }
+    Ok((best, true))
 }
 
 fn sanitize_text(value: &str) -> (String, bool) {
@@ -3791,5 +4043,81 @@ mod tests {
         assert_eq!(durable_operation["filePath"], "src/main.rs");
         assert_eq!(durable_operation["additions"], 1);
         assert_eq!(durable_operation["deletions"], 1);
+    }
+
+    #[test]
+    fn collaboration_receipt_can_cover_multiple_fifo_messages_with_exact_model_envelopes() {
+        let mut recorder = ConversationTraceRecorder::default();
+        let first = recorder
+            .record_agent_mailbox_delivery(
+                0,
+                "receipt-1",
+                "message-1",
+                "agent-parent",
+                "Parent",
+                "/root",
+                crate::AgentMailboxKind::Followup,
+                "  first payload  ",
+                1,
+            )
+            .unwrap()
+            .unwrap();
+        let second = recorder
+            .record_agent_mailbox_delivery(
+                1,
+                "receipt-1",
+                "message-2",
+                "agent-child",
+                "Child",
+                "/root/child",
+                crate::AgentMailboxKind::Result,
+                "second\u{0007}payload",
+                2,
+            )
+            .unwrap()
+            .unwrap();
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.items.len(), 2);
+        assert_eq!(snapshot.model_context_items.len(), 2);
+        assert_eq!(snapshot.model_context_items[0].content, first);
+        assert_eq!(snapshot.model_context_items[1].content, second);
+        assert_eq!(
+            serde_json::from_str::<Value>(&first).unwrap()["payload"],
+            "first payload"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&second).unwrap()["origin"],
+            "agent"
+        );
+    }
+
+    #[test]
+    fn collaboration_model_envelope_is_utf8_safe_deterministic_and_bounded() {
+        let payload = "蒙".repeat(400_000);
+        let first = project_agent_mailbox_model_envelope(
+            "agent-parent",
+            "Parent",
+            "/root",
+            crate::AgentMailboxKind::Followup,
+            &payload,
+        )
+        .unwrap();
+        let second = project_agent_mailbox_model_envelope(
+            "agent-parent",
+            "Parent",
+            "/root",
+            crate::AgentMailboxKind::Followup,
+            &payload,
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert!(first.1);
+        assert!(first.0.len() <= AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES);
+        let envelope: Value = serde_json::from_str(&first.0).unwrap();
+        assert_eq!(envelope["payloadTruncated"], true);
+        assert!(envelope["payload"]
+            .as_str()
+            .unwrap()
+            .ends_with("...[agent mailbox payload truncated]"));
     }
 }

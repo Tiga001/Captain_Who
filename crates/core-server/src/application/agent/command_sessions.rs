@@ -1447,6 +1447,106 @@ impl AgentCommandSessionRegistry {
             .is_some()
     }
 
+    /// Installs a process-free live-session double around the production Condvar wait path. The
+    /// durable Session row is created separately by the test, so cross-domain tests exercise the
+    /// real Registry waiter and SQLite repository without spawning a shell process.
+    #[cfg(test)]
+    pub(super) fn install_wait_only_test_session(
+        &self,
+        session_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        run_id: &str,
+        call_id: &str,
+    ) {
+        let session_id =
+            CommandSessionId::parse(session_id).expect("valid test command session id");
+        let session = Arc::new(HostCommandSession {
+            owner: CommandSessionOwner {
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                origin_run_id: run_id.to_string(),
+                call_id: call_id.to_string(),
+                project_id: None,
+            },
+            authorization_source: CommandAuthorizationSource::ExplicitUser,
+            approval_provenance: json!({"decision":"approved"}),
+            permission_provenance: json!({"mode":"test"}),
+            notifications: None,
+            state: Mutex::new(HostCommandSessionState {
+                session_id: Some(session_id.clone()),
+                handoff: HandoffState::Adopted,
+                durable_start: DurableStartState::Ready,
+                terminal: None,
+                file_effect_guard: None,
+                persistence_error: None,
+                terminal_settled: false,
+                terminal_archive_ref: None,
+                terminal_settlement_ready: true,
+                output_persistence_truncated: false,
+                persisted_sequence: 0,
+                admission_lease: None,
+            }),
+            handoff_settlement_fence: Mutex::new(()),
+            terminal_settlement_fence: Mutex::new(()),
+            changed: Condvar::new(),
+        });
+        lock(&self.inner.sessions).insert(session_id.to_string(), session);
+    }
+
+    #[cfg(test)]
+    pub(super) fn signal_wait_only_test_terminal(&self, session_id: &str) {
+        let session = self
+            .live_session(session_id)
+            .expect("installed test command session");
+        let parsed = CommandSessionId::parse(session_id).expect("valid test command session id");
+        let terminal = CommandTerminalResult {
+            snapshot: CoreSessionSnapshot {
+                session_id: parsed,
+                scope_id: CommandSessionScopeId::new("dual-wait-test").unwrap(),
+                state: CommandSessionState::Exited { exit_code: Some(0) },
+                started_at: 1,
+                ended_at: Some(2),
+                exit_code: Some(0),
+                latest_output_sequence: 0,
+                output_truncated: false,
+                projection: mycopilot_core::command::CommandSessionProjection {
+                    command: "deterministic fake command".to_string(),
+                    cwd: "/tmp".to_string(),
+                },
+                error: None,
+            },
+            execution: AgentCommandExecutionResult {
+                outputs: Vec::new(),
+                command: "deterministic fake command".to_string(),
+                cwd: "/tmp".to_string(),
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+                duration_ms: 1,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                output_capture: Default::default(),
+                stdout_spool: Default::default(),
+                stderr_spool: Default::default(),
+                error: None,
+                policy_evaluation: None,
+                artifact_observation: None,
+                input_files: Vec::new(),
+                runtime: None,
+                managed_outputs: None,
+                authoritative_archive_ref: None,
+                history_open: None,
+            },
+        };
+        let mut state = lock(&session.state);
+        state.terminal = Some(terminal);
+        state.terminal_settled = true;
+        session.changed.notify_all();
+    }
+
     #[cfg(test)]
     pub(super) fn retained_live_session_count(&self) -> usize {
         lock(&self.inner.sessions).len()

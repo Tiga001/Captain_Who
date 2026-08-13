@@ -17,6 +17,7 @@ enum ConversationTurnInputSource {
         collaboration_identity: Box<AgentCollaborationIdentity>,
         model_snapshot: Box<AgentModelSelectionSnapshot>,
         reasoning_effort_snapshot: Option<mycopilot_core::ReasoningEffort>,
+        wake_admission: Box<mycopilot_core::TrustedAgentWakeTurnAdmission>,
     },
 }
 
@@ -74,6 +75,7 @@ pub(crate) fn prepare_reserved_human_turn(
 /// Prepares a child Turn from the already-acknowledged Mailbox projection. The task remains the
 /// one durable `role=user` projection created by the collaboration transaction; this function
 /// appends only the pending assistant and carries the Host-authenticated identity in RunContext.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_agent_wake_turn(
     storage: &StorageService,
     skills_service: &SkillsService,
@@ -82,6 +84,7 @@ pub(crate) fn prepare_agent_wake_turn(
     run_id: &str,
     existing: ChatConversationRecord,
     expected_revision: i64,
+    wake_admission: mycopilot_core::TrustedAgentWakeTurnAdmission,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
     let model_snapshot = spawn
         .agent
@@ -114,6 +117,7 @@ pub(crate) fn prepare_agent_wake_turn(
             collaboration_identity: Box::new(spawn.collaboration_identity.clone()),
             model_snapshot: Box::new(model_snapshot),
             reasoning_effort_snapshot: spawn.agent.reasoning_effort_snapshot,
+            wake_admission: Box::new(wake_admission),
         },
         TurnReservationMode::CommitDurableLease,
         Some(existing),
@@ -283,12 +287,21 @@ fn prepare_conversation_turn_from_source(
     let history_model_context = storage.list_conversation_model_context_logs(&conversation_id)?;
     let context_compaction_summary =
         storage.get_active_context_compaction_summary(&conversation_id)?;
+    let mut history_excluded_message_ids = storage
+        .list_trace_bound_agent_projection_message_ids(&conversation_id)
+        .map_err(|error| error.to_string())?;
+    history_excluded_message_ids.push(user_message_id.clone());
+    history_excluded_message_ids.push(assistant_message_id.clone());
+    let history_excluded_refs = history_excluded_message_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let history_messages = conversation_history_messages_with_model_context(
         &conversation,
         &history_traces,
         &history_model_context,
         context_compaction_summary.as_ref(),
-        &[user_message_id.as_str(), assistant_message_id.as_str()],
+        &history_excluded_refs,
     )?;
 
     let user_message = match &source {
@@ -345,6 +358,15 @@ fn prepare_conversation_turn_from_source(
         ui_state_json: None,
     };
 
+    let mut model_input_projection_ids = history_messages
+        .iter()
+        .filter_map(|message| message.message_id.clone())
+        .collect::<Vec<_>>();
+    model_input_projection_ids.push(user_message_id.clone());
+    let preloaded_agent_message_ids = storage
+        .filter_preloaded_agent_message_ids(&conversation_id, &model_input_projection_ids)
+        .map_err(|error| error.to_string())?;
+
     if matches!(&source, ConversationTurnInputSource::Human) {
         upsert_message(&mut conversation.messages, user_message.clone());
     }
@@ -357,17 +379,17 @@ fn prepare_conversation_turn_from_source(
         TurnReservationMode::CommitDurableLease => {
             let initial_trace = mycopilot_core::ConversationTraceSnapshot::default()
                 .in_progress_trace(run_id, &conversation_id, &assistant_message_id);
-            let trusted_agent_id = match &source {
+            let trusted_wake = match &source {
                 ConversationTurnInputSource::Human => None,
-                ConversationTurnInputSource::ExistingAgentProjection {
-                    collaboration_identity,
-                    ..
-                } => Some(collaboration_identity.agent_id.as_str()),
+                ConversationTurnInputSource::ExistingAgentProjection { wake_admission, .. } => {
+                    Some(wake_admission.as_ref())
+                }
             };
-            storage.save_conversation_and_begin_turn(
+            storage.save_conversation_and_begin_turn_with_preloaded_agent_messages(
                 conversation,
                 expected_revision,
-                trusted_agent_id,
+                trusted_wake,
+                &preloaded_agent_message_ids,
                 &initial_trace,
                 assistant_created_at,
                 now_ms().max(assistant_created_at),

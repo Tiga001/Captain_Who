@@ -11,7 +11,8 @@ use super::{
 };
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
-    AgentContextWindowSnapshot, AgentError, AgentResult, AgentSkillActivation, AgentToolDefinition,
+    AgentContextWindowSnapshot, AgentError, AgentResult, AgentRunToolSetCheckpoint,
+    AgentSkillActivation, AgentToolDefinition,
 };
 use crate::{ConversationModelContextItem, ConversationTurnTrace, WorldStateSnapshot};
 
@@ -20,6 +21,7 @@ pub struct AgentContextWindowToolProjection {
     stable_revision: String,
     dynamic_revision: String,
     effective_revision: String,
+    exposed_tool_names: Vec<String>,
     initial_run_world_state: WorldStateSnapshot,
     dynamic_definitions: Vec<AgentToolDefinition>,
 }
@@ -45,6 +47,7 @@ impl AgentContextWindowToolProjection {
         stable_revision: String,
         dynamic_revision: String,
         effective_revision: String,
+        exposed_tool_names: Vec<String>,
         initial_run_world_state: WorldStateSnapshot,
         dynamic_definitions: Vec<AgentToolDefinition>,
     ) -> Self {
@@ -52,6 +55,7 @@ impl AgentContextWindowToolProjection {
             stable_revision,
             dynamic_revision,
             effective_revision,
+            exposed_tool_names,
             initial_run_world_state,
             dynamic_definitions,
         }
@@ -67,6 +71,18 @@ impl AgentContextWindowToolProjection {
 
     pub fn effective_revision(&self) -> &str {
         &self.effective_revision
+    }
+
+    /// Returns the exact Tool-set authority frozen by the same Host projection a real run uses.
+    /// Approval recovery fixtures and Host persistence can reuse this instead of reproducing the
+    /// registry hashing algorithm or hard-coding revision strings.
+    pub fn tool_set_checkpoint(&self) -> AgentRunToolSetCheckpoint {
+        AgentRunToolSetCheckpoint {
+            stable_revision: self.stable_revision.clone(),
+            dynamic_revision: self.dynamic_revision.clone(),
+            effective_revision: self.effective_revision.clone(),
+            exposed_tool_names: self.exposed_tool_names.clone(),
+        }
     }
 
     pub(crate) fn initial_run_world_state(&self) -> &WorldStateSnapshot {

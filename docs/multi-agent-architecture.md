@@ -128,11 +128,11 @@ claim 带有持久 lease deadline，并允许同一 claim 续租。只在“已�
 可以把过期 Wake 原子退回队列并重新 claim；一旦进入 running，后续崩溃恢复必须由第 3 轮按
 Turn/checkpoint 事实判定 `outcome_unknown`、恢复或终止，不能冒险并发启动第二个 Turn。
 
-带来源消息的 Wake 只有在对应 Mailbox message 已完成唯一 Conversation projection 并确认后
-才能入队；因此 Dispatcher 后续不会先启动 Turn、再发现模型上下文里还没有任务正文。
-对会触发执行的 task/followup，repository 提供“写投影并确认 + 创建唯一 Wake”的单事务 API；
-普通 message 可以只投影确认。同一 source message 最多绑定一个 Wake，崩溃后可按幂等 request
-重试，不能出现“正文已经投影但唤醒事实永久缺失”的半完成状态。
+初始 task 在创建 child 的事务内完成唯一 Conversation projection、ack 和 Wake；后续 deferred
+follow-up/result 则允许 source message 仍为 queued 时先与 Wake 原子入队。任何 Wake claim 都必须
+在同一个事务中先按 FIFO 完成该 source 以及更早消息的唯一投影/ack，再取得执行权；因此既不会先
+启动 Turn 才发现任务正文缺失，也不存在“已投影但尚未 claim”跨事务崩溃半窗。同一 source message
+最多绑定一个 Wake，崩溃后按幂等 request 重试；普通 send 只入队，不隐式创建 Wake。
 
 ### Result / Outbox
 
@@ -356,6 +356,171 @@ collaboration identity 做 exact 双向相等校验，并在进入 Runtime 或�
 
 实现受限并发 Dispatcher、每 Agent 单 Turn、持久 Wake 恢复、父子消息安全注入，以及
 `wait_agent` 与 Command Session wait 相互独立、均不丢持久结果的语义。
+
+#### A：Mailbox、deferred Wake 与结果 Outbox
+
+第 3 轮不增加平行消息表。`agent_mailbox_messages` 仍是唯一协作传输真相，单调 `sequence`
+定义同时间戳下的稳定 FIFO；读取不删除记录。`queued -> claimed -> acknowledged` 的 lease
+协议只描述“唯一 Conversation 投影已提交”，并不等价于“模型已经消费”。投影与 ack 在同一
+SQLite 事务中完成，`messages.source_agent_message_id` 的唯一约束使重启重试不能产生第二条投影。
+
+通信应用服务固定为两种写语义：
+
+- `send_message` 只写 queued Mailbox，不创建 Wake；
+- `follow_up` 在同一事务写 queued Mailbox 与唯一 deferred Wake，但不提前投影。Dispatcher 在
+  claim Wake 的同一 `BEGIN IMMEDIATE` 中按 recipient/sequence 投影并 ack 全部早于或等于 source
+  的消息，再 claim Wake；运行中 Turn 则由模型批次 receipt 绑定同一 source 后把 deferred Wake
+  原子变为 `satisfied`。因此“投影后崩溃、Wake 尚未 claim”和“已进当前批次又启动第二 Turn”两个
+  窗口都不存在。多个 follow-up 不要求每条单独启动 Turn：第一条取得执行权，后续条目在安全采样
+  边界按 FIFO 被同一 Turn 吸收并满足各自 Wake。
+
+动态投影若遇到 `in_progress` assistant，会稳定插在该 pending assistant 之前并只把 assistant
+及其后普通行右移。未 receipt-bound 的后续 Mailbox 不会提前进入历史构建。投影 helper 与模型
+批次 receipt 共用这一位置规则，Tool handler 不自行拼上下文。
+
+权限只有四条：普通 message 可同 root tree 定向；task 只允许直接父到直接子；管理 follow-up
+只允许调用者到严格后代；result 只允许子到直接父。严格后代由 `parent_agent_id` 递归链判断，不用
+含 `%`/`_` 通配语义的 task path 做授权。repository 做可读错误，canonical trigger 再做数据库
+防伪；跨树、祖先方向、兄弟分支和根目标 follow-up 均失败。
+
+子 Wake 终结时使用 typed `AgentTurnResultEnvelope`：冻结 schema version、child、task path、Wake、
+Turn/Run、终态、有界 summary/error，以及按 artifact ID 稳定排序的 managed Artifact refs。Artifact
+只能从该 child Conversation 与 exact run 的 durable grants 导出，不猜普通附件，不暴露绝对路径，
+也没有 Usage 字段。Wake 终态、result Mailbox 和非根直接父的 deferred Wake 在一个事务提交；直接
+父为根时只留下 pending result，绝不后台启动根模型。终态幂等重试读取首次冻结的 envelope，之后
+新增 Artifact grant 不改变已提交结果。
+
+Wake 的 `status_revision` 初始为 1，每次真实状态变化严格加一，lease-only renewal 不增加；它和
+Wake sequence 是等待/observer cursor 的持久版本。`run_id` 与 `assistant_message_id` 只能成对绑定，
+并且必须引用该 Agent Conversation 的 exact durable Turn。`satisfied` 是 receipt 已由当前 Turn
+消费的成功协调终态，不伪装成 cancelled 或“最近任务完成”。Agent 列表状态从 lifecycle、durable
+active Conversation Turn、active Wake 和最近真实 Turn 终态派生：active/approval 优先，根 Agent 的
+普通 Human Turn 即使没有 Wake 也显示 running/waiting；仅在没有 active 执行时才展示最近的
+completed/failed/interrupted/outcome_unknown。上述最近任务状态不会关闭持久 Agent 身份。
+
+#### B：Dispatcher、执行权与崩溃恢复
+
+`AgentDispatcher` 只做三件事：从 SQLite 按 Wake sequence 领取可执行机会、取得进程级许可后调用
+第 2 轮唯一 Turn executor、观察 durable trace/pending-action 直至结算。它不解释 Graph、不读取
+Renderer event 判断完成，也没有第二套 Agent Loop。全局领取的固定顺序是“共享进程许可 -> SQLite
+per-Agent 执行权”；SQLite 查询跳过已有 active Wake、in-progress Conversation 或仍持有 Mailbox
+claim 的 Agent，因此一个暂不可投影的最老 Wake 不会阻塞其他 Agent。source FIFO 投影/ack 与
+`queued -> claimed` 在同一 `BEGIN IMMEDIATE` 中提交。极窄的查询后竞争仍可能让一次投影返回
+`NotReady`；Dispatcher 把它当候选级暂态冲突，在有界 fallback tick 后重新扫描，而数据库损坏或
+不可用仍作为 fatal storage error 暴露。这样不把正常竞争误判成进程故障，也不会无限吞掉真实故障。
+
+领取前先在同一个 gate 中预留容量，claim 成功才把 reservation 提升为 active Turn permit；空队列探测
+会占住并发容量却不会伪装成活跃 Turn。Dispatcher 的 quiescence 边界同时要求：最近一次 durable 扫描
+确认队列为空、worker/running map 为空且 active Turn 为零，避免“旧 worker 刚释放、下一次空队列探测
+刚预留”的瞬时归零竞态。
+每次已提交的新 Wake/result 通知还会在同一锁内递增单调 generation；空扫描只有在开始与发布之间
+generation 未变化时才能宣布 idle，避免旧的空扫描覆盖扫描窗口内刚提交的新工作。
+
+根 Human Turn 与子 Wake Turn 必须使用 `AgentService` 的同一个 `AgentTurnConcurrencyGate`。Host
+构造时配置唯一进程上限（默认 4），Dispatcher 正式构造器只接受这个共享 gate，不存在另建 child
+semaphore 的生产入口。permit 是共享 lease：AgentService 持有一份跨 Runtime/Approval，Dispatcher
+持有另一份直到 Wake 终态、result Outbox 和父 deferred Wake 全部提交；因此 terminal trace 先落库
+也不会提前腾出并发槽。审批暂停仍算一个活跃逻辑 Turn并占用槽；重启时 `AgentService` 从所有 durable
+in-progress traces 恢复占用，哪怕配置被调低，也只会阻塞新工作而不会丢掉既有执行。
+
+Wake claim 与 Turn admission 分成两个明确的崩溃边界。`claimed` 尚无 Run 身份，过期后可以安全回到
+`queued`；统一 executor 在同一个事务提交 pending assistant、empty in-progress trace、turn-start
+delivery receipt，并把 Wake `claimed -> running`、冻结 run/assistant 身份。此后任何 prepare/start
+失败都不得删除 assistant、trace 或 receipt，而由 typed settlement 把 exact Turn 失败终结并回传结果。
+`claimed -> failed` 只用于确定未完成 Turn admission 的启动失败，属于合法终态迁移。
+
+启动恢复不是一次性扫描：Host 周期性检查租约，处理“新 Host 启动时旧租约尚未过期”的窗口。过期
+`claimed` 可重排；过期 `running/waiting_for_approval` 只更换 owner token/lease（语义状态未变，所以
+`status_revision` 不增加），再按 durable 事实分类：terminal trace 或可恢复审批只观察 exact Turn；
+admission 后没有 trace 是确定的 pre-Runtime failure；in-progress 且无可恢复 checkpoint 则写
+`outcome_unknown`，绝不盲重放可能已有外部副作用的步骤。恢复 settlement 在同一事务终结遗留 trace、
+Usage 投影、Wake 和 result Outbox，提交成功后才按 exact identity 释放 AgentService 的 Conversation
+占用与 permit，使该持久 Agent 可以接受下一次 follow-up。
+
+内部 interrupt 只允许 caller 的严格后代。tree-scoped request receipt 记录首次 disposition，重复
+request ID 永远返回同一 Wake/Run，不能误伤队列中的下一项；queued/未 admission 的 claimed Wake
+原子 cancelled，running 传播到 exact Runtime，waiting approval 则走现有 durable pending-action
+cancel/finalize 路径。进入过 Turn 的取消最终以 `interrupted` 结果回直接父；节点、Conversation、历史
+都保留。审批 continuation 真正重新进入 Runtime 前，必须先用同一 claim 把 Wake
+`waiting_for_approval -> running` 并增加 `status_revision`，再通知 durable observer；因此关停只保留
+仍有 durable pending approval 的纯等待状态，pending 已消失且 Wake 已回到 running 的 continuation
+与其他 live Runtime 一样接受 interrupt。正常关停先停止新 claim，有限等待运行中工作；进入取消阶段后
+在同一个有界 grace window 内持续重扫 live execution map，只对非审批 Runtime 的 exact run 请求一次
+取消。因此，即使审批恰好在首次快照之后恢复，也不会从关停边界漏过；窗口结束仍未收敛的 durable
+Wake/trace 留给上述恢复规则。
+
+Mailbox 与 Wake lease 都采用半开区间 `[claimed_at, lease_expires_at)`：旧 holder 在精确 deadline
+续租、ack、transition 或 settlement 一律失败；新 Host 从 `deadline <= now` 起可以回收。owner/lease
+更换不增加 `status_revision`，因为它不是用户可见的语义状态变化。
+
+#### C：唯一安全采样边界与模型批次 receipt
+
+Runtime 只在一个位置接收动态协作输入：每次真正调用 Provider 采样之前、steer 和上一批 Tool / Command
+结果已合并之后。Core 通过窄 `AgentSamplingBoundaryInbox` Host port 请求事实；它不知道 Agent tree、
+SQLite 或 Dispatcher。正式 Host 为所有 graph-bound Turn 安装同一实现，包括根 Human Turn；旧的未绑定
+Conversation 返回空。因此根空闲期间积累的 child result 不启动后台模型，只会在下一次用户 Turn 的首个
+采样边界进入。
+
+`agent_model_batch_receipts` 以 `(run_id, model_batch_index)` 唯一标识一次采样 admission；item 以
+`message_id` 全局唯一，使自动安全边界与 wait 路径只能有一个赢家。turn-start 路径在 Turn admission
+同一个 `BEGIN IMMEDIATE` 中绑定准备阶段已经实际放入模型输入的 Agent projection IDs，不另写 trace；
+因此 initial task、前置 send 和 follow-up 都只出现一次。动态 safe-boundary 则在一个事务中完成 queued
+claim、唯一 projection/ack、receipt item、`AgentMailboxDelivery` trace、精确 model-context log、deferred
+Wake `satisfied` 和 batch close，崩溃不存在“已消费但 trace 未落库”的窗口。
+
+Mailbox 原文保持不变。模型看到的是共享 trace 层生成的 Host 认证 JSON envelope，明确
+`origin=agent`、sender/task path/kind 和 payload，绝不冒充真人。Storage 返回 raw payload，Runtime 也调用
+同一个 projector；durable trace、model-context、live Context 和重启恢复逐字一致，不产生二次 envelope。
+单条 envelope 最多 32 KiB，超限按 UTF-8 边界确定性截断并带 `payloadTruncated=true`；每个动态批次最多
+64 条、合计最多 128 KiB，按 Mailbox sequence FIFO 选择，超预算内容保持 pending 到后续批次。
+
+被 safe-boundary trace 承载的 raw Conversation projection 在后续模型 history 和 compaction journal 中
+排除，但仍保留给 observer 审计和 FTS 的唯一用户可搜记录；trace delivery 不重复建 FTS 正文。turn-start
+projection 始终是历史唯一表示，绝不因存在 receipt 而被过滤。receipt header/item/target 都是不可删、
+不可改写的协调事实；batch `sampling_bound_at` 关闭后禁止补写 item/target，删除 assistant trace 也不能
+级联擦除消费事实。
+
+Mailbox 在同一真相源上设置简单背压：每个 recipient 最多保留 1024 条、16 MiB 尚未绑定 model
+receipt 的事实；普通 message/follow-up 使用 960 条、15 MiB 软上限，为 initial task、terminal result
+等协调事实保留 64 条、1 MiB，但总体硬上限仍不可突破。重复 request 先命中原记录，不重复占用配额；
+projection/ack 不释放容量，只有不可变 receipt item 证明进入某个模型批次后才释放。
+
+#### D：wait_agent 内核与 Command Session 双等待域
+
+本轮只实现内部 `AgentWaitKernel`，不注册模型工具。它只查看 caller 自己 Mailbox 中来自指定 target 的
+message/result/update，以及 target 的授权状态；绝不读取或 claim target 自己的 inbox。target 必须是
+caller 的严格后代，祖先、兄弟和跨树均拒绝。多个 target 是 first-ready：返回本次已就绪快照，不增加
+all/quorum/wait-any DSL。
+
+等待采用“先检查控制信号 -> 查 SQLite -> 注册一次性通知 -> 再检查控制信号 -> 再查 SQLite”。同进程
+commit 后的共享通知只降低延迟；50ms 有界 durable poll 使通知丢失、另一 StorageService/进程提交或
+重启仍然正确。steer 优先结束当前 wait，且在任何有副作用的 poll 前检查，所以结果仍 pending；timeout
+同样不取消 target 或删除结果。Command Session wait 只响应指定 session 的输出/终态，Agent wait 只响应
+协作通知和 durable facts，两域互不唤醒、互不 claim，也不提供 wait_any。
+
+wait first-ready 把 message item 与完整 target/status/display snapshot 冻结到同一个 batch receipt，并推进
+caller/run/target cursor；重试同一 batch 返回首次冻结快照。状态版本由 Agent lifecycle revision 加所有
+Wake `status_revision` 的单调和构成，所以较新的 queued/satisfied 事件不能遮住较老 active Wake 的后续
+终态，disabled/archived 也能被观察；lease-only owner 变化不算语义版本。display 仍按 active-priority
+repository 派生，而不是拿最新 Wake 冒充当前状态。
+
+wait 的 first-ready 事务不留下“cursor 已推进、ToolResult 尚未落库”的窗口：它冻结 item/target 快照，
+把同一个 `wait_agent` ToolCall 的确定性 ToolResult 与 model-context 前缀持久化，并设置
+`sampling_bound_at`，然后才返回 `AgentWaitModelProjection::PrecommittedToolResult`。第 4 轮 adapter 必须
+按 receipt 重载这段 durable prefix，跳过 Runtime 通常会做的第二次 ToolResult record；它不能重读 target
+inbox、重新拼结果或把返回值当普通未持久化 ToolResult。若进程在较早的 open receipt 阶段退出，下一
+Turn 通过不可变 replay link 读取完整的认证 message 与 status 快照，在同一个事务中提交新 ToolResult 并
+关闭 source/current receipt；因此 message-bearing 与 status-only wait 都不会因换 run 永久搁浅。
+
+wait 最多接受 32 个不同 target；候选先按整组 Mailbox sequence 做全局 FIFO，再应用每次最多 64 条的
+预算，不能因 target 排序越过更早消息。单条 payload 复用 32 KiB 认证 envelope 的确定性截断；message
+projection 预留 96 KiB，包含 status 和 ToolResult 外壳后的最终 durable JSON 硬限制为 128 KiB，模型侧
+再统一经过现有 10k-token ToolResult gate，超预算消息继续 pending 到下一次 wait。
+
+双等待集成测试使用真实 `AgentCommandSessionRegistry` 的生产 Condvar 和持久 Command Session
+record/read receipt（执行进程由无 Shell 的测试 Host 替代）：命令 settle 不唤醒或消费 Agent wait，Agent
+result 也不结束 Command wait，两边随后都能从各自真相源取回结果。关停信号只结束当前 wait；不删除
+Mailbox、target、Command Session 或稍后到达的结果。
 
 ### 第 4 轮：Harness、权限审批与跨进程协议
 

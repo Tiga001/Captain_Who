@@ -213,6 +213,17 @@ fn model_context_for_closed_trace(
                 tool_calls: Vec::new(),
                 is_error: false,
             }),
+            ConversationTurnTraceItem::AgentMailboxDelivery {
+                sequence, content, ..
+            } => Some(ConversationModelContextItem {
+                sequence: *sequence,
+                ordinal: 0,
+                role: "user".to_string(),
+                content: content.clone(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            }),
             ConversationTurnTraceItem::CommandSessionLifecycle { .. } => None,
         })
         .collect()

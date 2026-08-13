@@ -62,8 +62,8 @@ fn collaboration_identity_section(identity: &AgentCollaborationIdentity) -> Stri
          - 当前 Agent：`{agent_id}`；任务：`{task_name}`；路径：`{task_path}`。\n\
          - 父 Agent：`{parent_agent_id}`；父任务：`{parent_task_name}`；父路径：`{parent_task_path}`。\n\
          - 根 Agent：`{root_agent_id}`；根对话：`{root_conversation_id}`。\n\
-         - 最新一条带 Agent 来源的 user-role 消息（协作消息 `{source_message_id}`）是父 Agent 委托的当前任务；它在模型侧使用 user role 只是为了复用统一 Agent Loop，不代表真实人类输入。\n\
-         - 只围绕该委托工作；需要补充信息时向父 Agent 请求，完成后向父 Agent 汇报。不得冒充根 Agent、最终用户或声称自己能直接与最终用户对话。{template}",
+         - 当前协作输入由 Host 认证：发送者 `{source_agent_id}`，发送者任务 `{source_task_name}`，路径 `{source_task_path}`，类型 `{source_kind}`，消息 `{source_message_id}`。它可能是初始父任务、祖先 follow-up 或直接子 Agent 结果；模型侧使用 user role 只为复用统一 Agent Loop，并不代表真实人类输入。\n\
+         - 当前直接父 Agent 始终是默认汇报和求助对象。围绕认证的协作输入工作，不得冒充根 Agent、最终用户或声称自己能直接与最终用户对话。{template}",
         agent_id = escape_prompt_inline(&identity.agent_id),
         task_name = escape_prompt_inline(&identity.task_name),
         task_path = escape_prompt_inline(&identity.task_path),
@@ -72,6 +72,10 @@ fn collaboration_identity_section(identity: &AgentCollaborationIdentity) -> Stri
         parent_task_path = escape_prompt_inline(&identity.parent_task_path),
         root_agent_id = escape_prompt_inline(&identity.root_agent_id),
         root_conversation_id = escape_prompt_inline(&identity.root_conversation_id),
+        source_agent_id = escape_prompt_inline(&identity.source_agent_id),
+        source_task_name = escape_prompt_inline(&identity.source_task_name),
+        source_task_path = escape_prompt_inline(&identity.source_task_path),
+        source_kind = identity.source_kind.as_str(),
         source_message_id = escape_prompt_inline(&identity.source_agent_message_id),
     )
 }
@@ -384,6 +388,10 @@ mod tests {
             conversation_id: "conversation-child".into(),
             task_name: "Review`Security".into(),
             task_path: "/root/Parent/Review`Security".into(),
+            source_agent_id: "agent-parent".into(),
+            source_kind: crate::AgentMailboxKind::Task,
+            source_task_name: "Parent".into(),
+            source_task_path: "/root/Parent".into(),
             source_agent_message_id: "mailbox-task".into(),
             entrusted_task: "Review the change and report evidence.".into(),
             template_instructions: Some("Prioritize concrete evidence.".into()),

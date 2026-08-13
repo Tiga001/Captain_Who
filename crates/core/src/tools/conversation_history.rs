@@ -1278,6 +1278,13 @@ fn build_history_turns(
                             }
                         }));
                     }
+                    ConversationTurnTraceItem::AgentMailboxDelivery { content, .. } => {
+                        guidance = guidance.saturating_add(1);
+                        let preview = normalize_preview(content, 200);
+                        if !preview.is_empty() {
+                            latest_guidance_preview = Some(preview);
+                        }
+                    }
                     ConversationTurnTraceItem::ToolCall {
                         call_id,
                         approval_status,

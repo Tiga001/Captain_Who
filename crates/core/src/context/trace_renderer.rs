@@ -110,6 +110,19 @@ impl ConversationTraceRenderer {
                         trace_item_metadata(&trace.assistant_message_id, *sequence),
                     ));
                 }
+                ConversationTurnTraceItem::AgentMailboxDelivery {
+                    sequence, content, ..
+                } => {
+                    if pending_exchange.is_some() {
+                        return Err(AgentError::new(
+                            "ConversationTurnTrace Agent Mailbox 投递不能拆分工具调用与结果。",
+                        ));
+                    }
+                    activity_items.push(ContextItem::new(
+                        crate::llm::LlmMessage::text(LlmMessageRole::User, content.clone()),
+                        trace_item_metadata(&trace.assistant_message_id, *sequence),
+                    ));
+                }
                 ConversationTurnTraceItem::ToolCall {
                     sequence: _,
                     call_id,
@@ -567,6 +580,7 @@ mod tests {
                     is_error: false,
                 },
                 ConversationTurnTraceItem::UserGuidance { .. }
+                | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => unreachable!(),
             })
             .collect::<Vec<_>>();
@@ -928,6 +942,7 @@ mod tests {
                 }
                 ConversationTurnTraceItem::AssistantNarration { .. }
                 | ConversationTurnTraceItem::UserGuidance { .. }
+                | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
         }

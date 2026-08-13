@@ -102,7 +102,12 @@ impl AgentService {
             .is_empty();
 
         let run_id = next_run_id();
+        let global_permit = self
+            .turn_concurrency_gate()
+            .try_acquire()
+            .map_err(AgentServiceError::from)?;
         self.reserve_conversation_turn(&conversation_id, &run_id, &assistant_message_id)?;
+        self.register_turn_concurrency_permit(&run_id, global_permit)?;
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
 
@@ -116,6 +121,7 @@ impl AgentService {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
+                self.release_turn_concurrency_permit(&run_id);
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
                 let rollback = PreparedTurnRollback::Human {

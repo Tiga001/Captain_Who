@@ -2,7 +2,9 @@ use crate::adapters::agent_skill_installation::AgentSkillInstallationInspectionA
 use crate::adapters::skills_adapter::{
     activate_selected_skills, model_skill_activation_resolver, prepare_enabled_skill_discovery,
 };
-use crate::application::agent_collaboration::ChildAgentFactory;
+use crate::application::agent_collaboration::{
+    ChildAgentFactory, PersistentAgentSamplingBoundaryInbox,
+};
 use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
@@ -102,7 +104,7 @@ use mycopilot_core::{
 };
 use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 mod action_execution;
 mod approval;
@@ -131,6 +133,7 @@ use pending_action_store::*;
 use persisted_resume_input::*;
 use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
 use turn_executor::*;
+pub(crate) use turn_executor::{AgentTurnStart, TrustedAgentWakeTurnStart};
 
 #[cfg(test)]
 use context_compaction::validate_compaction_trace_boundary;
@@ -435,6 +438,16 @@ pub struct AgentService {
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     active_runs: Arc<Mutex<HashMap<String, ActiveRunControl>>>,
     active_conversation_turns: Arc<Mutex<HashMap<String, ActiveConversationTurn>>>,
+    /// Process-local wakeup accelerator for consumers which observe durable Turn state.
+    ///
+    /// The corresponding Conversation trace and pending-action rows remain authoritative. A
+    /// subscriber always checks SQLite both before and after registering this notification, so
+    /// dropping the map on restart or coalescing notifications cannot lose a completion.
+    durable_turn_notifications: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    turn_concurrency_gate: crate::application::agent_dispatcher::AgentTurnConcurrencyGate,
+    active_turn_permits: Arc<
+        Mutex<HashMap<String, crate::application::agent_dispatcher::AgentTurnConcurrencyPermit>>,
+    >,
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     startup_recoverable_mcp_approvals: Arc<Mutex<HashSet<String>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
@@ -475,7 +488,24 @@ impl AgentService {
         storage: Arc<StorageService>,
         provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
     ) -> Result<Self, String> {
-        Self::try_new_with_startup_reconciliation(storage, false, provider_continuation_vault)
+        Self::try_new_deferred_startup_reconciliation_with_agent_limit(
+            storage,
+            provider_continuation_vault,
+            crate::application::agent_dispatcher::DEFAULT_AGENT_GLOBAL_CONCURRENCY,
+        )
+    }
+
+    pub(crate) fn try_new_deferred_startup_reconciliation_with_agent_limit(
+        storage: Arc<StorageService>,
+        provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
+        global_agent_concurrency_limit: usize,
+    ) -> Result<Self, String> {
+        Self::try_new_with_startup_reconciliation_and_limit(
+            storage,
+            false,
+            provider_continuation_vault,
+            global_agent_concurrency_limit,
+        )
     }
 
     #[cfg(test)]
@@ -486,11 +516,31 @@ impl AgentService {
         Self::try_new_with_startup_reconciliation(storage, false, Some(provider_continuation_vault))
     }
 
+    #[cfg(test)]
     fn try_new_with_startup_reconciliation(
         storage: Arc<StorageService>,
         reconcile_orphaned_traces: bool,
         provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
     ) -> Result<Self, String> {
+        Self::try_new_with_startup_reconciliation_and_limit(
+            storage,
+            reconcile_orphaned_traces,
+            provider_continuation_vault,
+            crate::application::agent_dispatcher::DEFAULT_AGENT_GLOBAL_CONCURRENCY,
+        )
+    }
+
+    fn try_new_with_startup_reconciliation_and_limit(
+        storage: Arc<StorageService>,
+        reconcile_orphaned_traces: bool,
+        provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
+        global_agent_concurrency_limit: usize,
+    ) -> Result<Self, String> {
+        let turn_concurrency_gate =
+            crate::application::agent_dispatcher::AgentTurnConcurrencyGate::new(
+                global_agent_concurrency_limit,
+            )
+            .map_err(|error| error.to_string())?;
         // Process handles are intentionally not recoverable across Host restarts. Reconcile the
         // operational projection before generic orphaned-run handling so no stale row is ever
         // advertised as controllable by this process.
@@ -569,6 +619,9 @@ impl AgentService {
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             active_conversation_turns: Arc::new(Mutex::new(HashMap::new())),
+            durable_turn_notifications: Arc::new(Mutex::new(HashMap::new())),
+            turn_concurrency_gate,
+            active_turn_permits: Arc::new(Mutex::new(HashMap::new())),
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             startup_recoverable_mcp_approvals: Arc::new(Mutex::new(
                 startup_recoverable_mcp_approvals,

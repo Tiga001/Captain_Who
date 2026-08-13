@@ -31,6 +31,7 @@ impl Default for AgentSteerInputQueueState {
 #[derive(Debug, Clone, Default)]
 pub struct AgentSteerInputQueue {
     state: Arc<Mutex<AgentSteerInputQueueState>>,
+    changed: Arc<tokio::sync::Notify>,
 }
 
 pub(crate) enum AgentSteerDrainOrClose {
@@ -110,12 +111,14 @@ impl AgentSteerInputQueue {
             .insert(input.client_message_id.clone(), input.clone());
         state.pending.push_back(input);
         on_queued();
+        self.changed.notify_waiters();
         Ok(AgentSteerEnqueueOutcome::Queued)
     }
 
     pub fn close(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.accepting = false;
+        self.changed.notify_waiters();
     }
 
     /// Atomically stops admission and returns every input that was accepted but not yet drained.
@@ -143,6 +146,12 @@ impl AgentSteerInputQueue {
     pub(crate) fn drain_pending(&self) -> Vec<crate::AgentSteerInput> {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.pending.drain(..).collect()
+    }
+
+    /// One-shot notification used by independent Host waits. Durable guidance remains in the
+    /// queue; this signal only allows a wait to yield promptly without polling.
+    pub async fn changed(&self) {
+        self.changed.notified().await;
     }
 
     pub(crate) fn take_pending_or_close(&self) -> AgentSteerDrainOrClose {
@@ -186,6 +195,46 @@ pub type AgentConversationTraceObserver = Arc<
 pub type AgentModelRequestObserver = Arc<dyn Fn(ModelRequestObservation) + Send + Sync + 'static>;
 pub type AgentContextWindowObserver =
     Arc<dyn Fn(AgentContextWindowSnapshot) + Send + Sync + 'static>;
+
+/// Trusted request emitted only at the one boundary immediately before an Agent-loop provider
+/// sample is assembled. Implementations must bind durable Mailbox facts to this exact batch before
+/// returning any model-visible input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSamplingBoundaryRequest {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub assistant_message_id: String,
+    pub model_batch_index: u64,
+    pub expected_next_trace_sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSamplingBoundaryMessage {
+    pub trace_sequence: u64,
+    pub message_id: String,
+    pub sender_agent_id: String,
+    pub sender_task_name: String,
+    pub sender_task_path: String,
+    pub kind: crate::AgentMailboxKind,
+    pub content: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSamplingBoundaryDelivery {
+    pub receipt_id: String,
+    pub messages: Vec<AgentSamplingBoundaryMessage>,
+}
+
+/// Narrow Host port for collaboration delivery. It is intentionally neither a Tool executor nor
+/// a ContextAssembler: Core asks once per model batch, and the Host atomically projects/binds the
+/// caller's persistent inbox and appends the corresponding Turn trace/model-context prefix.
+pub trait AgentSamplingBoundaryInbox: Send + Sync {
+    fn bind_for_model_batch(
+        &self,
+        request: AgentSamplingBoundaryRequest,
+    ) -> AgentResult<Option<AgentSamplingBoundaryDelivery>>;
+}
 pub type AgentHostActionExecutor = Arc<
     dyn Fn(
             AgentProposedAction,
@@ -348,6 +397,7 @@ pub struct AgentRuntimeHostServices {
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     pub(super) command_session_executor: Option<Arc<dyn AgentCommandSessionExecutor>>,
     pub(super) steer_input: Option<AgentSteerInputQueue>,
+    pub(super) collaboration_inbox: Option<Arc<dyn AgentSamplingBoundaryInbox>>,
 }
 
 impl AgentRuntimeHostServices {
@@ -493,6 +543,11 @@ impl AgentRuntimeHostServices {
 
     pub fn with_steer_input(mut self, input: AgentSteerInputQueue) -> Self {
         self.steer_input = Some(input);
+        self
+    }
+
+    pub fn with_collaboration_inbox(mut self, inbox: Arc<dyn AgentSamplingBoundaryInbox>) -> Self {
+        self.collaboration_inbox = Some(inbox);
         self
     }
 }
@@ -699,6 +754,10 @@ pub fn prepare_context_window_tool_projection(
         capabilities.initial_tool_set.stable_revision().to_string(),
         capabilities.initial_tool_set.dynamic_revision().to_string(),
         capabilities.initial_tool_set.revision().to_string(),
+        capabilities
+            .initial_tool_set
+            .checkpoint()
+            .exposed_tool_names,
         initial_run_world_state,
         capabilities.initial_tool_set.dynamic_definitions().to_vec(),
     ))

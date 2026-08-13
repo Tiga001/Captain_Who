@@ -111,6 +111,9 @@ pub enum AgentWakeStatus {
     Interrupted,
     Cancelled,
     OutcomeUnknown,
+    /// A deferred Wake whose source message was absorbed by the Agent's already-running Turn.
+    /// This is a successful coordination outcome, not a cancellation or a new Turn.
+    Satisfied,
 }
 
 impl AgentWakeStatus {
@@ -125,6 +128,7 @@ impl AgentWakeStatus {
             Self::Interrupted => "interrupted",
             Self::Cancelled => "cancelled",
             Self::OutcomeUnknown => "outcome_unknown",
+            Self::Satisfied => "satisfied",
         }
     }
 
@@ -139,6 +143,7 @@ impl AgentWakeStatus {
             "interrupted" => Ok(Self::Interrupted),
             "cancelled" => Ok(Self::Cancelled),
             "outcome_unknown" => Ok(Self::OutcomeUnknown),
+            "satisfied" => Ok(Self::Satisfied),
             _ => Err(AgentGraphError::CorruptRecord(format!(
                 "unknown Agent wake status `{value}`"
             ))),
@@ -153,6 +158,7 @@ impl AgentWakeStatus {
                 | Self::Interrupted
                 | Self::Cancelled
                 | Self::OutcomeUnknown
+                | Self::Satisfied
         )
     }
 
@@ -161,10 +167,12 @@ impl AgentWakeStatus {
             || matches!(
                 (self, next),
                 (Self::Queued, Self::Claimed | Self::Cancelled)
+                    | (Self::Queued, Self::Satisfied)
                     | (
                         Self::Claimed,
                         Self::Queued
                             | Self::Running
+                            | Self::Failed
                             | Self::Interrupted
                             | Self::Cancelled
                             | Self::OutcomeUnknown
@@ -364,6 +372,12 @@ pub struct AgentCollaborationIdentity {
     pub conversation_id: String,
     pub task_name: String,
     pub task_path: String,
+    /// Authenticated sender of the collaboration input which admitted this Wake. It may be the
+    /// direct parent, another ancestor (follow-up), or a direct child (result).
+    pub source_agent_id: String,
+    pub source_kind: AgentMailboxKind,
+    pub source_task_name: String,
+    pub source_task_path: String,
     pub source_agent_message_id: String,
     pub entrusted_task: String,
     pub template_instructions: Option<String>,
@@ -423,6 +437,7 @@ impl AgentCollaborationIdentity {
             ("root_agent_id", self.root_agent_id.as_str()),
             ("root_conversation_id", self.root_conversation_id.as_str()),
             ("parent_agent_id", self.parent_agent_id.as_str()),
+            ("source_agent_id", self.source_agent_id.as_str()),
             ("conversation_id", self.conversation_id.as_str()),
             (
                 "source_agent_message_id",
@@ -432,8 +447,10 @@ impl AgentCollaborationIdentity {
             bounded(field, value, MAX_ID_BYTES)?;
         }
         bounded("parent_task_name", &self.parent_task_name, MAX_NAME_BYTES)?;
+        bounded("source_task_name", &self.source_task_name, MAX_NAME_BYTES)?;
         bounded("task_name", &self.task_name, MAX_NAME_BYTES)?;
         bounded("parent_task_path", &self.parent_task_path, MAX_PATH_BYTES)?;
+        bounded("source_task_path", &self.source_task_path, MAX_PATH_BYTES)?;
         bounded("task_path", &self.task_path, MAX_PATH_BYTES)?;
         bounded_multiline("entrusted_task", &self.entrusted_task, MAX_TASK_BYTES)?;
         if let Some(instructions) = self.template_instructions.as_deref() {
@@ -618,10 +635,17 @@ pub struct AgentWakeRequestRecord {
     pub request_id: String,
     pub source_agent_message_id: Option<String>,
     pub status: AgentWakeStatus,
+    /// Monotonic durable version used by observers. It advances on every real Wake state change,
+    /// but not on a lease-only renewal.
+    pub status_revision: u64,
     pub claim_token: Option<String>,
     pub lease_expires_at: Option<i64>,
     pub result_message_id: Option<String>,
     pub terminal_error: Option<String>,
+    /// Exact shared-Turn identities once execution has been admitted. Dispatch failures that
+    /// happen before Turn preparation intentionally keep both fields empty.
+    pub run_id: Option<String>,
+    pub assistant_message_id: Option<String>,
     pub created_at: i64,
     pub claimed_at: Option<i64>,
     pub started_at: Option<i64>,
@@ -638,6 +662,17 @@ pub struct EnqueueAgentWakeInput {
     pub source_agent_message_id: Option<String>,
 }
 
+/// Host-only capability used while atomically admitting a claimed Wake into the shared Turn
+/// executor. The storage transaction binds these immutable facts to the newly created durable
+/// Conversation trace before the Runtime is allowed to sample a model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedAgentWakeTurnAdmission {
+    pub agent_id: String,
+    pub wake_id: String,
+    pub claim_token: String,
+    pub source_agent_message_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgeAgentTaskAndWakeInput {
     pub message_id: String,
@@ -646,6 +681,11 @@ pub struct AcknowledgeAgentTaskAndWakeInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Round-1 compatibility input for the low-level repository settlement primitive.
+///
+/// Production Dispatcher/Host code must use [`FinishAgentTurnResultInput`] so the result payload,
+/// Artifact snapshot, direct-parent routing, and optional pre-admission failure identity are
+/// created by the trusted typed service rather than supplied by a caller.
 pub struct FinishAgentWakeWithResultInput {
     pub wake_id: String,
     pub expected_status: AgentWakeStatus,
@@ -653,6 +693,168 @@ pub struct FinishAgentWakeWithResultInput {
     pub terminal_status: AgentWakeStatus,
     pub terminal_error: Option<String>,
     pub result_message: EnqueueAgentMessageInput,
+}
+
+pub const AGENT_RESULT_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_RESULT_SUMMARY_MAX_BYTES: usize = 16_384;
+pub const AGENT_RESULT_TERMINAL_ERROR_MAX_BYTES: usize = 4_096;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentResultArtifactKind {
+    Image,
+    Document,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentResultArtifactReference {
+    pub artifact_id: String,
+    pub kind: AgentResultArtifactKind,
+    pub media_type: String,
+}
+
+/// The bounded, immutable payload placed in the direct parent's Mailbox when a delegated Turn
+/// settles. Usage is deliberately absent: accounting remains owned by the child's Conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentTurnResultEnvelope {
+    pub schema_version: u32,
+    pub child_agent_id: String,
+    pub task_name: String,
+    pub task_path: String,
+    pub wake_id: String,
+    pub turn_id: Option<String>,
+    pub run_id: Option<String>,
+    pub status: AgentWakeStatus,
+    pub summary: String,
+    pub artifact_refs: Vec<AgentResultArtifactReference>,
+    pub terminal_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishAgentTurnResultInput {
+    pub wake_id: String,
+    pub expected_status: AgentWakeStatus,
+    pub claim_token: String,
+    pub terminal_status: AgentWakeStatus,
+    /// `None`/`None` is valid for a dispatch failure before a Turn was prepared.
+    pub run_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub summary: String,
+    pub terminal_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTurnResultSettlement {
+    pub wake: AgentWakeRequestRecord,
+    pub result_message: AgentMailboxMessageRecord,
+    /// Non-root direct parents receive a deferred Wake. Root results remain pending for the next
+    /// user-driven Turn and therefore never create this value.
+    pub parent_wake: Option<AgentWakeRequestRecord>,
+    pub envelope: AgentTurnResultEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendAgentMessageRequest {
+    pub sender_agent_id: String,
+    pub recipient_agent_id: String,
+    pub request_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMessageDispatch {
+    pub message: AgentMailboxMessageRecord,
+    /// Present only for follow-up. A plain send is deliberately queue-only.
+    pub deferred_wake: Option<AgentWakeRequestRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentDisplayStatus {
+    Idle,
+    Queued,
+    Running,
+    WaitingApproval,
+    LatestCompleted,
+    LatestFailed,
+    LatestInterrupted,
+    LatestOutcomeUnknown,
+    Archived,
+    Disabled,
+}
+
+impl AgentDisplayStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::WaitingApproval => "waiting_approval",
+            Self::LatestCompleted => "latest_completed",
+            Self::LatestFailed => "latest_failed",
+            Self::LatestInterrupted => "latest_interrupted",
+            Self::LatestOutcomeUnknown => "latest_outcome_unknown",
+            Self::Archived => "archived",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, AgentGraphError> {
+        match value {
+            "idle" => Ok(Self::Idle),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "waiting_approval" => Ok(Self::WaitingApproval),
+            "latest_completed" => Ok(Self::LatestCompleted),
+            "latest_failed" => Ok(Self::LatestFailed),
+            "latest_interrupted" => Ok(Self::LatestInterrupted),
+            "latest_outcome_unknown" => Ok(Self::LatestOutcomeUnknown),
+            "archived" => Ok(Self::Archived),
+            "disabled" => Ok(Self::Disabled),
+            _ => Err(AgentGraphError::CorruptRecord(format!(
+                "unknown Agent display status `{value}`"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDisplayStatusSnapshot {
+    pub agent_id: String,
+    pub status: AgentDisplayStatus,
+    pub agent_revision: u64,
+    pub latest_wake_id: Option<String>,
+    pub latest_wake_sequence: Option<u64>,
+    pub latest_wake_status_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentWakeRecoveryAction {
+    /// The exact Turn is terminal or has a resumable approval checkpoint. The Host may observe it
+    /// using the rebound claim token; it must never start the model from the beginning.
+    Observe(AgentWakeRequestRecord),
+    /// Atomic Turn admission committed, but the pre-Runtime preparation was rolled back before a
+    /// trace survived. This is definitely-not-dispatched and may be failed without replay.
+    FailBeforeRuntime(AgentWakeRequestRecord),
+    /// Execution crossed a durable dispatch boundary but its effects cannot be proven after the
+    /// process disappeared. The only safe recovery is an explicit outcome-unknown result.
+    OutcomeUnknown(AgentWakeRequestRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AgentWakeRecoveryBatch {
+    pub requeued_before_dispatch: usize,
+    pub actions: Vec<AgentWakeRecoveryAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterruptAgentExecutionOutcome {
+    NoPendingExecution,
+    QueuedWakeCancelled { wake_id: String },
+    ActiveTurn { wake_id: String, run_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,6 +931,10 @@ pub enum AgentGraphError {
         expected: u64,
         current: u64,
     },
+    ResourceLimit {
+        resource: &'static str,
+        limit: u64,
+    },
     Conflict(String),
     IllegalLifecycleTransition {
         current: AgentLifecycle,
@@ -758,6 +964,12 @@ impl fmt::Display for AgentGraphError {
                 formatter,
                 "Agent revision conflict: expected {expected}, current {current}"
             ),
+            Self::ResourceLimit { resource, limit } => {
+                write!(
+                    formatter,
+                    "Agent {resource} resource limit exceeded ({limit})"
+                )
+            }
             Self::Conflict(reason) => write!(formatter, "Agent graph conflict: {reason}"),
             Self::IllegalLifecycleTransition { current, requested } => write!(
                 formatter,

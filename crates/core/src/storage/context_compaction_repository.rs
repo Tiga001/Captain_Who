@@ -1017,9 +1017,27 @@ fn list_journal_entries(
 ) -> Result<Vec<ContextCompactionSourceItem>, ContextCompactionRepositoryError> {
     let rows = {
         let mut statement = connection.prepare(
-            "SELECT id, role, content, created_at, status
-             FROM messages
-             WHERE conversation_id = ?1
+            "SELECT message.id, message.role, message.content, message.created_at, message.status
+             FROM messages AS message
+             WHERE message.conversation_id = ?1
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM agent_mailbox_messages AS mailbox
+                   INNER JOIN agent_model_batch_receipt_items AS receipt_item
+                      ON receipt_item.message_id = mailbox.message_id
+                   WHERE mailbox.projection_message_id = message.id
+                     AND (
+                         receipt_item.delivery_path = 'safe_boundary'
+                         OR (
+                             receipt_item.delivery_path = 'wait_agent'
+                             AND EXISTS (
+                                 SELECT 1 FROM agent_model_batch_receipts AS receipt
+                                 WHERE receipt.receipt_id = receipt_item.receipt_id
+                                   AND receipt.sampling_bound_at IS NOT NULL
+                             )
+                         )
+                     )
+               )
              ORDER BY position ASC, created_at ASC, id ASC",
         )?;
         let rows = statement

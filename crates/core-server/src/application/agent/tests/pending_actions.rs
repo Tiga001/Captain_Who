@@ -879,9 +879,13 @@ fn test_mcp_resume_checkpoint(
                 }
             }],
             "isError": false,
-            "sources": [],
+            "sources": ["model_response"],
             "scope": "conversation",
-            "retention": "durable"
+            "retention": "retained",
+            "group": {
+                "id": format!("run:{run_id}:tool-exchange:1"),
+                "kind": "tool_exchange"
+            }
         }],
         "nextModelRequestIndex": 1,
         "queuedToolCalls": [],
@@ -3460,6 +3464,10 @@ fn valid_resume_collaboration_identity() -> mycopilot_core::AgentCollaborationId
         conversation_id: "conversation-child-resume".to_string(),
         task_name: "review".to_string(),
         task_path: "root/review".to_string(),
+        source_agent_id: "agent-root-resume".to_string(),
+        source_kind: mycopilot_core::AgentMailboxKind::Task,
+        source_task_name: "Root".to_string(),
+        source_task_path: "root".to_string(),
         source_agent_message_id: "mailbox-task-resume".to_string(),
         entrusted_task: "Review the durable facts.".to_string(),
         template_instructions: None,
@@ -4467,6 +4475,344 @@ async fn pre_runtime_continuation_failure_terminalizes_turn_and_releases_occupan
         .expect("terminal failure must emit a Done event");
     assert_eq!(done["params"]["status"], "failed");
     assert_eq!(done["params"]["success"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_approval_continuation_persists_waiting_to_running_before_runtime() {
+    struct ApprovalRecoveryClock(std::sync::atomic::AtomicI64);
+
+    impl crate::application::agent_dispatcher::AgentDispatcherClock for ApprovalRecoveryClock {
+        fn now_ms(&self) -> i64 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_address = listener.local_addr().unwrap();
+    let (provider_accepted, provider_entered) = tokio::sync::oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        let _ = provider_accepted.send(());
+        std::future::pending::<()>().await;
+    });
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": format!("http://{provider_address}/v1/chat/completions"),
+        "apiToken": "test-token",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-child-approval-root".to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Approval root".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: "agent-child-approval-root".to_string(),
+            conversation_id: "conversation-child-approval-root".to_string(),
+            creation_request_id: "ensure-child-approval-root".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    let child = storage
+        .create_child_agent(&mycopilot_core::CreateChildAgentInput {
+            parent_agent_id: "agent-child-approval-root".to_string(),
+            creation_request_id: "spawn-child-approval".to_string(),
+            task_name: "approval_review".to_string(),
+            task: "Pause for approval, then continue.".to_string(),
+            template_machine_key: None,
+            explicit_model_id: None,
+            reasoning_effort: None,
+            fork_turns: mycopilot_core::AgentForkTurns::None,
+        })
+        .unwrap();
+    let admitted_at = mycopilot_core::storage::now_ms();
+    let claimed = storage
+        .claim_next_dispatchable_agent_wake_at("approval-host", admitted_at)
+        .unwrap()
+        .unwrap();
+    let run_id = "child-approval-continuation-run";
+    let assistant_message_id = "child-approval-continuation-assistant";
+    let call = AgentToolCall {
+        id: test_mcp_call_id("child-approval-continuation-call"),
+        tool: "apply_patch".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let provenance = AgentToolIdentity::Builtin {
+        tool_name: call.tool.clone(),
+    };
+    let context = AgentRunContext {
+        conversation_id: Some(child.agent.conversation_id.clone()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: Some(child.collaboration_identity.clone()),
+    };
+    agent_input.context = Some(context.clone());
+    agent_input.assistant_message_id = Some(assistant_message_id.to_string());
+    // Freeze the exact Tool authority through the same Host projection used by Runtime instead
+    // of copying revision hashes into this durable approval fixture.
+    let checkpoint_tool_set = {
+        let projection_service =
+            AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+                Arc::clone(&storage),
+                None,
+                1,
+            )
+            .unwrap();
+        projection_service
+            .context_window_tool_projection(&agent_input, None)
+            .unwrap()
+            .tool_set_checkpoint()
+    };
+    let (conversation, revision) = storage
+        .load_conversation_for_turn(&child.agent.conversation_id)
+        .unwrap();
+    let mut conversation = conversation.unwrap();
+    conversation.messages.push(ChatMessageRecord {
+        id: assistant_message_id.to_string(),
+        role: "assistant".to_string(),
+        content: String::new(),
+        created_at: admitted_at + 1,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    conversation.updated_at = admitted_at + 1;
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: child.agent.conversation_id.clone(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            operation: call.args.clone(),
+            provenance: provenance.clone(),
+            approval_status: call.approval_status,
+            truncated: false,
+        }],
+    };
+    storage
+        .save_conversation_and_begin_turn_with_preloaded_agent_messages(
+            conversation,
+            revision,
+            Some(&mycopilot_core::TrustedAgentWakeTurnAdmission {
+                agent_id: child.agent.agent_id.clone(),
+                wake_id: claimed.wake_id.clone(),
+                claim_token: claimed.claim_token.clone().unwrap(),
+                source_agent_message_id: claimed.source_agent_message_id.clone().unwrap(),
+            }),
+            &[claimed.source_agent_message_id.clone().unwrap()],
+            &trace,
+            admitted_at + 1,
+            admitted_at + 1,
+        )
+        .unwrap();
+    let mut durable_checkpoint =
+        test_pending_resume_checkpoint_for_call(&storage, run_id, None, &call, provenance.clone());
+    durable_checkpoint.tool_set = checkpoint_tool_set.clone();
+    let checkpoint_model_context = durable_checkpoint.conversation_model_context_items;
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &checkpoint_model_context,
+            admitted_at + 1,
+            admitted_at + 1,
+        )
+        .unwrap();
+    let waiting = storage
+        .transition_agent_wake(
+            &claimed.wake_id,
+            mycopilot_core::AgentWakeStatus::Running,
+            mycopilot_core::AgentWakeStatus::WaitingForApproval,
+            claimed.claim_token.as_deref(),
+        )
+        .unwrap();
+
+    let mut checkpoint =
+        test_pending_resume_checkpoint_for_call(&storage, run_id, None, &call, provenance);
+    checkpoint.run_context = Some(context.clone());
+    checkpoint.tool_set = checkpoint_tool_set;
+    agent_input.resume_checkpoint = Some(checkpoint);
+    agent_input.approval_decision = Some(AgentApprovalDecision {
+        action_id: call.id.clone(),
+        status: AgentApprovalDecisionStatus::Approved,
+        message: None,
+    });
+    agent_input.tool_continuation = Some(AgentToolContinuation {
+        call: call.clone(),
+        result: AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({ "approved": true })),
+            error: None,
+        },
+    });
+
+    let service = AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+        Arc::clone(&storage),
+        None,
+        1,
+    )
+    .unwrap();
+    service
+        .store_pending_action(
+            run_id,
+            &child.agent.conversation_id,
+            assistant_message_id,
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input.clone(),
+        )
+        .unwrap();
+    let storage_id = pending_action_storage_id(run_id, &call.id);
+    let pending = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .transition_pending_status(&pending, PendingActionStatus::Approved)
+        .unwrap();
+    let approved = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .persist_pending_target_status(&approved, PendingActionStatus::Completed)
+        .unwrap();
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .commit_trace_snapshot_with_continuation(&approved, &agent_input, &notifications)
+        .unwrap();
+    let gate = service.turn_concurrency_gate();
+    assert_eq!(gate.active(), 1);
+    let (dispatcher_notifications, _dispatcher_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher_store: Arc<dyn crate::application::agent_dispatcher::AgentDispatcherStore> =
+        Arc::new(
+            crate::application::agent_dispatcher::SqliteAgentDispatcherStore::new(Arc::clone(
+                &storage,
+            )),
+        );
+    let dispatcher_executor: Arc<
+        dyn crate::application::agent_dispatcher::AgentWakeTurnExecutionPort,
+    > = Arc::new(
+        crate::application::agent_dispatcher::SharedAgentTurnExecutionPort::new(
+            service.clone(),
+            Arc::clone(&storage),
+            dispatcher_notifications,
+        )
+        .with_fallback_poll_interval(Duration::from_millis(5)),
+    );
+    let dispatcher = crate::application::agent_dispatcher::AgentDispatcher::start_with_clock(
+        dispatcher_store,
+        dispatcher_executor,
+        Arc::new(ApprovalRecoveryClock(std::sync::atomic::AtomicI64::new(
+            waiting.lease_expires_at.unwrap(),
+        ))),
+        gate.clone(),
+        crate::application::agent_dispatcher::AgentDispatcherConfig {
+            global_concurrency_limit: 1,
+            wake_lease_renew_interval: Duration::from_millis(20),
+            idle_poll_interval: Duration::from_millis(5),
+            shutdown_grace: Duration::from_millis(250),
+        },
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if dispatcher.observed_waiting_for_approval(&child.agent.agent_id) == Some(true) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Dispatcher must recover and observe the durable approval wait");
+
+    // The approved tool result is already durable before the continuation enters Runtime. This
+    // mirrors the production action runner and lets the observer distinguish a live continuation
+    // from a still-pending approval after the Wake CAS.
+    service
+        .transition_pending_status(&approved, PendingActionStatus::Completed)
+        .unwrap();
+    let continuation_service = service.clone();
+    let continuation = tokio::spawn(async move {
+        continuation_service
+            .run_action_continuation(
+                approved,
+                agent_input,
+                notifications,
+                PendingActionStatus::Completed,
+                None,
+            )
+            .await;
+    });
+    tokio::time::timeout(Duration::from_secs(2), provider_entered)
+        .await
+        .expect("continuation must reach the deterministic Provider boundary")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if dispatcher.observed_waiting_for_approval(&child.agent.agent_id) == Some(false) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("durable Running transition must make shutdown see a live continuation");
+    let resumed = storage.get_agent_wake(&claimed.wake_id).unwrap().unwrap();
+    assert_eq!(resumed.status, mycopilot_core::AgentWakeStatus::Running);
+    assert_eq!(resumed.status_revision, waiting.status_revision + 1);
+    assert_eq!(resumed.run_id.as_deref(), Some(run_id));
+    assert_eq!(
+        resumed.assistant_message_id.as_deref(),
+        Some(assistant_message_id)
+    );
+
+    let shutdown = dispatcher.shutdown().await.unwrap();
+    assert_eq!(
+        shutdown.cancellation_requested, 1,
+        "shutdown must interrupt the resumed live Runtime, not preserve it as approval waiting"
+    );
+    tokio::time::timeout(Duration::from_secs(2), continuation)
+        .await
+        .expect("cancelled continuation must converge")
+        .unwrap();
+    let terminal = storage.get_agent_wake(&claimed.wake_id).unwrap().unwrap();
+    assert_eq!(
+        terminal.status,
+        mycopilot_core::AgentWakeStatus::Interrupted
+    );
+    assert!(terminal.result_message_id.is_some());
+    assert_eq!(gate.active(), 0);
+    provider.abort();
 }
 
 #[tokio::test]

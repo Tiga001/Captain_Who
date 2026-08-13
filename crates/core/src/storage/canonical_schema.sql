@@ -1118,6 +1118,87 @@ CREATE TRIGGER validate_agent_mailbox_active_participants_insert
         BEGIN
             SELECT RAISE(ABORT, 'Agent mailbox participants must be active');
         END;
+CREATE TRIGGER validate_agent_mailbox_unbound_quota_insert
+        BEFORE INSERT ON agent_mailbox_messages
+        WHEN (
+            SELECT COUNT(*)
+            FROM agent_mailbox_messages AS mailbox
+            WHERE mailbox.recipient_agent_id = NEW.recipient_agent_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_model_batch_receipt_items AS item
+                  WHERE item.message_id = mailbox.message_id
+              )
+        ) >= 1024 OR (
+            SELECT COALESCE(SUM(length(CAST(mailbox.content AS BLOB))), 0)
+            FROM agent_mailbox_messages AS mailbox
+            WHERE mailbox.recipient_agent_id = NEW.recipient_agent_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_model_batch_receipt_items AS item
+                  WHERE item.message_id = mailbox.message_id
+              )
+        ) + length(CAST(NEW.content AS BLOB)) > 16777216 OR (
+            NEW.kind IN ('message', 'followup')
+            AND (
+                SELECT COUNT(*)
+                FROM agent_mailbox_messages AS mailbox
+                WHERE mailbox.recipient_agent_id = NEW.recipient_agent_id
+                  AND mailbox.kind IN ('message', 'followup')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_model_batch_receipt_items AS item
+                      WHERE item.message_id = mailbox.message_id
+                  )
+            ) >= 960
+        ) OR (
+            NEW.kind IN ('message', 'followup')
+            AND (
+                SELECT COALESCE(SUM(length(CAST(mailbox.content AS BLOB))), 0)
+                FROM agent_mailbox_messages AS mailbox
+                WHERE mailbox.recipient_agent_id = NEW.recipient_agent_id
+                  AND mailbox.kind IN ('message', 'followup')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_model_batch_receipt_items AS item
+                      WHERE item.message_id = mailbox.message_id
+                  )
+            ) + length(CAST(NEW.content AS BLOB)) > 15728640
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent recipient unbound Mailbox quota exceeded');
+        END;
+CREATE TRIGGER validate_agent_mailbox_kind_authority_insert
+        BEFORE INSERT ON agent_mailbox_messages
+        WHEN (
+            NEW.kind = 'task'
+            AND NOT EXISTS (
+                SELECT 1 FROM agent_nodes AS recipient
+                WHERE recipient.agent_id = NEW.recipient_agent_id
+                  AND recipient.parent_agent_id = NEW.sender_agent_id
+            )
+        ) OR (
+            NEW.kind = 'followup'
+            AND NOT EXISTS (
+                WITH RECURSIVE ancestors(agent_id, parent_agent_id) AS (
+                    SELECT agent_id, parent_agent_id
+                    FROM agent_nodes WHERE agent_id = NEW.recipient_agent_id
+                    UNION ALL
+                    SELECT parent.agent_id, parent.parent_agent_id
+                    FROM agent_nodes AS parent
+                    JOIN ancestors AS child ON parent.agent_id = child.parent_agent_id
+                )
+                SELECT 1 FROM ancestors
+                WHERE agent_id = NEW.sender_agent_id
+                  AND agent_id != NEW.recipient_agent_id
+            )
+        ) OR (
+            NEW.kind = 'result'
+            AND NOT EXISTS (
+                SELECT 1 FROM agent_nodes AS sender
+                WHERE sender.agent_id = NEW.sender_agent_id
+                  AND sender.parent_agent_id = NEW.recipient_agent_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox kind violates tree communication authority');
+        END;
 CREATE INDEX agent_mailbox_recipient_pending
             ON agent_mailbox_messages(recipient_agent_id, delivery_status, sequence);
 CREATE UNIQUE INDEX agent_mailbox_claim_token_identity
@@ -1141,6 +1222,11 @@ CREATE TRIGGER prevent_agent_mailbox_identity_update
         ON agent_mailbox_messages
         BEGIN
             SELECT RAISE(ABORT, 'Agent mailbox identity and payload are immutable');
+        END;
+CREATE TRIGGER prevent_agent_mailbox_delete
+        BEFORE DELETE ON agent_mailbox_messages
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent mailbox transport facts are immutable');
         END;
 CREATE TRIGGER validate_agent_mailbox_delivery_transition
         BEFORE UPDATE OF delivery_status ON agent_mailbox_messages
@@ -1209,12 +1295,24 @@ CREATE TABLE agent_wake_requests (
             source_agent_message_id TEXT,
             status TEXT NOT NULL CHECK (status IN (
                 'queued', 'claimed', 'running', 'waiting_for_approval',
-                'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown'
+                'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown',
+                'satisfied'
             )),
+            status_revision INTEGER NOT NULL DEFAULT 1 CHECK (status_revision > 0),
             claim_token TEXT,
             lease_expires_at INTEGER,
             result_message_id TEXT UNIQUE,
-            terminal_error TEXT,
+            terminal_error TEXT CHECK (
+                terminal_error IS NULL
+                OR length(CAST(terminal_error AS BLOB)) BETWEEN 1 AND 4096
+            ),
+            run_id TEXT CHECK (
+                run_id IS NULL OR length(CAST(run_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
+            assistant_message_id TEXT CHECK (
+                assistant_message_id IS NULL
+                OR length(CAST(assistant_message_id AS BLOB)) BETWEEN 1 AND 2048
+            ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             claimed_at INTEGER,
             started_at INTEGER,
@@ -1230,11 +1328,8 @@ CREATE TABLE agent_wake_requests (
             ) REFERENCES agent_mailbox_messages(
                 message_id, root_agent_id, sender_agent_id, recipient_agent_id
             ) ON DELETE RESTRICT,
-            FOREIGN KEY (
-                result_message_id, root_agent_id, agent_id, requester_agent_id
-            ) REFERENCES agent_mailbox_messages(
-                message_id, root_agent_id, sender_agent_id, recipient_agent_id
-            ) ON DELETE RESTRICT,
+            FOREIGN KEY (result_message_id)
+                REFERENCES agent_mailbox_messages(message_id) ON DELETE RESTRICT,
             CHECK (agent_id != requester_agent_id),
             CHECK (
                 (status = 'queued'
@@ -1259,6 +1354,12 @@ CREATE TABLE agent_wake_requests (
                     AND completed_at IS NULL)
                 OR (status IN ('completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown')
                     AND completed_at IS NOT NULL)
+                OR (status = 'satisfied'
+                    AND claim_token IS NULL
+                    AND lease_expires_at IS NULL
+                    AND claimed_at IS NULL
+                    AND started_at IS NULL
+                    AND completed_at IS NOT NULL)
             ),
             CHECK (
                 result_message_id IS NULL
@@ -1267,6 +1368,10 @@ CREATE TABLE agent_wake_requests (
             CHECK (
                 terminal_error IS NULL
                 OR status IN ('failed', 'interrupted', 'outcome_unknown')
+            ),
+            CHECK (
+                (run_id IS NULL AND assistant_message_id IS NULL)
+                OR (run_id IS NOT NULL AND assistant_message_id IS NOT NULL)
             )
         );
 CREATE TRIGGER validate_agent_wake_active_target_insert
@@ -1281,11 +1386,62 @@ CREATE TRIGGER validate_agent_wake_active_target_insert
             AND NOT EXISTS (
                 SELECT 1 FROM agent_mailbox_messages
                 WHERE message_id = NEW.source_agent_message_id
-                  AND delivery_status = 'acknowledged'
+                  AND root_agent_id = NEW.root_agent_id
+                  AND sender_agent_id = NEW.requester_agent_id
+                  AND recipient_agent_id = NEW.agent_id
             )
         )
         BEGIN
-            SELECT RAISE(ABORT, 'Agent wake target must be active and its source delivered');
+            SELECT RAISE(ABORT, 'Agent wake target must be active and its source must match');
+        END;
+CREATE TRIGGER validate_agent_wake_source_authority_insert
+        BEFORE INSERT ON agent_wake_requests
+        WHEN NEW.source_agent_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM agent_mailbox_messages AS source
+              JOIN agent_nodes AS requester ON requester.agent_id = NEW.requester_agent_id
+              JOIN agent_nodes AS target ON target.agent_id = NEW.agent_id
+              WHERE source.message_id = NEW.source_agent_message_id
+                AND source.root_agent_id = NEW.root_agent_id
+                AND source.sender_agent_id = NEW.requester_agent_id
+                AND source.recipient_agent_id = NEW.agent_id
+                AND (
+                    (source.kind = 'task'
+                        AND target.parent_agent_id = requester.agent_id)
+                    OR (source.kind = 'followup'
+                        AND EXISTS (
+                            WITH RECURSIVE ancestors(agent_id, parent_agent_id) AS (
+                                SELECT agent_id, parent_agent_id
+                                FROM agent_nodes WHERE agent_id = target.agent_id
+                                UNION ALL
+                                SELECT parent.agent_id, parent.parent_agent_id
+                                FROM agent_nodes AS parent
+                                JOIN ancestors AS child
+                                  ON parent.agent_id = child.parent_agent_id
+                            )
+                            SELECT 1 FROM ancestors
+                            WHERE agent_id = requester.agent_id
+                              AND agent_id != target.agent_id
+                        ))
+                    OR (source.kind = 'result'
+                        AND requester.parent_agent_id = target.agent_id)
+                )
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake source violates tree communication authority');
+        END;
+CREATE TRIGGER validate_agent_wake_claim_source_delivered
+        BEFORE UPDATE OF status ON agent_wake_requests
+        WHEN NEW.status = 'claimed'
+          AND NEW.source_agent_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM agent_mailbox_messages
+              WHERE message_id = NEW.source_agent_message_id
+                AND delivery_status = 'acknowledged'
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake source must be projected before claim');
         END;
 CREATE UNIQUE INDEX agent_wake_one_active_turn
             ON agent_wake_requests(agent_id)
@@ -1303,12 +1459,18 @@ CREATE TRIGGER prevent_agent_wake_identity_update
         BEGIN
             SELECT RAISE(ABORT, 'Agent wake identity is immutable');
         END;
+CREATE TRIGGER prevent_agent_wake_delete
+        BEFORE DELETE ON agent_wake_requests
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake coordination facts are immutable');
+        END;
 CREATE TRIGGER validate_agent_wake_transition
         BEFORE UPDATE OF status ON agent_wake_requests
         WHEN NEW.status != OLD.status AND NOT (
             (OLD.status = 'queued' AND NEW.status IN ('claimed', 'cancelled'))
+            OR (OLD.status = 'queued' AND NEW.status = 'satisfied')
             OR (OLD.status = 'claimed' AND NEW.status IN (
-                'queued', 'running', 'interrupted', 'cancelled', 'outcome_unknown'
+                'queued', 'running', 'failed', 'interrupted', 'cancelled', 'outcome_unknown'
             ))
             OR (OLD.status = 'running' AND NEW.status IN (
                 'waiting_for_approval', 'completed', 'failed', 'interrupted',
@@ -1322,11 +1484,31 @@ CREATE TRIGGER validate_agent_wake_transition
         BEGIN
             SELECT RAISE(ABORT, 'illegal Agent wake transition');
         END;
+CREATE TRIGGER validate_agent_wake_status_revision
+        BEFORE UPDATE OF status, status_revision ON agent_wake_requests
+        WHEN (
+            NEW.status != OLD.status
+            AND NEW.status_revision != OLD.status_revision + 1
+        ) OR (
+            NEW.status = OLD.status
+            AND NEW.status_revision != OLD.status_revision
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake status revision must advance exactly once');
+        END;
 CREATE TRIGGER prevent_agent_wake_claim_reassignment
         BEFORE UPDATE OF claim_token ON agent_wake_requests
         WHEN OLD.claim_token IS NOT NULL
           AND NEW.claim_token IS NOT OLD.claim_token
           AND NEW.status != 'queued'
+          AND NOT (
+              OLD.status IN ('running', 'waiting_for_approval')
+              AND NEW.status = OLD.status
+              AND OLD.lease_expires_at IS NOT NULL
+              AND NEW.claimed_at IS NOT NULL
+              AND NEW.claimed_at >= OLD.lease_expires_at
+              AND NEW.lease_expires_at > NEW.claimed_at
+          )
         BEGIN
             SELECT RAISE(ABORT, 'Agent wake claim token is immutable while active');
         END;
@@ -1336,7 +1518,15 @@ CREATE TRIGGER validate_agent_wake_lease_update
           AND NEW.status IN ('claimed', 'running', 'waiting_for_approval')
           AND NEW.lease_expires_at IS NOT OLD.lease_expires_at
           AND (
-              NEW.claim_token IS NOT OLD.claim_token
+              (
+                  NEW.claim_token IS NOT OLD.claim_token
+                  AND NOT (
+                      OLD.lease_expires_at IS NOT NULL
+                      AND NEW.claimed_at IS NOT NULL
+                      AND NEW.claimed_at >= OLD.lease_expires_at
+                      AND NEW.lease_expires_at > NEW.claimed_at
+                  )
+              )
               OR NEW.lease_expires_at IS NULL
               OR NEW.lease_expires_at <= OLD.lease_expires_at
           )
@@ -1347,17 +1537,61 @@ CREATE TRIGGER validate_agent_wake_result_kind
         BEFORE UPDATE OF result_message_id ON agent_wake_requests
         WHEN NEW.result_message_id IS NOT NULL
           AND NOT EXISTS (
-              SELECT 1 FROM agent_mailbox_messages
-              WHERE message_id = NEW.result_message_id AND kind = 'result'
+              SELECT 1
+              FROM agent_mailbox_messages AS result
+              JOIN agent_nodes AS child ON child.agent_id = NEW.agent_id
+              WHERE result.message_id = NEW.result_message_id
+                AND result.kind = 'result'
+                AND result.root_agent_id = NEW.root_agent_id
+                AND result.sender_agent_id = NEW.agent_id
+                AND result.recipient_agent_id = child.parent_agent_id
           )
         BEGIN
-            SELECT RAISE(ABORT, 'Agent wake result must reference a result mailbox message');
+            SELECT RAISE(ABORT, 'Agent wake result must target the child direct parent');
+        END;
+CREATE TRIGGER prevent_agent_wake_execution_identity_rewrite
+        BEFORE UPDATE OF run_id, assistant_message_id ON agent_wake_requests
+        WHEN (OLD.run_id IS NOT NULL OR OLD.assistant_message_id IS NOT NULL)
+          AND (
+              NEW.run_id IS NOT OLD.run_id
+              OR NEW.assistant_message_id IS NOT OLD.assistant_message_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake execution identity is immutable once bound');
+        END;
+CREATE TRIGGER validate_agent_wake_execution_identity_bind
+        BEFORE UPDATE OF run_id, assistant_message_id ON agent_wake_requests
+        WHEN OLD.run_id IS NULL
+          AND NEW.run_id IS NOT NULL
+          AND (
+              NEW.status NOT IN (
+                  'running', 'waiting_for_approval', 'completed', 'failed',
+                  'interrupted', 'outcome_unknown'
+              )
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM agent_nodes AS agent
+                  JOIN conversation_turn_traces AS trace
+                    ON trace.conversation_id = agent.conversation_id
+                  WHERE agent.agent_id = NEW.agent_id
+                    AND trace.run_id = NEW.run_id
+                    AND trace.assistant_message_id = NEW.assistant_message_id
+              )
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wake execution identity must reference its exact Turn');
         END;
 CREATE TRIGGER prevent_agent_wake_claim_time_rewrite
         BEFORE UPDATE OF claimed_at ON agent_wake_requests
         WHEN OLD.claimed_at IS NOT NULL
           AND NEW.claimed_at IS NOT OLD.claimed_at
           AND NEW.status = OLD.status
+          AND NOT (
+              OLD.status IN ('running', 'waiting_for_approval')
+              AND OLD.lease_expires_at IS NOT NULL
+              AND NEW.claimed_at >= OLD.lease_expires_at
+              AND NEW.lease_expires_at > NEW.claimed_at
+          )
         BEGIN
             SELECT RAISE(ABORT, 'Agent wake claim time is immutable within a state');
         END;
@@ -1370,23 +1604,361 @@ CREATE TRIGGER prevent_agent_wake_start_time_rewrite
         END;
 CREATE TRIGGER prevent_agent_wake_terminal_rewrite
         BEFORE UPDATE OF
-            status, claim_token, lease_expires_at, result_message_id, terminal_error,
-            claimed_at, started_at, completed_at
+            status, status_revision, claim_token, lease_expires_at, result_message_id,
+            terminal_error, run_id, assistant_message_id, claimed_at, started_at, completed_at
         ON agent_wake_requests
         WHEN OLD.status IN (
-            'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown'
+            'completed', 'failed', 'interrupted', 'cancelled', 'outcome_unknown', 'satisfied'
         ) AND (
             NEW.status IS NOT OLD.status
+            OR NEW.status_revision IS NOT OLD.status_revision
             OR NEW.claim_token IS NOT OLD.claim_token
             OR NEW.lease_expires_at IS NOT OLD.lease_expires_at
             OR NEW.result_message_id IS NOT OLD.result_message_id
             OR NEW.terminal_error IS NOT OLD.terminal_error
+            OR NEW.run_id IS NOT OLD.run_id
+            OR NEW.assistant_message_id IS NOT OLD.assistant_message_id
             OR NEW.claimed_at IS NOT OLD.claimed_at
             OR NEW.started_at IS NOT OLD.started_at
             OR NEW.completed_at IS NOT OLD.completed_at
         )
         BEGIN
             SELECT RAISE(ABORT, 'Agent wake terminal fact is immutable');
+        END;
+CREATE TABLE agent_interrupt_requests (
+            caller_agent_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            root_agent_id TEXT NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            disposition TEXT NOT NULL CHECK (disposition IN (
+                'no_pending_execution', 'queued_wake_cancelled', 'active_turn'
+            )),
+            wake_id TEXT,
+            run_id TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            dispatched_at INTEGER CHECK (dispatched_at IS NULL OR dispatched_at >= created_at),
+            PRIMARY KEY (caller_agent_id, request_id),
+            FOREIGN KEY (caller_agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_agent_id, root_agent_id)
+                REFERENCES agent_nodes(agent_id, root_agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (wake_id) REFERENCES agent_wake_requests(wake_id) ON DELETE RESTRICT,
+            CHECK (caller_agent_id != target_agent_id),
+            CHECK (
+                (disposition = 'no_pending_execution' AND wake_id IS NULL AND run_id IS NULL)
+                OR (disposition = 'queued_wake_cancelled' AND wake_id IS NOT NULL AND run_id IS NULL)
+                OR (disposition = 'active_turn' AND wake_id IS NOT NULL AND run_id IS NOT NULL)
+            )
+        );
+CREATE TRIGGER prevent_agent_interrupt_request_rewrite
+        BEFORE UPDATE OF caller_agent_id, request_id, root_agent_id, target_agent_id,
+            disposition, wake_id, run_id, created_at
+        ON agent_interrupt_requests
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent interrupt request fact is immutable');
+        END;
+CREATE TABLE agent_model_batch_receipts (
+            receipt_id TEXT PRIMARY KEY CHECK (
+                length(CAST(receipt_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            agent_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (
+                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            assistant_message_id TEXT NOT NULL,
+            model_batch_index INTEGER NOT NULL CHECK (model_batch_index > 0),
+            sampling_bound_at INTEGER CHECK (sampling_bound_at IS NULL OR sampling_bound_at >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            UNIQUE (run_id, model_batch_index),
+            UNIQUE (receipt_id, agent_id),
+            FOREIGN KEY (agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE RESTRICT,
+            FOREIGN KEY (assistant_message_id)
+                REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE RESTRICT
+        );
+CREATE INDEX agent_model_batch_receipts_conversation_run
+            ON agent_model_batch_receipts(conversation_id, run_id, model_batch_index);
+CREATE TRIGGER validate_agent_model_batch_receipt_identity_insert
+        BEFORE INSERT ON agent_model_batch_receipts
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM agent_nodes AS agent
+            INNER JOIN conversation_turn_traces AS trace
+                ON trace.assistant_message_id = NEW.assistant_message_id
+            WHERE agent.agent_id = NEW.agent_id
+              AND agent.conversation_id = NEW.conversation_id
+              AND trace.conversation_id = NEW.conversation_id
+              AND trace.run_id = NEW.run_id
+              AND trace.terminal_status = 'in_progress'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt must bind the active Agent Turn');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_identity_update
+        BEFORE UPDATE OF
+            receipt_id, agent_id, conversation_id, run_id, assistant_message_id,
+            model_batch_index, created_at
+        ON agent_model_batch_receipts
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt identity is immutable');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_reopen
+        BEFORE UPDATE OF sampling_bound_at ON agent_model_batch_receipts
+        WHEN OLD.sampling_bound_at IS NOT NULL
+          AND NEW.sampling_bound_at IS NOT OLD.sampling_bound_at
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt sampling boundary is immutable');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_delete
+        BEFORE DELETE ON agent_model_batch_receipts
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipts are durable coordination facts');
+        END;
+CREATE TABLE agent_model_batch_receipt_replays (
+            receipt_id TEXT PRIMARY KEY,
+            source_receipt_id TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (receipt_id)
+                REFERENCES agent_model_batch_receipts(receipt_id) ON DELETE RESTRICT,
+            FOREIGN KEY (source_receipt_id)
+                REFERENCES agent_model_batch_receipts(receipt_id) ON DELETE RESTRICT,
+            CHECK (receipt_id != source_receipt_id)
+        );
+CREATE TRIGGER validate_agent_model_batch_receipt_replay_insert
+        BEFORE INSERT ON agent_model_batch_receipt_replays
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM agent_model_batch_receipts AS target
+            JOIN agent_model_batch_receipts AS source
+              ON source.receipt_id = NEW.source_receipt_id
+            WHERE target.receipt_id = NEW.receipt_id
+              AND target.agent_id = source.agent_id
+              AND target.conversation_id = source.conversation_id
+              AND target.run_id != source.run_id
+              AND target.sampling_bound_at IS NULL
+              AND source.sampling_bound_at IS NULL
+        ) OR EXISTS (
+            WITH RECURSIVE replay_ancestors(receipt_id) AS (
+                SELECT NEW.source_receipt_id
+                UNION ALL
+                SELECT replay.source_receipt_id
+                FROM agent_model_batch_receipt_replays AS replay
+                JOIN replay_ancestors AS ancestor
+                  ON replay.receipt_id = ancestor.receipt_id
+            )
+            SELECT 1 FROM replay_ancestors WHERE receipt_id = NEW.receipt_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt replay must link one open prior batch');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_replay_update
+        BEFORE UPDATE ON agent_model_batch_receipt_replays
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt replay facts are immutable');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_replay_delete
+        BEFORE DELETE ON agent_model_batch_receipt_replays
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt replay facts are durable');
+        END;
+CREATE TABLE agent_model_batch_receipt_items (
+            receipt_id TEXT NOT NULL,
+            message_id TEXT NOT NULL UNIQUE,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            mailbox_sequence INTEGER NOT NULL CHECK (mailbox_sequence > 0),
+            delivery_path TEXT NOT NULL CHECK (
+                delivery_path IN ('turn_start', 'safe_boundary', 'wait_agent')
+            ),
+            trace_sequence INTEGER CHECK (trace_sequence IS NULL OR trace_sequence >= 0),
+            bound_at INTEGER NOT NULL CHECK (bound_at >= 0),
+            PRIMARY KEY (receipt_id, ordinal),
+            UNIQUE (receipt_id, mailbox_sequence),
+            FOREIGN KEY (receipt_id)
+                REFERENCES agent_model_batch_receipts(receipt_id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id)
+                REFERENCES agent_mailbox_messages(message_id) ON DELETE RESTRICT,
+            CHECK (
+                (delivery_path = 'safe_boundary' AND trace_sequence IS NOT NULL)
+                OR (delivery_path != 'safe_boundary' AND trace_sequence IS NULL)
+            )
+        );
+CREATE INDEX agent_model_batch_receipt_items_sequence
+            ON agent_model_batch_receipt_items(receipt_id, mailbox_sequence);
+CREATE TRIGGER validate_agent_model_batch_receipt_item_insert
+        BEFORE INSERT ON agent_model_batch_receipt_items
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM agent_model_batch_receipts AS receipt
+            INNER JOIN agent_mailbox_messages AS message
+                ON message.message_id = NEW.message_id
+            WHERE receipt.receipt_id = NEW.receipt_id
+              AND receipt.sampling_bound_at IS NULL
+              AND message.recipient_agent_id = receipt.agent_id
+              AND message.delivery_status = 'acknowledged'
+              AND message.sequence = NEW.mailbox_sequence
+        ) OR (
+            NEW.delivery_path = 'safe_boundary'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM agent_model_batch_receipts AS receipt
+                INNER JOIN conversation_turn_trace_items AS trace_item
+                    ON trace_item.assistant_message_id = receipt.assistant_message_id
+                   AND trace_item.sequence = NEW.trace_sequence
+                WHERE receipt.receipt_id = NEW.receipt_id
+                  AND trace_item.item_kind = 'agent_mailbox_delivery'
+                  AND json_extract(trace_item.item_json, '$.receiptId') = NEW.receipt_id
+                  AND json_extract(trace_item.item_json, '$.messageId') = NEW.message_id
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent receipt item must match its acknowledged Mailbox/trace fact');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_item_update
+        BEFORE UPDATE ON agent_model_batch_receipt_items
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt items are immutable');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_item_delete
+        BEFORE DELETE ON agent_model_batch_receipt_items
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt items are durable coordination facts');
+        END;
+CREATE TABLE agent_model_batch_receipt_targets (
+            receipt_id TEXT NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            target_status_version INTEGER NOT NULL CHECK (target_status_version > 0),
+            latest_wake_sequence INTEGER CHECK (latest_wake_sequence > 0),
+            latest_wake_status_revision INTEGER CHECK (latest_wake_status_revision > 0),
+            latest_wake_status TEXT CHECK (
+                latest_wake_status IS NULL OR latest_wake_status IN (
+                    'queued', 'claimed', 'running', 'waiting_for_approval', 'completed',
+                    'failed', 'interrupted', 'cancelled', 'outcome_unknown', 'satisfied'
+                )
+            ),
+            display_status TEXT NOT NULL CHECK (
+                display_status IN (
+                    'idle', 'queued', 'running', 'waiting_approval', 'latest_completed',
+                    'latest_failed', 'latest_interrupted', 'latest_outcome_unknown',
+                    'archived', 'disabled'
+                )
+            ),
+            frozen_at INTEGER NOT NULL CHECK (frozen_at >= 0),
+            PRIMARY KEY (receipt_id, target_agent_id),
+            UNIQUE (receipt_id, ordinal),
+            FOREIGN KEY (receipt_id)
+                REFERENCES agent_model_batch_receipts(receipt_id) ON DELETE CASCADE,
+            FOREIGN KEY (target_agent_id)
+                REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            CHECK (
+                (latest_wake_sequence IS NULL
+                 AND latest_wake_status_revision IS NULL
+                 AND latest_wake_status IS NULL)
+                OR (latest_wake_sequence IS NOT NULL
+                    AND latest_wake_status_revision IS NOT NULL
+                    AND latest_wake_status IS NOT NULL)
+            )
+        );
+CREATE TRIGGER validate_agent_model_batch_receipt_target_insert
+        BEFORE INSERT ON agent_model_batch_receipt_targets
+        WHEN NOT EXISTS (
+            WITH RECURSIVE ancestors(agent_id, parent_agent_id) AS (
+                SELECT agent.agent_id, agent.parent_agent_id
+                FROM agent_nodes AS agent
+                WHERE agent.agent_id = NEW.target_agent_id
+                UNION ALL
+                SELECT parent.agent_id, parent.parent_agent_id
+                FROM agent_nodes AS parent
+                JOIN ancestors AS child ON parent.agent_id = child.parent_agent_id
+            )
+            SELECT 1
+            FROM agent_model_batch_receipts AS receipt
+            JOIN ancestors ON ancestors.agent_id = receipt.agent_id
+            WHERE receipt.receipt_id = NEW.receipt_id
+              AND receipt.sampling_bound_at IS NULL
+              AND receipt.agent_id != NEW.target_agent_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wait receipt target must be a strict descendant');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_target_update
+        BEFORE UPDATE ON agent_model_batch_receipt_targets
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt target facts are immutable');
+        END;
+CREATE TRIGGER prevent_agent_model_batch_receipt_target_delete
+        BEFORE DELETE ON agent_model_batch_receipt_targets
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent model batch receipt target facts are durable coordination facts');
+        END;
+CREATE TRIGGER validate_agent_wake_satisfied_receipt
+        BEFORE UPDATE OF status ON agent_wake_requests
+        WHEN NEW.status = 'satisfied'
+          AND OLD.status != 'satisfied'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM agent_model_batch_receipt_items
+              WHERE message_id = NEW.source_agent_message_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Satisfied Agent wake requires a durable delivery receipt');
+        END;
+CREATE TABLE agent_collaboration_cursors (
+            caller_agent_id TEXT NOT NULL,
+            run_id TEXT NOT NULL CHECK (
+                length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            target_agent_id TEXT NOT NULL,
+            last_target_status_version INTEGER NOT NULL DEFAULT 0
+                CHECK (last_target_status_version >= 0),
+            last_message_sequence INTEGER NOT NULL DEFAULT 0
+                CHECK (last_message_sequence >= 0),
+            last_wake_sequence INTEGER NOT NULL DEFAULT 0
+                CHECK (last_wake_sequence >= 0),
+            last_wake_status_revision INTEGER NOT NULL DEFAULT 0
+                CHECK (last_wake_status_revision >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+            PRIMARY KEY (caller_agent_id, run_id, target_agent_id),
+            FOREIGN KEY (caller_agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            FOREIGN KEY (target_agent_id) REFERENCES agent_nodes(agent_id) ON DELETE RESTRICT,
+            CHECK (caller_agent_id != target_agent_id)
+        );
+CREATE INDEX agent_collaboration_cursors_target
+            ON agent_collaboration_cursors(target_agent_id, updated_at);
+CREATE TRIGGER validate_agent_collaboration_cursor_authority_insert
+        BEFORE INSERT ON agent_collaboration_cursors
+        WHEN NOT EXISTS (
+            WITH RECURSIVE ancestors(agent_id, parent_agent_id) AS (
+                SELECT agent_id, parent_agent_id
+                FROM agent_nodes WHERE agent_id = NEW.target_agent_id
+                UNION ALL
+                SELECT parent.agent_id, parent.parent_agent_id
+                FROM agent_nodes AS parent
+                JOIN ancestors AS child ON parent.agent_id = child.parent_agent_id
+            )
+            SELECT 1 FROM ancestors
+            WHERE agent_id = NEW.caller_agent_id
+              AND agent_id != NEW.target_agent_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent wait cursor target must be a strict descendant');
+        END;
+CREATE TRIGGER validate_agent_collaboration_cursor_update
+        BEFORE UPDATE ON agent_collaboration_cursors
+        WHEN NEW.caller_agent_id IS NOT OLD.caller_agent_id
+          OR NEW.run_id IS NOT OLD.run_id
+          OR NEW.target_agent_id IS NOT OLD.target_agent_id
+          OR NEW.last_target_status_version < OLD.last_target_status_version
+          OR NEW.last_message_sequence < OLD.last_message_sequence
+          OR NEW.last_wake_sequence < OLD.last_wake_sequence
+          OR (
+              NEW.last_wake_sequence = OLD.last_wake_sequence
+              AND NEW.last_wake_status_revision < OLD.last_wake_status_revision
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'Agent collaboration cursor identity/version cannot rewind');
         END;
 CREATE TABLE child_context_snapshots (
             target_conversation_id TEXT PRIMARY KEY,
@@ -1750,7 +2322,7 @@ CREATE TABLE conversation_turn_trace_items (
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
             item_kind TEXT NOT NULL CHECK (item_kind IN (
                 'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
-                'command_session_lifecycle'
+                'command_session_lifecycle', 'agent_mailbox_delivery'
             )),
             item_json TEXT NOT NULL CHECK (json_valid(item_json)),
             PRIMARY KEY (assistant_message_id, sequence),
@@ -2913,7 +3485,8 @@ BEGIN
     FROM conversation_turn_traces AS trace
     INNER JOIN messages AS message
         ON message.id = trace.assistant_message_id
-    WHERE trace.assistant_message_id = NEW.assistant_message_id;
+    WHERE trace.assistant_message_id = NEW.assistant_message_id
+      AND NEW.item_kind != 'agent_mailbox_delivery';
     UPDATE conversation_history_fts
     SET
         status = COALESCE(
@@ -2960,7 +3533,8 @@ BEGIN
     FROM conversation_turn_traces AS trace
     INNER JOIN messages AS message
         ON message.id = trace.assistant_message_id
-    WHERE trace.assistant_message_id = NEW.assistant_message_id;
+    WHERE trace.assistant_message_id = NEW.assistant_message_id
+      AND NEW.item_kind != 'agent_mailbox_delivery';
     UPDATE conversation_history_fts
     SET
         status = COALESCE(

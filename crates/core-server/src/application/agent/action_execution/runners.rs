@@ -2450,6 +2450,10 @@ impl AgentService {
         if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
             self.release_conversation_turn_if_current(conversation_id, run_id);
         }
+        self.release_turn_concurrency_permit(run_id);
+        if let Some(assistant_message_id) = record.snapshot.assistant_message_id.as_deref() {
+            self.notify_durable_turn_observers(assistant_message_id);
+        }
         self.discard_trace_snapshot(run_id);
         let _ = notifications.send(agent_event_notification(AgentEvent::Done {
             run_id: run_id.clone(),
@@ -2640,6 +2644,7 @@ impl AgentService {
             return;
         }
         self.finish_persisted_run_usage(run_id, AgentRunStatus::Failed);
+        self.notify_durable_turn_observers(assistant_message_id);
 
         self.emit_terminal_context_window_snapshot(
             notifications,
@@ -2650,6 +2655,7 @@ impl AgentService {
             &terminal_message,
         );
         self.release_conversation_turn_if_current(conversation_id, run_id);
+        self.release_turn_concurrency_permit(run_id);
         self.discard_trace_snapshot(run_id);
         self.discard_exact_running_context_window_snapshot(run_id);
         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
@@ -2701,24 +2707,29 @@ impl AgentService {
             }));
             return;
         }
-        if let Some(identity) = resumed_identity {
-            if let Err(error) = ChildAgentFactory::new(Arc::clone(&self.storage))
+        let active_child_wake = if let Some(identity) = resumed_identity {
+            match ChildAgentFactory::new(Arc::clone(&self.storage))
                 .resolve_trusted_active_wake_by_identity(identity)
             {
-                self.discard_usage_context(&run_id);
-                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
-                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id),
-                    message: format!(
-                        "子 Agent 审批续跑的 Host 协作身份已失效，已拒绝执行：{error}"
-                    ),
-                    recoverable: true,
-                    code: Some("collaboration_identity_revalidation_failed".to_string()),
-                    details: None,
-                }));
-                return;
+                Ok(bundle) => Some(bundle),
+                Err(error) => {
+                    self.discard_usage_context(&run_id);
+                    self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                        run_id: Some(run_id),
+                        message: format!(
+                            "子 Agent 审批续跑的 Host 协作身份已失效，已拒绝执行：{error}"
+                        ),
+                        recoverable: true,
+                        code: Some("collaboration_identity_revalidation_failed".to_string()),
+                        details: None,
+                    }));
+                    return;
+                }
             }
-        }
+        } else {
+            None
+        };
         if cancellation_token.is_cancelled() {
             self.finish_cancelled_action_continuation(&record, &notifications, &cancellation_token);
             return;
@@ -2768,6 +2779,18 @@ impl AgentService {
                 message: format!("审批续跑无法取得 Conversation Turn：{error}"),
                 recoverable: true,
                 code: Some("conversation_turn_ownership_conflict".to_string()),
+                details: None,
+            }));
+            return;
+        }
+        if let Err(error) = self.ensure_turn_concurrency_permit(&run_id) {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id),
+                message: format!("审批续跑暂时无法取得进程级 Agent Turn 并发许可：{error}"),
+                recoverable: true,
+                code: Some("agent_turn_concurrency_limit".to_string()),
                 details: None,
             }));
             return;
@@ -2822,6 +2845,26 @@ impl AgentService {
         };
         let context_window_tool_projection =
             RunContextToolProjection::new(initial_context_window_tool_projection);
+        if let Some(active) = active_child_wake.as_ref() {
+            if let Err(error) = self.storage.transition_agent_wake(
+                &active.spawn.initial_wake.wake_id,
+                mycopilot_core::AgentWakeStatus::WaitingForApproval,
+                mycopilot_core::AgentWakeStatus::Running,
+                Some(&active.claim_token),
+            ) {
+                self.finish_pre_runtime_action_continuation_failure(
+                    &record,
+                    &notifications,
+                    &steer_input,
+                    &cancellation_token,
+                    final_pending_status,
+                    "collaboration_wake_resume_transition_failed",
+                    format!("子 Agent Wake 无法持久进入续跑状态：{error}"),
+                );
+                return;
+            }
+            self.notify_durable_turn_observers(&turn_assistant_message_id);
+        }
         let RuntimeTurnSegmentOutcome {
             result,
             terminal_event_gate,
@@ -2897,6 +2940,7 @@ impl AgentService {
                 );
                 if let (Some(conversation_id), Some(assistant_message_id)) = owner_ids {
                     if terminal_commit_published {
+                        self.notify_durable_turn_observers(assistant_message_id);
                         self.emit_terminal_context_window_snapshot(
                             &notifications,
                             &record.agent_input,
@@ -3051,6 +3095,7 @@ impl AgentService {
                         record.snapshot.conversation_id.as_deref(),
                         record.snapshot.assistant_message_id.as_deref(),
                     ) {
+                        self.notify_durable_turn_observers(assistant_message_id);
                         self.emit_terminal_context_window_snapshot(
                             &notifications,
                             &record.agent_input,
@@ -3084,6 +3129,7 @@ impl AgentService {
         drop(deletion_lifecycle);
         if durable_turn_terminal {
             self.release_conversation_turn_if_current(&turn_conversation_id, &run_id);
+            self.release_turn_concurrency_permit(&run_id);
         }
         if !keep_trace_snapshot {
             self.discard_trace_snapshot(&run_id);
