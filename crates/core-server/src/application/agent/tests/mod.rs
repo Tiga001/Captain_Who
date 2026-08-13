@@ -25,6 +25,7 @@ use std::fs;
 use tempfile::tempdir;
 
 mod cancellation;
+mod collaboration_harness;
 mod command_sessions;
 mod context_history;
 mod context_runtime;

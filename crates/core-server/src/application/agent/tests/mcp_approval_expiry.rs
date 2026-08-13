@@ -174,6 +174,7 @@ fn resume_checkpoint(
         "extensionSnapshots": [],
         "toolSet": crate::test_tool_set_checkpoint(),
         "runContext": null,
+        "collaborationRunSnapshot": null,
         "modelCapabilities": { "imageInput": false },
         "providerProfileConfig": crate::test_provider_profile_config(),
         "providerProtocolKey": crate::test_provider_protocol_key("expiry-test-model"),

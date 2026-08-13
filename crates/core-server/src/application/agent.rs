@@ -106,8 +106,10 @@ use mycopilot_mcp_client::{McpConfigDigest, McpConfigEpoch, McpServerId};
 use serde_json::Value;
 use tokio::sync::{mpsc::UnboundedSender, Notify};
 
+mod access;
 mod action_execution;
 mod approval;
+mod collaboration_protocol;
 mod command_sessions;
 mod completion;
 mod context_compaction;
@@ -122,6 +124,8 @@ mod turn_executor;
 mod usage;
 
 use action_execution::*;
+pub(crate) use approval::ProjectedApprovalDecision;
+pub(crate) use collaboration_protocol::event_dto as collaboration_event_dto;
 #[cfg(test)]
 use command_sessions::AgentCommandSessionHandoffGuard;
 use command_sessions::{
@@ -433,6 +437,10 @@ struct ActiveConversationTurn {
 #[derive(Clone)]
 pub struct AgentService {
     storage: Arc<StorageService>,
+    collaboration_authorizer:
+        crate::application::collaboration_authorization::CollaborationAuthorizer,
+    collaboration_dispatcher:
+        Arc<Mutex<Option<crate::application::agent_dispatcher::AgentDispatcher>>>,
     provider_continuation_vault: Option<Arc<ProviderContinuationVault>>,
     skills: Arc<SkillsService>,
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
@@ -612,8 +620,14 @@ impl AgentService {
             .map(|(storage_id, _)| storage_id.clone())
             .collect::<HashSet<_>>();
         let command_sessions = AgentCommandSessionRegistry::new(Arc::clone(&storage));
+        let collaboration_authorizer =
+            crate::application::collaboration_authorization::CollaborationAuthorizer::new(
+                Arc::clone(&storage),
+            );
         let service = Self {
             storage,
+            collaboration_authorizer,
+            collaboration_dispatcher: Arc::new(Mutex::new(None)),
             provider_continuation_vault,
             skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -678,6 +692,12 @@ impl AgentService {
         mycopilot_core::storage::models::ChatConversationViewRecord,
         mycopilot_core::storage::conversation_fork_repository::ConversationForkError,
     > {
+        self.authorize_user_conversation_write(&input.source_conversation_id)
+            .map_err(|error| {
+                mycopilot_core::storage::conversation_fork_repository::ConversationForkError::Other(
+                    error.to_string(),
+                )
+            })?;
         match self.provider_continuation_vault.as_deref() {
             Some(vault) => self
                 .storage
@@ -1424,6 +1444,48 @@ impl AgentService {
     ) -> Self {
         self.context_compaction_summary_generator = Some(generator);
         self
+    }
+
+    /// Takes ownership of the lazily-created collaboration Dispatcher and runs its existing
+    /// bounded shutdown protocol. The outer Host must stop accepting new Turns before calling
+    /// this method, so another tool invocation cannot create a replacement owner concurrently.
+    pub(crate) async fn shutdown_collaboration_dispatcher(
+        &self,
+    ) -> Result<
+        Option<crate::application::agent_dispatcher::AgentDispatcherShutdownReport>,
+        AgentServiceError,
+    > {
+        let dispatcher = self
+            .collaboration_dispatcher
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        match dispatcher {
+            Some(dispatcher) => dispatcher
+                .shutdown()
+                .await
+                .map(Some)
+                .map_err(|error| AgentServiceError::from(error.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Starts the single process-owned collaboration Dispatcher and immediately asks it to scan
+    /// durable Wake state. This runs after the server outbound channel exists, so recovered child
+    /// Turns use the same event sink as later tool-created children.
+    pub(crate) fn start_collaboration_dispatcher(
+        &self,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<(), AgentServiceError> {
+        crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
+            Arc::clone(&self.storage),
+            self.clone(),
+            self.collaboration_authorizer(),
+            Arc::clone(&self.collaboration_dispatcher),
+            notifications,
+        )
+        .start_dispatcher()
+        .map_err(|error| AgentServiceError::from(error.to_string()))
     }
 }
 

@@ -1013,15 +1013,12 @@ mod tests {
             )
             .is_err());
 
-        // Provenance is immutable while the Conversation exists, but ordinary FK cascade must
-        // still be able to remove the complete child history during a future controlled tree
-        // deletion.
-        connection
+        // A child Agent belongs to its root's durable collaboration event log. Raw node deletion
+        // is not the future controlled whole-tree deletion path and must not punch through the
+        // immutable snapshot provenance while that root still exists.
+        assert!(connection
             .execute("DELETE FROM agent_nodes WHERE agent_id = 'child-agent'", [])
-            .unwrap();
-        connection
-            .execute("DELETE FROM conversations WHERE id = 'target'", [])
-            .unwrap();
+            .is_err());
         assert_eq!(
             connection
                 .query_row(
@@ -1030,7 +1027,7 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-            0
+            1
         );
     }
 

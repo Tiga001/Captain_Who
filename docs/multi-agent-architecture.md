@@ -527,6 +527,112 @@ Mailbox、target、Command Session 或稍后到达的结果。
 只提供 `spawn_agent`、`send_message`、`followup_task`、`wait_agent`、`list_agents`、
 `interrupt_agent` 六个工具；完成根树权限、Approval 路由、严格 DTO、Host/Main/Preload 接线。
 
+#### A：六工具与窄 Host 边界
+
+Core 只声明六个严格 JSON schema 和 `AgentCollaborationExecutor` Host port，不引用 SQLite、
+Dispatcher、RPC 或 UI。只有 Host 注入可信 `AgentCollaborationCaller` 时才整组注册六个工具；
+未提供协作 capability 时一个也不出现。Server 在真实 root Turn 构造时对旧 Conversation 执行
+幂等 `ensure_root`，child 则从 Agent 节点重建身份；模型参数里不存在 sender/root/workspace 字段。
+
+- `spawn_agent(task_name, message, agent_type?, model?, reasoning_effort?, fork_turns?)` 只建直接子节点；
+  `agent_type` 是 machine key，`model` 是 `model_config_id`，两者都是精确匹配。
+- `send_message(target, message)` 只持久入队；`followup_task(target, message)` 额外保证最终执行机会，
+  但永不给正在运行的目标开第二个 Turn。
+- `wait_agent(targets, timeout_ms?)` 是 first-ready，0 表示立即快照，默认 30 s，最长 300 s，最多
+  32 个目标；它复用第 3 轮 durable receipt，不重读目标 inbox。
+- `list_agents()` 只返回授权树的简洁投影；`interrupt_agent(target)` 只中断当前 Turn，不删节点、
+  Conversation 或历史。不增加第七个工具。
+
+Host 每个 Turn 提供当时快照的脱敏 selector 目录：已启用模板的 machine key/名称/简介/
+模型显示名，以及可用 model config id/显示名。目录按稳定 key 排序，每类最多 32 项、
+总 JSON 最多 16 KiB，确定性截断并标记 `truncated`；类型上无 API key、URL、Provider 配置或模板
+instructions。目录只帮模型选择，过期/被截断 selector 仍由后端严格返回 unavailable，不模糊
+匹配。目录插入系统提示词前把 `<`、`>`、`&`、反引号和 Unicode 行分隔符编码为可逆 JSON
+Unicode escape，防止用户可编辑的名称/简介闭合数据标签或打开 Markdown 指令边界；16 KiB 总上限按
+编码后的实际字节重新执行，解码后的 selector 值不变。实际可调用 selector 集合与目录来自同一份
+Host-authored snapshot，并随 Turn checkpoint 持久化；Approval continuation 或进程恢复继续使用原 Turn
+的授权快照，不能在恢复时重算目录后获得模型从未看到的新 selector。
+
+可能跨过持久副作用边界的 spawn/send/follow-up/wait/interrupt 都使用 authoritative
+cancellation settlement，不把已提交的 Host future 遗留在 Run 外。`wait_agent` ready 返回时 ToolResult 已和
+cursor/model batch 在同一持久事务提交；Runtime 只更新内存 trace，不再次发布相同持久前缀。稳定
+错误分类为 `invalid_arguments / permission_denied / conflict / unavailable / unsupported /
+resource_limit`，由 typed 领域错误映射，不从文案猜测。同一个 Provider tool-call batch 只允许一次
+`wait_agent` admission；第二次调用在进入 Host 前稳定失败，并由普通 Runtime 路径持久化自己的失败
+ToolResult，不能复用第一条 `(run, model batch)` delivery receipt。
+
+Core Server 在 outbound 事件通道建立后、开始接收请求前启动唯一进程级 Dispatcher。启动动作会立即
+扫描 SQLite 中已有的 queued/recoverable Wake，因此上个进程未收到或来不及处理的内存通知不影响恢复；
+关停时由同一个 `AgentService` owner 取回 Dispatcher 并走有界收敛。确定性 fake-provider 集成测试通过
+真实 Tool schema → Runtime → Host port → application service 链同时运行两个使用不同模板/模型的 child，
+并锁定旧 root 懒物化、恰好六工具、Conversation 隔离和 wait precommitted ToolResult 只写一次。
+
+#### B：统一授权、资源边界与根 Approval 投影
+
+`CollaborationAuthorizer` 是 renderer RPC、Harness adapter 和应用服务共用的授权边界。它只从
+`agent_nodes` 解析 caller/root/project/parent，不接受前端或模型提交的 `isChild`、sender、root、task
+path 作为权限事实。旧的未绑定 Conversation 保持原行为；一旦绑定 Agent，普通用户写入只允许 root。
+child 只可通过携带 exact root Conversation 和 child Conversation 的 observer RPC 读取，普通历史、meta
+和全文搜索均过滤 child。start/steer/stop/fork/provider transition、Approval decision、消息 edit/retry/
+delete、meta/UI state/composer draft 等旧入口在执行写操作前都经过相同 root guard；持久 Agent tree 的
+Conversation/project 不能通过旧删除入口被级联破坏。
+
+当前 canonical 外键将 Agent-bound root Conversation/Project 的旧删除请求显式拒绝，而不是猜测级联范围；
+安全的“归档/删除整棵树”需要独立生命周期事务，不能借旧单 Conversation 删除 RPC 顺手实现。普通未绑定
+Conversation/Project 的删除行为保持不变。
+
+普通 send 允许同树定向；follow-up、wait、interrupt 只允许 caller 的严格后代；不存在、跨项目和跨树
+target 对外统一表现为 permission denied，不能充当存在性探针。默认产品限制是深度 8、每树 64 节点、
+Harness 消息 64 KiB 和 Dispatcher 全局并发 4。节点数/深度在 child spawn 的同一个
+`BEGIN IMMEDIATE` 内校验，不能由两个并发 spawn 同时越过；既有 request 的幂等 retry 在配额检查前返回
+原记录。Mailbox 仍保留第 3 轮的持久硬配额。模板没有权限字段，因此当前不可能提权；child Wake 始终由
+Host 注入保守 `AgentPermissions::default()`，未来若模板增加声明，也只能与 root/project/dynamic policy
+逐字段取交集。
+
+child Approval 不复制审批表或状态机。`agent_pending_actions`、checkpoint、原 child Run 和 action audit
+继续是真相；renderer 看到的是按 root tree JOIN 得到的逻辑投影。稳定 `approval_id` 是后端 framed
+pending-action id，根决策请求只携带 `root_conversation_id + approval_id + decision`，server 反查 source
+Agent、run/action 并调用原 Approval continuation。重复、过期或已终结点击只返回 durable 已结算状态，
+不启动第二个 continuation；重启后投影由 pending journal 重建。pending INSERT/状态 CAS 与 root-tree
+collaboration event 由 canonical trigger 同事务提交，内存通知仅用于刷新。
+
+#### C：稳定协议、持久事件与 renderer 数据层
+
+`agent.collaboration.*` 是严格、版本化的小 DTO 面：树/节点详情、精确 child Conversation observer、
+模板 CRUD、根 Approval 投影和 event replay。DTO 只包含模型/界面安全的 display 信息；不返回连接 URL、
+credential、Provider profile、内部 lease/claim token、checkpoint 或完整系统提示词。Main 对请求和响应都做
+runtime parser 与 root/agent/project 身份回验，Preload 仅开放固定 allowlist。普通 `storage.load*`、历史和
+搜索继续隐藏 child；observer 必须同时提交 exact root Conversation 与 child Conversation。
+
+`agent_collaboration_events` 是按 root tree 分区的 append-only invalidation outbox，不是第二份聊天或状态表。
+每次 Agent、Mailbox、Wake、Turn 和 child Approval 状态更新都由 canonical trigger 在同一 SQLite 事务里
+推进 root-local sequence 并写 event；数据库触发器同时验证 root、Agent、Conversation 和 sequence cut 的
+精确关系。进程内 notifier 只降低延迟；崩溃、丢通知、重复通知或窗口重载均通过
+`listEvents(afterSequence)` 从该日志补洞。全局 sequence 只供 server notifier 扫描，renderer 永远按
+root-local sequence 合并，两个并行子 Agent/不同 root 不会串线。
+
+Core 进程启动时先冻结当前 durable global cursor，再发一次严格的全局
+`agent.collaboration.resync(core_started)`，随后只从该 cursor 之后订阅 outbox。这样现存 Main/renderer
+不会把重启前后窗口误当成“已经同步”；cursor 冻结后提交的 mutation 仍由 event replay 覆盖。模型设置
+是跨 root 的显示元数据目录，成功提交后发窄的
+`agent.collaboration.resync(model_settings_changed)`；失败事务不发通知。resync 只是失效信号，renderer
+仍从数据库重新 hydrate，通知本身不携带或替代任何领域状态。
+
+树 snapshot 在读取多查询状态前先取得保守 replay cursor，因此并发 mutation 最多被重复 replay，绝不会
+让 cursor 越过 snapshot 尚未观察到的状态。未懒物化 root 的旧 Conversation 返回
+`materialized=false/tree=null`，是健康的“无协作”状态；真正存储/RPC 失败保持 error 并在下一 durable
+notification 或显式 hydrate 时重试。
+
+renderer 的 `CollaborationStore` 只保存 root-scoped Agent tree/display snapshot。notification 是失效提示：
+store 忽略重复/其他 root，按持久日志验证连续 sequence，遇缺口或乱序后重新水合数据库 snapshot；它不
+复制 Conversation 消息 reducer。窗口 reload 新建 store 后直接水合数据库。observer Conversation 使用
+专用严格 DTO，保留安全的完整 chat display 投影（attachments、Agent run/UI state）并为每个 user-role
+输入附带可信 human/agent/historical-snapshot origin；UI 不得把 agent-origin 显示成“你”。
+
+协议版本本轮为 `schemaVersion=1`，canonical storage 为 v7；v6 及更早开发库继续采用既有
+reset-required、原库不改写策略。本轮只交付 renderer client/store/hook，不实现右侧栏、聊天卡片或视觉
+交互。
+
 ### 第 5 轮：前端复用与完整用户体验
 
 把现有聊天 Surface 拆成 interactive/observer 两种模式；子 Agent observer 放在右侧栏指挥中心，

@@ -271,11 +271,12 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 7 carries ordered, opaque references to Provider continuation state.
+/// Version 8 additionally freezes the model-visible Agent collaboration selector directory and
+/// per-model-batch wait admission state across approval/restart continuation.
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 7;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -307,6 +308,10 @@ pub struct AgentRunCheckpoint {
     /// Backend execution authority frozen at the approval boundary.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub run_context: Option<AgentRunContext>,
+    /// Host-authenticated collaboration authority for this exact logical Turn. It is the same
+    /// bounded directory shown to the model, plus durable admission of wait_agent per batch.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub collaboration_run_snapshot: Option<crate::AgentCollaborationRunSnapshot>,
     /// Provider-neutral capabilities frozen for the same logical run.
     pub model_capabilities: ModelCapabilities,
     /// Exact provider protocol settings used by the run before it paused.

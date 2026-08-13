@@ -39,7 +39,7 @@ pub(crate) enum AgentWaitStopReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentWaitOutcome {
-    Ready(AgentWaitReadySnapshot),
+    Ready(Box<AgentWaitReadySnapshot>),
     Stopped(AgentWaitStopReason),
 }
 
@@ -116,7 +116,7 @@ impl AgentWaitKernel {
         }
         // First check: avoid registration work when a durable item is already ready.
         if let Some(ready) = self.storage.poll_ready(&input)? {
-            return Ok(AgentWaitOutcome::Ready(ready));
+            return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
         }
         let listener = self.notifications.listener(&input.caller_agent_id);
         let notified = listener.notified();
@@ -126,7 +126,7 @@ impl AgentWaitKernel {
         }
         // Second check closes the check/subscription lost-wakeup window.
         if let Some(ready) = self.storage.poll_ready(&input)? {
-            return Ok(AgentWaitOutcome::Ready(ready));
+            return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
         }
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
@@ -162,7 +162,7 @@ impl AgentWaitKernel {
                         return Ok(AgentWaitOutcome::Stopped(reason));
                     }
                     if let Some(ready) = self.storage.poll_ready(&input)? {
-                        return Ok(AgentWaitOutcome::Ready(ready));
+                        return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
                     }
                     notified.set(listener.notified());
                 }
@@ -171,7 +171,7 @@ impl AgentWaitKernel {
                         return Ok(AgentWaitOutcome::Stopped(reason));
                     }
                     if let Some(ready) = self.storage.poll_ready(&input)? {
-                        return Ok(AgentWaitOutcome::Ready(ready));
+                        return Ok(AgentWaitOutcome::Ready(Box::new(ready)));
                     }
                 }
             }
@@ -265,6 +265,7 @@ mod tests {
                 created_at: 1,
                 updated_at: 1,
             },
+            source_receipt_id: None,
             targets: vec![AgentWaitTargetSnapshot {
                 target_agent_id: "target-b".into(),
                 messages: Vec::new(),

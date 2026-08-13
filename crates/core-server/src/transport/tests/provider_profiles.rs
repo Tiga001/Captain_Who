@@ -37,11 +37,42 @@ fn generic_model(model_id: &str, input_price: &str) -> Value {
 }
 
 #[test]
+fn successful_model_settings_commit_emits_one_global_collaboration_resync() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let response = handle_request(
+        storage.as_ref(),
+        &agent_service,
+        notifications,
+        request(
+            STORAGE_SAVE_MODEL_SETTINGS_METHOD,
+            Some(generic_model_save_payload(serde_json::json!([
+                generic_model("model-a", "0")
+            ]))),
+        ),
+    );
+
+    assert!(response.get("result").is_some(), "{response}");
+    assert_eq!(
+        receiver.try_recv().unwrap(),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": mycopilot_protocol_rs::AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+            "params": { "schemaVersion": 1, "reason": "model_settings_changed" }
+        })
+    );
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
 fn duplicate_model_id_is_returned_as_safe_stable_validation_data() {
     let temp = tempfile::tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new(Arc::clone(&storage));
-    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
 
     let response = handle_request(
         storage.as_ref(),
@@ -72,6 +103,10 @@ fn duplicate_model_id_is_returned_as_safe_stable_validation_data() {
     let encoded = response.to_string();
     assert!(!encoded.contains("fixed-secret-token-must-not-cross"));
     assert!(!encoded.contains("provider-secret.example"));
+    assert!(
+        receiver.try_recv().is_err(),
+        "a rejected settings transaction must not invalidate collaboration state"
+    );
 }
 
 #[test]

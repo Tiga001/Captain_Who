@@ -1334,6 +1334,17 @@ impl StorageService {
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
     }
 
+    /// Loads one frozen approval fact by its backend-framed id. Renderer-facing callers must use
+    /// a higher-level root projection and must never receive `agent_input_json`.
+    pub fn get_pending_agent_action(
+        &self,
+        approval_id: &str,
+    ) -> Result<Option<AgentPendingActionRecord>, String> {
+        let connection = self.state.connection()?;
+        pending_action_repository::load_pending_action(&connection, approval_id)
+            .map_err(storage_error)
+    }
+
     /// Returns the current-format rows owned by pending or MCP-specific startup recovery.
     pub fn list_recoverable_agent_actions_after_reconciliation(
         &self,

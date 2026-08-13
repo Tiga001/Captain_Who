@@ -47,7 +47,7 @@ use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
     ModelRequestPurpose, ModelRequestToolSetObservation,
 };
-use crate::prompts::build_system_prompt_with_collaboration;
+use crate::prompts::{build_system_prompt_with_collaboration, collaboration_harness_section};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowSnapshot,
@@ -67,9 +67,10 @@ use crate::storage::now_ms;
 use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
 use crate::{
-    resolve_provider_runtime_capabilities, ConversationTraceSnapshot, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
-    ProviderContinuationRequirement, ProviderPrivateReplaySemantics, ProviderUsageSemantics,
+    resolve_provider_runtime_capabilities, AgentCollaborationRuntimeServices,
+    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus, ProviderContinuationRequirement,
+    ProviderPrivateReplaySemantics, ProviderUsageSemantics,
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
@@ -403,6 +404,7 @@ impl AgentRuntime {
             command_session_executor,
             steer_input,
             collaboration_inbox,
+            mut agent_collaboration,
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -468,6 +470,24 @@ impl AgentRuntime {
             input.model_capabilities = restored.model_capabilities;
             input.provider_profile_config = Some(restored.provider_profile_config.clone());
             input.provider_protocol_key = Some(restored.provider_protocol_key.clone());
+            agent_collaboration = match (
+                agent_collaboration.take(),
+                restored.collaboration_run_snapshot.as_ref(),
+            ) {
+                (Some(services), Some(snapshot)) => {
+                    Some(services.with_run_snapshot(snapshot).map_err(|error| {
+                        AgentError::new(format!(
+                            "无法恢复运行检查点的 Agent collaboration 授权：{error}"
+                        ))
+                    })?)
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(AgentError::new(
+                        "无法恢复运行检查点：Agent collaboration Host capability 与冻结授权不一致。",
+                    ));
+                }
+            };
         }
         let mut run_context = input.context.clone();
         let model_capabilities = input.model_capabilities;
@@ -509,6 +529,7 @@ impl AgentRuntime {
                 skill_activation_resolver,
                 skill_resources: skill_resources.clone(),
                 mcp_tools,
+                agent_collaboration_enabled: agent_collaboration.is_some(),
             },
         )
         .map_err(|error| {
@@ -606,6 +627,17 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        if !resumed_world_state_epoch {
+            if let Some(services) = agent_collaboration.as_ref() {
+                active_context.push(ContextItem::text(
+                    LlmMessageRole::System,
+                    collaboration_harness_section(&services.caller, &services.selector_directory),
+                    ContextSource::RuntimeGuard,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ));
+            }
+        }
         let provider_runtime_capabilities = resolve_provider_runtime_capabilities(
             &llm_request.provider_protocol_key,
         )
@@ -684,6 +716,10 @@ impl AgentRuntime {
             .with_skill_resources(skill_resources)
             .with_command_runtime_profile_resolver(command_runtime_profile_resolver)
             .with_command_session_executor(command_session_executor)
+            .with_agent_collaboration(
+                agent_collaboration.clone(),
+                trace_assistant_message_id.clone(),
+            )
             .with_steer_input(steer_input.clone())
             .with_goal_runtime_state_reader(runtime_extensions.goal_runtime_state_reader())
             .with_text_output_budget(tool_output_budget);
@@ -2353,6 +2389,9 @@ impl AgentRuntime {
                                     conversation_trace: &trace,
                                     tool_set: &effective_tool_set,
                                     run_context: run_context.as_ref(),
+                                    collaboration_run_snapshot: agent_collaboration
+                                        .as_ref()
+                                        .map(AgentCollaborationRuntimeServices::run_snapshot),
                                     model_capabilities,
                                     run_world_state: run_world_state.snapshot(),
                                     provider_profile_config: &llm_request.provider_profile_config,
@@ -2507,6 +2546,8 @@ impl AgentRuntime {
                         });
                     }
 
+                    let mut tool_result_persistence =
+                        crate::tools::AgentToolResultPersistence::RuntimeCommits;
                     let result_result = if let Some(result) = policy_preflight_failure {
                         Ok(result)
                     } else if auto_execute_host_action {
@@ -2579,6 +2620,10 @@ impl AgentRuntime {
                                                         conversation_trace: &trace,
                                                         tool_set: &effective_tool_set,
                                                         run_context: run_context.as_ref(),
+                                                        collaboration_run_snapshot:
+                                                            agent_collaboration.as_ref().map(
+                                                                AgentCollaborationRuntimeServices::run_snapshot,
+                                                            ),
                                                         model_capabilities,
                                                         run_world_state: run_world_state.snapshot(),
                                                         provider_profile_config:
@@ -2639,11 +2684,18 @@ impl AgentRuntime {
                     } else {
                         execute_registered_tool(
                             tool_registry.clone(),
-                            tool_context.clone(),
+                            tool_context.clone().with_model_batch_index(
+                                u64::try_from(next_model_request_index.saturating_add(1))
+                                    .unwrap_or(u64::MAX),
+                            ),
                             call.clone(),
                             cancellation_token.clone(),
                         )
                         .await
+                        .map(|execution| {
+                            tool_result_persistence = execution.persistence;
+                            execution.result
+                        })
                     };
                     let authoritative_tool_settlement = matches!(
                         tool_registry.cancellation_settlement(&call.tool),
@@ -2848,9 +2900,15 @@ impl AgentRuntime {
                         }
                         sequence
                     };
-                    if let Err(error) =
-                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
+                    let trace_publish = if tool_result_persistence
+                        == crate::tools::AgentToolResultPersistence::PrecommittedTrace
                     {
+                        Ok(())
+                    } else {
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())
+                            .map(|_| ())
+                    };
+                    if let Err(error) = trace_publish {
                         if settles_entire_provider_tool_batch_on_terminal {
                             settle_aborted_grouped_tool_batch(
                                 &error,

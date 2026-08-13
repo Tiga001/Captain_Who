@@ -701,6 +701,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         }],
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
+        collaboration_run_snapshot: None,
         model_capabilities: ModelCapabilities::default(),
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),
@@ -1272,6 +1273,7 @@ fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: prepared.agent_input.context.clone(),
+        collaboration_run_snapshot: None,
         model_capabilities: prepared.agent_input.model_capabilities,
         provider_profile_config: prepared
             .agent_input

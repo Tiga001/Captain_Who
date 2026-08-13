@@ -1003,6 +1003,24 @@ impl AgentService {
         host_services = host_services.with_collaboration_inbox(Arc::new(
             PersistentAgentSamplingBoundaryInbox::new(Arc::clone(&self.storage)),
         ));
+        let collaboration_harness =
+            crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
+                Arc::clone(&self.storage),
+                self.clone(),
+                self.collaboration_authorizer(),
+                Arc::clone(&self.collaboration_dispatcher),
+                notifications.clone(),
+            );
+        host_services =
+            match collaboration_harness.attach_to_host_services(host_services, &conversation_id) {
+                Ok(services) => services,
+                Err(error) => {
+                    return RuntimeTurnSegmentOutcome {
+                        result: Err(error),
+                        terminal_event_gate,
+                    };
+                }
+            };
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
         }

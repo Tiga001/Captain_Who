@@ -13,6 +13,7 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) mcp_tools: Option<crate::tools::McpToolRuntime>,
+    pub(super) agent_collaboration_enabled: bool,
 }
 
 pub(super) struct DurableConversationTimeline {
@@ -42,6 +43,7 @@ pub(super) fn prepare_runtime_capabilities(
             skill_activation_resolver: None,
             skill_resources: None,
             mcp_tools: None,
+            agent_collaboration_enabled: false,
         },
     )
 }
@@ -61,6 +63,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_activation_resolver,
         skill_resources,
         mcp_tools,
+        agent_collaboration_enabled,
     } = services;
     let runtime_extensions = RuntimeExtensions::for_run_with_skills(
         run_id,
@@ -84,6 +87,9 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     let context = input.context.as_ref();
     tool_registry.register_conversation_history();
     tool_registry.register_goal_tools();
+    if agent_collaboration_enabled {
+        tool_registry.register_agent_collaboration_tools();
+    }
     runtime_extensions.register_tools(&mut tool_registry)?;
     if let Some(mcp_tools) = mcp_tools.as_ref() {
         tool_registry.register_mcp_runtime(mcp_tools);
@@ -593,7 +599,12 @@ fn assemble_initial_context_with_skill_overlays(
 
 #[cfg(test)]
 mod approval_identity_tests {
-    use super::expected_approval_action_id;
+    use super::{
+        expected_approval_action_id, prepare_runtime_capabilities_with_skills, AgentChatInput,
+        RuntimeCapabilityServices,
+    };
+    use serde_json::json;
+    use std::collections::BTreeSet;
 
     #[test]
     fn mcp_action_identity_is_independent_while_builtin_actions_use_call_identity() {
@@ -605,5 +616,68 @@ mod approval_identity_tests {
             expected_approval_action_id(None, "model-call-id"),
             "model-call-id"
         );
+    }
+
+    fn minimal_input() -> AgentChatInput {
+        serde_json::from_value(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "model-1",
+            "modelCapabilities": { "imageInput": false },
+            "messages": []
+        }))
+        .unwrap()
+    }
+
+    fn services(agent_collaboration_enabled: bool) -> RuntimeCapabilityServices {
+        RuntimeCapabilityServices {
+            host_actions_available: false,
+            office_engine: None,
+            image_generation_execution: None,
+            skill_installation_prepare: None,
+            skill_installation_commit: None,
+            skill_activation_resolver: None,
+            skill_resources: None,
+            mcp_tools: None,
+            agent_collaboration_enabled,
+        }
+    }
+
+    #[test]
+    fn runtime_capability_exposes_exactly_six_collaboration_tools_as_one_group() {
+        let disabled = prepare_runtime_capabilities_with_skills(
+            &minimal_input(),
+            "run-disabled",
+            &[],
+            services(false),
+        )
+        .unwrap();
+        assert!(crate::AGENT_COLLABORATION_TOOL_NAMES.iter().all(|name| {
+            disabled
+                .tool_definitions
+                .iter()
+                .all(|definition| definition.name != *name)
+        }));
+
+        let enabled = prepare_runtime_capabilities_with_skills(
+            &minimal_input(),
+            "run-enabled",
+            &[],
+            services(true),
+        )
+        .unwrap();
+        let actual = enabled
+            .tool_definitions
+            .iter()
+            .filter(|definition| {
+                crate::AGENT_COLLABORATION_TOOL_NAMES.contains(&definition.name.as_str())
+            })
+            .map(|definition| definition.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let expected = crate::AGENT_COLLABORATION_TOOL_NAMES
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
     }
 }

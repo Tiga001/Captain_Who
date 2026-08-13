@@ -36,6 +36,7 @@ use crate::tools::{
 use crate::world_state::{
     WorldStateLifetime, WorldStateSectionId, WorldStateSnapshot, WorldStateVisibility,
 };
+use crate::AGENT_COLLABORATION_TOOL_NAMES;
 use std::collections::{BTreeSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -445,6 +446,7 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) conversation_trace: ConversationTraceRecorder,
     pub(super) tool_set: AgentRunToolSetCheckpoint,
     pub(super) run_context: Option<AgentRunContext>,
+    pub(super) collaboration_run_snapshot: Option<crate::AgentCollaborationRunSnapshot>,
     pub(super) model_capabilities: ModelCapabilities,
     pub(super) run_world_state: WorldStateSnapshot,
     pub(super) provider_profile_config: ProviderProfileConfig,
@@ -461,6 +463,7 @@ pub(super) struct RunCheckpointState<'a> {
     pub(super) conversation_trace: &'a ConversationTraceRecorder,
     pub(super) tool_set: &'a EffectiveToolSet,
     pub(super) run_context: Option<&'a AgentRunContext>,
+    pub(super) collaboration_run_snapshot: Option<crate::AgentCollaborationRunSnapshot>,
     pub(super) model_capabilities: ModelCapabilities,
     pub(super) run_world_state: &'a WorldStateSnapshot,
     pub(super) provider_profile_config: &'a ProviderProfileConfig,
@@ -480,6 +483,7 @@ pub(super) fn create_run_checkpoint(
         conversation_trace,
         tool_set,
         run_context,
+        collaboration_run_snapshot,
         model_capabilities,
         run_world_state,
         provider_profile_config,
@@ -527,6 +531,13 @@ pub(super) fn create_run_checkpoint(
     project_mcp_result_context_for_checkpoint(&mut context_items);
     validate_context_checkpoint_tool_call_ids(&context_items)?;
     validate_checkpoint_world_state(run_world_state, model_capabilities)?;
+    validate_collaboration_run_snapshot(
+        tool_set
+            .all_definitions()
+            .iter()
+            .map(|definition| definition.name.as_str()),
+        collaboration_run_snapshot.as_ref(),
+    )?;
     let provider_continuation_refs = context.provider_continuation_refs()?;
     Ok(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
@@ -549,6 +560,7 @@ pub(super) fn create_run_checkpoint(
         extension_snapshots,
         tool_set: tool_set.checkpoint(),
         run_context: run_context.cloned(),
+        collaboration_run_snapshot,
         model_capabilities,
         provider_profile_config: provider_profile_config.clone(),
         provider_protocol_key: provider_protocol_key.clone(),
@@ -759,6 +771,14 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         return Err(AgentError::new("无法恢复运行检查点：待审批动作标识无效。"));
     }
     validate_tool_set_checkpoint_shape(&checkpoint.tool_set)?;
+    validate_collaboration_run_snapshot(
+        checkpoint
+            .tool_set
+            .exposed_tool_names
+            .iter()
+            .map(String::as_str),
+        checkpoint.collaboration_run_snapshot.as_ref(),
+    )?;
     validate_checkpoint_world_state(&checkpoint.run_world_state, checkpoint.model_capabilities)?;
     validate_model_tool_call_id(&continuation.call.id)?;
     validate_model_tool_call_id(&continuation.result.call_id)?;
@@ -922,6 +942,7 @@ pub(super) fn restore_run_checkpoint_with_model_projection(
         conversation_trace,
         tool_set,
         run_context: checkpoint.run_context,
+        collaboration_run_snapshot: checkpoint.collaboration_run_snapshot,
         model_capabilities: checkpoint.model_capabilities,
         run_world_state: checkpoint.run_world_state,
         provider_profile_config,
@@ -1110,6 +1131,36 @@ fn validate_checkpoint_world_state(
         ));
     }
     Ok(())
+}
+
+fn validate_collaboration_run_snapshot<'a>(
+    exposed_tool_names: impl IntoIterator<Item = &'a str>,
+    snapshot: Option<&crate::AgentCollaborationRunSnapshot>,
+) -> AgentResult<()> {
+    let collaboration_tool_count = exposed_tool_names
+        .into_iter()
+        .filter(|name| AGENT_COLLABORATION_TOOL_NAMES.contains(name))
+        .count();
+    if collaboration_tool_count != 0
+        && collaboration_tool_count != AGENT_COLLABORATION_TOOL_NAMES.len()
+    {
+        return Err(AgentError::new(
+            "运行检查点包含不完整的 Agent collaboration Tool 集。",
+        ));
+    }
+    match (collaboration_tool_count, snapshot) {
+        (0, None) => Ok(()),
+        (count, Some(snapshot)) if count == AGENT_COLLABORATION_TOOL_NAMES.len() => {
+            snapshot.validate()
+        }
+        (0, Some(_)) => Err(AgentError::new(
+            "运行检查点在未暴露 Agent collaboration Tools 时携带了协作授权。",
+        )),
+        (_, None) => Err(AgentError::new(
+            "运行检查点缺少 Agent collaboration Tool 的冻结授权。",
+        )),
+        _ => unreachable!("partial collaboration tool sets are rejected above"),
+    }
 }
 
 fn restore_batch_fingerprints(
@@ -1349,6 +1400,14 @@ mod tests {
 
     fn test_tool_set() -> EffectiveToolSet {
         let registry = ToolRegistry::defaults_with_search(None);
+        registry
+            .effective_tool_set(registry.definitions(), &std::collections::BTreeSet::new())
+            .unwrap()
+    }
+
+    fn collaboration_tool_set() -> EffectiveToolSet {
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_agent_collaboration_tools();
         registry
             .effective_tool_set(registry.definitions(), &std::collections::BTreeSet::new())
             .unwrap()
@@ -1781,6 +1840,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -1846,6 +1906,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -1888,6 +1949,7 @@ mod tests {
             "deferredExternalToolCallCount",
             "providerContinuationRefs",
             "runContext",
+            "collaborationRunSnapshot",
             "conversationTraceItems",
             "conversationModelContextItems",
             "nextConversationTraceSequence",
@@ -1903,6 +1965,7 @@ mod tests {
         }
 
         assert!(canonical["runContext"].is_null());
+        assert!(canonical["collaborationRunSnapshot"].is_null());
 
         let mut missing_provider_identity = canonical.clone();
         missing_provider_identity["contextItems"][0]["toolCalls"][0]
@@ -2028,6 +2091,82 @@ mod tests {
             serde_json::from_value::<AgentRunCheckpoint>(extra).is_err(),
             "unknown checkpoint fields must fail closed"
         );
+    }
+
+    #[test]
+    fn approval_checkpoint_freezes_selector_and_wait_admission_across_resume() {
+        let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+        let frozen_directory = crate::AgentCollaborationSelectorDirectory::bounded(
+            Vec::new(),
+            vec![crate::AgentCollaborationModelSelector {
+                model_config_id: "model-visible-before-approval".to_string(),
+                display_name: "Visible before approval".to_string(),
+            }],
+        );
+        let frozen_snapshot = crate::AgentCollaborationRunSnapshot {
+            selector_directory: frozen_directory.clone(),
+            admitted_wait_model_batches: vec![3],
+        };
+        checkpoint.tool_set = collaboration_tool_set().checkpoint();
+        checkpoint.collaboration_run_snapshot = Some(frozen_snapshot.clone());
+
+        let serialized = serde_json::to_vec(&checkpoint).unwrap();
+        let checkpoint: AgentRunCheckpoint = serde_json::from_slice(&serialized).unwrap();
+        let restored =
+            restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+        assert_eq!(
+            restored.collaboration_run_snapshot.as_ref(),
+            Some(&frozen_snapshot)
+        );
+
+        let current_services = crate::AgentCollaborationRuntimeServices::new(
+            std::sync::Arc::new(NeverCollaborationExecutor),
+            test_collaboration_caller(),
+            crate::AgentCollaborationSelectorDirectory::bounded(
+                Vec::new(),
+                vec![crate::AgentCollaborationModelSelector {
+                    model_config_id: "model-added-during-approval".to_string(),
+                    display_name: "Added during approval".to_string(),
+                }],
+            ),
+        )
+        .with_run_snapshot(
+            restored
+                .collaboration_run_snapshot
+                .as_ref()
+                .expect("checkpoint has frozen collaboration authority"),
+        )
+        .unwrap();
+        let authorization = current_services.selector_authorization();
+        assert!(authorization.allows_model_config_id("model-visible-before-approval"));
+        assert!(!authorization.allows_model_config_id("model-added-during-approval"));
+        assert!(!current_services.try_admit_wait_model_batch(3).unwrap());
+        assert!(current_services.try_admit_wait_model_batch(4).unwrap());
+    }
+
+    struct NeverCollaborationExecutor;
+
+    impl crate::AgentCollaborationExecutor for NeverCollaborationExecutor {
+        fn execute(
+            &self,
+            _invocation: crate::AgentCollaborationInvocation,
+            _control: crate::AgentCollaborationExecutionControl,
+        ) -> crate::AgentCollaborationExecutionFuture {
+            Box::pin(async { panic!("checkpoint test never executes collaboration Host work") })
+        }
+    }
+
+    fn test_collaboration_caller() -> crate::AgentCollaborationCaller {
+        crate::AgentCollaborationCaller {
+            agent_id: "agent-root".to_string(),
+            root_agent_id: "agent-root".to_string(),
+            root_conversation_id: "conversation-root".to_string(),
+            parent_agent_id: None,
+            conversation_id: "conversation-root".to_string(),
+            project_id: Some("project-root".to_string()),
+            task_name: "Root".to_string(),
+            task_path: "/root".to_string(),
+        }
     }
 
     #[test]
@@ -2376,6 +2515,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2520,6 +2660,7 @@ mod tests {
                 conversation_trace: &ConversationTraceRecorder::default(),
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2566,6 +2707,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2606,6 +2748,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2664,6 +2807,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2692,6 +2836,7 @@ mod tests {
                 conversation_trace: &invalid_trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2861,6 +3006,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -2922,6 +3068,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -3054,6 +3201,7 @@ mod tests {
                 conversation_trace: &conversation_trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),
@@ -3191,6 +3339,7 @@ mod tests {
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: ModelCapabilities::default(),
                 run_world_state: &test_run_world_state(),
                 provider_profile_config: &test_provider_profile(),

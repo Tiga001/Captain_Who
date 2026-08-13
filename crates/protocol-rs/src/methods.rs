@@ -42,6 +42,27 @@ pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
 pub const AGENT_READ_FILE_DRAFT_METHOD: &str = "agent.readFileDraft";
 pub const AGENT_GET_FILE_WRITE_DIFF_METHOD: &str = "agent.getFileWriteDiff";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
+pub const AGENT_COLLABORATION_GET_TREE_METHOD: &str = "agent.collaboration.getTree";
+pub const AGENT_COLLABORATION_GET_AGENT_METHOD: &str = "agent.collaboration.getAgent";
+pub const AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD: &str =
+    "agent.collaboration.locateConversation";
+pub const AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD: &str =
+    "agent.collaboration.loadObserverConversation";
+pub const AGENT_COLLABORATION_LIST_EVENTS_METHOD: &str = "agent.collaboration.listEvents";
+pub const AGENT_COLLABORATION_TEMPLATES_LIST_METHOD: &str = "agent.collaboration.templates.list";
+pub const AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD: &str =
+    "agent.collaboration.templates.create";
+pub const AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD: &str =
+    "agent.collaboration.templates.update";
+pub const AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD: &str =
+    "agent.collaboration.templates.setEnabled";
+pub const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD: &str =
+    "agent.collaboration.templates.delete";
+pub const AGENT_COLLABORATION_APPROVALS_LIST_METHOD: &str = "agent.collaboration.approvals.list";
+pub const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD: &str =
+    "agent.collaboration.approvals.decide";
+pub const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD: &str = "agent.collaboration.event";
+pub const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD: &str = "agent.collaboration.resync";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
 pub const SKILLS_LIST_METHOD: &str = "skills.list";
 pub const SKILLS_INSTALL_LOCAL_METHOD: &str = "skills.installLocal";

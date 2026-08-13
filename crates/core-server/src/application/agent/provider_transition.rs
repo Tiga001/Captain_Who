@@ -97,6 +97,7 @@ impl AgentService {
         &self,
         input: AgentProviderTransitionPreflightInput,
     ) -> Result<AgentProviderTransitionPreflightOutput, AgentServiceError> {
+        self.authorize_user_conversation_write(&input.conversation_id)?;
         match self.prepare_provider_transition(input)? {
             ProviderTransitionPreparation::Ready(prepared) => Ok(prepared.output),
             ProviderTransitionPreparation::Blocked(output) => Ok(output),
@@ -108,6 +109,7 @@ impl AgentService {
         input: AgentProviderTransitionStartInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentProviderTransitionOperation, AgentServiceError> {
+        self.authorize_user_conversation_write(&input.conversation_id)?;
         let transition_token = input.transition_token.trim();
         if transition_token.is_empty() {
             return Err("模型切换预检已失效，请重新选择模型后重试。"
@@ -323,6 +325,7 @@ impl AgentService {
         if conversation_id.is_empty() {
             return Err("conversationId 不能为空。".to_string().into());
         }
+        self.authorize_user_conversation_write(conversation_id)?;
         let _conversation = self
             .storage
             .load_conversation(conversation_id)?

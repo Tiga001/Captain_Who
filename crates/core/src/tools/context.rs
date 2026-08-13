@@ -91,6 +91,9 @@ pub struct ToolExecutionContext {
     command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     command_session_executor: Option<Arc<dyn crate::runtime::AgentCommandSessionExecutor>>,
+    agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
+    assistant_message_id: Option<String>,
+    model_batch_index: u64,
     steer_input: Option<crate::runtime::AgentSteerInputQueue>,
     goal_runtime_state_reader: Option<Arc<dyn GoalRuntimeStateReader>>,
 }
@@ -124,6 +127,9 @@ impl ToolExecutionContext {
             skill_resources: None,
             command_runtime_profile_resolver: None,
             command_session_executor: None,
+            agent_collaboration: None,
+            assistant_message_id: None,
+            model_batch_index: 0,
             steer_input: None,
             goal_runtime_state_reader: None,
         }
@@ -189,6 +195,21 @@ impl ToolExecutionContext {
         executor: Option<Arc<dyn crate::runtime::AgentCommandSessionExecutor>>,
     ) -> Self {
         self.command_session_executor = executor;
+        self
+    }
+
+    pub(crate) fn with_agent_collaboration(
+        mut self,
+        services: Option<crate::AgentCollaborationRuntimeServices>,
+        assistant_message_id: Option<String>,
+    ) -> Self {
+        self.agent_collaboration = services;
+        self.assistant_message_id = assistant_message_id;
+        self
+    }
+
+    pub(crate) fn with_model_batch_index(mut self, index: u64) -> Self {
+        self.model_batch_index = index;
         self
     }
 
@@ -425,6 +446,55 @@ impl ToolExecutionContext {
 
     pub(super) fn steer_input(&self) -> Option<crate::runtime::AgentSteerInputQueue> {
         self.steer_input.clone()
+    }
+
+    pub(super) fn agent_collaboration_invocation(
+        &self,
+        action: crate::AgentCollaborationAction,
+    ) -> AgentResult<(
+        crate::AgentCollaborationRuntimeServices,
+        crate::AgentCollaborationInvocation,
+    )> {
+        self.check_cancelled()?;
+        let services = self.agent_collaboration.clone().ok_or_else(|| {
+            AgentError::structured(
+                "agent.collaboration.unavailable",
+                "当前 Host 未启用 Agent 协作能力。",
+                serde_json::json!({
+                    "type": "agent_collaboration",
+                    "category": "unavailable",
+                    "retryable": false,
+                }),
+            )
+        })?;
+        if matches!(action, crate::AgentCollaborationAction::Wait(_))
+            && !services.try_admit_wait_model_batch(self.model_batch_index)?
+        {
+            return Err(AgentError::structured(
+                "agent.collaboration.wait_batch_conflict",
+                "同一个模型 Tool-call 批次只能执行一个 wait_agent；请在下一次模型采样后再等待。",
+                serde_json::json!({
+                    "type": "agent_collaboration",
+                    "category": "conflict",
+                    "retryable": false,
+                    "recovery": "waitInNextModelBatch",
+                }),
+            ));
+        }
+        let invocation = crate::AgentCollaborationInvocation {
+            caller: services.caller.clone(),
+            selector_authorization: services.selector_authorization(),
+            conversation_id: self.conversation_id()?.to_string(),
+            run_id: self.run_id()?.to_string(),
+            assistant_message_id: self
+                .assistant_message_id
+                .clone()
+                .ok_or_else(|| AgentError::new("协作工具缺少 assistant message identity。"))?,
+            model_batch_index: self.model_batch_index,
+            tool_call_id: self.tool_call_id()?.to_string(),
+            action,
+        };
+        Ok((services, invocation))
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {

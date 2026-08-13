@@ -305,6 +305,9 @@ fn take_project_deletion_failure(project_id: &str) -> Option<String> {
 
 impl AgentService {
     pub fn cancel_run(&self, run_id: &str) -> bool {
+        if !self.authorize_user_run_write(run_id).unwrap_or(false) {
+            return false;
+        }
         // `agent.cancelRun` is the explicit user stop boundary. Capture the authoritative
         // conversation binding before cancelling the worker, because worker teardown removes the
         // ActiveRunControl. This is intentionally separate from `cancel_run_internal`: deletion,
@@ -334,7 +337,7 @@ impl AgentService {
         cancelled || terminated_sessions > 0
     }
 
-    fn cancel_run_internal(&self, run_id: &str) -> bool {
+    pub(super) fn cancel_run_internal(&self, run_id: &str) -> bool {
         let cancelled_run = {
             let cancellations = self
                 .cancellations
@@ -357,6 +360,9 @@ impl AgentService {
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        self.storage
+            .ensure_agent_project_deletable(project_id)
+            .map_err(|error| error.to_string())?;
         // Marking and effect registration use the same lock. Therefore every effect is either
         // already represented in `file_effects`, or observes the marker and never starts.
         {
@@ -491,6 +497,11 @@ impl AgentService {
     }
 
     pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
+        self.authorize_user_conversation_write(conversation_id)
+            .map_err(|error| error.to_string())?;
+        self.storage
+            .ensure_agent_conversation_deletable(conversation_id)
+            .map_err(|error| error.to_string())?;
         let project_id = self
             .storage
             .load_conversation(conversation_id)?
@@ -575,6 +586,8 @@ impl AgentService {
         conversation_id: &str,
         message_ids: &[String],
     ) -> Result<(), String> {
+        self.authorize_user_conversation_write(conversation_id)
+            .map_err(|error| error.to_string())?;
         if message_ids.is_empty() {
             return Ok(());
         }

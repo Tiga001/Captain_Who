@@ -398,6 +398,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) command_session_executor: Option<Arc<dyn AgentCommandSessionExecutor>>,
     pub(super) steer_input: Option<AgentSteerInputQueue>,
     pub(super) collaboration_inbox: Option<Arc<dyn AgentSamplingBoundaryInbox>>,
+    pub(super) agent_collaboration: Option<crate::AgentCollaborationRuntimeServices>,
 }
 
 impl AgentRuntimeHostServices {
@@ -548,6 +549,15 @@ impl AgentRuntimeHostServices {
 
     pub fn with_collaboration_inbox(mut self, inbox: Arc<dyn AgentSamplingBoundaryInbox>) -> Self {
         self.collaboration_inbox = Some(inbox);
+        self
+    }
+
+    /// Enables exactly the six Host-authenticated Agent collaboration tools for this Turn.
+    pub fn with_agent_collaboration(
+        mut self,
+        services: crate::AgentCollaborationRuntimeServices,
+    ) -> Self {
+        self.agent_collaboration = Some(services);
         self
     }
 }
@@ -740,6 +750,7 @@ pub fn prepare_context_window_tool_projection(
             skill_activation_resolver: host_services.skill_activation_resolver.clone(),
             skill_resources: host_services.skill_resources.clone(),
             mcp_tools: host_services.mcp_tools.clone(),
+            agent_collaboration_enabled: host_services.agent_collaboration.is_some(),
         },
     )?;
     let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(

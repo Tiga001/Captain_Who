@@ -1,3 +1,4 @@
+mod agent_collaboration;
 mod git;
 mod image_generation;
 mod mcp_management;
@@ -10,6 +11,7 @@ mod skill_management;
 mod skill_mutation;
 mod storage;
 
+pub use agent_collaboration::*;
 pub use git::*;
 pub use image_generation::*;
 pub use mcp_management::*;

@@ -51,7 +51,7 @@ fn electron_app_data_root_is_the_authoritative_process_boundary() {
             "method": "core.ping"
         }),
     );
-    assert_eq!(receive_response(&line_rx)["result"]["message"], "pong");
+    assert_eq!(receive_response(&line_rx, 1)["result"]["message"], "pong");
     send_request(
         &mut stdin,
         json!({
@@ -60,7 +60,7 @@ fn electron_app_data_root_is_the_authoritative_process_boundary() {
             "method": "core.shutdown"
         }),
     );
-    assert_eq!(receive_response(&line_rx)["id"], 2);
+    assert_eq!(receive_response(&line_rx, 2)["id"], 2);
     drop(stdin);
 
     let status = wait_for_exit(&mut child, EXIT_TIMEOUT);
@@ -126,7 +126,7 @@ fn unsigned_development_bootstrap_persists_credentials_without_keychain_access()
             }
         }),
     );
-    let update = receive_response(&line_rx);
+    let update = receive_response(&line_rx, 1);
     assert_eq!(update["id"], 1);
     assert_eq!(
         update["result"]["configuration"]["credentialStatus"],
@@ -141,7 +141,7 @@ fn unsigned_development_bootstrap_persists_credentials_without_keychain_access()
             "method": "core.shutdown"
         }),
     );
-    assert_eq!(receive_response(&line_rx)["id"], 2);
+    assert_eq!(receive_response(&line_rx, 2)["id"], 2);
     drop(stdin);
     let status = wait_for_exit(&mut child, EXIT_TIMEOUT);
     reader.join().expect("stdout reader thread");
@@ -182,7 +182,7 @@ fn unsigned_development_bootstrap_persists_credentials_without_keychain_access()
             "method": "imageGeneration.getConfiguration"
         }),
     );
-    let restored = receive_response(&restarted_rx);
+    let restored = receive_response(&restarted_rx, 3);
     assert_eq!(restored["id"], 3);
     assert_eq!(
         restored["result"]["configuration"]["credentialStatus"],
@@ -196,7 +196,7 @@ fn unsigned_development_bootstrap_persists_credentials_without_keychain_access()
             "method": "core.shutdown"
         }),
     );
-    assert_eq!(receive_response(&restarted_rx)["id"], 4);
+    assert_eq!(receive_response(&restarted_rx, 4)["id"], 4);
     drop(restarted_stdin);
     let restarted_status = wait_for_exit(&mut restarted, EXIT_TIMEOUT);
     restarted_reader.join().expect("stdout reader thread");
@@ -232,7 +232,7 @@ fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly()
             "params": { "message": "startup-smoke" }
         }),
     );
-    let ping = receive_response(&line_rx);
+    let ping = receive_response(&line_rx, 1);
     assert_eq!(ping["id"], 1);
     assert_eq!(ping["result"]["message"], "pong");
     assert_eq!(ping["result"]["echo"], "startup-smoke");
@@ -264,7 +264,7 @@ fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly()
             "params": {}
         }),
     );
-    let management = receive_response(&line_rx);
+    let management = receive_response(&line_rx, 2);
     assert_eq!(management["id"], 2);
     assert_eq!(management["result"]["schemaVersion"], 1);
     assert!(management["result"]["skills"].is_array());
@@ -277,7 +277,7 @@ fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly()
             "method": "imageGeneration.getConfiguration"
         }),
     );
-    let image_generation = receive_response(&line_rx);
+    let image_generation = receive_response(&line_rx, 3);
     assert_eq!(image_generation["id"], 3);
     assert_eq!(image_generation["result"]["schemaVersion"], 1);
     assert_eq!(
@@ -300,7 +300,7 @@ fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly()
             "method": "core.shutdown"
         }),
     );
-    let shutdown = receive_response(&line_rx);
+    let shutdown = receive_response(&line_rx, 4);
     assert_eq!(shutdown["id"], 4);
     assert!(shutdown["result"].is_object());
     drop(stdin);
@@ -333,12 +333,28 @@ fn send_request(stdin: &mut impl Write, request: Value) {
     stdin.flush().expect("flush JSON-RPC request");
 }
 
-fn receive_response(lines: &Receiver<std::io::Result<String>>) -> Value {
-    let line = lines
-        .recv_timeout(RESPONSE_TIMEOUT)
-        .expect("core-server response before timeout")
-        .expect("read core-server response");
-    serde_json::from_str(&line).expect("valid JSON-RPC response")
+fn receive_response(lines: &Receiver<std::io::Result<String>>, expected_id: i64) -> Value {
+    let deadline = Instant::now() + RESPONSE_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let line = lines
+            .recv_timeout(remaining)
+            .expect("core-server response before timeout")
+            .expect("read core-server response");
+        let value: Value = serde_json::from_str(&line).expect("valid JSON-RPC message");
+        match value.get("id") {
+            Some(id) => {
+                assert_eq!(id, expected_id, "unexpected JSON-RPC response ordering");
+                return value;
+            }
+            None => {
+                assert!(
+                    value.get("method").is_some(),
+                    "an id-less JSON-RPC message must be a notification"
+                );
+            }
+        }
+    }
 }
 
 fn wait_for_exit(child: &mut Child, timeout: Duration) -> ExitStatus {

@@ -544,8 +544,10 @@ pub fn poll_wait_ready(
         } else {
             receipt
         };
+        let source_receipt_id = wait_replay_source(&transaction, &receipt.receipt_id)?;
         let snapshot = AgentWaitReadySnapshot {
             receipt,
+            source_receipt_id,
             targets: snapshots,
             model_projection: AgentWaitModelProjection::PrecommittedToolResult,
         };
@@ -572,6 +574,7 @@ pub fn poll_wait_ready(
             &replay.targets,
             polled_at,
         )?;
+        replay.source_receipt_id = Some(source_receipt_id.clone());
         transaction
             .execute(
                 "UPDATE agent_model_batch_receipts
@@ -779,6 +782,7 @@ pub fn poll_wait_ready(
     transaction.commit().map_err(write_error)?;
     Ok(Some(AgentWaitReadySnapshot {
         receipt,
+        source_receipt_id: None,
         targets: snapshots,
         model_projection: AgentWaitModelProjection::PrecommittedToolResult,
     }))
@@ -983,11 +987,26 @@ fn load_open_wait_snapshot_from_previous_run(
     Ok(Some((
         AgentWaitReadySnapshot {
             receipt,
+            source_receipt_id: None,
             targets: snapshots,
             model_projection: AgentWaitModelProjection::PrecommittedToolResult,
         },
         previous_receipt_id,
     )))
+}
+
+fn wait_replay_source(
+    connection: &Connection,
+    receipt_id: &str,
+) -> Result<Option<String>, AgentGraphError> {
+    connection
+        .query_row(
+            "SELECT source_receipt_id FROM agent_model_batch_receipt_replays WHERE receipt_id = ?1",
+            [receipt_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(read_error)
 }
 
 fn insert_wait_receipt_target(
@@ -1095,6 +1114,7 @@ fn wait_snapshot_from_frozen(
 ) -> AgentWaitReadySnapshot {
     AgentWaitReadySnapshot {
         receipt,
+        source_receipt_id: None,
         targets: targets
             .into_iter()
             .map(|target| AgentWaitTargetSnapshot {

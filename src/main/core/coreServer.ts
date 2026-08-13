@@ -14,6 +14,29 @@ import type {
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentEvent,
+  AgentConversationLocator,
+  AgentConversationLocatorRequest,
+  AgentDetail,
+  AgentDetailRequest,
+  AgentObserverConversationRequest,
+  AgentObserverConversation,
+  AgentTemplate,
+  AgentTemplateCreateRequest,
+  AgentTemplateDeleteRequest,
+  AgentTemplateList,
+  AgentTemplateListRequest,
+  AgentTemplateSetEnabledRequest,
+  AgentTemplateUpdateRequest,
+  AgentTreeRequest,
+  AgentTreeLookup,
+  CollaborationApprovalDecisionRequest,
+  CollaborationApprovalDecisionResult,
+  CollaborationApprovalList,
+  CollaborationApprovalListRequest,
+  CollaborationEventEnvelope,
+  CollaborationEventsPage,
+  CollaborationEventsRequest,
+  CollaborationResyncEnvelope,
   AgentFileDraftContentPage,
   AgentFileDraftReadInput,
   AgentFileWriteDiffInput,
@@ -223,6 +246,29 @@ import {
   SKILL_SOURCE_RESOLUTION_ERROR_CODE,
   OFFICE_GET_STATUS_METHOD,
   parseOfficeEngineStatus,
+  parseAgentConversationLocator,
+  parseAgentConversationLocatorRequest,
+  parseAgentDetail,
+  parseAgentDetailRequest,
+  parseAgentObserverConversationRequest,
+  parseAgentObserverConversation,
+  parseAgentTemplate,
+  parseAgentTemplateCreateRequest,
+  parseAgentTemplateDeleteRequest,
+  parseAgentTemplateList,
+  parseAgentTemplateListRequest,
+  parseAgentTemplateSetEnabledRequest,
+  parseAgentTemplateUpdateRequest,
+  parseAgentTreeRequest,
+  parseAgentTreeLookup,
+  parseCollaborationApprovalDecisionRequest,
+  parseCollaborationApprovalDecisionResult,
+  parseCollaborationApprovalList,
+  parseCollaborationApprovalListRequest,
+  parseCollaborationEventEnvelope,
+  parseCollaborationEventsPage,
+  parseCollaborationEventsRequest,
+  parseCollaborationResyncEnvelope,
   SKILLS_UNINSTALL_METHOD,
   SKILLS_UPDATE_LOCAL_METHOD
 } from '@mycopilot/protocol'
@@ -264,6 +310,21 @@ const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
 const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = 'storage.loadInputAttachments'
+const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
+const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
+const AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD = 'agent.collaboration.locateConversation'
+const AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD =
+  'agent.collaboration.loadObserverConversation'
+const AGENT_COLLABORATION_LIST_EVENTS_METHOD = 'agent.collaboration.listEvents'
+const AGENT_COLLABORATION_TEMPLATES_LIST_METHOD = 'agent.collaboration.templates.list'
+const AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD = 'agent.collaboration.templates.create'
+const AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD = 'agent.collaboration.templates.update'
+const AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD = 'agent.collaboration.templates.setEnabled'
+const AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD = 'agent.collaboration.templates.delete'
+const AGENT_COLLABORATION_APPROVALS_LIST_METHOD = 'agent.collaboration.approvals.list'
+const AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD = 'agent.collaboration.approvals.decide'
+const AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD = 'agent.collaboration.event'
+const AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD = 'agent.collaboration.resync'
 
 function validateProviderTransitionResponseIdentity(
   request: { conversationId: string; targetModelId: string },
@@ -857,6 +918,245 @@ export class CoreServer {
       } catch {
         // MCP event rejection must not echo the rejected payload or a parser diagnostic.
         console.warn('Ignored invalid Agent event')
+      }
+    })
+  }
+
+  getCollaborationTree(input: AgentTreeRequest): Promise<AgentTreeLookup> {
+    const request = parseAgentTreeRequest(input)
+    return this.rpc
+      .request<unknown, AgentTreeRequest>(AGENT_COLLABORATION_GET_TREE_METHOD, request)
+      .then((value) => {
+        const lookup = parseAgentTreeLookup(value)
+        const tree = lookup.tree
+        if (!tree) return lookup
+        if (
+          tree.rootConversationId !== request.rootConversationId ||
+          tree.agents.some(
+            (agent) =>
+              agent.rootConversationId !== tree.rootConversationId ||
+              agent.rootAgentId !== tree.rootAgentId ||
+              agent.projectId !== tree.projectId
+          )
+        ) {
+          throw new Error('Invalid collaboration tree response identity')
+        }
+        return lookup
+      })
+  }
+
+  getCollaborationAgent(input: AgentDetailRequest): Promise<AgentDetail> {
+    const request = parseAgentDetailRequest(input)
+    return this.rpc
+      .request<unknown, AgentDetailRequest>(AGENT_COLLABORATION_GET_AGENT_METHOD, request)
+      .then((value) => {
+        const detail = parseAgentDetail(value)
+        if (
+          detail.summary.agentId !== request.agentId ||
+          detail.summary.rootConversationId !== request.rootConversationId
+        ) {
+          throw new Error('Invalid collaboration Agent response identity')
+        }
+        return detail
+      })
+  }
+
+  locateCollaborationConversation(
+    input: AgentConversationLocatorRequest
+  ): Promise<AgentConversationLocator> {
+    const request = parseAgentConversationLocatorRequest(input)
+    return this.rpc
+      .request<unknown, AgentConversationLocatorRequest>(
+        AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD,
+        request
+      )
+      .then((value) => {
+        const locator = parseAgentConversationLocator(value)
+        if (locator.agentId !== request.agentId) {
+          throw new Error('Invalid collaboration locator response identity')
+        }
+        return locator
+      })
+  }
+
+  loadCollaborationObserverConversation(
+    input: AgentObserverConversationRequest
+  ): Promise<AgentObserverConversation | null> {
+    const request = parseAgentObserverConversationRequest(input)
+    return this.rpc
+      .request<unknown, AgentObserverConversationRequest>(
+        AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD,
+        request
+      )
+      .then((value) => {
+        const response = parseAgentObserverConversation(value)
+        if (
+          response &&
+          (response.rootConversationId !== request.rootConversationId ||
+            response.conversationId !== request.conversationId)
+        ) {
+          throw new Error('Invalid observer Conversation response identity')
+        }
+        return response
+      })
+  }
+
+  listCollaborationEvents(input: CollaborationEventsRequest): Promise<CollaborationEventsPage> {
+    const request = parseCollaborationEventsRequest(input)
+    return this.rpc
+      .request<unknown, CollaborationEventsRequest>(AGENT_COLLABORATION_LIST_EVENTS_METHOD, request)
+      .then((value) => {
+        const page = parseCollaborationEventsPage(value)
+        if (
+          page.rootConversationId !== request.rootConversationId ||
+          page.events.some(
+            (event) =>
+              event.rootConversationId !== page.rootConversationId ||
+              event.rootAgentId !== page.rootAgentId
+          )
+        ) {
+          throw new Error('Invalid collaboration event page identity')
+        }
+        return page
+      })
+  }
+
+  listAgentTemplates(input: AgentTemplateListRequest): Promise<AgentTemplateList> {
+    const request = parseAgentTemplateListRequest(input)
+    return this.rpc
+      .request<unknown, AgentTemplateListRequest>(
+        AGENT_COLLABORATION_TEMPLATES_LIST_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentTemplateList(value)
+        if (output.templates.some((template) => template.projectId !== request.projectId)) {
+          throw new Error('Invalid Agent template list identity')
+        }
+        return output
+      })
+  }
+
+  createAgentTemplate(input: AgentTemplateCreateRequest): Promise<AgentTemplate> {
+    const request = parseAgentTemplateCreateRequest(input)
+    return this.rpc
+      .request<unknown, AgentTemplateCreateRequest>(
+        AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentTemplate(value)
+        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+          throw new Error('Invalid Agent template response identity')
+        }
+        return output
+      })
+  }
+
+  updateAgentTemplate(input: AgentTemplateUpdateRequest): Promise<AgentTemplate> {
+    const request = parseAgentTemplateUpdateRequest(input)
+    return this.rpc
+      .request<unknown, AgentTemplateUpdateRequest>(
+        AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentTemplate(value)
+        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+          throw new Error('Invalid Agent template response identity')
+        }
+        return output
+      })
+  }
+
+  setAgentTemplateEnabled(input: AgentTemplateSetEnabledRequest): Promise<AgentTemplate> {
+    const request = parseAgentTemplateSetEnabledRequest(input)
+    return this.rpc
+      .request<unknown, AgentTemplateSetEnabledRequest>(
+        AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentTemplate(value)
+        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+          throw new Error('Invalid Agent template response identity')
+        }
+        return output
+      })
+  }
+
+  deleteAgentTemplate(input: AgentTemplateDeleteRequest): Promise<AgentTemplate> {
+    const request = parseAgentTemplateDeleteRequest(input)
+    return this.rpc
+      .request<unknown, AgentTemplateDeleteRequest>(
+        AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseAgentTemplate(value)
+        if (output.projectId !== request.projectId || output.templateId !== request.templateId) {
+          throw new Error('Invalid Agent template response identity')
+        }
+        return output
+      })
+  }
+
+  listCollaborationApprovals(
+    input: CollaborationApprovalListRequest
+  ): Promise<CollaborationApprovalList> {
+    const request = parseCollaborationApprovalListRequest(input)
+    return this.rpc
+      .request<unknown, CollaborationApprovalListRequest>(
+        AGENT_COLLABORATION_APPROVALS_LIST_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseCollaborationApprovalList(value)
+        if (
+          output.approvals.some(
+            (approval) => approval.rootConversationId !== request.rootConversationId
+          )
+        ) {
+          throw new Error('Invalid collaboration Approval list identity')
+        }
+        return output
+      })
+  }
+
+  decideCollaborationApproval(
+    input: CollaborationApprovalDecisionRequest
+  ): Promise<CollaborationApprovalDecisionResult> {
+    const request = parseCollaborationApprovalDecisionRequest(input)
+    return this.rpc
+      .request<unknown, CollaborationApprovalDecisionRequest>(
+        AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD,
+        request
+      )
+      .then((value) => {
+        const output = parseCollaborationApprovalDecisionResult(value)
+        if (output.approvalId !== request.approvalId) {
+          throw new Error('Invalid collaboration Approval response identity')
+        }
+        return output
+      })
+  }
+
+  onCollaborationEvent(handler: (event: CollaborationEventEnvelope) => void): () => void {
+    return this.rpc.onNotification(AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseCollaborationEventEnvelope(params))
+      } catch {
+        console.warn('Ignored invalid collaboration event')
+      }
+    })
+  }
+
+  onCollaborationResync(handler: (event: CollaborationResyncEnvelope) => void): () => void {
+    return this.rpc.onNotification(AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseCollaborationResyncEnvelope(params))
+      } catch {
+        console.warn('Ignored invalid collaboration resync')
       }
     })
   }

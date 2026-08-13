@@ -1563,6 +1563,8 @@ impl AgentService {
         &self,
         input: AgentCommandSessionListInput,
     ) -> Result<AgentCommandSessionListOutput, String> {
+        self.authorize_user_conversation_write(&input.conversation_id)
+            .map_err(|error| error.to_string())?;
         self.command_sessions.list(input)
     }
 
@@ -1570,6 +1572,8 @@ impl AgentService {
         &self,
         input: AgentCommandSessionGetInput,
     ) -> Result<AgentCommandSessionGetOutput, String> {
+        self.authorize_user_conversation_write(&input.conversation_id)
+            .map_err(|error| error.to_string())?;
         self.command_sessions.get(input)
     }
 }

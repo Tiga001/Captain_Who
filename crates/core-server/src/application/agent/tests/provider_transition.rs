@@ -219,35 +219,61 @@ fn provider_transition_rejects_inactive_roots_and_child_observer_conversations_w
         .unwrap();
 
     let service = AgentService::new(Arc::clone(&storage));
-    for (conversation_id, expected_message) in [
-        (
-            "conversation-transition-inactive-root",
-            "根 Agent 当前不可用，不能切换模型。",
-        ),
-        (
-            child.agent.conversation_id.as_str(),
-            "子 Agent Conversation 是只读观察视图，不能由用户切换模型。",
-        ),
-    ] {
-        let before = storage.load_conversation(conversation_id).unwrap().unwrap();
-        let output = service
-            .preflight_provider_transition(AgentProviderTransitionPreflightInput {
-                conversation_id: conversation_id.to_string(),
-                target_model_id: "model-2".to_string(),
-            })
-            .unwrap();
-        assert_eq!(output.decision, AgentProviderTransitionDecision::Blocked);
-        assert_eq!(
-            output.reason,
-            AgentProviderTransitionReason::UnsupportedTarget
-        );
-        assert_eq!(output.message.as_deref(), Some(expected_message));
-        assert_eq!(
-            serde_json::to_value(storage.load_conversation(conversation_id).unwrap().unwrap())
-                .unwrap(),
-            serde_json::to_value(before).unwrap()
-        );
-    }
+    let inactive_conversation_id = "conversation-transition-inactive-root";
+    let inactive_before = storage
+        .load_conversation(inactive_conversation_id)
+        .unwrap()
+        .unwrap();
+    let output = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: inactive_conversation_id.to_string(),
+            target_model_id: "model-2".to_string(),
+        })
+        .unwrap();
+    assert_eq!(output.decision, AgentProviderTransitionDecision::Blocked);
+    assert_eq!(
+        output.reason,
+        AgentProviderTransitionReason::UnsupportedTarget
+    );
+    assert_eq!(
+        output.message.as_deref(),
+        Some("根 Agent 当前不可用，不能切换模型。")
+    );
+    assert_eq!(
+        serde_json::to_value(
+            storage
+                .load_conversation(inactive_conversation_id)
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(inactive_before).unwrap()
+    );
+
+    let child_conversation_id = child.agent.conversation_id.as_str();
+    let child_before = storage
+        .load_conversation(child_conversation_id)
+        .unwrap()
+        .unwrap();
+    let error = service
+        .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+            conversation_id: child_conversation_id.to_string(),
+            target_model_id: "model-2".to_string(),
+        })
+        .unwrap_err();
+    assert!(error
+        .message()
+        .contains("子 Agent Conversation 是只读观察视图"));
+    assert_eq!(
+        serde_json::to_value(
+            storage
+                .load_conversation(child_conversation_id)
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
+        serde_json::to_value(child_before).unwrap()
+    );
 }
 
 fn two_model_settings(

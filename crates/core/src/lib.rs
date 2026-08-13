@@ -1,3 +1,5 @@
+mod agent_collaboration_event;
+mod agent_collaboration_harness;
 mod agent_delivery;
 mod agent_graph;
 pub mod artifact_runtime;
@@ -33,6 +35,8 @@ mod turn_diff;
 mod usage;
 pub mod world_state;
 
+pub use agent_collaboration_event::*;
+pub use agent_collaboration_harness::*;
 pub use agent_delivery::*;
 pub use agent_graph::{
     AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentDisplayStatus,
@@ -41,9 +45,9 @@ pub use agent_graph::{
     AgentModelSelectionSnapshot, AgentModelSelectionSource, AgentModelUnavailableReason,
     AgentNodeRecord, AgentResultArtifactKind, AgentResultArtifactReference, AgentTemplateError,
     AgentTemplateModelUnavailableReason, AgentTemplateRecord, AgentTemplateSnapshot,
-    AgentTurnResultEnvelope, AgentTurnResultSettlement, AgentWakeRecoveryAction,
-    AgentWakeRecoveryBatch, AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnError,
-    ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
+    AgentTreeResourceLimits, AgentTurnResultEnvelope, AgentTurnResultSettlement,
+    AgentWakeRecoveryAction, AgentWakeRecoveryBatch, AgentWakeRequestRecord, AgentWakeStatus,
+    ChildAgentSpawnError, ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
     CreateAgentTemplateInput, CreateChildAgentInput, EnqueueAgentMessageInput,
     EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentTurnResultInput,
     FinishAgentWakeWithResultInput, IdempotentCreate, InterruptAgentExecutionOutcome,

@@ -102,6 +102,18 @@ impl StorageService {
         let connection = self.state.connection()?;
         conversations
             .into_iter()
+            .filter_map(
+                |conversation| match agent_graph_repository::get_agent_node_by_conversation(
+                    &connection,
+                    &conversation.id,
+                ) {
+                    Ok(Some(node)) if node.parent_agent_id.is_some() => None,
+                    Ok(_) => Some(Ok(conversation)),
+                    Err(error) => Some(Err(error.to_string())),
+                },
+            )
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
             .map(|conversation| {
                 let continuation_origin = conversation_fork_repository::get_continuation_origin(
                     &connection,
@@ -118,7 +130,20 @@ impl StorageService {
 
     pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
         let connection = self.state.connection()?;
-        chat_repository::list_conversation_metas(&connection).map_err(storage_error)
+        chat_repository::list_conversation_metas(&connection)
+            .map_err(storage_error)?
+            .into_iter()
+            .filter_map(
+                |conversation| match agent_graph_repository::get_agent_node_by_conversation(
+                    &connection,
+                    &conversation.id,
+                ) {
+                    Ok(Some(node)) if node.parent_agent_id.is_some() => None,
+                    Ok(_) => Some(Ok(conversation)),
+                    Err(error) => Some(Err(error.to_string())),
+                },
+            )
+            .collect()
     }
 
     pub fn load_conversation(
@@ -133,6 +158,54 @@ impl StorageService {
             attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
         }
         Ok(conversation)
+    }
+
+    /// Loads a complete observer Conversation and its input provenance from one SQLite read cut.
+    ///
+    /// This is intentionally a narrow bulk boundary: actor facts are decoded in one ordered
+    /// query and returned as an in-memory map, rather than opening a new connection for every
+    /// message. A missing or corrupt origin aborts the whole snapshot instead of silently
+    /// presenting an Agent instruction as a human message.
+    pub fn load_conversation_observer_snapshot(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationObserverSnapshot>, String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let mut conversation = chat_repository::get_conversation(&transaction, conversation_id)
+            .map_err(storage_error)?;
+        let Some(mut conversation) = conversation.take() else {
+            transaction.commit().map_err(storage_error)?;
+            return Ok(None);
+        };
+        self.attach_message_attachments(&transaction, std::slice::from_mut(&mut conversation))?;
+        attach_message_guidance_timelines(&transaction, std::slice::from_mut(&mut conversation))?;
+        let input_origins =
+            agent_graph_repository::conversation_message_origins(&transaction, conversation_id)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+        let expected_input_count = conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .count();
+        if input_origins.len() != expected_input_count
+            || conversation
+                .messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .any(|message| !input_origins.contains_key(&message.id))
+        {
+            return Err(
+                "Conversation observer snapshot has incomplete input provenance.".to_string(),
+            );
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(Some(ConversationObserverSnapshot {
+            conversation,
+            input_origins,
+        }))
     }
 
     /// Loads the complete Conversation together with the opaque revision used for Turn

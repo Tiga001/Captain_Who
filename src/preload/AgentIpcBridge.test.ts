@@ -94,3 +94,97 @@ describe('Agent IPC bridge Provider transitions', () => {
     expect(removeListener).toHaveBeenCalledWith('host:agent.providerTransition', listener)
   })
 })
+
+describe('Agent IPC bridge collaboration', () => {
+  it('uses the dedicated snapshot, replay and observer channels', async () => {
+    const invoke = vi.fn().mockResolvedValue({ ok: true, value: {} })
+    const ipcRenderer = {
+      invoke,
+      on: vi.fn(),
+      removeListener: vi.fn()
+    } as unknown as Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
+    const bridge = createAgentIpcBridge(ipcRenderer)
+
+    await bridge.getCollaborationTree({ rootConversationId: 'root-conversation' })
+    await bridge.listCollaborationEvents({
+      rootConversationId: 'root-conversation',
+      afterSequence: 9,
+      limit: 256
+    })
+    await bridge.loadCollaborationObserverConversation({
+      rootConversationId: 'root-conversation',
+      conversationId: 'child-conversation'
+    })
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'host:agent.collaboration.getTree', {
+      rootConversationId: 'root-conversation'
+    })
+    expect(invoke).toHaveBeenNthCalledWith(2, 'host:agent.collaboration.listEvents', {
+      rootConversationId: 'root-conversation',
+      afterSequence: 9,
+      limit: 256
+    })
+    expect(invoke).toHaveBeenNthCalledWith(3, 'host:agent.collaboration.loadObserverConversation', {
+      rootConversationId: 'root-conversation',
+      conversationId: 'child-conversation'
+    })
+  })
+
+  it('subscribes and unsubscribes the collaboration event channel', () => {
+    const on = vi.fn()
+    const removeListener = vi.fn()
+    const ipcRenderer = {
+      invoke: vi.fn(),
+      on,
+      removeListener
+    } as unknown as Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
+    const bridge = createAgentIpcBridge(ipcRenderer)
+    const handler = vi.fn()
+    const unsubscribe = bridge.onCollaborationEvent(handler)
+    const listener = on.mock.calls[0]?.[1]
+    const notification = {
+      schemaVersion: 1,
+      eventId: 'event-1',
+      sequence: 1,
+      workspaceId: 'project-1',
+      projectId: 'project-1',
+      rootAgentId: 'root-agent',
+      rootConversationId: 'root-conversation',
+      agentId: 'child-agent',
+      conversationId: 'child-conversation',
+      turnId: null,
+      runId: null,
+      messageId: null,
+      kind: 'agent_created',
+      resourceRevision: 1,
+      occurredAt: 100
+    }
+    listener({}, notification)
+
+    expect(on).toHaveBeenCalledWith('host:agent.collaboration.event', expect.any(Function))
+    expect(handler).toHaveBeenCalledWith(notification)
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith('host:agent.collaboration.event', listener)
+  })
+
+  it('subscribes and unsubscribes the global collaboration resync channel', () => {
+    const on = vi.fn()
+    const removeListener = vi.fn()
+    const ipcRenderer = {
+      invoke: vi.fn(),
+      on,
+      removeListener
+    } as unknown as Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
+    const bridge = createAgentIpcBridge(ipcRenderer)
+    const handler = vi.fn()
+    const unsubscribe = bridge.onCollaborationResync(handler)
+    const listener = on.mock.calls[0]?.[1]
+    const notification = { schemaVersion: 1, reason: 'core_started' }
+    listener({}, notification)
+
+    expect(on).toHaveBeenCalledWith('host:agent.collaboration.resync', expect.any(Function))
+    expect(handler).toHaveBeenCalledWith(notification)
+    unsubscribe()
+    expect(removeListener).toHaveBeenCalledWith('host:agent.collaboration.resync', listener)
+  })
+})

@@ -31,6 +31,8 @@ impl AgentService {
         input.user_message_id = Some(user_message_id.clone());
         input.assistant_message_id = Some(assistant_message_id.clone());
 
+        self.authorize_user_conversation_write(&conversation_id)?;
+
         // Conversation Turn admission and Provider-transition admission share one Host lock. The
         // process reservation is installed before prepare writes any message; the empty durable
         // in-progress trace committed by the executor is the cross-restart source of truth.

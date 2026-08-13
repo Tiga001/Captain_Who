@@ -94,6 +94,7 @@ impl AgentSamplingBoundaryInbox for PersistentAgentSamplingBoundaryInbox {
 #[derive(Clone)]
 pub(crate) struct ChildAgentFactory {
     storage: Arc<StorageService>,
+    authorizer: crate::application::collaboration_authorization::CollaborationAuthorizer,
 }
 
 /// Narrow Host/application boundary for durable Agent-to-Agent communication. Transport and model
@@ -101,12 +102,17 @@ pub(crate) struct ChildAgentFactory {
 #[derive(Clone)]
 pub(crate) struct AgentMessagingService {
     storage: Arc<StorageService>,
+    authorizer: crate::application::collaboration_authorization::CollaborationAuthorizer,
     wait_notifications: crate::application::agent_wait::AgentWaitNotifications,
 }
 
 impl AgentMessagingService {
     pub(crate) fn new(storage: Arc<StorageService>) -> Self {
         Self {
+            authorizer:
+                crate::application::collaboration_authorization::CollaborationAuthorizer::new(
+                    Arc::clone(&storage),
+                ),
             storage,
             wait_notifications: crate::application::agent_wait::shared_agent_wait_notifications(),
         }
@@ -116,6 +122,13 @@ impl AgentMessagingService {
         &self,
         input: &mycopilot_core::SendAgentMessageRequest,
     ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        self.authorizer
+            .authorize_send(
+                &input.sender_agent_id,
+                &input.recipient_agent_id,
+                &input.content,
+            )
+            .map_err(map_authorization_error)?;
         let dispatch = self.storage.send_agent_message(input)?;
         self.wait_notifications
             .notify_caller(&dispatch.message.recipient_agent_id);
@@ -126,6 +139,18 @@ impl AgentMessagingService {
         &self,
         input: &mycopilot_core::SendAgentMessageRequest,
     ) -> Result<mycopilot_core::AgentMessageDispatch, AgentGraphError> {
+        self.authorizer
+            .authorize_message_size(&input.content)
+            .and_then(|()| {
+                self.authorizer
+                    .authorize_management(
+                        &input.sender_agent_id,
+                        &input.recipient_agent_id,
+                        crate::application::collaboration_authorization::AgentManagementOperation::FollowUp,
+                    )
+                    .map(|_| ())
+            })
+            .map_err(map_authorization_error)?;
         let dispatch = self.storage.follow_up_agent(input)?;
         self.wait_notifications
             .notify_caller(&dispatch.message.recipient_agent_id);
@@ -152,14 +177,48 @@ impl AgentMessagingService {
 
 impl ChildAgentFactory {
     pub(crate) fn new(storage: Arc<StorageService>) -> Self {
-        Self { storage }
+        Self {
+            authorizer:
+                crate::application::collaboration_authorization::CollaborationAuthorizer::new(
+                    Arc::clone(&storage),
+                ),
+            storage,
+        }
+    }
+
+    pub(crate) fn with_policy(
+        storage: Arc<StorageService>,
+        policy: crate::application::collaboration_authorization::AgentAccessPolicy,
+    ) -> Result<
+        Self,
+        crate::application::collaboration_authorization::CollaborationAuthorizationError,
+    > {
+        Ok(Self {
+            authorizer:
+                crate::application::collaboration_authorization::CollaborationAuthorizer::with_policy(
+                    Arc::clone(&storage),
+                    policy,
+                )?,
+            storage,
+        })
     }
 
     pub(crate) fn create_child(
         &self,
         input: &CreateChildAgentInput,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
-        self.storage.create_child_agent(input)
+        self.authorizer
+            .authorize_spawn(&input.parent_agent_id)
+            .map_err(map_spawn_authorization_error)?;
+        let policy = self.authorizer.policy();
+        self.storage.create_child_agent_with_limits(
+            input,
+            mycopilot_core::AgentTreeResourceLimits {
+                max_depth: policy.max_tree_depth,
+                max_nodes: policy.max_nodes_per_tree,
+                max_task_bytes: policy.max_message_bytes,
+            },
+        )
     }
 
     pub(crate) fn resolve_trusted_running_wake(
@@ -198,6 +257,54 @@ impl ChildAgentFactory {
     ) -> Result<TrustedActiveChildWakeBundle, AgentGraphError> {
         self.storage
             .resolve_active_child_agent_wake_by_identity(identity)
+    }
+}
+
+fn map_authorization_error(
+    error: crate::application::collaboration_authorization::CollaborationAuthorizationError,
+) -> AgentGraphError {
+    use crate::application::collaboration_authorization::CollaborationAuthorizationError;
+    match error {
+        CollaborationAuthorizationError::ResourceLimit { resource, limit } => {
+            AgentGraphError::ResourceLimit { resource, limit }
+        }
+        CollaborationAuthorizationError::StorageUnavailable(reason) => {
+            AgentGraphError::StorageUnavailable(reason)
+        }
+        CollaborationAuthorizationError::InvalidPolicy(reason) => AgentGraphError::InvalidInput {
+            field: "collaboration_policy",
+            reason,
+        },
+        CollaborationAuthorizationError::ReadOnlyChildConversation
+        | CollaborationAuthorizationError::CallerUnavailable
+        | CollaborationAuthorizationError::PermissionDenied => {
+            AgentGraphError::Conflict("Agent collaboration operation is not authorized".to_string())
+        }
+    }
+}
+
+fn map_spawn_authorization_error(
+    error: crate::application::collaboration_authorization::CollaborationAuthorizationError,
+) -> ChildAgentSpawnError {
+    use crate::application::collaboration_authorization::CollaborationAuthorizationError;
+    match error {
+        CollaborationAuthorizationError::ResourceLimit { resource, limit } => {
+            ChildAgentSpawnError::ResourceLimit { resource, limit }
+        }
+        CollaborationAuthorizationError::StorageUnavailable(reason) => {
+            ChildAgentSpawnError::StorageUnavailable(reason)
+        }
+        CollaborationAuthorizationError::InvalidPolicy(reason) => {
+            ChildAgentSpawnError::InvalidInput {
+                field: "collaboration_policy",
+                reason,
+            }
+        }
+        CollaborationAuthorizationError::ReadOnlyChildConversation
+        | CollaborationAuthorizationError::CallerUnavailable
+        | CollaborationAuthorizationError::PermissionDenied => ChildAgentSpawnError::Conflict(
+            "Agent collaboration operation is not authorized".to_string(),
+        ),
     }
 }
 

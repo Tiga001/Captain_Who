@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 6;
+pub const STORAGE_SCHEMA_VERSION: i32 = 7;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:6b70e69c40e01ef79c00edd2deef1e83224ca5016f3cb4fffb9c795d91550e2d";
+    "sha256:6e653a62162a1c6357d897daf4c0b66ceea2d5260001ee518a21d427309cb929";
 
 /// Opens the single supported development schema.
 ///
@@ -257,6 +257,27 @@ mod tests {
             "conversation_history_fts",
             "conversation_history_fts_message_insert",
             "validate_agent_command_session_model_receipt_payload_insert",
+            "agent_collaboration_event_sequences",
+            "agent_collaboration_events",
+            "agent_collaboration_events_root_sequence",
+            "agent_collaboration_events_global_sequence",
+            "validate_agent_collaboration_event_identity_insert",
+            "validate_agent_collaboration_event_sequence_insert",
+            "validate_agent_collaboration_event_sequence_update",
+            "prevent_agent_collaboration_event_sequence_delete",
+            "prevent_agent_collaboration_event_update",
+            "prevent_agent_collaboration_event_delete",
+            "emit_agent_created_collaboration_event",
+            "emit_agent_updated_collaboration_event",
+            "emit_root_conversation_model_updated_collaboration_event",
+            "emit_agent_mailbox_enqueued_collaboration_event",
+            "emit_agent_mailbox_updated_collaboration_event",
+            "emit_agent_wake_created_collaboration_event",
+            "emit_agent_wake_updated_collaboration_event",
+            "emit_agent_turn_started_collaboration_event",
+            "emit_agent_turn_updated_collaboration_event",
+            "emit_agent_approval_projected_collaboration_event",
+            "emit_agent_approval_updated_collaboration_event",
         ] {
             let exists = connection
                 .query_row(
@@ -468,7 +489,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 6, found 3"));
+            .contains("expected schema version 7, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -517,7 +538,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 6, found 4"));
+            .contains("expected schema version 7, found 4"));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -559,7 +580,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 6, found 5"));
+            .contains("expected schema version 7, found 5"));
         assert_eq!(read_schema_version(&connection).unwrap(), 5);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -576,6 +597,57 @@ mod tests {
         assert!(connection
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE name = 'agent_model_batch_receipts'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn a_v6_database_requires_reset_without_rewriting_the_fixture() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v6.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE legacy_v6_sentinel (
+                         id TEXT PRIMARY KEY,
+                         payload TEXT NOT NULL
+                     );
+                     INSERT INTO legacy_v6_sentinel (id, payload)
+                     VALUES ('sentinel', 'round-3 baseline remains untouched');
+                     PRAGMA user_version = 6;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("expected schema version 7, found 6"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 6);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT payload FROM legacy_v6_sentinel WHERE id = 'sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "round-3 baseline remains untouched"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE name = 'agent_collaboration_events'",
                 [],
                 |_| Ok(()),
             )

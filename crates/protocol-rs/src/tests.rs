@@ -11,6 +11,138 @@ fn provider_profile_ui_descriptor_method_is_stable() {
 }
 
 #[test]
+fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/agent-collaboration-contract-v1.json"
+    ))
+    .unwrap();
+    let expected_methods = [
+        AGENT_COLLABORATION_GET_TREE_METHOD,
+        AGENT_COLLABORATION_GET_AGENT_METHOD,
+        AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD,
+        AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD,
+        AGENT_COLLABORATION_LIST_EVENTS_METHOD,
+        AGENT_COLLABORATION_TEMPLATES_LIST_METHOD,
+        AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD,
+        AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD,
+        AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD,
+        AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD,
+        AGENT_COLLABORATION_APPROVALS_LIST_METHOD,
+        AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD,
+    ];
+    assert_eq!(
+        fixture["methods"],
+        serde_json::to_value(expected_methods).unwrap()
+    );
+    assert_eq!(
+        fixture["notifications"],
+        serde_json::json!({
+            "event": AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
+            "resync": AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+        })
+    );
+
+    let tree: AgentTreeSnapshotDto = serde_json::from_value(fixture["tree"].clone()).unwrap();
+    assert_eq!(tree.last_sequence, 7);
+    assert_eq!(tree.workspace_id, tree.project_id);
+    let agent_ids = tree
+        .agents
+        .iter()
+        .map(|agent| agent.agent_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let conversation_ids = tree
+        .agents
+        .iter()
+        .map(|agent| agent.conversation_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let task_paths = tree
+        .agents
+        .iter()
+        .map(|agent| agent.task_path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(agent_ids.len(), tree.agents.len());
+    assert_eq!(conversation_ids.len(), tree.agents.len());
+    assert_eq!(task_paths.len(), tree.agents.len());
+    assert!(tree.agents.iter().all(|agent| {
+        agent.agent_id == tree.root_agent_id
+            || agent
+                .parent_agent_id
+                .as_deref()
+                .is_some_and(|parent| agent_ids.contains(parent))
+    }));
+    assert_eq!(
+        tree.agents
+            .iter()
+            .find(|agent| agent.agent_id == "agent-child")
+            .and_then(|agent| agent.model.as_ref())
+            .unwrap()
+            .model_config_id,
+        "model-safe-id"
+    );
+    let event: CollaborationEventEnvelopeDto =
+        serde_json::from_value(fixture["event"].clone()).unwrap();
+    assert_eq!(event.sequence, 7);
+    assert_eq!(event.kind, CollaborationEventKindDto::TurnStarted);
+    assert_eq!(event.workspace_id, event.project_id);
+    let observer: AgentObserverConversationDto =
+        serde_json::from_value(fixture["observer"].clone()).unwrap();
+    assert_eq!(observer.agent_id, "agent-child");
+    assert_eq!(
+        observer.messages[0].input_origin.as_ref().unwrap().kind,
+        AgentObserverInputOriginKindDto::Agent
+    );
+    let lookup: AgentTreeLookupDto = serde_json::from_value(serde_json::json!({
+        "schemaVersion": AGENT_COLLABORATION_SCHEMA_VERSION,
+        "materialized": true,
+        "tree": fixture["tree"].clone(),
+    }))
+    .unwrap();
+    assert!(lookup.materialized);
+    let detail: AgentDetailDto = serde_json::from_value(fixture["detail"].clone()).unwrap();
+    assert_eq!(detail.summary.root_agent_id, tree.root_agent_id);
+    assert_eq!(
+        detail.summary.root_conversation_id,
+        tree.root_conversation_id
+    );
+    assert_eq!(detail.summary.conversation_id, "conversation-child");
+    let locator: AgentConversationLocatorDto =
+        serde_json::from_value(fixture["locator"].clone()).unwrap();
+    assert_eq!(locator.agent_id, detail.summary.agent_id);
+    assert_eq!(locator.conversation_id, detail.summary.conversation_id);
+    assert_eq!(locator.mode, AgentConversationModeDto::Observer);
+    let template: AgentTemplateDto = serde_json::from_value(fixture["template"].clone()).unwrap();
+    let template_list: AgentTemplateListDto =
+        serde_json::from_value(fixture["templateList"].clone()).unwrap();
+    assert_eq!(template_list.templates, vec![template.clone()]);
+    assert_eq!(template.project_id, tree.project_id.as_deref().unwrap());
+    assert_eq!(
+        detail.template.as_ref().unwrap().template_id,
+        template.template_id
+    );
+    let approvals: CollaborationApprovalListDto =
+        serde_json::from_value(fixture["approvalList"].clone()).unwrap();
+    let approval = &approvals.approvals[0];
+    assert_eq!(approval.root_agent_id, tree.root_agent_id);
+    assert_eq!(approval.root_conversation_id, tree.root_conversation_id);
+    assert_eq!(approval.source_agent_id, detail.summary.agent_id);
+    assert_eq!(
+        approval.source_conversation_id,
+        detail.summary.conversation_id
+    );
+    let decision: CollaborationApprovalDecisionResultDto =
+        serde_json::from_value(fixture["approvalDecision"].clone()).unwrap();
+    assert_eq!(decision.approval_id, approval.approval_id);
+    assert_eq!(decision.status, CollaborationApprovalStatusDto::Approved);
+    let resync: CollaborationResyncEnvelopeDto =
+        serde_json::from_value(fixture["resync"].clone()).unwrap();
+    assert_eq!(resync.reason, CollaborationResyncReasonDto::CoreStarted);
+
+    let mut unknown = fixture["tree"].clone();
+    unknown["providerSecret"] = serde_json::json!("must-not-cross");
+    assert!(serde_json::from_value::<AgentTreeSnapshotDto>(unknown).is_err());
+}
+
+#[test]
 fn agent_method_names_match_the_cross_language_golden_contract() {
     let fixture: Value = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/agent-contract-v1.json"

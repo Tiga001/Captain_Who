@@ -185,6 +185,22 @@ pub(super) fn orphan_scan_relative_path(attachment_root: &Path, path: &Path) -> 
 }
 
 impl StorageService {
+    /// Resolves only the durable Conversation owner for an attachment. Host authorization uses
+    /// this narrow lookup before any legacy attachment-content read crosses the RPC boundary.
+    pub fn attachment_conversation_id(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<String>, String> {
+        let attachment_id = attachment_id.trim();
+        if attachment_id.is_empty() {
+            return Ok(None);
+        }
+        let connection = self.state.connection()?;
+        attachment_repository::get_attachment(&connection, attachment_id)
+            .map(|record| record.map(|record| record.conversation_id))
+            .map_err(storage_error)
+    }
+
     pub fn load_attachment_image(
         &self,
         attachment_id: &str,

@@ -393,6 +393,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
+        collaboration_run_snapshot: None,
         model_capabilities: ModelCapabilities::default(),
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),

@@ -12,6 +12,29 @@ import type {
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentEvent,
+  AgentConversationLocator,
+  AgentConversationLocatorRequest,
+  AgentDetail,
+  AgentDetailRequest,
+  AgentObserverConversationRequest,
+  AgentObserverConversation,
+  AgentTemplate,
+  AgentTemplateCreateRequest,
+  AgentTemplateDeleteRequest,
+  AgentTemplateList,
+  AgentTemplateListRequest,
+  AgentTemplateSetEnabledRequest,
+  AgentTemplateUpdateRequest,
+  AgentTreeRequest,
+  AgentTreeLookup,
+  CollaborationApprovalDecisionRequest,
+  CollaborationApprovalDecisionResult,
+  CollaborationApprovalList,
+  CollaborationApprovalListRequest,
+  CollaborationEventEnvelope,
+  CollaborationEventsPage,
+  CollaborationEventsRequest,
+  CollaborationResyncEnvelope,
   AgentFileDraftContentPage,
   AgentFileDraftReadInput,
   AgentFileWriteDiffInput,
@@ -308,6 +331,40 @@ export interface WorkspaceFilesHostApi {
 }
 
 export interface AgentHostApi {
+  getCollaborationTree(input: AgentTreeRequest): Promise<HostInvocationResult<AgentTreeLookup>>
+  getCollaborationAgent(input: AgentDetailRequest): Promise<HostInvocationResult<AgentDetail>>
+  locateCollaborationConversation(
+    input: AgentConversationLocatorRequest
+  ): Promise<HostInvocationResult<AgentConversationLocator>>
+  loadCollaborationObserverConversation(
+    input: AgentObserverConversationRequest
+  ): Promise<HostInvocationResult<AgentObserverConversation | null>>
+  listCollaborationEvents(
+    input: CollaborationEventsRequest
+  ): Promise<HostInvocationResult<CollaborationEventsPage>>
+  listAgentTemplates(
+    input: AgentTemplateListRequest
+  ): Promise<HostInvocationResult<AgentTemplateList>>
+  createAgentTemplate(
+    input: AgentTemplateCreateRequest
+  ): Promise<HostInvocationResult<AgentTemplate>>
+  updateAgentTemplate(
+    input: AgentTemplateUpdateRequest
+  ): Promise<HostInvocationResult<AgentTemplate>>
+  setAgentTemplateEnabled(
+    input: AgentTemplateSetEnabledRequest
+  ): Promise<HostInvocationResult<AgentTemplate>>
+  deleteAgentTemplate(
+    input: AgentTemplateDeleteRequest
+  ): Promise<HostInvocationResult<AgentTemplate>>
+  listCollaborationApprovals(
+    input: CollaborationApprovalListRequest
+  ): Promise<HostInvocationResult<CollaborationApprovalList>>
+  decideCollaborationApproval(
+    input: CollaborationApprovalDecisionRequest
+  ): Promise<HostInvocationResult<CollaborationApprovalDecisionResult>>
+  onCollaborationEvent(handler: (event: CollaborationEventEnvelope) => void): () => void
+  onCollaborationResync(handler: (event: CollaborationResyncEnvelope) => void): () => void
   preflightProviderTransition(
     input: AgentProviderTransitionPreflightInput
   ): Promise<HostInvocationResult<AgentProviderTransitionPreflightOutput>>

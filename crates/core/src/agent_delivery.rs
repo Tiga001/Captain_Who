@@ -177,6 +177,7 @@ pub struct AgentWaitTargetSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct AgentWaitReadySnapshot {
     pub receipt: AgentModelBatchReceiptRecord,
+    pub source_receipt_id: Option<String>,
     pub targets: Vec<AgentWaitTargetSnapshot>,
     pub model_projection: AgentWaitModelProjection,
 }

@@ -114,7 +114,7 @@ impl AsyncAgentTool for CommandSessionTool {
                 )
             })??;
             validate_host_output(&session_id, &output)?;
-            Ok(model_result(output))
+            Ok(model_result(output).into())
         })
     }
 }

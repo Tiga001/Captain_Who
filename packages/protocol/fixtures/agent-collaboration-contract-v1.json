@@ -1,0 +1,222 @@
+{
+  "methods": [
+    "agent.collaboration.getTree",
+    "agent.collaboration.getAgent",
+    "agent.collaboration.locateConversation",
+    "agent.collaboration.loadObserverConversation",
+    "agent.collaboration.listEvents",
+    "agent.collaboration.templates.list",
+    "agent.collaboration.templates.create",
+    "agent.collaboration.templates.update",
+    "agent.collaboration.templates.setEnabled",
+    "agent.collaboration.templates.delete",
+    "agent.collaboration.approvals.list",
+    "agent.collaboration.approvals.decide"
+  ],
+  "notifications": {
+    "event": "agent.collaboration.event",
+    "resync": "agent.collaboration.resync"
+  },
+  "tree": {
+    "schemaVersion": 1,
+    "workspaceId": "project-1",
+    "projectId": "project-1",
+    "rootAgentId": "agent-root",
+    "rootConversationId": "conversation-root",
+    "agents": [
+      {
+        "agentId": "agent-root",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": null,
+        "conversationId": "conversation-root",
+        "projectId": "project-1",
+        "taskName": "root",
+        "taskPath": "/root",
+        "lifecycle": "active",
+        "displayStatus": "idle",
+        "latestActivityAt": 1719999999999,
+        "model": null
+      },
+      {
+        "agentId": "agent-child",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "parentAgentId": "agent-root",
+        "conversationId": "conversation-child",
+        "projectId": "project-1",
+        "taskName": "research",
+        "taskPath": "/root/research",
+        "lifecycle": "active",
+        "displayStatus": "running",
+        "latestActivityAt": 1720000000000,
+        "model": {
+          "modelConfigId": "model-safe-id",
+          "displayName": "Safe display name"
+        }
+      }
+    ],
+    "lastSequence": 7
+  },
+  "detail": {
+    "schemaVersion": 1,
+    "summary": {
+      "agentId": "agent-child",
+      "rootAgentId": "agent-root",
+      "rootConversationId": "conversation-root",
+      "parentAgentId": "agent-root",
+      "conversationId": "conversation-child",
+      "projectId": "project-1",
+      "taskName": "research",
+      "taskPath": "/root/research",
+      "lifecycle": "active",
+      "displayStatus": "running",
+      "latestActivityAt": 1720000000000,
+      "model": {
+        "modelConfigId": "model-safe-id",
+        "displayName": "Safe display name"
+      }
+    },
+    "template": {
+      "templateId": "template-research",
+      "machineKey": "research",
+      "name": "Research",
+      "description": "Read-only research",
+      "revision": 3
+    },
+    "reasoningEffort": "high",
+    "revision": 2,
+    "createdAt": 1720000000000,
+    "updatedAt": 1720000000001
+  },
+  "locator": {
+    "schemaVersion": 1,
+    "agentId": "agent-child",
+    "conversationId": "conversation-child",
+    "mode": "observer"
+  },
+  "template": {
+    "schemaVersion": 1,
+    "templateId": "template-research",
+    "projectId": "project-1",
+    "machineKey": "research",
+    "name": "Research",
+    "description": "Read-only research",
+    "instructions": "Inspect the assigned code and report evidence.",
+    "modelConfigId": "model-safe-id",
+    "modelDisplayName": "Safe display name",
+    "enabled": true,
+    "revision": 3,
+    "createdAt": 1719999999000,
+    "updatedAt": 1720000000000
+  },
+  "templateList": {
+    "schemaVersion": 1,
+    "templates": [
+      {
+        "schemaVersion": 1,
+        "templateId": "template-research",
+        "projectId": "project-1",
+        "machineKey": "research",
+        "name": "Research",
+        "description": "Read-only research",
+        "instructions": "Inspect the assigned code and report evidence.",
+        "modelConfigId": "model-safe-id",
+        "modelDisplayName": "Safe display name",
+        "enabled": true,
+        "revision": 3,
+        "createdAt": 1719999999000,
+        "updatedAt": 1720000000000
+      }
+    ]
+  },
+  "approvalList": {
+    "schemaVersion": 1,
+    "approvals": [
+      {
+        "schemaVersion": 1,
+        "approvalId": "approval-1",
+        "rootAgentId": "agent-root",
+        "rootConversationId": "conversation-root",
+        "sourceAgentId": "agent-child",
+        "sourceTaskPath": "/root/research",
+        "sourceConversationId": "conversation-child",
+        "runId": "run-1",
+        "actionId": "action-1",
+        "actionType": "tool_call",
+        "toolName": "read_file",
+        "action": {
+          "type": "tool_call",
+          "call": {
+            "id": "call-1",
+            "tool": "read_file",
+            "args": { "path": "README.md" },
+            "approvalStatus": "required",
+            "reason": "Inspect the requested file."
+          }
+        },
+        "status": "pending",
+        "createdAt": 1720000000000,
+        "updatedAt": 1720000000001
+      }
+    ]
+  },
+  "approvalDecision": {
+    "schemaVersion": 1,
+    "approvalId": "approval-1",
+    "accepted": true,
+    "alreadySettled": false,
+    "status": "approved"
+  },
+  "resync": {
+    "schemaVersion": 1,
+    "reason": "core_started"
+  },
+  "event": {
+    "schemaVersion": 1,
+    "eventId": "event-7",
+    "sequence": 7,
+    "workspaceId": "project-1",
+    "projectId": "project-1",
+    "rootAgentId": "agent-root",
+    "rootConversationId": "conversation-root",
+    "agentId": "agent-child",
+    "conversationId": "conversation-child",
+    "turnId": "turn-1",
+    "runId": "run-1",
+    "messageId": null,
+    "kind": "turn_started",
+    "resourceRevision": 2,
+    "occurredAt": 1720000000001
+  },
+  "observer": {
+    "schemaVersion": 1,
+    "agentId": "agent-child",
+    "rootConversationId": "conversation-root",
+    "conversationId": "conversation-child",
+    "projectId": "project-1",
+    "modelId": "model-safe-id",
+    "title": "Research",
+    "createdAt": 1720000000000,
+    "updatedAt": 1720000000001,
+    "messages": [
+      {
+        "messageId": "message-task",
+        "role": "user",
+        "content": "delegated task",
+        "createdAt": 1720000000000,
+        "status": "sent",
+        "inputOrigin": {
+          "kind": "agent",
+          "senderAgentId": "agent-root",
+          "sourceAgentMessageId": "mailbox-task",
+          "snapshotSourceConversationId": null,
+          "snapshotSourceMessageId": null
+        },
+        "attachments": [],
+        "agentRunJson": null,
+        "uiStateJson": null
+      }
+    ]
+  }
+}

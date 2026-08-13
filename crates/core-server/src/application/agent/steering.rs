@@ -29,6 +29,7 @@ impl AgentService {
                     .into(),
             );
         }
+        self.authorize_user_conversation_write(&conversation_id)?;
 
         let existing = self
             .storage

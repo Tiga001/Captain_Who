@@ -1725,6 +1725,69 @@ pub fn conversation_message_origin(
         .optional()
         .map_err(read_error)?
         .ok_or_else(|| AgentGraphError::MessageNotFound(message_id.to_string()))?;
+    decode_conversation_message_origin(stored)
+}
+
+/// Loads every user/input origin for one Conversation in one ordered SQLite query. Callers that
+/// need a conversation snapshot should invoke this through the Storage read transaction API so
+/// message content and actor provenance share the same read cut.
+pub fn conversation_message_origins(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<(String, ConversationMessageOrigin)>, AgentGraphError> {
+    validate_id("conversation_id", conversation_id)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, role, input_origin_kind, input_origin_agent_id,
+                    source_agent_message_id, snapshot_source_conversation_id,
+                    snapshot_source_message_id, snapshot_original_origin_kind,
+                    snapshot_original_agent_id, snapshot_original_mailbox_message_id
+             FROM messages
+             WHERE conversation_id = ?1 AND role = 'user'
+             ORDER BY position, id",
+        )
+        .map_err(read_error)?;
+    let rows = statement
+        .query_map([conversation_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                ),
+            ))
+        })
+        .map_err(read_error)?;
+    let mut origins = Vec::new();
+    for row in rows {
+        let (message_id, stored) = row.map_err(read_error)?;
+        origins.push((message_id, decode_conversation_message_origin(stored)?));
+    }
+    Ok(origins)
+}
+
+type StoredConversationMessageOrigin = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn decode_conversation_message_origin(
+    stored: StoredConversationMessageOrigin,
+) -> Result<ConversationMessageOrigin, AgentGraphError> {
     match stored {
         (role, _, _, _, _, _, _, _, _) if role != "user" => Err(AgentGraphError::InvalidInput {
             field: "message_id",

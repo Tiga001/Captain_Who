@@ -1,3 +1,4 @@
+mod agent_collaboration;
 mod apply_patch;
 mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
@@ -43,6 +44,7 @@ use crate::protocol::{
     AgentError, AgentFileWritePreview, AgentProposedAction, AgentResult, AgentSearchConfig,
     AgentSearchMode, AgentToolCall, AgentToolDefinition, AgentToolIdentity, AgentToolResult,
 };
+use agent_collaboration::{AgentCollaborationTool, AgentCollaborationToolKind};
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use command_session::CommandSessionTool;
@@ -272,7 +274,32 @@ fn value_contains_true(value: &Value) -> bool {
 }
 
 pub(crate) type BoxAgentToolFuture<'a> =
-    Pin<Box<dyn Future<Output = AgentResult<Value>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = AgentResult<AgentToolExecutionValue>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentToolResultPersistence {
+    RuntimeCommits,
+    PrecommittedTrace,
+}
+
+pub(crate) struct AgentToolExecutionValue {
+    pub(crate) value: Value,
+    pub(crate) persistence: AgentToolResultPersistence,
+}
+
+pub(crate) struct RegisteredToolExecution {
+    pub(crate) result: AgentToolResult,
+    pub(crate) persistence: AgentToolResultPersistence,
+}
+
+impl From<Value> for AgentToolExecutionValue {
+    fn from(value: Value) -> Self {
+        Self {
+            value,
+            persistence: AgentToolResultPersistence::RuntimeCommits,
+        }
+    }
+}
 
 /// True asynchronous tool execution boundary.
 ///
@@ -805,17 +832,16 @@ impl ToolRegistry {
         context: ToolExecutionContext,
         call: AgentToolCall,
         cancellation_token: crate::AgentCancellationToken,
-    ) -> AgentResult<AgentToolResult> {
+    ) -> AgentResult<RegisteredToolExecution> {
         if context.check_cancelled().is_err() {
             return Err(AgentError::cancelled());
         }
 
         let Some(tool) = self.tools.get(&call.tool) else {
-            return Ok(failed_tool_result(
-                &call,
-                None,
-                format!("未知工具：{}", call.tool),
-            ));
+            return Ok(RegisteredToolExecution {
+                result: failed_tool_result(&call, None, format!("未知工具：{}", call.tool)),
+                persistence: AgentToolResultPersistence::RuntimeCommits,
+            });
         };
 
         if let Some(async_tool) = tool.async_tool() {
@@ -833,18 +859,20 @@ impl ToolRegistry {
             };
             return match execution {
                 Err(error) if error.is_cancelled() => Err(error),
-                Err(error) => Ok(failed_tool_result(
-                    &call,
-                    tool.error_result(&error),
-                    error.to_string(),
-                )),
+                Err(error) => Ok(RegisteredToolExecution {
+                    result: failed_tool_result(&call, tool.error_result(&error), error.to_string()),
+                    persistence: AgentToolResultPersistence::RuntimeCommits,
+                }),
                 Ok(_)
                     if settlement == AgentToolCancellationSettlement::Interruptible
                         && cancellation_token.is_cancelled() =>
                 {
                     Err(AgentError::cancelled())
                 }
-                Ok(result) => Ok(successful_tool_result(&call, result)),
+                Ok(execution) => Ok(RegisteredToolExecution {
+                    result: successful_tool_result(&call, execution.value),
+                    persistence: execution.persistence,
+                }),
             };
         }
 
@@ -854,12 +882,21 @@ impl ToolRegistry {
             AgentToolCancellationSettlement::Interruptible => tokio::select! {
                 _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
                 result = handle => {
-                    result.map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
+                    result
+                        .map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
+                        .map(|result| RegisteredToolExecution {
+                            result,
+                            persistence: AgentToolResultPersistence::RuntimeCommits,
+                        })
                 }
             },
             AgentToolCancellationSettlement::Authoritative => handle
                 .await
-                .map_err(|error| AgentError::new(format!("工具执行线程失败：{error}"))),
+                .map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
+                .map(|result| RegisteredToolExecution {
+                    result,
+                    persistence: AgentToolResultPersistence::RuntimeCommits,
+                }),
         }
     }
 
@@ -990,6 +1027,22 @@ impl ToolRegistry {
             if !self.contains_tool(&tool.definition().name) {
                 self.register_boxed("core".to_string(), tool)
                     .expect("goal tool definitions must be valid");
+            }
+        }
+    }
+
+    pub(crate) fn register_agent_collaboration_tools(&mut self) {
+        for kind in [
+            AgentCollaborationToolKind::Spawn,
+            AgentCollaborationToolKind::SendMessage,
+            AgentCollaborationToolKind::FollowupTask,
+            AgentCollaborationToolKind::Wait,
+            AgentCollaborationToolKind::List,
+            AgentCollaborationToolKind::Interrupt,
+        ] {
+            let tool = AgentCollaborationTool::new(kind);
+            if !self.contains_tool(&tool.definition().name) {
+                self.register_async(tool);
             }
         }
     }

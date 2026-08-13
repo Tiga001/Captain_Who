@@ -16,6 +16,7 @@ const skillsTests = 'src/renderer/src/features/skills/__tests__'
 const mcpTests = 'src/renderer/src/features/mcp/__tests__'
 const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
+const agentCollaborationTests = 'src/renderer/src/features/agentCollaboration'
 const protocolTests = 'packages/protocol/src'
 
 export default defineConfig({
@@ -62,6 +63,7 @@ export default defineConfig({
             `${mcpTests}/**/*.test.ts`,
             `${appTests}/**/*.test.ts`,
             `${chatTests}/**/*.test.ts`,
+            `${agentCollaborationTests}/**/*.test.ts`,
             `${protocolTests}/**/*.test.ts`
           ],
           name: 'unit'

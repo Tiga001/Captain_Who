@@ -24,6 +24,59 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
     }
   })
 
+  coreServer.onCollaborationEvent?.((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.collaborationEvent, event)
+      }
+    }
+  })
+
+  coreServer.onCollaborationResync?.((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(HOST_CHANNELS.agent.collaborationResync, event)
+      }
+    }
+  })
+
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationGetTree, (_event, input) =>
+    captureHostInvocation(() => coreServer.getCollaborationTree(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationGetAgent, (_event, input) =>
+    captureHostInvocation(() => coreServer.getCollaborationAgent(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationLocateConversation, (_event, input) =>
+    captureHostInvocation(() => coreServer.locateCollaborationConversation(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationLoadObserverConversation, (_event, input) =>
+    captureHostInvocation(() => coreServer.loadCollaborationObserverConversation(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationListEvents, (_event, input) =>
+    captureHostInvocation(() => coreServer.listCollaborationEvents(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateList, (_event, input) =>
+    captureHostInvocation(() => coreServer.listAgentTemplates(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateCreate, (_event, input) =>
+    captureHostInvocation(() => coreServer.createAgentTemplate(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateUpdate, (_event, input) =>
+    captureHostInvocation(() => coreServer.updateAgentTemplate(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateSetEnabled, (_event, input) =>
+    captureHostInvocation(() => coreServer.setAgentTemplateEnabled(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationTemplateDelete, (_event, input) =>
+    captureHostInvocation(() => coreServer.deleteAgentTemplate(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationApprovalList, (_event, input) =>
+    captureHostInvocation(() => coreServer.listCollaborationApprovals(input))
+  )
+  ipcMain.handle(HOST_CHANNELS.agent.collaborationApprovalDecide, (_event, input) =>
+    captureHostInvocation(() => coreServer.decideCollaborationApproval(input))
+  )
+
   ipcMain.handle(HOST_CHANNELS.agent.preflightProviderTransition, (_event, input) =>
     captureProviderTransitionInvocation(
       () => coreServer.preflightProviderTransition(input),

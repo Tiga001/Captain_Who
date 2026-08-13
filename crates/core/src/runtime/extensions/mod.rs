@@ -761,6 +761,7 @@ mod tests {
                     exposed_tool_names: Vec::new(),
                 },
                 run_context: None,
+                collaboration_run_snapshot: None,
                 model_capabilities: crate::protocol::ModelCapabilities::default(),
                 provider_profile_config: crate::ProviderProfileConfig::generic_for_dialect(
                     crate::ProviderProtocolDialect::OpenAiChatCompletions,

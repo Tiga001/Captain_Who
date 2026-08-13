@@ -251,7 +251,7 @@ pub(super) async fn execute_registered_tool(
     context: ToolExecutionContext,
     call: AgentToolCall,
     cancellation_token: AgentCancellationToken,
-) -> AgentResult<AgentToolResult> {
+) -> AgentResult<crate::tools::RegisteredToolExecution> {
     registry
         .execute_async(context, call, cancellation_token)
         .await
@@ -1086,9 +1086,10 @@ mod tests {
 
         let result = task.await.unwrap().unwrap();
         assert!(finished.load(Ordering::SeqCst));
-        assert!(result.ok);
+        assert!(result.result.ok);
         assert_eq!(
             result
+                .result
                 .result
                 .as_ref()
                 .and_then(|value| value["authoritative"].as_bool()),
@@ -1098,7 +1099,7 @@ mod tests {
             false,
             AgentToolCancellationSettlement::Authoritative,
             true,
-            &result,
+            &result.result,
         ));
     }
 

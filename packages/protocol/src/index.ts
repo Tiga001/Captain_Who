@@ -1,4 +1,5 @@
 export * from './agent'
+export * from './agentCollaboration'
 export * from './agentCommandSessionParsers'
 export * from './agentMcpParsers'
 export * from './attachments'

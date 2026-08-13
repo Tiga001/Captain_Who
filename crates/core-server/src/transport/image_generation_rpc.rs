@@ -200,6 +200,26 @@ pub(crate) async fn handle_image_generation_artifact_request(
             ImageGenerationArtifactErrorCodeDto::InvalidRequest,
         );
     }
+    if let Some(conversation_id) = input.conversation_id.as_deref() {
+        match storage.get_agent_node_by_conversation(conversation_id) {
+            Ok(Some(node)) if node.parent_agent_id.is_some() => {
+                // The legacy artifact endpoint is a user-facing root/unbound surface. Child
+                // artifacts are visible only through an exact root-scoped observer projection;
+                // return the same result as an unknown capability to avoid an ownership oracle.
+                return image_generation_artifact_error_response(
+                    id,
+                    ImageGenerationArtifactErrorCodeDto::NotFound,
+                );
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return image_generation_artifact_error_response(
+                    id,
+                    ImageGenerationArtifactErrorCodeDto::Unavailable,
+                );
+            }
+        }
+    }
     let target = match artifact_read_target(&input.artifact) {
         Some(target) => target,
         None => {
@@ -689,6 +709,13 @@ mod tests {
         ImageGenerationExecutionTerminalUpdate, StoredImageGenerationArtifactState,
         StoredImageGenerationExecutionStatus,
     };
+    use mycopilot_core::storage::models::{
+        ChatConversationMetaRecord, ModelConfigRecord, ModelSettingsRecord,
+    };
+    use mycopilot_core::{
+        AgentForkTurns, CreateChildAgentInput, EnsureRootAgentInput, ProviderProfileConfig,
+        ProviderProtocolDialect,
+    };
     use sha2::{Digest, Sha256};
     use std::fs;
 
@@ -745,6 +772,30 @@ mod tests {
                 "value": credential
             }
         })
+    }
+
+    fn agent_model_settings() -> ModelSettingsRecord {
+        ModelSettingsRecord {
+            api_url: "https://provider.example/v1/chat/completions".to_string(),
+            api_token: "fixture-secret".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![ModelConfigRecord {
+                id: "model-a".to_string(),
+                display_name: "Model A".to_string(),
+                api_url_override: None,
+                api_token_override: None,
+                supports_image: false,
+                context_window_tokens: Some(64_000),
+                provider_profile_config: ProviderProfileConfig::generic_for_dialect(
+                    ProviderProtocolDialect::OpenAiChatCompletions,
+                ),
+                input_price: "0".to_string(),
+                cached_input_price: String::new(),
+                output_price: "0".to_string(),
+                enabled: true,
+            }],
+        }
     }
 
     fn artifact_fixture() -> (
@@ -1031,13 +1082,43 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let database_path = temp.path().join("storage.sqlite");
         let storage = Arc::new(StorageService::open(&database_path).unwrap());
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
-        connection
-            .execute(
-                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, 1, 1)",
-                ["conversation-1", "test"],
-            )
+        storage.save_model_settings(agent_model_settings()).unwrap();
+        for conversation_id in ["conversation-root", "conversation-unbound"] {
+            storage
+                .save_conversation_meta(ChatConversationMetaRecord {
+                    id: conversation_id.to_string(),
+                    project_id: None,
+                    model_id: Some("model-a".to_string()),
+                    title: conversation_id.to_string(),
+                    created_at: 1,
+                    updated_at: 1,
+                    pinned_at: None,
+                    archived_at: None,
+                    unread_at: None,
+                })
+                .unwrap();
+        }
+        storage
+            .ensure_root_agent(&EnsureRootAgentInput {
+                agent_id: "agent-root".to_string(),
+                conversation_id: "conversation-root".to_string(),
+                creation_request_id: "ensure-root".to_string(),
+                task_name: "Root".to_string(),
+            })
             .unwrap();
+        let child = storage
+            .create_child_agent(&CreateChildAgentInput {
+                parent_agent_id: "agent-root".to_string(),
+                creation_request_id: "spawn-child".to_string(),
+                task_name: "artifact-child".to_string(),
+                task: "Create a managed image.".to_string(),
+                template_machine_key: None,
+                explicit_model_id: None,
+                reasoning_effort: None,
+                fork_turns: AgentForkTurns::None,
+            })
+            .unwrap();
+        let child_conversation_id = child.agent.conversation_id;
         let store = Arc::new(
             ManagedImageGenerationArtifactStore::new(
                 temp.path().join("image-generation-artifacts"),
@@ -1056,12 +1137,27 @@ mod tests {
             .publish_managed_artifact_file(
                 &source,
                 mycopilot_core::storage::service::ManagedArtifactAuthority {
-                    conversation_id: "conversation-1",
-                    run_id: "run-1",
-                    call_id: "call-1",
+                    conversation_id: "conversation-root",
+                    run_id: "run-root",
+                    call_id: "call-root",
                 },
             )
             .unwrap();
+        for (conversation_id, run_id, call_id) in [
+            ("conversation-unbound", "run-unbound", "call-unbound"),
+            (child_conversation_id.as_str(), "run-child", "call-child"),
+        ] {
+            storage
+                .publish_managed_artifact_file(
+                    &source,
+                    mycopilot_core::storage::service::ManagedArtifactAuthority {
+                        conversation_id,
+                        run_id,
+                        call_id,
+                    },
+                )
+                .unwrap();
+        }
         let artifact = json!({
             "artifactId": format!("sha256:{}", published.sha256),
             "uri": published.read_path(),
@@ -1084,18 +1180,24 @@ mod tests {
             })),
         };
 
-        let authorized = handle_image_generation_artifact_request(
-            Arc::clone(&store),
-            Arc::clone(&storage),
-            request(1, Some("conversation-1")),
-        )
-        .await;
-        assert_eq!(
-            authorized["result"]["dataBase64"],
-            base64::engine::general_purpose::STANDARD.encode(bytes)
-        );
+        for (id, conversation_id) in [(1, "conversation-root"), (2, "conversation-unbound")] {
+            let authorized = handle_image_generation_artifact_request(
+                Arc::clone(&store),
+                Arc::clone(&storage),
+                request(id, Some(conversation_id)),
+            )
+            .await;
+            assert_eq!(
+                authorized["result"]["dataBase64"],
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            );
+        }
 
-        for (id, conversation_id) in [(2, Some("conversation-2")), (3, None)] {
+        for (id, conversation_id) in [
+            (3, Some(child_conversation_id.as_str())),
+            (4, Some("conversation-other")),
+            (5, None),
+        ] {
             let rejected = handle_image_generation_artifact_request(
                 Arc::clone(&store),
                 Arc::clone(&storage),

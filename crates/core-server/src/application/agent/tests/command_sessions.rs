@@ -661,6 +661,23 @@ fn wait_for_settlement_attempts(registry: &AgentCommandSessionRegistry, minimum_
     }
 }
 
+fn wait_for_retained_admission_count(
+    registry: &AgentCommandSessionRegistry,
+    expected_count: usize,
+) {
+    let deadline = Instant::now() + TEST_WAIT;
+    loop {
+        if registry.retained_admission_count() == expected_count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "command Session admission count did not reach {expected_count}"
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 fn short_command_exits_through_the_same_managed_session_entry() {
     let fixture =
@@ -3235,6 +3252,7 @@ fn cross_domain_ready() -> AgentWaitReadySnapshot {
             created_at: 1,
             updated_at: 1,
         },
+        source_receipt_id: None,
         targets: vec![AgentWaitTargetSnapshot {
             target_agent_id: "target".into(),
             messages: Vec::new(),
@@ -4071,7 +4089,9 @@ fn delayed_failed_settlement_does_not_starve_a_healthy_session() {
         &fixture.conversation_id,
         &bad_snapshot.session_id,
     );
-    assert_eq!(fixture.registry.retained_admission_count(), 0);
+    // The durable terminal row commits immediately before the worker releases its admission
+    // lease. Wait for that second, in-memory ownership boundary instead of racing it.
+    wait_for_retained_admission_count(&fixture.registry, 0);
 }
 
 #[test]

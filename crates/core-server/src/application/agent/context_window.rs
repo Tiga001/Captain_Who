@@ -30,6 +30,10 @@ impl AgentService {
         if model_id.is_empty() {
             return Err("modelId 不能为空。".to_string().into());
         }
+        let conversation_id = normalized_optional(input.conversation_id.as_deref());
+        if let Some(conversation_id) = conversation_id.as_deref() {
+            self.authorize_user_conversation_write(conversation_id)?;
+        }
         let settings_snapshot = self
             .storage
             .load_model_settings_snapshot()?
@@ -68,7 +72,6 @@ impl AgentService {
         )
         .map_err(|error| format!("模型 {model_id} 的 Provider Protocol 无效：{error}"))?;
 
-        let conversation_id = normalized_optional(input.conversation_id.as_deref());
         let conversation = match conversation_id.as_deref() {
             Some(conversation_id) => self.storage.load_conversation(conversation_id)?,
             None => None,
@@ -252,6 +255,23 @@ impl AgentService {
         }
         if let Some(mcp_tools) = mcp_tools {
             host_services = host_services.with_mcp_tools(mcp_tools);
+        }
+        if let Some(conversation_id) = agent_input
+            .context
+            .as_ref()
+            .and_then(|context| context.conversation_id.as_deref())
+        {
+            let (preview_notifications, _preview_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let harness = crate::application::agent_harness::AgentCollaborationHarnessAdapter::new(
+                Arc::clone(&self.storage),
+                self.clone(),
+                self.collaboration_authorizer(),
+                Arc::clone(&self.collaboration_dispatcher),
+                preview_notifications,
+            );
+            host_services = harness
+                .attach_preview_to_host_services(host_services, conversation_id)
+                .map_err(|error| error.to_string())?;
         }
         // AgentService always provides the real Host action executor to a started run. Passing
         // `true` keeps preview approval schemas aligned with that production boundary without

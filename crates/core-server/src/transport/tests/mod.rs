@@ -13,6 +13,7 @@ use std::sync::{mpsc as std_mpsc, Mutex};
 use tokio::io::AsyncReadExt;
 
 mod bootstrap;
+mod collaboration_authorization;
 mod conversation_fork;
 mod provider_profiles;
 mod request_loop;

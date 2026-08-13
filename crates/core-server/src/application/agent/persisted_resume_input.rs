@@ -8,7 +8,7 @@ use mycopilot_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 7;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 8;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -56,7 +56,7 @@ pub(super) struct PersistedAgentResumeInput {
     temperature: Option<f32>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     stream: Option<bool>,
-    /// Host-authenticated Run context. Schema v7 explicitly permits collaboration identity here;
+    /// Host-authenticated Run context. Schema v8 explicitly permits collaboration identity here;
     /// it must exactly match the same frozen identity in `resume_checkpoint.run_context`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     context: Option<AgentRunContext>,
@@ -194,6 +194,12 @@ impl PersistedAgentResumeInput {
         }
         if resume_checkpoint.context_items.is_empty() {
             return Err("pending Agent checkpoint is missing its exact context".to_string());
+        }
+        if let Some(snapshot) = resume_checkpoint.collaboration_run_snapshot.as_ref() {
+            snapshot.validate().map_err(|_| {
+                "pending Agent checkpoint has an invalid collaboration authorization snapshot"
+                    .to_string()
+            })?;
         }
         if input
             .context
@@ -446,6 +452,7 @@ mod tests {
             "extensionSnapshots": [],
             "toolSet": crate::test_tool_set_checkpoint(),
             "runContext": null,
+            "collaborationRunSnapshot": null,
             "modelCapabilities": { "imageInput": false },
             "providerProfileConfig": {
                 "schemaVersion": 1,
@@ -543,7 +550,7 @@ mod tests {
         assert!(!encoded.contains(API_URL_CANARY));
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
-        assert!(encoded.contains("\"resumeInputSchemaVersion\":7"));
+        assert!(encoded.contains("\"resumeInputSchemaVersion\":8"));
         let encoded_object = serde_json::from_str::<Value>(&encoded).unwrap();
         for absent_placeholder in [
             "approvalDecision",
@@ -728,7 +735,7 @@ mod tests {
             PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
 
-        for unsupported_version in [0, 5, 6, 8] {
+        for unsupported_version in [0, 5, 6, 7] {
             let mut old_version = serde_json::from_str::<Value>(&encoded).unwrap();
             old_version["resumeInputSchemaVersion"] = Value::from(unsupported_version);
             assert_eq!(

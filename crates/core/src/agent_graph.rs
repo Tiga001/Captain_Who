@@ -324,6 +324,51 @@ pub struct CreateChildAgentInput {
     pub fork_turns: AgentForkTurns,
 }
 
+/// Host-selected hard limits for one atomic child spawn.
+///
+/// The values are carried to SQLite rather than checked only in a model Tool adapter, so two
+/// concurrent spawns cannot both observe the last available tree slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentTreeResourceLimits {
+    pub max_depth: u32,
+    pub max_nodes: u32,
+    pub max_task_bytes: usize,
+}
+
+impl Default for AgentTreeResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: 8,
+            max_nodes: 64,
+            max_task_bytes: 64 * 1024,
+        }
+    }
+}
+
+impl AgentTreeResourceLimits {
+    pub fn validate(self) -> Result<Self, ChildAgentSpawnError> {
+        if self.max_depth == 0 || self.max_depth > 32 {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "max_depth",
+                reason: "must be between 1 and 32".to_string(),
+            });
+        }
+        if self.max_nodes < 2 || self.max_nodes > 1_024 {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "max_nodes",
+                reason: "must be between 2 and 1024".to_string(),
+            });
+        }
+        if self.max_task_bytes == 0 || self.max_task_bytes > 1_048_576 {
+            return Err(ChildAgentSpawnError::InvalidInput {
+                field: "max_task_bytes",
+                reason: "must be between 1 and 1048576".to_string(),
+            });
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentModelSelectionSource {
@@ -528,6 +573,10 @@ pub enum ChildAgentSpawnError {
         reason: AgentModelUnavailableReason,
     },
     UnsupportedReasoningEffort(ReasoningEffort),
+    ResourceLimit {
+        resource: &'static str,
+        limit: u64,
+    },
     IdempotencyConflict(String),
     Conflict(String),
     SnapshotUnavailable(String),
@@ -562,6 +611,9 @@ impl fmt::Display for ChildAgentSpawnError {
                 formatter,
                 "reasoning effort constraint `{effort:?}` is unsupported by the selected model"
             ),
+            Self::ResourceLimit { resource, limit } => {
+                write!(formatter, "child Agent {resource} limit exceeded ({limit})")
+            }
             Self::IdempotencyConflict(reason) => {
                 write!(formatter, "child Agent request was reused: {reason}")
             }

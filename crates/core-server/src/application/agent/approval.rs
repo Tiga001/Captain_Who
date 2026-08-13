@@ -1,4 +1,42 @@
 use super::*;
+use serde::Serialize;
+
+const PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE: &str = "Approval is unavailable.";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectedAgentApproval {
+    /// Backend-framed pending-action identity. This is globally stable and is the only decision
+    /// selector accepted from the root card.
+    pub(crate) approval_id: String,
+    pub(crate) root_agent_id: String,
+    pub(crate) root_conversation_id: String,
+    pub(crate) source_agent_id: String,
+    pub(crate) source_task_name: String,
+    pub(crate) source_task_path: String,
+    pub(crate) source_conversation_id: String,
+    pub(crate) action: PendingAgentActionSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectedApprovalDecision {
+    Approve,
+    Reject,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectedApprovalDecisionResult {
+    pub(crate) approval_id: String,
+    pub(crate) source_agent_id: String,
+    pub(crate) run_id: String,
+    pub(crate) action_id: String,
+    pub(crate) status: String,
+    /// False means an identical/stale click observed a durable non-pending state. It never starts
+    /// a second continuation.
+    pub(crate) accepted: bool,
+}
 
 pub(super) fn publish_inline_file_write_tool_result(
     notifications: &CoreServerNotificationSender,
@@ -21,11 +59,219 @@ pub(super) fn publish_inline_file_write_tool_result(
 }
 
 impl AgentService {
+    pub(crate) fn list_root_projected_approvals(
+        &self,
+        root_conversation_id: &str,
+    ) -> Result<Vec<ProjectedAgentApproval>, String> {
+        let root = self
+            .collaboration_authorizer
+            .authorize_user_conversation_write(root_conversation_id)
+            .map_err(|error| error.to_string())?;
+        let Some(root) = root else {
+            return Ok(Vec::new());
+        };
+        if root.parent_agent_id.is_some() {
+            return Err("Approval projection owner must be a root Agent.".to_string());
+        }
+        let tree = self
+            .collaboration_authorizer
+            .visible_tree(&root.agent_id)
+            .map_err(|error| error.to_string())?;
+        let by_conversation = tree
+            .into_iter()
+            .filter(|node| node.parent_agent_id.is_some())
+            .map(|node| (node.conversation_id.clone(), node))
+            .collect::<HashMap<_, _>>();
+        let startup_recoverable = self
+            .startup_recoverable_mcp_approvals
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut projected = pending_actions
+            .values()
+            .filter_map(|record| {
+                if record.snapshot.status != PendingActionStatus::Pending
+                    && !(record.snapshot.status == PendingActionStatus::Approved
+                        && startup_recoverable.contains(&record.storage_id))
+                {
+                    return None;
+                }
+                let source = by_conversation.get(record.snapshot.conversation_id.as_deref()?)?;
+                Some(ProjectedAgentApproval {
+                    approval_id: record.storage_id.clone(),
+                    root_agent_id: root.agent_id.clone(),
+                    root_conversation_id: root.conversation_id.clone(),
+                    source_agent_id: source.agent_id.clone(),
+                    source_task_name: source.task_name.clone(),
+                    source_task_path: source.task_path.clone(),
+                    source_conversation_id: source.conversation_id.clone(),
+                    action: record.snapshot.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        projected.sort_by(|left, right| {
+            left.action
+                .created_at
+                .cmp(&right.action.created_at)
+                .then_with(|| left.approval_id.cmp(&right.approval_id))
+        });
+        Ok(projected)
+    }
+
+    /// Routes a root-card decision back to the exact child Run. The UI supplies no child/run/action
+    /// identity; all of it is reloaded from the durable framed approval id.
+    pub(crate) fn decide_root_projected_approval(
+        &self,
+        root_conversation_id: &str,
+        approval_id: &str,
+        decision: ProjectedApprovalDecision,
+        message: Option<String>,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<ProjectedApprovalDecisionResult, String> {
+        let approval_id = approval_id.trim();
+        if approval_id.is_empty() || approval_id.len() > 512 || approval_id.contains('\0') {
+            return Err("Invalid approvalId.".to_string());
+        }
+        if message
+            .as_ref()
+            .is_some_and(|message| message.len() > 16 * 1024 || message.contains('\0'))
+        {
+            return Err("Approval message must be NUL-free and at most 16384 bytes.".to_string());
+        }
+        // Validate the root before looking up the opaque approval capability. Every miss and
+        // tree/project mismatch below deliberately returns the same safe error so this endpoint
+        // cannot be used to enumerate approval ids owned by another root.
+        self.collaboration_authorizer
+            .authorize_root_conversation(root_conversation_id)
+            .map_err(|_| PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE.to_string())?;
+        let in_memory = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(approval_id)
+            .cloned();
+        let Some(record) = in_memory else {
+            let durable = self
+                .storage
+                .get_pending_agent_action(approval_id)?
+                .ok_or_else(|| PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE.to_string())?;
+            let source_conversation_id = durable
+                .conversation_id
+                .as_deref()
+                .ok_or_else(|| PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE.to_string())?;
+            let (_, source) = self
+                .collaboration_authorizer
+                .authorize_root_projection(root_conversation_id, source_conversation_id)
+                .map_err(|_| PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE.to_string())?;
+            let public_action_id =
+                serde_json::from_str::<AgentProposedAction>(&durable.action_json)
+                    .map(|action| action_id_for_action(&action))
+                    .unwrap_or_else(|_| approval_id.to_string());
+            return Ok(ProjectedApprovalDecisionResult {
+                approval_id: approval_id.to_string(),
+                source_agent_id: source.agent_id,
+                run_id: durable.run_id,
+                action_id: public_action_id,
+                status: durable.status,
+                accepted: false,
+            });
+        };
+
+        let source_conversation_id = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE.to_string())?;
+        let (_, source) = self
+            .collaboration_authorizer
+            .authorize_root_projection(root_conversation_id, source_conversation_id)
+            .map_err(|_| PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE.to_string())?;
+        let run_id = record.snapshot.run_id.clone();
+        let action_id = record.snapshot.action_id.clone();
+        let current = record.snapshot.status;
+        let actionable = current == PendingActionStatus::Pending
+            || (current == PendingActionStatus::Approved
+                && decision == ProjectedApprovalDecision::Approve
+                && self
+                    .startup_recoverable_mcp_approvals
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .contains(approval_id));
+        if !actionable {
+            return Ok(ProjectedApprovalDecisionResult {
+                approval_id: approval_id.to_string(),
+                source_agent_id: source.agent_id,
+                run_id,
+                action_id,
+                status: pending_status_label(current).to_string(),
+                accepted: false,
+            });
+        }
+
+        let result = match decision {
+            ProjectedApprovalDecision::Approve => self
+                .queue_action_continuation(
+                    &run_id,
+                    &action_id,
+                    AgentApprovalDecisionStatus::Approved,
+                    None,
+                    notifications,
+                )
+                .map(|output| (output.status, true)),
+            ProjectedApprovalDecision::Reject => self
+                .queue_action_continuation(
+                    &run_id,
+                    &action_id,
+                    AgentApprovalDecisionStatus::Rejected,
+                    message,
+                    notifications,
+                )
+                .map(|output| (output.status, true)),
+            ProjectedApprovalDecision::Cancel => self
+                .cancel_action_internal(&run_id, &action_id)
+                .map(|cancelled| {
+                    (
+                        if cancelled { "cancelled" } else { "unchanged" }.to_string(),
+                        cancelled,
+                    )
+                }),
+        };
+        match result {
+            Ok((status, accepted)) => Ok(ProjectedApprovalDecisionResult {
+                approval_id: approval_id.to_string(),
+                source_agent_id: source.agent_id,
+                run_id,
+                action_id,
+                status,
+                accepted,
+            }),
+            Err(error) => {
+                // A simultaneous click may win between the in-memory check and the existing
+                // pending-action CAS. Re-read durable state and return an idempotent snapshot.
+                let durable = self.storage.get_pending_agent_action(approval_id)?;
+                if let Some(durable) = durable.filter(|durable| durable.status != "pending") {
+                    return Ok(ProjectedApprovalDecisionResult {
+                        approval_id: approval_id.to_string(),
+                        source_agent_id: source.agent_id,
+                        run_id,
+                        action_id,
+                        status: durable.status,
+                        accepted: false,
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
     /// Host-internal cancellation for one trusted child Wake run. A live Runtime uses the normal
     /// run token; a durable approval has no worker, so its exact action is atomically cancelled
     /// through the existing pending-action settlement path.
     pub(crate) fn interrupt_agent_wake_run(&self, run_id: &str) -> Result<bool, String> {
-        if self.cancel_run(run_id) {
+        if self.cancel_run_internal(run_id) {
             return Ok(true);
         }
         let action_ids = self
@@ -45,7 +291,7 @@ impl AgentService {
             .map(|record| record.snapshot.action_id.clone())
             .collect::<Vec<_>>();
         for action_id in action_ids {
-            if self.cancel_action(run_id, &action_id)? {
+            if self.cancel_action_internal(run_id, &action_id)? {
                 return Ok(true);
             }
         }
@@ -152,6 +398,22 @@ impl AgentService {
         snapshots
     }
 
+    /// Legacy renderer approval list. Child approvals are intentionally absent: they are exposed
+    /// only through `list_root_projected_approvals`, which carries authenticated source identity.
+    pub fn list_user_pending_actions(&self) -> Vec<PendingAgentActionSnapshot> {
+        self.list_pending_actions()
+            .into_iter()
+            .filter(|snapshot| {
+                let Some(conversation_id) = snapshot.conversation_id.as_deref() else {
+                    return true;
+                };
+                self.collaboration_authorizer
+                    .authorize_user_conversation_write(conversation_id)
+                    .is_ok()
+            })
+            .collect()
+    }
+
     pub fn read_file_draft(
         &self,
         draft_id: &str,
@@ -162,6 +424,8 @@ impl AgentService {
             .storage
             .get_agent_file_draft(draft_id)?
             .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+        self.authorize_user_conversation_write(&draft.conversation_id)
+            .map_err(|error| error.to_string())?;
         let snapshot = file_draft_snapshot(&draft)?;
         let (content, offset, next_offset, truncated) =
             paginate_chars(&draft.content, offset, max_chars);
@@ -184,6 +448,8 @@ impl AgentService {
             .storage
             .get_agent_file_draft(draft_id)?
             .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+        self.authorize_user_conversation_write(&draft.conversation_id)
+            .map_err(|error| error.to_string())?;
         let diff = file_write_diff(&draft);
         let (patch, offset, next_offset, truncated) = paginate_chars(&diff, offset, max_chars);
         Ok(AgentFileWriteDiffPage {
@@ -201,6 +467,7 @@ impl AgentService {
         action_id: &str,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        self.authorize_user_pending_action(run_id, action_id)?;
         self.queue_action_continuation(
             run_id,
             action_id,
@@ -217,6 +484,7 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        self.authorize_user_pending_action(run_id, action_id)?;
         self.queue_action_continuation(
             run_id,
             action_id,
@@ -227,6 +495,11 @@ impl AgentService {
     }
 
     pub fn cancel_action(&self, run_id: &str, action_id: &str) -> Result<bool, String> {
+        self.authorize_user_pending_action(run_id, action_id)?;
+        self.cancel_action_internal(run_id, action_id)
+    }
+
+    fn cancel_action_internal(&self, run_id: &str, action_id: &str) -> Result<bool, String> {
         if self
             .try_cancel_recovered_approved_mcp_action(run_id, action_id)?
             .is_some()

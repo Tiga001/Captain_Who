@@ -14,6 +14,7 @@ use crate::application::mcp::sqlite_envelope_repository::SqliteMcpApprovalEnvelo
 use crate::application::mcp::sqlite_registry::SqliteMcpRegistry;
 
 const MCP_APPROVAL_EXPIRY_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(60);
+const AGENT_COLLABORATION_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 struct McpApprovalExpiryReconciler {
     cancellation: Option<oneshot::Sender<()>>,
@@ -361,7 +362,20 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let mcp_approval_expiry_reconciler =
         McpApprovalExpiryReconciler::spawn(agent_service.clone(), mcp_payload_store);
 
+    // Freeze the notifier cut before any request or collaboration dispatcher can mutate durable
+    // state. Events committed after this read are replayed; older events are covered by the global
+    // startup resync which makes every already-mounted root store rehydrate.
+    let collaboration_event_startup_cursor = bootstrap
+        .storage
+        .latest_global_agent_collaboration_event_sequence()
+        .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
+    outbound_tx
+        .send(collaboration_resync_notification())
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound channel is closed"))?;
+    agent_service
+        .start_collaboration_dispatcher(outbound_tx.clone())
+        .map_err(io::Error::other)?;
     let (image_artifact_outbound_tx, image_artifact_outbound_rx) =
         mpsc::channel::<ImageArtifactOutbound>(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
@@ -375,6 +389,11 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         mcp_event_sink.subscribe_safe_events(),
         Arc::clone(&mcp_management),
         outbound_tx.clone(),
+    ));
+    let collaboration_event_notifier = tokio::spawn(run_collaboration_event_notifier(
+        Arc::clone(&bootstrap.storage),
+        outbound_tx.clone(),
+        collaboration_event_startup_cursor,
     ));
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -418,6 +437,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     mcp_management.begin_shutdown();
     mcp_changed_notifier.abort();
     let _ = mcp_changed_notifier.await;
+    collaboration_event_notifier.abort();
+    let _ = collaboration_event_notifier.await;
     // Optional connection discovery must never delay admission or outlive Host shutdown.
     // Aborting this coordinator does not replace Manager cleanup; stop_all below remains the
     // process-owned close authority for every connection that reached the Manager.
@@ -436,6 +457,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         skill_acquisition_dispatcher_result,
         image_generation_configuration_dispatcher_result,
         image_generation_execution_shutdown,
+        collaboration_dispatcher_shutdown,
         (cancelled_runs, timed_out),
         mcp_management_requests_shutdown,
         mcp_shutdown,
@@ -447,10 +469,15 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         bootstrap
             .image_generation_execution
             .shutdown(Duration::from_secs(2)),
+        agent_service.shutdown_collaboration_dispatcher(),
         agent_service.shutdown_active_runs(Duration::from_secs(2)),
         mcp_management_tasks.shutdown(Duration::from_secs(2)),
         mcp_manager.shutdown(Duration::from_secs(2))
     );
+
+    if let Err(error) = collaboration_dispatcher_shutdown {
+        eprintln!("collaboration dispatcher shutdown failed: {error}");
+    }
 
     let mut outbound_error = None;
     if let Ok(Some(shutdown_id)) = &input_result {
@@ -530,6 +557,49 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     }
     mcp_action_invalidation.map_err(io::Error::other)?;
     writer_result
+}
+
+async fn run_collaboration_event_notifier(
+    storage: Arc<StorageService>,
+    outbound: mpsc::UnboundedSender<Value>,
+    initial_cursor: u64,
+) {
+    let mut cursor = initial_cursor;
+    let mut interval = tokio::time::interval(AGENT_COLLABORATION_EVENT_POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let storage = Arc::clone(&storage);
+        let page = tokio::task::spawn_blocking(move || {
+            storage.list_global_agent_collaboration_events(cursor, 256)
+        })
+        .await;
+        let Ok(Ok(events)) = page else {
+            continue;
+        };
+        for event in events {
+            cursor = event.global_sequence;
+            let notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": mycopilot_protocol_rs::AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD,
+                "params": application::agent::collaboration_event_dto(event),
+            });
+            if outbound.send(notification).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+fn collaboration_resync_notification() -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": mycopilot_protocol_rs::AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+        "params": mycopilot_protocol_rs::CollaborationResyncEnvelopeDto {
+            schema_version: mycopilot_protocol_rs::AGENT_COLLABORATION_SCHEMA_VERSION,
+            reason: mycopilot_protocol_rs::CollaborationResyncReasonDto::CoreStarted,
+        },
+    })
 }
 
 #[derive(Clone)]
@@ -742,6 +812,83 @@ mod mcp_payload_bootstrap_tests {
         UnavailableMcpApprovalPayloadStore,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn collaboration_startup_resync_is_a_strict_global_invalidation() {
+        assert_eq!(
+            collaboration_resync_notification(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": mycopilot_protocol_rs::AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+                "params": {
+                    "schemaVersion": mycopilot_protocol_rs::AGENT_COLLABORATION_SCHEMA_VERSION,
+                    "reason": "core_started"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn collaboration_notifier_replays_a_commit_after_the_frozen_startup_cut() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(
+            StorageService::open(&directory.path().join("collaboration-events.sqlite")).unwrap(),
+        );
+        storage
+            .save_conversation_meta(
+                mycopilot_core::storage::models::ChatConversationMetaRecord {
+                    id: "conversation-root".to_string(),
+                    project_id: None,
+                    model_id: None,
+                    title: "Root".to_string(),
+                    created_at: 1,
+                    updated_at: 1,
+                    pinned_at: None,
+                    archived_at: None,
+                    unread_at: None,
+                },
+            )
+            .unwrap();
+        storage
+            .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+                agent_id: "agent-root".to_string(),
+                conversation_id: "conversation-root".to_string(),
+                creation_request_id: "ensure-root".to_string(),
+                task_name: "Root".to_string(),
+            })
+            .unwrap();
+        let startup_cut = storage
+            .latest_global_agent_collaboration_event_sequence()
+            .unwrap();
+        storage
+            .transition_agent_lifecycle(
+                "agent-root",
+                1,
+                mycopilot_core::AgentLifecycle::Active,
+                mycopilot_core::AgentLifecycle::Archived,
+            )
+            .unwrap();
+
+        let (outbound, mut notifications) = mpsc::unbounded_channel();
+        let notifier = tokio::spawn(run_collaboration_event_notifier(
+            Arc::clone(&storage),
+            outbound,
+            startup_cut,
+        ));
+        let notification = tokio::time::timeout(Duration::from_secs(1), notifications.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        notifier.abort();
+        let _ = notifier.await;
+
+        assert_eq!(
+            notification["method"],
+            mycopilot_protocol_rs::AGENT_COLLABORATION_EVENT_NOTIFICATION_METHOD
+        );
+        assert_eq!(notification["params"]["rootAgentId"], "agent-root");
+        assert_eq!(notification["params"]["sequence"], 2);
+    }
 
     #[test]
     fn test_bootstrap_never_probes_native_credentials_and_uses_process_only_payloads() {

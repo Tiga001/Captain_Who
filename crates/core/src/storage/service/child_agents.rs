@@ -4,9 +4,9 @@ use super::*;
 use crate::storage::child_context_snapshot_repository;
 use crate::{
     AgentCollaborationIdentity, AgentForkTurns, AgentGraphError, AgentLifecycle, AgentMailboxKind,
-    AgentModelSelectionSource, AgentTemplateError, AgentTemplateSnapshot, ChildAgentSpawnError,
-    ChildAgentSpawnRecord, CreateAgentNodeInput, CreateChildAgentInput, EnqueueAgentMessageInput,
-    EnqueueAgentWakeInput, IdempotentCreate,
+    AgentModelSelectionSource, AgentTemplateError, AgentTemplateSnapshot, AgentTreeResourceLimits,
+    ChildAgentSpawnError, ChildAgentSpawnRecord, CreateAgentNodeInput, CreateChildAgentInput,
+    EnqueueAgentMessageInput, EnqueueAgentWakeInput, IdempotentCreate,
 };
 use rusqlite::{params, TransactionBehavior};
 
@@ -26,6 +26,15 @@ impl StorageService {
         &self,
         input: &CreateChildAgentInput,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_agent_with_limits(input, AgentTreeResourceLimits::default())
+    }
+
+    pub fn create_child_agent_with_limits(
+        &self,
+        input: &CreateChildAgentInput,
+        limits: AgentTreeResourceLimits,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        let limits = limits.validate()?;
         validate_spawn_input(input)?;
         let created_at = now_ms();
         let mut connection = self
@@ -60,6 +69,8 @@ impl StorageService {
                 parent.agent_id.clone(),
             ));
         }
+        enforce_task_resource_limit(input, limits)?;
+        enforce_tree_resource_limits(&transaction, &parent, limits)?;
 
         let (template_snapshot, selected_model_id, model_selection_source) =
             select_model_identity(&transaction, &parent, input)?;
@@ -341,6 +352,64 @@ fn validate_spawn_input(input: &CreateChildAgentInput) -> Result<(), ChildAgentS
         MAX_MODEL_ID_BYTES,
     )?;
     input.fork_turns.validate()?;
+    Ok(())
+}
+
+fn enforce_task_resource_limit(
+    input: &CreateChildAgentInput,
+    limits: AgentTreeResourceLimits,
+) -> Result<(), ChildAgentSpawnError> {
+    if input.task.len() > limits.max_task_bytes {
+        return Err(ChildAgentSpawnError::ResourceLimit {
+            resource: "task_bytes",
+            limit: limits.max_task_bytes as u64,
+        });
+    }
+    Ok(())
+}
+
+fn enforce_tree_resource_limits(
+    transaction: &rusqlite::Transaction<'_>,
+    parent: &crate::AgentNodeRecord,
+    limits: AgentTreeResourceLimits,
+) -> Result<(), ChildAgentSpawnError> {
+    let node_count = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM agent_nodes WHERE root_agent_id = ?1",
+            [&parent.root_agent_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(spawn_database_error)?;
+    if node_count >= u64::from(limits.max_nodes) {
+        return Err(ChildAgentSpawnError::ResourceLimit {
+            resource: "tree_nodes",
+            limit: u64::from(limits.max_nodes),
+        });
+    }
+
+    let parent_depth = transaction
+        .query_row(
+            "WITH RECURSIVE ancestors(agent_id, parent_agent_id, depth) AS (
+                 SELECT agent_id, parent_agent_id, 0
+                   FROM agent_nodes
+                  WHERE agent_id = ?1
+                 UNION ALL
+                 SELECT parent.agent_id, parent.parent_agent_id, ancestors.depth + 1
+                   FROM agent_nodes AS parent
+                   JOIN ancestors ON parent.agent_id = ancestors.parent_agent_id
+                  WHERE ancestors.depth <= 32
+             )
+             SELECT COALESCE(MAX(depth), 0) FROM ancestors",
+            [&parent.agent_id],
+            |row| row.get::<_, u32>(0),
+        )
+        .map_err(spawn_database_error)?;
+    if parent_depth >= limits.max_depth {
+        return Err(ChildAgentSpawnError::ResourceLimit {
+            resource: "tree_depth",
+            limit: u64::from(limits.max_depth),
+        });
+    }
     Ok(())
 }
 
@@ -1183,6 +1252,75 @@ mod tests {
     }
 
     #[test]
+    fn observer_snapshot_bulk_loads_large_history_and_every_actor_origin_from_one_read_cut() {
+        const TURN_COUNT: usize = 1_000;
+
+        let fixture = Fixture::new(Some("model-a"));
+        save_settled_history(&fixture, TURN_COUNT, false);
+
+        let root = fixture
+            .service
+            .load_conversation_observer_snapshot("root-conversation")
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.conversation.messages.len(), TURN_COUNT * 2);
+        assert_eq!(root.input_origins.len(), TURN_COUNT);
+        assert!(root
+            .input_origins
+            .values()
+            .all(|origin| matches!(origin, crate::ConversationMessageOrigin::Human)));
+
+        let mut input = spawn_input("bulk-observer-child", "bulk_observer");
+        input.fork_turns = AgentForkTurns::All;
+        let child = fixture.service.create_child_agent(&input).unwrap();
+        let observer = fixture
+            .service
+            .load_conversation_observer_snapshot(&child.agent.conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(observer.conversation.messages.len(), TURN_COUNT * 2 + 1);
+        assert_eq!(observer.input_origins.len(), TURN_COUNT + 1);
+        assert_eq!(
+            observer
+                .input_origins
+                .get(&child.task_message.projection_message_id),
+            Some(&crate::ConversationMessageOrigin::Agent {
+                sender_agent_id: "agent-root".to_string(),
+                source_agent_message_id: child.task_message.message_id.clone(),
+            })
+        );
+
+        let snapshots = observer
+            .input_origins
+            .iter()
+            .filter(|(message_id, _)| *message_id != &child.task_message.projection_message_id)
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots.len(), TURN_COUNT);
+        for (message_id, origin) in snapshots {
+            let crate::ConversationMessageOrigin::HistoricalSnapshot {
+                source_conversation_id,
+                source_message_id,
+                original,
+            } = origin
+            else {
+                panic!("input {message_id} lost its historical snapshot provenance");
+            };
+            assert_eq!(source_conversation_id, "root-conversation");
+            assert!(source_message_id.starts_with("root-user-"));
+            assert!(matches!(
+                original.as_ref(),
+                crate::ConversationMessageOrigin::Human
+            ));
+        }
+        assert!(observer
+            .conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .all(|message| observer.input_origins.contains_key(&message.id)));
+    }
+
+    #[test]
     fn all_snapshot_copies_attachment_to_independent_path_and_retry_is_idempotent() {
         let fixture = Fixture::new(Some("model-a"));
         save_settled_history(&fixture, 1, false);
@@ -2000,5 +2138,94 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn atomic_tree_limits_preserve_idempotent_retry_and_reject_depth_nodes_and_task_bytes() {
+        let fixture = Fixture::new(Some("model-a"));
+        let limits = AgentTreeResourceLimits {
+            max_depth: 2,
+            max_nodes: 2,
+            max_task_bytes: 64,
+        };
+        let first_input = spawn_input("spawn-limited-first", "first");
+        let first = fixture
+            .service
+            .create_child_agent_with_limits(&first_input, limits)
+            .unwrap();
+        let retry = fixture
+            .service
+            .create_child_agent_with_limits(
+                &first_input,
+                AgentTreeResourceLimits {
+                    max_depth: 1,
+                    max_nodes: 2,
+                    max_task_bytes: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(retry.agent.agent_id, first.agent.agent_id);
+
+        let node_error = fixture
+            .service
+            .create_child_agent_with_limits(&spawn_input("spawn-limited-second", "second"), limits)
+            .unwrap_err();
+        assert_eq!(
+            node_error,
+            ChildAgentSpawnError::ResourceLimit {
+                resource: "tree_nodes",
+                limit: 2,
+            }
+        );
+
+        let depth_fixture = Fixture::new(Some("model-a"));
+        let child = depth_fixture
+            .service
+            .create_child_agent_with_limits(
+                &spawn_input("spawn-depth-parent", "depth_parent"),
+                AgentTreeResourceLimits {
+                    max_depth: 1,
+                    max_nodes: 8,
+                    max_task_bytes: 64,
+                },
+            )
+            .unwrap();
+        let mut grandchild_input = spawn_input("spawn-depth-child", "depth_child");
+        grandchild_input.parent_agent_id = child.agent.agent_id;
+        let depth_error = depth_fixture
+            .service
+            .create_child_agent_with_limits(
+                &grandchild_input,
+                AgentTreeResourceLimits {
+                    max_depth: 1,
+                    max_nodes: 8,
+                    max_task_bytes: 64,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            depth_error,
+            ChildAgentSpawnError::ResourceLimit {
+                resource: "tree_depth",
+                limit: 1,
+            }
+        );
+
+        let mut oversized = spawn_input("spawn-oversized-task", "oversized");
+        oversized.task = "x".repeat(65);
+        assert!(matches!(
+            depth_fixture.service.create_child_agent_with_limits(
+                &oversized,
+                AgentTreeResourceLimits {
+                    max_depth: 2,
+                    max_nodes: 8,
+                    max_task_bytes: 64,
+                },
+            ),
+            Err(ChildAgentSpawnError::ResourceLimit {
+                resource: "task_bytes",
+                limit: 64,
+            })
+        ));
     }
 }

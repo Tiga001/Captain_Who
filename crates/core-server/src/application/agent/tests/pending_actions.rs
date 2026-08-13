@@ -894,6 +894,7 @@ fn test_mcp_resume_checkpoint(
         "extensionSnapshots": [],
         "toolSet": crate::test_tool_set_checkpoint(),
         "runContext": null,
+        "collaborationRunSnapshot": null,
         "modelCapabilities": { "imageInput": false },
         "providerProfileConfig": provider_profile_config,
         "providerProtocolKey": provider_protocol_key,
@@ -3327,7 +3328,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     let row = storage.list_pending_agent_actions().unwrap().remove(0);
     assert!(row
         .agent_input_json
-        .contains("\"resumeInputSchemaVersion\":7"));
+        .contains("\"resumeInputSchemaVersion\":8"));
     for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
         assert!(!row.agent_input_json.contains(forbidden_key));
     }
@@ -4172,6 +4173,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         }],
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
+        collaboration_run_snapshot: None,
         model_capabilities: ModelCapabilities::default(),
         provider_profile_config,
         provider_protocol_key,
@@ -4528,6 +4530,28 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
             task_name: "Root".to_string(),
         })
         .unwrap();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-foreign-approval-root".to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Foreign approval root".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: "agent-foreign-approval-root".to_string(),
+            conversation_id: "conversation-foreign-approval-root".to_string(),
+            creation_request_id: "ensure-foreign-approval-root".to_string(),
+            task_name: "Foreign root".to_string(),
+        })
+        .unwrap();
     let child = storage
         .create_child_agent(&mycopilot_core::CreateChildAgentInput {
             parent_agent_id: "agent-child-approval-root".to_string(),
@@ -4634,6 +4658,8 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
     let mut durable_checkpoint =
         test_pending_resume_checkpoint_for_call(&storage, run_id, None, &call, provenance.clone());
     durable_checkpoint.tool_set = checkpoint_tool_set.clone();
+    durable_checkpoint.collaboration_run_snapshot =
+        Some(mycopilot_core::AgentCollaborationRunSnapshot::default());
     let checkpoint_model_context = durable_checkpoint.conversation_model_context_items;
     storage
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
@@ -4656,6 +4682,8 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         test_pending_resume_checkpoint_for_call(&storage, run_id, None, &call, provenance);
     checkpoint.run_context = Some(context.clone());
     checkpoint.tool_set = checkpoint_tool_set;
+    checkpoint.collaboration_run_snapshot =
+        Some(mycopilot_core::AgentCollaborationRunSnapshot::default());
     agent_input.resume_checkpoint = Some(checkpoint);
     agent_input.approval_decision = Some(AgentApprovalDecision {
         action_id: call.id.clone(),
@@ -4690,6 +4718,70 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
         )
         .unwrap();
     let storage_id = pending_action_storage_id(run_id, &call.id);
+    let (root_card_notifications, _root_card_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let direct_child_write =
+        service.approve_action(run_id, &call.id, root_card_notifications.clone());
+    assert!(
+        direct_child_write
+            .unwrap_err()
+            .contains("子 Agent Conversation 是只读观察视图"),
+        "a user approval must not use the child Conversation write API"
+    );
+    assert!(!service.cancel_run(run_id));
+    assert!(service
+        .reject_action(
+            run_id,
+            &call.id,
+            Some("forged rejection".to_string()),
+            root_card_notifications.clone(),
+        )
+        .unwrap_err()
+        .contains("子 Agent Conversation 是只读观察视图"));
+    assert!(service
+        .cancel_action(run_id, &call.id)
+        .unwrap_err()
+        .contains("子 Agent Conversation 是只读观察视图"));
+    let projected = service
+        .list_root_projected_approvals("conversation-child-approval-root")
+        .unwrap();
+    assert_eq!(projected.len(), 1);
+    assert_eq!(projected[0].approval_id, storage_id);
+    assert_eq!(projected[0].source_agent_id, child.agent.agent_id);
+    assert_eq!(projected[0].action.run_id, run_id);
+    let unknown_error = service
+        .decide_root_projected_approval(
+            "conversation-child-approval-root",
+            "missing-projected-approval",
+            ProjectedApprovalDecision::Cancel,
+            None,
+            root_card_notifications.clone(),
+        )
+        .unwrap_err();
+    let foreign_error = service
+        .decide_root_projected_approval(
+            "conversation-foreign-approval-root",
+            &storage_id,
+            ProjectedApprovalDecision::Cancel,
+            None,
+            root_card_notifications.clone(),
+        )
+        .unwrap_err();
+    assert_eq!(unknown_error, "Approval is unavailable.");
+    assert_eq!(foreign_error, unknown_error);
+    let restarted_projection =
+        AgentService::try_new_deferred_startup_reconciliation_with_agent_limit(
+            Arc::clone(&storage),
+            None,
+            1,
+        )
+        .unwrap();
+    let recovered = restarted_projection
+        .list_root_projected_approvals("conversation-child-approval-root")
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].approval_id, storage_id);
+    assert_eq!(recovered[0].source_agent_id, child.agent.agent_id);
+    drop(restarted_projection);
     let pending = service
         .pending_actions
         .lock()
@@ -4761,6 +4853,18 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
     service
         .transition_pending_status(&approved, PendingActionStatus::Completed)
         .unwrap();
+    let duplicate = service
+        .decide_root_projected_approval(
+            "conversation-child-approval-root",
+            &storage_id,
+            ProjectedApprovalDecision::Approve,
+            None,
+            root_card_notifications,
+        )
+        .unwrap();
+    assert!(!duplicate.accepted);
+    assert_eq!(duplicate.status, "completed");
+    assert_eq!(duplicate.run_id, run_id);
     let continuation_service = service.clone();
     let continuation = tokio::spawn(async move {
         continuation_service
@@ -5097,6 +5201,7 @@ fn invalid_checkpoint_tool_call_is_rejected_before_pending_publication() {
         extension_snapshots: Vec::new(),
         tool_set: crate::test_tool_set_checkpoint(),
         run_context: None,
+        collaboration_run_snapshot: None,
         model_capabilities: ModelCapabilities::default(),
         provider_profile_config: crate::test_provider_profile_config(),
         provider_protocol_key: crate::test_provider_protocol_key("test-model"),

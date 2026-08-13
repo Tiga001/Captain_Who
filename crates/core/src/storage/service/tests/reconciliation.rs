@@ -1985,6 +1985,7 @@ fn attach_current_manual_file_effect_checkpoint(
             exposed_tool_names: vec![tool.clone()],
         },
         run_context: None,
+        collaboration_run_snapshot: None,
         model_capabilities: crate::ModelCapabilities::default(),
         provider_profile_config,
         provider_protocol_key,

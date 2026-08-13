@@ -55,7 +55,127 @@ pub(crate) fn handle_request(
             handle_agent_steer_run(agent_service, notification_tx, request.id, request.params)
         }
         AGENT_LIST_PENDING_ACTIONS_METHOD => {
-            response_success(request.id, agent_service.list_pending_actions())
+            response_success(request.id, agent_service.list_user_pending_actions())
+        }
+        AGENT_COLLABORATION_GET_TREE_METHOD => {
+            let input = match parse_params::<AgentTreeRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.get_collaboration_tree(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_GET_AGENT_METHOD => {
+            let input = match parse_params::<AgentDetailRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.get_collaboration_agent(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD => {
+            let input = match parse_params::<AgentConversationLocatorRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.locate_collaboration_conversation(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_LOAD_OBSERVER_CONVERSATION_METHOD => {
+            let input = match parse_params::<AgentObserverConversationRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.load_collaboration_observer_conversation(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_LIST_EVENTS_METHOD => {
+            let input = match parse_params::<CollaborationEventsRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.list_collaboration_events(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_TEMPLATES_LIST_METHOD => {
+            let input = match parse_params::<AgentTemplateListRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.list_collaboration_templates(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_TEMPLATES_CREATE_METHOD => {
+            let input = match parse_params::<AgentTemplateCreateRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.create_collaboration_template(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_TEMPLATES_UPDATE_METHOD => {
+            let input = match parse_params::<AgentTemplateUpdateRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.update_collaboration_template(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_TEMPLATES_SET_ENABLED_METHOD => {
+            let input = match parse_params::<AgentTemplateSetEnabledRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.set_collaboration_template_enabled(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_TEMPLATES_DELETE_METHOD => {
+            let input = match parse_params::<AgentTemplateDeleteRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.delete_collaboration_template(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_APPROVALS_LIST_METHOD => {
+            let input = match parse_params::<CollaborationApprovalListRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.list_collaboration_approvals(input) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
+        }
+        AGENT_COLLABORATION_APPROVALS_DECIDE_METHOD => {
+            let input = match parse_params::<CollaborationApprovalDecisionRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.decide_collaboration_approval(input, notification_tx) {
+                Ok(output) => response_success(request.id, output),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         AGENT_APPROVE_ACTION_METHOD => {
             handle_agent_approve_action(agent_service, notification_tx, request.id, request.params)
@@ -115,6 +235,14 @@ pub(crate) fn handle_request(
             let result = storage.save_model_settings_request(settings);
             if result.is_ok() {
                 agent_service.invalidate_all_conversation_context_states();
+                let _ = notification_tx.send(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": mycopilot_protocol_rs::AGENT_COLLABORATION_RESYNC_NOTIFICATION_METHOD,
+                    "params": mycopilot_protocol_rs::CollaborationResyncEnvelopeDto {
+                        schema_version: mycopilot_protocol_rs::AGENT_COLLABORATION_SCHEMA_VERSION,
+                        reason: mycopilot_protocol_rs::CollaborationResyncReasonDto::ModelSettingsChanged,
+                    },
+                }));
             }
             model_settings_save_response(request.id, result)
         }
@@ -163,10 +291,13 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage.load_conversation_view(&input.conversation_id),
-            )
+            match agent_service.authorize_user_conversation_write(&input.conversation_id) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.load_conversation_view(&input.conversation_id),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_FORK_CONVERSATION_METHOD => {
             let input = match parse_params::<ForkConversationRequest>(request.params) {
@@ -180,27 +311,40 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage.load_attachment_image(&input.attachment_id),
-            )
+            match agent_service
+                .authorize_user_attachment_reads(std::slice::from_ref(&input.attachment_id))
+            {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.load_attachment_image(&input.attachment_id),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD => {
             let input = match parse_params::<LoadInputAttachmentsRequest>(request.params) {
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage.load_input_attachments(&input.attachment_ids),
-            )
+            match agent_service.authorize_user_attachment_reads(&input.attachment_ids) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.load_input_attachments(&input.attachment_ids),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_SAVE_CONVERSATION_META_METHOD => {
             let conversation = match parse_params::<ChatConversationMetaRecord>(request.params) {
                 Ok(conversation) => conversation,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(request.id, storage.save_conversation_meta(conversation))
+            match agent_service.authorize_user_conversation_write(&conversation.id) {
+                Ok(()) => {
+                    storage_response(request.id, storage.save_conversation_meta(conversation))
+                }
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_DELETE_CONVERSATION_METHOD => {
             let input = match parse_params::<ConversationIdRequest>(request.params) {
@@ -231,42 +375,51 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage.upsert_chat_messages(
-                    &input.conversation_id,
-                    input.messages,
-                    input.position_offset,
+            match agent_service.authorize_user_conversation_write(&input.conversation_id) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage.upsert_chat_messages(
+                        &input.conversation_id,
+                        input.messages,
+                        input.position_offset,
+                    ),
                 ),
-            )
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD => {
             let input = match parse_params::<SaveChatMessageStateRequest>(request.params) {
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage
-                    .save_chat_message_state(&input.conversation_id, input.message)
-                    .map(|_| json!(null)),
-            )
+            match agent_service.authorize_user_conversation_write(&input.conversation_id) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage
+                        .save_chat_message_state(&input.conversation_id, input.message)
+                        .map(|_| json!(null)),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_SAVE_CHAT_MESSAGE_UI_STATE_METHOD => {
             let input = match parse_params::<SaveChatMessageUiStateRequest>(request.params) {
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage
-                    .save_chat_message_ui_state(
-                        &input.conversation_id,
-                        &input.message.id,
-                        input.message.ui_state_json.as_deref(),
-                    )
-                    .map(|_| json!(null)),
-            )
+            match agent_service.authorize_user_conversation_write(&input.conversation_id) {
+                Ok(()) => storage_response(
+                    request.id,
+                    storage
+                        .save_chat_message_ui_state(
+                            &input.conversation_id,
+                            &input.message.id,
+                            input.message.ui_state_json.as_deref(),
+                        )
+                        .map(|_| json!(null)),
+                ),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_LOAD_COMPOSER_DRAFTS_METHOD => {
             storage_response(request.id, storage.load_composer_drafts())
@@ -276,7 +429,10 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(request.id, storage.save_composer_draft(input.draft))
+            match agent_service.authorize_user_conversation_write(&input.draft.scope_id) {
+                Ok(()) => storage_response(request.id, storage.save_composer_draft(input.draft)),
+                Err(error) => agent_service_error_response(request.id, error),
+            }
         }
         STORAGE_LOAD_UI_PREFERENCES_METHOD => {
             storage_response(request.id, storage.load_ui_preferences())
