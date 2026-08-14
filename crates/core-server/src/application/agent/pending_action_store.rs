@@ -14,6 +14,9 @@ static MANUAL_ACTION_AUDIT_FAILURES: Mutex<Vec<(String, String)>> = Mutex::new(V
 static MANUAL_ACTION_AUDIT_POST_COMMIT_FAILURES: Mutex<Vec<(String, String)>> =
     Mutex::new(Vec::new());
 
+#[cfg(test)]
+static PENDING_STATUS_TRANSITION_FAILURES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
 /// Installs a one-shot, action-scoped audit persistence failure for Host boundary tests.
 ///
 /// Matching on run, provider action id, and status keeps parallel tests isolated without adding
@@ -69,6 +72,30 @@ pub(super) fn inject_manual_action_audit_post_commit_failure(storage_id: &str, s
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .push((storage_id.to_string(), status.to_string()));
+}
+
+/// Installs a one-shot, action-scoped pending status persistence failure. This exercises the
+/// independent terminal/pending settlement retry without adding a production fault surface.
+#[cfg(test)]
+pub(super) fn inject_pending_status_transition_failure(storage_id: &str, status: &str) {
+    PENDING_STATUS_TRANSITION_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((storage_id.to_string(), status.to_string()));
+}
+
+#[cfg(test)]
+fn take_pending_status_transition_failure(storage_id: &str, status: &str) -> Option<String> {
+    let mut failures = PENDING_STATUS_TRANSITION_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let index = failures
+        .iter()
+        .position(|candidate| candidate.0 == storage_id && candidate.1 == status)?;
+    failures.swap_remove(index);
+    Some(format!(
+        "injected pending status persistence failure for action={storage_id}, status={status}"
+    ))
 }
 
 #[cfg(test)]
@@ -436,6 +463,12 @@ impl AgentService {
         expected_status: PendingActionStatus,
         status: PendingActionStatus,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(error) =
+            take_pending_status_transition_failure(&record.storage_id, pending_status_label(status))
+        {
+            return Err(error);
+        }
         self.storage.transition_pending_agent_action(
             &record.storage_id,
             pending_status_label(expected_status),

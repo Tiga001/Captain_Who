@@ -338,7 +338,22 @@ fn is_valid_pending_successor(
     if !is_pending_successor_candidate(interrupted, candidate) {
         return Ok(false);
     }
-    let Ok(action) = serde_json::from_str::<AgentProposedAction>(&candidate.action_json) else {
+    durable_trace_proves_action_precedes(interrupted, candidate, connection)
+}
+
+fn durable_trace_proves_action_precedes(
+    predecessor: &AgentPendingActionRecord,
+    successor: &AgentPendingActionRecord,
+    connection: &rusqlite::Connection,
+) -> Result<bool, String> {
+    if predecessor.action_id == successor.action_id
+        || predecessor.run_id != successor.run_id
+        || predecessor.conversation_id != successor.conversation_id
+        || predecessor.assistant_message_id != successor.assistant_message_id
+    {
+        return Ok(false);
+    }
+    let Ok(action) = serde_json::from_str::<AgentProposedAction>(&successor.action_json) else {
         return Ok(false);
     };
     let action_id = match &action {
@@ -354,10 +369,10 @@ fn is_valid_pending_successor(
         AgentProposedAction::OfficeOperation { office_operation } => office_operation.id.as_str(),
         AgentProposedAction::SkillInstallation { installation } => installation.id.as_str(),
     };
-    if candidate.tool_call_id.as_deref() != Some(action_id) {
+    if successor.tool_call_id.as_deref() != Some(action_id) {
         return Ok(false);
     }
-    let Some(assistant_message_id) = candidate.assistant_message_id.as_deref() else {
+    let Some(assistant_message_id) = successor.assistant_message_id.as_deref() else {
         return Ok(false);
     };
     let Some(trace) =
@@ -366,13 +381,13 @@ fn is_valid_pending_successor(
     else {
         return Ok(false);
     };
-    if trace.run_id != candidate.run_id
-        || trace.conversation_id != candidate.conversation_id.as_deref().unwrap_or_default()
+    if trace.run_id != successor.run_id
+        || trace.conversation_id != successor.conversation_id.as_deref().unwrap_or_default()
         || trace.assistant_message_id != assistant_message_id
     {
         return Ok(false);
     }
-    let Some(parent_call_id) = interrupted.tool_call_id.as_deref() else {
+    let Some(parent_call_id) = predecessor.tool_call_id.as_deref() else {
         return Ok(false);
     };
     let parent_result_sequence = trace.items.iter().find_map(|item| match item {
@@ -1425,6 +1440,48 @@ impl StorageService {
         let connection = self.state.connection()?;
         pending_action_repository::list_recoverable_actions_after_reconciliation(&connection)
             .map_err(storage_error)
+    }
+
+    /// Returns whether a nonterminal action in the same durable Run must settle before the
+    /// successor approval can resume model execution.
+    ///
+    /// The successor's frozen checkpoint selects candidate ToolResult ids, while the Conversation
+    /// trace proves that a selected result is already durable before the successor ToolCall. This
+    /// deliberately does not infer dependencies from creation time or sibling ToolCalls. Reading
+    /// current SQLite status also avoids a false block when a terminal CAS committed but its
+    /// caller observed an unknown response and process-local state remained stale.
+    pub fn pending_agent_action_has_unsettled_predecessor(
+        &self,
+        successor_action_id: &str,
+        frozen_result_call_ids: &[String],
+    ) -> Result<bool, String> {
+        if frozen_result_call_ids.is_empty() {
+            return Ok(false);
+        }
+        let connection = self.state.connection()?;
+        let Some(successor) =
+            pending_action_repository::load_pending_action(&connection, successor_action_id)
+                .map_err(storage_error)?
+        else {
+            // Preserve the approval path's existing durable status CAS as the authoritative
+            // fail-closed boundary for a concurrently removed successor row. The predecessor
+            // gate only adds dependency ordering; it must not replace missing-row arbitration.
+            return Ok(false);
+        };
+        let unsettled =
+            pending_action_repository::list_recoverable_actions_after_reconciliation(&connection)
+                .map_err(storage_error)?;
+        for predecessor in unsettled {
+            if predecessor.tool_call_id.as_ref().is_some_and(|call_id| {
+                frozen_result_call_ids
+                    .iter()
+                    .any(|frozen| frozen == call_id)
+            }) && durable_trace_proves_action_precedes(&predecessor, &successor, &connection)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn reconcile_interrupted_pending_agent_actions(

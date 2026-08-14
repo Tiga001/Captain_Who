@@ -1,103 +1,64 @@
 import { Bot } from 'lucide-react'
 import { useMemo } from 'react'
-import type { CollaborationActivitySemantic as ProtocolCollaborationActivitySemantic } from '@mycopilot/protocol'
+import type { ClipboardEvent as ReactClipboardEvent } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../config/translationFormat'
+import {
+  groupCollaborationTimelineActivities,
+  type CollaborationActivitySemantic,
+  type CollaborationTimelineActivity
+} from './collaborationTimelineModel'
 import './CollaborationTimelineActivity.css'
 
-export type CollaborationActivitySemantic = ProtocolCollaborationActivitySemantic
+export {
+  groupCollaborationTimelineActivities,
+  normalizeCollaborationTimelineActivities
+} from './collaborationTimelineModel'
+export type {
+  CollaborationActivitySemantic,
+  CollaborationTimelineActivity,
+  CollaborationTimelineActivityGroup
+} from './collaborationTimelineModel'
 
-/** Renderer-safe projection of one typed durable collaboration event. */
-export interface CollaborationTimelineActivity {
-  activityId: string
-  agentId: string
-  occurredAt: number
-  rootAnchorMessageId: string | null
-  rootTraceBoundarySequence: number | null
-  runId: string | null
-  semantic: CollaborationActivitySemantic
-  sequence: number
-  taskNameSnapshot: string
-  turnId: string | null
-}
-
-export interface CollaborationTimelineActivityGroup {
-  activities: readonly CollaborationTimelineActivity[]
-  rootAnchorMessageId: string | null
-  rootTraceBoundarySequence: number | null
-  semantic: CollaborationActivitySemantic
-}
-
-function compareActivity(
-  left: CollaborationTimelineActivity,
-  right: CollaborationTimelineActivity
-): number {
-  if (left.occurredAt !== right.occurredAt) return left.occurredAt - right.occurredAt
-  if (left.sequence !== right.sequence) return left.sequence - right.sequence
-  return left.activityId.localeCompare(right.activityId)
-}
-
-function canMerge(
-  group: CollaborationTimelineActivityGroup,
-  activity: CollaborationTimelineActivity
-): boolean {
-  const previous = group.activities.at(-1)
-  if (!previous) return false
-  if (
-    group.semantic !== activity.semantic ||
-    group.rootAnchorMessageId !== activity.rootAnchorMessageId ||
-    group.rootTraceBoundarySequence !== activity.rootTraceBoundarySequence
-  ) {
-    return false
-  }
-  if (group.activities.some((candidate) => candidate.agentId === activity.agentId)) return false
-  if (activity.rootAnchorMessageId) return true
-  // Unanchored events may only coalesce inside the same narrow timestamp bucket. This keeps
-  // simultaneous multi-Agent activity compact without merging unrelated later work.
-  return Math.floor(previous.occurredAt / 1_000) === Math.floor(activity.occurredAt / 1_000)
-}
+const MAX_VISIBLE_AGENT_CHIPS = 3
+const COLLABORATION_COPY_ATTRIBUTE = 'data-collaboration-copy-text'
 
 /**
- * Produces the deterministic root Timeline projection from durable typed events.
- *
- * Terminal-result and generic-update deduplication belongs to the trusted backend semantic
- * projection. The Renderer only deduplicates stable event identities; it never guesses that a
- * genuine earlier `updated` event became unimportant merely because a later terminal event exists.
+ * Preserves surrounding selected chat text while replacing semantic rows with an explicit
+ * per-Agent status projection. A row-local copy is intercepted only when both selection endpoints
+ * are inside that row; broader selections are reconstructed by the Conversation container.
  */
-export function normalizeCollaborationTimelineActivities(
-  input: readonly CollaborationTimelineActivity[]
-): readonly CollaborationTimelineActivity[] {
-  const seen = new Set<string>()
-  return [...input].sort(compareActivity).filter((activity) => {
-    if (seen.has(activity.activityId)) return false
-    seen.add(activity.activityId)
-    return true
-  })
-}
-
-export function groupCollaborationTimelineActivities(
-  input: readonly CollaborationTimelineActivity[]
-): readonly CollaborationTimelineActivityGroup[] {
-  const visible = normalizeCollaborationTimelineActivities(input)
-
-  const groups: CollaborationTimelineActivityGroup[] = []
-  for (const activity of visible) {
-    const current = groups.at(-1)
-    if (current && canMerge(current, activity)) {
-      groups[groups.length - 1] = {
-        ...current,
-        activities: [...current.activities, activity]
-      }
-      continue
-    }
-    groups.push({
-      activities: [activity],
-      rootAnchorMessageId: activity.rootAnchorMessageId,
-      rootTraceBoundarySequence: activity.rootTraceBoundarySequence,
-      semantic: activity.semantic
-    })
+export function copyCollaborationTimelineSelection(event: ReactClipboardEvent<HTMLElement>): void {
+  if (event.defaultPrevented) return
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return
+  const range = selection.getRangeAt(0)
+  const root = event.currentTarget
+  const copyText = root.getAttribute(COLLABORATION_COPY_ATTRIBUTE)
+  if (copyText && root.contains(range.startContainer) && root.contains(range.endContainer)) {
+    event.clipboardData.setData('text/plain', copyText)
+    event.preventDefault()
+    return
   }
-  return groups
+
+  if (!range.intersectsNode(root)) return
+  const fragment = range.cloneContents()
+  const activityRows = fragment.querySelectorAll<HTMLElement>(`[${COLLABORATION_COPY_ATTRIBUTE}]`)
+  if (activityRows.length === 0) return
+  for (const row of activityRows) {
+    row.replaceWith(document.createTextNode(row.getAttribute(COLLABORATION_COPY_ATTRIBUTE) ?? ''))
+  }
+
+  const copySurface = document.createElement('div')
+  copySurface.style.cssText =
+    'position:fixed;inset:auto auto auto -10000px;white-space:pre-wrap;width:800px'
+  copySurface.append(fragment)
+  document.body.append(copySurface)
+  const selectedText = copySurface.innerText
+  copySurface.remove()
+  if (!selectedText) return
+  event.clipboardData.setData('text/plain', selectedText)
+  event.preventDefault()
 }
 
 function semanticLabel(semantic: CollaborationActivitySemantic, t: Translate): string {
@@ -129,17 +90,30 @@ export function CollaborationTimelineActivityList({
   if (groups.length === 0) return null
 
   return (
-    <div className="collaboration-timeline" data-testid="collaboration-timeline">
+    <div className="collaboration-timeline" data-testid="collaboration-timeline" role="list">
       {groups.map((group) => {
         const statusLabel = semanticLabel(group.semantic, t)
+        const visibleActivities = group.activities.slice(0, MAX_VISIBLE_AGENT_CHIPS)
+        const hiddenActivities = group.activities.slice(MAX_VISIBLE_AGENT_CHIPS)
+        const copyText = group.activities
+          .map((activity) =>
+            formatTranslation(t, 'collaboration.activity.copyAgentStatus', {
+              name: activity.taskNameSnapshot,
+              status: statusLabel
+            })
+          )
+          .join(t('collaboration.activity.statusListSeparator'))
         return (
           <div
             className="collaboration-timeline__activity"
+            data-collaboration-copy-text={copyText}
             data-semantic={group.semantic}
             key={group.activities.map((activity) => activity.activityId).join(':')}
+            onCopy={copyCollaborationTimelineSelection}
+            role="listitem"
           >
             <span className="collaboration-timeline__chips">
-              {group.activities.map((activity) => (
+              {visibleActivities.map((activity) => (
                 <button
                   aria-label={formatTranslation(t, 'collaboration.activity.openAgentActivity', {
                     name: activity.taskNameSnapshot,
@@ -156,6 +130,23 @@ export function CollaborationTimelineActivityList({
                 </button>
               ))}
             </span>
+            {hiddenActivities.length > 0 && (
+              <span
+                aria-label={formatTranslation(t, 'collaboration.activity.moreAgentsLabel', {
+                  agents: hiddenActivities
+                    .map((activity) => activity.taskNameSnapshot)
+                    .join(t('collaboration.activity.agentNameSeparator')),
+                  count: String(hiddenActivities.length),
+                  status: statusLabel
+                })}
+                className="collaboration-timeline__overflow"
+                role="note"
+              >
+                {formatTranslation(t, 'collaboration.activity.moreAgents', {
+                  count: String(hiddenActivities.length)
+                })}
+              </span>
+            )}
             <span
               aria-atomic="true"
               aria-live="polite"

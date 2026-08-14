@@ -1,6 +1,6 @@
 import type { AgentTreeSnapshot, CollaborationEventEnvelope } from '@mycopilot/protocol'
 import { hostCollaborationDataSource, type CollaborationDataSource } from './collaborationClient'
-import type { CollaborationTimelineActivity } from './CollaborationTimelineActivity'
+import type { CollaborationTimelineActivity } from './collaborationTimelineModel'
 
 const EVENT_PAGE_SIZE = 256
 export const MAX_COLLABORATION_TIMELINE_ACTIVITIES = 2_048

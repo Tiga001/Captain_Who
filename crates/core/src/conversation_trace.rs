@@ -2388,11 +2388,22 @@ impl ConversationTraceRecorder {
             checkpoint_tool_result_trace_item(sequence, call, result)
         };
         if let ConversationTurnTraceItem::ToolResult {
+            truncated,
             archive: item_archive,
             ..
         } = &mut item
         {
             *item_archive = archive;
+            if self.items_are_durable {
+                // `projected_tool_result_trace_item` has already crossed the same bounded
+                // history-projection boundary that `project_durable_trace_items` applies when a
+                // live Runtime snapshot reaches terminal settlement. Preserve that fact in the
+                // archive metadata as well as on the item itself. Otherwise a precommitted
+                // wait_agent result whose generic payload exceeds the history limit differs from
+                // the later Runtime terminal projection only by this bit, and the append-only
+                // exact-prefix guard correctly rejects the terminal commit.
+                item_archive.history_projection_truncated |= *truncated;
+            }
         }
         self.truncated |= matches!(
             &item,
@@ -2830,7 +2841,12 @@ fn project_durable_trace_items(
 
                 let item_truncated = *truncated || projection_truncated;
                 let mut archive = archive.clone();
-                archive.history_projection_truncated |= projection_truncated;
+                // `truncated` can already be true because the Runtime checkpoint sanitizer
+                // replaced binary/base64 content before this durable projection runs. Treat the
+                // complete canonical item truncation bit as the archive fact as well; otherwise a
+                // wait_agent ToolResult precommitted from the raw result and the later terminal
+                // projection differ only in archive metadata.
+                archive.history_projection_truncated |= item_truncated;
                 trace_truncated |= item_truncated;
                 ConversationTurnTraceItem::ToolResult {
                     sequence: *sequence,
@@ -2926,6 +2942,7 @@ pub(crate) fn projected_tool_result_trace_item(
         result.result.as_ref().unwrap_or(&Value::Null),
         result.error.as_deref(),
     );
+    let history_projection_truncated = observation.truncated || error_truncated;
     ConversationTurnTraceItem::ToolResult {
         sequence,
         call_id: call.id.clone(),
@@ -2935,8 +2952,11 @@ pub(crate) fn projected_tool_result_trace_item(
         observation: observation.value,
         approval_status: call.approval_status,
         error,
-        truncated: observation.truncated || error_truncated,
-        archive: Default::default(),
+        truncated: history_projection_truncated,
+        archive: ConversationHistoryArchiveTraceMetadata {
+            history_projection_truncated,
+            ..Default::default()
+        },
     }
 }
 
@@ -3224,6 +3244,101 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn wait_call() -> AgentToolCall {
+        AgentToolCall {
+            id: "wait-call".to_string(),
+            tool: "wait_agent".to_string(),
+            args: json!({ "targets": ["agent-child"], "timeout_ms": 30_000 }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        }
+    }
+
+    fn wait_result(payload: &str) -> AgentToolResult {
+        AgentToolResult {
+            exact_archive_file: None,
+            call_id: "wait-call".to_string(),
+            tool: "wait_agent".to_string(),
+            ok: true,
+            result: Some(json!({
+                "receiptId": "receipt-wait",
+                "sourceReceiptId": null,
+                "targets": [{
+                    "targetAgentId": "agent-child",
+                    "messages": [{
+                        "messageId": "message-child-result",
+                        "senderAgentId": "agent-child",
+                        "senderTaskName": "research",
+                        "senderTaskPath": "/root/research",
+                        "kind": "result",
+                        "content": payload,
+                        "mailboxSequence": 1,
+                        "createdAt": 1
+                    }],
+                    "targetStatusVersion": 1,
+                    "latestWakeSequence": 1,
+                    "latestWakeStatusRevision": 1,
+                    "latestWakeStatus": "completed",
+                    "displayStatus": "idle"
+                }]
+            })),
+            error: None,
+        }
+    }
+
+    fn assert_precommitted_wait_matches_runtime_terminal(payload: &str, truncated: bool) {
+        let call = wait_call();
+        let result = wait_result(payload);
+
+        // The live Runtime retains the unbounded checkpoint item until terminal projection.
+        let mut runtime = ConversationTraceRecorder::default();
+        runtime.record_tool_call(&call).unwrap();
+        runtime.record_tool_result(&call, &result);
+        let terminal = runtime.finish(
+            "run-wait",
+            "conversation-wait",
+            "assistant-wait",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+
+        // wait_agent commits the same ToolResult from the durable unresolved call before it
+        // returns control to Runtime. This is the prefix which terminal settlement must preserve.
+        let mut unresolved = ConversationTraceRecorder::default();
+        unresolved.record_tool_call(&call).unwrap();
+        let durable_unresolved = unresolved.snapshot().in_progress_audit_trace(
+            "run-wait",
+            "conversation-wait",
+            "assistant-wait",
+        );
+        let precommitted =
+            conversation_trace_with_recovered_tool_result(&durable_unresolved, &result).unwrap();
+
+        assert_eq!(precommitted.items, terminal.items);
+        assert_eq!(precommitted.truncated, terminal.truncated);
+        assert_eq!(precommitted.truncated, truncated);
+        assert!(matches!(
+            precommitted.items.last(),
+            Some(ConversationTurnTraceItem::ToolResult {
+                archive: ConversationHistoryArchiveTraceMetadata {
+                    history_projection_truncated,
+                    ..
+                },
+                ..
+            }) if *history_projection_truncated == truncated
+        ));
+    }
+
+    #[test]
+    fn precommitted_wait_uses_the_same_archive_metadata_as_runtime_terminal_projection() {
+        assert_precommitted_wait_matches_runtime_terminal("small child result", false);
+        assert_precommitted_wait_matches_runtime_terminal(&"x".repeat(16_000), true);
+        assert_precommitted_wait_matches_runtime_terminal(
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+            true,
+        );
     }
 
     #[test]

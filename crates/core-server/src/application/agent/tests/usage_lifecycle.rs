@@ -1,5 +1,33 @@
 use super::*;
 
+fn seed_terminal_retry_pending_action(
+    storage: &StorageService,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    action_id: &str,
+) -> String {
+    let storage_id = pending_action_storage_id(run_id, action_id);
+    storage
+        .store_pending_agent_action(AgentPendingActionRecord {
+            action_id: storage_id.clone(),
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some(assistant_message_id.to_string()),
+            action_type: "tool_call".to_string(),
+            tool_name: "approval_retry_fixture".to_string(),
+            tool_call_id: Some(action_id.to_string()),
+            status: "approved".to_string(),
+            target_status: Some("completed".to_string()),
+            action_json: "{}".to_string(),
+            agent_input_json: "{}".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+    storage_id
+}
+
 #[test]
 fn persists_usage_for_failed_runs() {
     let fixture = tempdir().unwrap();
@@ -73,6 +101,465 @@ fn persists_usage_for_failed_runs() {
     assert_eq!(summary.input_tokens, Some(20));
     assert_eq!(summary.output_tokens, Some(8));
     assert_eq!(summary.total_tokens, Some(28));
+}
+
+#[tokio::test]
+async fn terminal_transaction_retry_reloads_sqlite_and_counts_usage_once() {
+    const CONVERSATION_ID: &str = "conversation-terminal-retry";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-terminal-retry";
+    const RUN_ID: &str = "run-terminal-retry";
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Terminal retry".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(Arc::clone(&storage));
+    let pending_action_id = seed_terminal_retry_pending_action(
+        &storage,
+        RUN_ID,
+        CONVERSATION_ID,
+        ASSISTANT_MESSAGE_ID,
+        "approval-terminal-retry",
+    );
+    storage
+        .append_in_progress_conversation_turn_trace(
+            &mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+                RUN_ID,
+                CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+            ),
+            1,
+            1,
+        )
+        .unwrap();
+    service.register_usage_context(
+        RUN_ID,
+        AgentRunUsageContext {
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+            run_id: RUN_ID.to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    let previous_usage_state = service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(RUN_ID)
+        .cloned();
+
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER inject_terminal_usage_failure
+             BEFORE INSERT ON agent_usage_records
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected terminal usage failure');
+             END;
+             CREATE TRIGGER inject_pending_status_failure
+             BEFORE UPDATE OF status ON agent_pending_actions
+             WHEN OLD.status = 'approved'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected pending status failure');
+             END;",
+        )
+        .unwrap();
+
+    let usage = AgentUsage {
+        input_tokens: Some(20),
+        output_tokens: Some(8),
+        output_thinking_tokens: None,
+        total_tokens: Some(28),
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: Some(1),
+    };
+    let mut output = AgentChatOutput {
+        content: "terminal retry completed".to_string(),
+        status: AgentRunStatus::Completed,
+        run_id: RUN_ID.to_string(),
+        events: Vec::new(),
+        tool_definitions: Vec::new(),
+        todo: None,
+        usage: Some(usage.clone()),
+        finish_reason: Some("stop".to_string()),
+        proposed_actions: Vec::new(),
+        conversation_turn_trace: None,
+    };
+    let rollback_count = Arc::new(Mutex::new(0_usize));
+    let rollback_count_for_retry = Arc::clone(&rollback_count);
+
+    super::super::turn_executor::persist_terminal_with_bounded_retry(
+        || {
+            service.persist_final_assistant_output(
+                CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+                &mut output,
+            )
+        },
+        || {
+            let mut contexts = service
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match &previous_usage_state {
+                Some(previous) => {
+                    contexts.insert(RUN_ID.to_string(), previous.clone());
+                }
+                None => {
+                    contexts.remove(RUN_ID);
+                }
+            }
+            drop(contexts);
+            let mut count = rollback_count_for_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *count += 1;
+            if *count == 1 {
+                rusqlite::Connection::open(&database_path)
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER inject_terminal_usage_failure;")
+                    .unwrap();
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    let pending_rollback_count = Arc::new(Mutex::new(0_usize));
+    let pending_rollback_count_for_retry = Arc::clone(&pending_rollback_count);
+    super::super::turn_executor::persist_terminal_with_bounded_retry(
+        || {
+            storage.transition_pending_agent_action(
+                &pending_action_id,
+                "approved",
+                "completed",
+                "{}",
+                mycopilot_core::storage::now_ms(),
+            )
+        },
+        || {
+            let trace = storage
+                .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                trace.terminal_status,
+                ConversationTurnTraceTerminalStatus::Completed,
+                "assistant/trace/Usage commits before the independent pending CAS retry"
+            );
+            assert!(storage
+                .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+                .unwrap()
+                .is_some());
+            let mut count = pending_rollback_count_for_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *count += 1;
+            if *count == 1 {
+                rusqlite::Connection::open(&database_path)
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER inject_pending_status_failure;")
+                    .unwrap();
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        *rollback_count
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        1
+    );
+    assert_eq!(
+        *pending_rollback_count
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        1
+    );
+    let pending_status = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status FROM agent_pending_actions WHERE action_id = ?1",
+            [&pending_action_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "completed");
+    assert_eq!(output.usage, Some(usage));
+    let persisted_usage = storage
+        .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted_usage.total_tokens, Some(28));
+    assert_eq!(persisted_usage.billable_request_count, 1);
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Completed
+    );
+    assert!(storage
+        .list_in_progress_conversation_turn_traces()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn terminal_error_transaction_retry_reloads_sqlite_and_counts_usage_once() {
+    const CONVERSATION_ID: &str = "conversation-terminal-error-retry";
+    const ASSISTANT_MESSAGE_ID: &str = "assistant-terminal-error-retry";
+    const RUN_ID: &str = "run-terminal-error-retry";
+    const FAILURE: &str = "deterministic provider stream failure";
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: CONVERSATION_ID.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Terminal error retry".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: ASSISTANT_MESSAGE_ID.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(Arc::clone(&storage));
+    let pending_action_id = seed_terminal_retry_pending_action(
+        &storage,
+        RUN_ID,
+        CONVERSATION_ID,
+        ASSISTANT_MESSAGE_ID,
+        "approval-terminal-error-retry",
+    );
+    storage
+        .append_in_progress_conversation_turn_trace(
+            &mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+                RUN_ID,
+                CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+            ),
+            1,
+            1,
+        )
+        .unwrap();
+    service.register_usage_context(
+        RUN_ID,
+        AgentRunUsageContext {
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+            run_id: RUN_ID.to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    let previous_usage_state = service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(RUN_ID)
+        .cloned();
+
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER inject_terminal_error_usage_failure
+             BEFORE INSERT ON agent_usage_records
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected terminal error usage failure');
+             END;
+             CREATE TRIGGER inject_pending_error_status_failure
+             BEFORE UPDATE OF status ON agent_pending_actions
+             WHEN OLD.status = 'approved'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected pending error status failure');
+             END;",
+        )
+        .unwrap();
+
+    let usage = AgentUsage {
+        input_tokens: Some(20),
+        output_tokens: Some(8),
+        output_thinking_tokens: None,
+        total_tokens: Some(28),
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: Some(1),
+    };
+    let terminal_trace = failed_conversation_trace_without_items(
+        RUN_ID,
+        CONVERSATION_ID,
+        ASSISTANT_MESSAGE_ID,
+        FAILURE,
+    );
+    let rollback_count = Arc::new(Mutex::new(0_usize));
+    let rollback_count_for_retry = Arc::clone(&rollback_count);
+
+    let cumulative_usage = super::super::turn_executor::persist_terminal_with_bounded_retry(
+        || {
+            service.persist_assistant_error(
+                CONVERSATION_ID,
+                ASSISTANT_MESSAGE_ID,
+                FAILURE,
+                Some(usage.clone()),
+                &terminal_trace,
+            )
+        },
+        || {
+            super::super::turn_executor::restore_run_usage_state(
+                &service,
+                RUN_ID,
+                &previous_usage_state,
+            );
+            let mut count = rollback_count_for_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *count += 1;
+            if *count == 1 {
+                rusqlite::Connection::open(&database_path)
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER inject_terminal_error_usage_failure;")
+                    .unwrap();
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    let pending_rollback_count = Arc::new(Mutex::new(0_usize));
+    let pending_rollback_count_for_retry = Arc::clone(&pending_rollback_count);
+    super::super::turn_executor::persist_terminal_with_bounded_retry(
+        || {
+            storage.transition_pending_agent_action(
+                &pending_action_id,
+                "approved",
+                "completed",
+                "{}",
+                mycopilot_core::storage::now_ms(),
+            )
+        },
+        || {
+            let trace = storage
+                .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                trace.terminal_status,
+                ConversationTurnTraceTerminalStatus::Failed,
+                "a failed model continuation does not rewrite the approved action outcome"
+            );
+            let mut count = pending_rollback_count_for_retry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            *count += 1;
+            if *count == 1 {
+                rusqlite::Connection::open(&database_path)
+                    .unwrap()
+                    .execute_batch("DROP TRIGGER inject_pending_error_status_failure;")
+                    .unwrap();
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        *rollback_count
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        1
+    );
+    assert_eq!(
+        *pending_rollback_count
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+        1
+    );
+    let (pending_status, pending_target_status) = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .query_row(
+            "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+            [&pending_action_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(pending_status, "completed");
+    assert_eq!(pending_target_status, "completed");
+    assert_eq!(cumulative_usage, Some(usage));
+    let persisted_usage = storage
+        .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted_usage.total_tokens, Some(28));
+    assert_eq!(persisted_usage.billable_request_count, 1);
+    assert_eq!(persisted_usage.status.as_deref(), Some("failed"));
+    assert_eq!(persisted_usage.error.as_deref(), Some(FAILURE));
+    let persisted_trace = storage
+        .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert_eq!(persisted_trace.terminal_error.as_deref(), Some(FAILURE));
+    assert!(storage
+        .list_in_progress_conversation_turn_traces()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

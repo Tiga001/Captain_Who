@@ -112,6 +112,32 @@ describe('agent collaboration protocol', () => {
       sequence: 15,
       activity: { semantic: 'completed' }
     })
+    expect(
+      eventPage.events.flatMap((event) =>
+        event.activity
+          ? [[event.sequence, event.kind, event.activity.agentId, event.activity.semantic]]
+          : []
+      )
+    ).toEqual([
+      [4, 'wake_created', 'agent-review', 'started'],
+      [7, 'wake_created', 'agent-compatibility', 'started'],
+      [9, 'mailbox_enqueued', 'agent-review', 'updated'],
+      [11, 'wake_created', 'agent-review', 'started'],
+      [12, 'approval_projected', 'agent-compatibility', 'waiting_approval'],
+      [13, 'approval_projected', 'agent-review', 'waiting_approval'],
+      [14, 'wake_updated', 'agent-compatibility', 'interrupted'],
+      [15, 'wake_updated', 'agent-review', 'completed']
+    ])
+    expect(eventPage.events.find((event) => event.sequence === 8)).toMatchObject({
+      kind: 'mailbox_enqueued',
+      messageId: 'mailbox-send-review',
+      activity: null
+    })
+    expect(eventPage.events.find((event) => event.sequence === 10)).toMatchObject({
+      kind: 'mailbox_enqueued',
+      messageId: 'mailbox-followup-review',
+      activity: null
+    })
     expect(observers.map((observer) => observer?.conversationId)).toEqual([
       'conversation-review',
       'conversation-compatibility'

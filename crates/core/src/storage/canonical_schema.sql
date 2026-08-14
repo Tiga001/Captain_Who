@@ -4124,7 +4124,8 @@ CREATE TRIGGER emit_agent_turn_updated_collaboration_event
         END;
 CREATE TRIGGER emit_agent_approval_projected_collaboration_event
         AFTER INSERT ON agent_pending_actions
-        WHEN EXISTS (
+        WHEN NEW.status = 'pending'
+          AND EXISTS (
             SELECT 1 FROM agent_nodes
             WHERE conversation_id = NEW.conversation_id AND parent_agent_id IS NOT NULL
         )

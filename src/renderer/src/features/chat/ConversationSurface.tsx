@@ -42,9 +42,10 @@ import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus } from '../agentRun/agentActionUtils'
 import {
   CollaborationTimelineActivityList,
-  normalizeCollaborationTimelineActivities,
+  copyCollaborationTimelineSelection,
   type CollaborationTimelineActivity
 } from '../agentCollaboration/CollaborationTimelineActivity'
+import { projectCollaborationTimelineActivities } from '../agentCollaboration/collaborationTimelineModel'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
 
@@ -232,31 +233,14 @@ export const ChatMessageList = memo(function ChatMessageList({
     () => new Set(conversation.messages.map((message) => message.id)),
     [conversation.messages]
   )
-  const collaborationTimeline = useMemo(() => {
-    const anchoredMessage = new Map<string, CollaborationTimelineActivity[]>()
-    const beforeMessage = new Map<string, CollaborationTimelineActivity[]>()
-    const tail: CollaborationTimelineActivity[] = []
-    const normalized = normalizeCollaborationTimelineActivities(collaborationTimelineActivities)
-    for (const activity of normalized) {
-      if (activity.rootAnchorMessageId && messageIds.has(activity.rootAnchorMessageId)) {
-        const slot = anchoredMessage.get(activity.rootAnchorMessageId) ?? []
-        slot.push(activity)
-        anchoredMessage.set(activity.rootAnchorMessageId, slot)
-        continue
-      }
-      const nextMessage = conversation.messages.find(
-        (message) => message.createdAt > activity.occurredAt
-      )
-      if (!nextMessage) {
-        tail.push(activity)
-        continue
-      }
-      const slot = beforeMessage.get(nextMessage.id) ?? []
-      slot.push(activity)
-      beforeMessage.set(nextMessage.id, slot)
-    }
-    return { anchoredMessage, beforeMessage, tail }
-  }, [collaborationTimelineActivities, conversation.messages, messageIds])
+  const collaborationTimeline = useMemo(
+    () =>
+      projectCollaborationTimelineActivities(
+        collaborationTimelineActivities,
+        conversation.messages
+      ),
+    [collaborationTimelineActivities, conversation.messages]
+  )
   const [observerTimelineCollapsed, setObserverTimelineCollapsed] = useState<
     Readonly<Record<string, boolean>>
   >({})
@@ -563,6 +547,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
       <div className="chat-conversation-page__messages-region">
         <div
           className="chat-conversation-page__messages"
+          onCopy={copyCollaborationTimelineSelection}
           onScroll={rememberCurrentScrollPosition}
           ref={messagesRef}
         >

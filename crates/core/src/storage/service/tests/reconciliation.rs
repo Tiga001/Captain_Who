@@ -4191,9 +4191,23 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
     attach_current_manual_file_effect_checkpoint(&mut child, &nested_trace);
     service.store_pending_agent_action(child).unwrap();
 
+    assert!(service
+        .pending_agent_action_has_unsettled_predecessor(
+            "child-storage-id",
+            &["parent-action".to_string()],
+        )
+        .unwrap());
+
     service
         .reconcile_interrupted_pending_agent_actions(42)
         .unwrap();
+
+    assert!(!service
+        .pending_agent_action_has_unsettled_predecessor(
+            "child-storage-id",
+            &["parent-action".to_string()],
+        )
+        .unwrap());
 
     let pending = service.list_pending_agent_actions().unwrap();
     assert_eq!(pending.len(), 1);
@@ -4230,6 +4244,90 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
     assert_eq!(run["status"], "waiting_for_approval");
     assert_eq!(run["state"]["status"], "waiting_for_approval");
     assert_eq!(run["state"]["activeRunId"], "run-1");
+}
+
+#[test]
+fn pending_sibling_without_a_durable_result_is_not_a_predecessor() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-pending-siblings";
+    let assistant_message_id = "assistant-pending-siblings";
+    let mut owner = conversation(conversation_id, Some("project-1"), assistant_message_id);
+    owner.messages[0].role = "assistant".to_string();
+    owner.messages[0].status = Some("pending".to_string());
+    service.save_conversation(owner).unwrap();
+
+    let sibling_trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-1".to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: "successor-call".to_string(),
+            tool: "approval_tool".to_string(),
+            provenance: crate::AgentToolIdentity::Builtin {
+                tool_name: "approval_tool".to_string(),
+            },
+            operation: serde_json::json!({}),
+            approval_status: crate::AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+    };
+    service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &sibling_trace,
+            &current_model_context_for_trace(&sibling_trace),
+            1,
+            1,
+        )
+        .unwrap();
+
+    let mut sibling = pending_action("sibling-storage-id", conversation_id);
+    sibling.assistant_message_id = Some(assistant_message_id.to_string());
+    sibling.action_type = "tool_call".to_string();
+    sibling.tool_name = "approval_tool".to_string();
+    sibling.tool_call_id = Some("sibling-call".to_string());
+    sibling.action_json = serde_json::json!({
+        "type": "tool_call",
+        "call": {
+            "id": "sibling-call",
+            "tool": "approval_tool",
+            "args": {},
+            "approvalStatus": "required",
+            "reason": null
+        }
+    })
+    .to_string();
+    service.store_pending_agent_action(sibling).unwrap();
+
+    let mut successor = pending_action("successor-storage-id", conversation_id);
+    successor.assistant_message_id = Some(assistant_message_id.to_string());
+    successor.action_type = "tool_call".to_string();
+    successor.tool_name = "approval_tool".to_string();
+    successor.tool_call_id = Some("successor-call".to_string());
+    successor.action_json = serde_json::json!({
+        "type": "tool_call",
+        "call": {
+            "id": "successor-call",
+            "tool": "approval_tool",
+            "args": {},
+            "approvalStatus": "required",
+            "reason": null
+        }
+    })
+    .to_string();
+    service.store_pending_agent_action(successor).unwrap();
+
+    assert!(!service
+        .pending_agent_action_has_unsettled_predecessor(
+            "successor-storage-id",
+            &["sibling-call".to_string()],
+        )
+        .unwrap());
 }
 
 #[test]

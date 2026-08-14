@@ -3035,6 +3035,54 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(bound_sequences, expected_prefix);
+
+        // Recreate the live Runtime's raw checkpoint view of the same Tool exchange and let the
+        // normal terminal projector bound it. The resulting trace must extend the ToolResult
+        // prefix which `poll_wait_ready` committed above byte-for-byte, including archive
+        // truncation metadata. This is the production precommit -> terminal boundary which used
+        // to fail only when the wait payload crossed the generic history-projection threshold.
+        let call = crate::AgentToolCall {
+            id: "wait-budget-first".to_string(),
+            tool: "wait_agent".to_string(),
+            args: json!({"targets": ["agent-child"]}),
+            approval_status: crate::AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({
+                "receiptId": first.receipt.receipt_id,
+                "sourceReceiptId": first.source_receipt_id,
+                "targets": first.targets,
+            })),
+            error: None,
+        };
+        let mut runtime = crate::conversation_trace::ConversationTraceRecorder::default();
+        runtime.record_tool_call(&call).unwrap();
+        runtime.record_tool_result(&call, &result);
+        let terminal = runtime.finish(
+            "run-wait-budget",
+            "conversation-root",
+            "assistant-wait-budget",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        conversation_trace_repository::commit_trace_in_connection(&connection, &terminal, 67, 141)
+            .unwrap();
+        assert!(terminal.truncated);
+        assert!(matches!(
+            terminal.items.last(),
+            Some(crate::ConversationTurnTraceItem::ToolResult {
+                archive: crate::ConversationHistoryArchiveTraceMetadata {
+                    history_projection_truncated: true,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]

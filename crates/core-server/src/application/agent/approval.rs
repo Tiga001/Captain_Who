@@ -2,6 +2,8 @@ use super::*;
 use serde::Serialize;
 
 const PROJECTED_APPROVAL_UNAVAILABLE_MESSAGE: &str = "Approval is unavailable.";
+const UNSETTLED_APPROVAL_PREDECESSOR_MESSAGE: &str =
+    "前置工具结果尚未完成持久化结算；已拒绝继续该审批，请等待恢复后重试。";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +61,39 @@ pub(super) fn publish_inline_file_write_tool_result(
 }
 
 impl AgentService {
+    fn ensure_approval_predecessors_settled(
+        &self,
+        successor: &PendingActionRecord,
+    ) -> Result<(), String> {
+        let frozen_result_call_ids = successor
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                checkpoint
+                    .conversation_trace_items
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationTurnTraceItem::ToolResult { call_id, .. } => {
+                            Some(call_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if self
+            .storage
+            .pending_agent_action_has_unsettled_predecessor(
+                &successor.storage_id,
+                &frozen_result_call_ids,
+            )?
+        {
+            return Err(UNSETTLED_APPROVAL_PREDECESSOR_MESSAGE.to_string());
+        }
+        Ok(())
+    }
+
     pub(crate) fn list_root_projected_approvals(
         &self,
         root_conversation_id: &str,
@@ -971,7 +1006,7 @@ impl AgentService {
                 ));
             };
             let record = pending_actions
-                .get_mut(&storage_id)
+                .get(&storage_id)
                 .expect("resolved pending action exists");
             let is_rejected_mcp = decision_status == AgentApprovalDecisionStatus::Rejected
                 && matches!(
@@ -990,6 +1025,10 @@ impl AgentService {
             {
                 return Err(format!("待审批操作已经处理：{action_id}"));
             }
+            self.ensure_approval_predecessors_settled(record)?;
+            let record = pending_actions
+                .get_mut(&storage_id)
+                .expect("resolved pending action exists");
             if deletion_lifecycle
                 .as_ref()
                 .expect("deletion lifecycle guard is held while preparing approval")
@@ -1696,21 +1735,25 @@ impl AgentService {
             return Ok(None);
         };
         let record = pending_actions
-            .get_mut(&storage_id)
+            .get(&storage_id)
             .expect("resolved pending action exists");
-        if record.snapshot.status != PendingActionStatus::Approved
-            || !matches!(
+        let is_recoverable_approved_mcp = record.snapshot.status == PendingActionStatus::Approved
+            && matches!(
                 record.snapshot.action,
                 AgentProposedAction::McpToolCall { .. }
             )
-            || !self
+            && self
                 .startup_recoverable_mcp_approvals
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .contains(&storage_id)
-        {
+                .contains(&storage_id);
+        if !is_recoverable_approved_mcp {
             return Ok(None);
         }
+        self.ensure_approval_predecessors_settled(record)?;
+        let record = pending_actions
+            .get_mut(&storage_id)
+            .expect("resolved pending action exists");
         if deletion_lifecycle.contains_input(&record.agent_input) {
             return Err("项目或会话正在移除，无法恢复 MCP 操作。".to_string());
         }

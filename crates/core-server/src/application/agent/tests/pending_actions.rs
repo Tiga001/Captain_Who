@@ -1184,6 +1184,320 @@ fn append_durable_pending_trace(
         .unwrap();
 }
 
+fn predecessor_gate_records(
+    storage: &StorageService,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    predecessor_status: PendingActionStatus,
+) -> (PendingActionRecord, PendingActionRecord) {
+    let predecessor_call = AgentToolCall {
+        id: "predecessor-call".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let successor_call = AgentToolCall {
+        id: "successor-call".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let provenance = AgentToolIdentity::Builtin {
+        tool_name: "approval_tool".to_string(),
+    };
+    seed_durable_pending_owner(
+        storage,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &predecessor_call,
+        provenance.clone(),
+        1,
+    );
+
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: predecessor_call.id.clone(),
+                tool: predecessor_call.tool.clone(),
+                provenance: provenance.clone(),
+                operation: predecessor_call.args.clone(),
+                approval_status: predecessor_call.approval_status,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: predecessor_call.id.clone(),
+                tool: predecessor_call.tool.clone(),
+                status: ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: json!({ "status": "completed" }),
+                approval_status: AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 2,
+                call_id: successor_call.id.clone(),
+                tool: successor_call.tool.clone(),
+                provenance: provenance.clone(),
+                operation: successor_call.args.clone(),
+                approval_status: successor_call.approval_status,
+                truncated: false,
+            },
+        ],
+    };
+    let model_context = vec![
+        ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: predecessor_call.id.clone(),
+                name: predecessor_call.tool.clone(),
+                args: predecessor_call.args.clone(),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: predecessor_call.id.clone(),
+                    runtime_call_id: predecessor_call.id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: json!({ "status": "completed" }).to_string(),
+            tool_call_id: Some(predecessor_call.id.clone()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        ConversationModelContextItem {
+            sequence: 2,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![AgentContextCheckpointToolCall {
+                id: successor_call.id.clone(),
+                name: successor_call.tool.clone(),
+                args: successor_call.args.clone(),
+                provider_identity: AgentProviderToolCallIdentity {
+                    provider_tool_index: 0,
+                    provider_call_id: successor_call.id.clone(),
+                    runtime_call_id: successor_call.id.clone(),
+                },
+            }],
+            is_error: false,
+        },
+    ];
+    storage
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &trace,
+            &model_context,
+            2,
+            2,
+        )
+        .unwrap();
+
+    let mut base_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(storage, &mut base_input);
+    let context = AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    base_input.context = Some(context.clone());
+
+    let mut predecessor_input = base_input.clone();
+    let mut predecessor_checkpoint = test_pending_resume_checkpoint_for_call(
+        storage,
+        run_id,
+        None,
+        &predecessor_call,
+        provenance.clone(),
+    );
+    predecessor_checkpoint.run_context = Some(context.clone());
+    predecessor_input.resume_checkpoint = Some(predecessor_checkpoint);
+    let predecessor = PendingActionRecord {
+        storage_id: pending_action_storage_id(run_id, &predecessor_call.id),
+        snapshot: PendingAgentActionSnapshot {
+            action_id: predecessor_call.id.clone(),
+            action_type: "tool_call".to_string(),
+            tool_name: predecessor_call.tool.clone(),
+            tool_call_id: Some(predecessor_call.id.clone()),
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some(assistant_message_id.to_string()),
+            action: AgentProposedAction::ToolCall {
+                call: predecessor_call,
+            },
+            created_at: 1,
+            status: predecessor_status,
+        },
+        agent_input: predecessor_input,
+    };
+
+    let mut successor_input = base_input;
+    let mut successor_checkpoint =
+        test_pending_resume_checkpoint_for_call(storage, run_id, None, &successor_call, provenance);
+    successor_checkpoint.run_context = Some(context);
+    successor_checkpoint.conversation_trace_items = trace.items;
+    successor_checkpoint.conversation_model_context_items = model_context;
+    successor_checkpoint.next_conversation_trace_sequence = 3;
+    successor_input.resume_checkpoint = Some(successor_checkpoint);
+    let successor = PendingActionRecord {
+        storage_id: pending_action_storage_id(run_id, &successor_call.id),
+        snapshot: PendingAgentActionSnapshot {
+            action_id: successor_call.id.clone(),
+            action_type: "tool_call".to_string(),
+            tool_name: successor_call.tool.clone(),
+            tool_call_id: Some(successor_call.id.clone()),
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some(assistant_message_id.to_string()),
+            action: AgentProposedAction::ToolCall {
+                call: successor_call,
+            },
+            // Both approvals belong to one logical Run and therefore share its authoritative
+            // usage start; trace sequence, not wall-clock creation order, proves dependency.
+            created_at: 1,
+            status: PendingActionStatus::Pending,
+        },
+        agent_input: successor_input,
+    };
+    (predecessor, successor)
+}
+
+#[test]
+fn successor_approval_is_blocked_until_its_durable_predecessor_settles() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    // Construct the service before seeding the synthetic crash window so startup reconciliation
+    // cannot repair it for this live-process gate test.
+    let service = AgentService::new(Arc::clone(&storage));
+    let (predecessor, successor) = predecessor_gate_records(
+        &storage,
+        "run-predecessor-gate",
+        "conversation-predecessor-gate",
+        "assistant-predecessor-gate",
+        PendingActionStatus::Executing,
+    );
+    let mut predecessor_row = pending_storage_record(&predecessor, 3).unwrap();
+    predecessor_row.target_status = Some("completed".to_string());
+    storage.store_pending_agent_action(predecessor_row).unwrap();
+    storage
+        .store_pending_agent_action(pending_storage_record(&successor, 3).unwrap())
+        .unwrap();
+    {
+        let mut pending = service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pending.insert(predecessor.storage_id.clone(), predecessor.clone());
+        pending.insert(successor.storage_id.clone(), successor.clone());
+    }
+
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let error = service
+        .queue_action_continuation(
+            &successor.snapshot.run_id,
+            &successor.snapshot.action_id,
+            AgentApprovalDecisionStatus::Approved,
+            None,
+            notifications,
+        )
+        .unwrap_err();
+    assert!(error.contains("前置工具结果尚未完成持久化结算"));
+    assert_eq!(
+        storage
+            .get_pending_agent_action(&successor.storage_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "pending"
+    );
+
+    // Durable status wins over stale process-local state. A commit-unknown terminal CAS must not
+    // leave B permanently blocked merely because this Host still remembers A as executing.
+    storage
+        .transition_pending_agent_action(&predecessor.storage_id, "executing", "completed", "{}", 4)
+        .unwrap();
+    assert!(!storage
+        .pending_agent_action_has_unsettled_predecessor(
+            &successor.storage_id,
+            std::slice::from_ref(&predecessor.snapshot.action_id),
+        )
+        .unwrap());
+}
+
+#[test]
+fn restart_loaded_pending_map_still_blocks_a_proven_successor() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let (predecessor, successor) = predecessor_gate_records(
+        &storage,
+        "run-restarted-predecessor-gate",
+        "conversation-restarted-predecessor-gate",
+        "assistant-restarted-predecessor-gate",
+        PendingActionStatus::Pending,
+    );
+    storage
+        .store_pending_agent_action(pending_storage_record(&predecessor, 3).unwrap())
+        .unwrap();
+    storage
+        .store_pending_agent_action(pending_storage_record(&successor, 3).unwrap())
+        .unwrap();
+
+    let reloaded = AgentService::new(Arc::clone(&storage));
+    let loaded = reloaded
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(loaded.contains_key(&predecessor.storage_id));
+    assert!(loaded.contains_key(&successor.storage_id));
+    drop(loaded);
+
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let error = reloaded
+        .queue_action_continuation(
+            &successor.snapshot.run_id,
+            &successor.snapshot.action_id,
+            AgentApprovalDecisionStatus::Approved,
+            None,
+            notifications,
+        )
+        .unwrap_err();
+    assert!(error.contains("前置工具结果尚未完成持久化结算"));
+}
+
 fn seed_durable_mcp_pending_owner(
     storage: &StorageService,
     conversation_id: &str,
@@ -5189,6 +5503,239 @@ async fn pre_runtime_continuation_failure_cas_conflict_preserves_turn_for_recove
     );
     assert_eq!(error["params"]["recoverable"], true);
     assert!(!events.iter().any(|event| event["params"]["type"] == "done"));
+}
+
+#[tokio::test]
+async fn pre_spawn_cancelled_continuation_retries_real_pending_target_and_releases_resources() {
+    const RUN_ID: &str = "pre-spawn-cancelled-continuation-run";
+    const CONVERSATION_ID: &str = "pre-spawn-cancelled-continuation-conversation";
+    const ASSISTANT_MESSAGE_ID: &str = "pre-spawn-cancelled-continuation-assistant";
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    service
+        .reserve_conversation_turn(CONVERSATION_ID, RUN_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap();
+    service.ensure_turn_concurrency_permit(RUN_ID).unwrap();
+    let gate = service.turn_concurrency_gate();
+    assert_eq!(gate.active(), 1);
+
+    let call = AgentToolCall {
+        id: "pre-spawn-cancelled-continuation-call".to_string(),
+        tool: "apply_patch".to_string(),
+        args: json!({ "scope": "fixture" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let provenance = AgentToolIdentity::Builtin {
+        tool_name: call.tool.clone(),
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "modelCapabilities": { "imageInput": false },
+        "messages": []
+    }))
+    .unwrap();
+    save_test_pending_provider_for_input(&storage, &mut agent_input);
+    agent_input.resume_checkpoint = Some(test_pending_resume_checkpoint_for_call(
+        &storage,
+        RUN_ID,
+        None,
+        &call,
+        provenance.clone(),
+    ));
+    let run_context = AgentRunContext {
+        conversation_id: Some(CONVERSATION_ID.to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+        collaboration_identity: None,
+    };
+    agent_input.context = Some(run_context.clone());
+    agent_input.resume_checkpoint.as_mut().unwrap().run_context = Some(run_context);
+    seed_durable_pending_owner(
+        &storage,
+        CONVERSATION_ID,
+        ASSISTANT_MESSAGE_ID,
+        RUN_ID,
+        &call,
+        provenance,
+        1,
+    );
+    service
+        .store_pending_action(
+            RUN_ID,
+            CONVERSATION_ID,
+            ASSISTANT_MESSAGE_ID,
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input.clone(),
+        )
+        .unwrap();
+    let storage_id = pending_action_storage_id(RUN_ID, &call.id);
+    let pending = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .transition_pending_status(&pending, PendingActionStatus::Approved)
+        .unwrap();
+    let approved = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())[&storage_id]
+        .clone();
+    service
+        .persist_pending_target_status(&approved, PendingActionStatus::Completed)
+        .unwrap();
+
+    let usage = AgentUsage {
+        input_tokens: Some(20),
+        output_tokens: Some(8),
+        output_thinking_tokens: Some(3),
+        total_tokens: Some(28),
+        cached_input_tokens: Some(2),
+        cache_creation_input_tokens: None,
+        billable_request_count: Some(1),
+    };
+    service.register_usage_context(
+        RUN_ID,
+        AgentRunUsageContext {
+            conversation_id: CONVERSATION_ID.to_string(),
+            assistant_message_id: ASSISTANT_MESSAGE_ID.to_string(),
+            run_id: RUN_ID.to_string(),
+            project_id: None,
+            model_id: "test-model".to_string(),
+            model_name: "Test Model".to_string(),
+            provider_usage_semantics: ProviderUsageSemantics::StandardAdditive,
+            input_price: None,
+            cached_input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    service
+        .persist_run_usage(
+            RUN_ID,
+            AgentRunStatus::WaitingForApproval,
+            Some(usage.clone()),
+            None,
+        )
+        .unwrap();
+
+    let mut resumed_input = agent_input;
+    resumed_input.approval_decision = Some(AgentApprovalDecision {
+        action_id: call.id.clone(),
+        status: AgentApprovalDecisionStatus::Approved,
+        message: None,
+    });
+    resumed_input.tool_continuation = Some(AgentToolContinuation {
+        call: call.clone(),
+        result: AgentToolResult {
+            exact_archive_file: None,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({ "approved": true })),
+            error: None,
+        },
+    });
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .commit_trace_snapshot_with_continuation(&approved, &resumed_input, &notifications)
+        .unwrap();
+
+    let cancellation = AgentCancellationToken::new();
+    service.register_cancellation(RUN_ID, cancellation.clone());
+    cancellation.cancel();
+    inject_pending_status_transition_failure(&storage_id, "completed");
+    service
+        .run_action_continuation(
+            approved,
+            resumed_input,
+            notifications,
+            PendingActionStatus::Completed,
+            Some(cancellation),
+        )
+        .await;
+
+    let (pending_status, pending_target_status): (String, String) =
+        rusqlite::Connection::open(&database_path)
+            .unwrap()
+            .query_row(
+                "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+                [&storage_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(pending_status, "completed");
+    assert_eq!(pending_target_status, "completed");
+    assert_eq!(
+        service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())[&storage_id]
+            .snapshot
+            .status,
+        PendingActionStatus::Completed
+    );
+
+    let trace = storage
+        .get_conversation_turn_trace(ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert!(trace.items.iter().any(|item| matches!(
+        item,
+        ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id
+    )));
+    let persisted_usage = storage
+        .load_agent_usage_for_owner(RUN_ID, CONVERSATION_ID, ASSISTANT_MESSAGE_ID)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted_usage.status.as_deref(), Some("cancelled"));
+    assert_eq!(persisted_usage.total_tokens, usage.total_tokens);
+    assert_eq!(persisted_usage.billable_request_count, 1);
+    assert!(!service
+        .has_conversation_turn_occupancy(CONVERSATION_ID)
+        .unwrap());
+    assert_eq!(gate.active(), 0);
+    assert!(!service
+        .active_turn_permits
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(RUN_ID));
+    assert!(!service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(RUN_ID));
+    assert!(!service
+        .cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(RUN_ID));
+
+    let events = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+    assert!(!events
+        .iter()
+        .any(|event| event["params"]["type"] == "error"));
+    let done = events
+        .iter()
+        .filter(|event| event["params"]["type"] == "done")
+        .collect::<Vec<_>>();
+    assert_eq!(done.len(), 1, "events: {events:#?}");
+    assert_eq!(done[0]["params"]["status"], "cancelled");
+    assert_eq!(done[0]["params"]["usage"]["totalTokens"], 28);
+    assert_eq!(done[0]["params"]["usage"]["billableRequestCount"], 1);
 }
 
 #[test]

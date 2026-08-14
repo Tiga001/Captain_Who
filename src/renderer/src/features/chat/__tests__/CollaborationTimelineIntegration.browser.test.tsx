@@ -14,7 +14,12 @@ const translations: Record<string, string> = {
   'chat.copyMessage': 'Copy message',
   'chat.messageActions': 'Message actions',
   'agent.contextCompaction.running': 'Compacting context',
+  'collaboration.activity.agentNameSeparator': ', ',
+  'collaboration.activity.copyAgentStatus': '{name}: {status}',
+  'collaboration.activity.moreAgents': '{count} more',
+  'collaboration.activity.moreAgentsLabel': '{count} more sub-agents: {agents}, {status}',
   'collaboration.activity.openAgentActivity': 'View sub-agent {name}: {status}',
+  'collaboration.activity.statusListSeparator': '; ',
   'collaboration.activity.status.completed': 'Completed',
   'collaboration.activity.status.failed': 'Failed',
   'collaboration.activity.status.interrupted': 'Interrupted',
@@ -43,6 +48,18 @@ vi.mock('../../../components/toast/ToastContext', () => ({
 vi.mock('../components/ChatComposer', () => ({
   ChatComposer: () => <div aria-label="Message composer" className="chat-composer" />
 }))
+
+function copySelection(target: Element): string {
+  const clipboardData = new DataTransfer()
+  target.dispatchEvent(
+    new ClipboardEvent('copy', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData
+    })
+  )
+  return clipboardData.getData('text/plain')
+}
 
 function conversation(): ChatConversation {
   return {
@@ -177,6 +194,34 @@ it('merges typed durable activity into the one message timeline without a bottom
   expect(
     screen.getByRole('button', { name: 'View sub-agent Reviewer: Started working' })
   ).toBeVisible()
+})
+
+it('keeps unanchored events in durable sequence when their wall clocks move backwards', async () => {
+  const screen = await render(
+    <ChatMessageList
+      collaborationTimelineActivities={[
+        activity('sequence-first', 'started', 1, 4_500, null),
+        activity('sequence-second', 'updated', 2, 500, null)
+      ]}
+      conversation={conversation()}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      onOpenCollaborationAgent={vi.fn()}
+      showTokenUsageDetails={false}
+    />
+  )
+
+  const started = screen.container.querySelector<HTMLElement>('[data-semantic="started"]')
+  const updated = screen.container.querySelector<HTMLElement>('[data-semantic="updated"]')
+  const nextUser = screen.container.querySelector<HTMLElement>('[data-message-id="root-user-2"]')
+  expect(started).not.toBeNull()
+  expect(updated).not.toBeNull()
+  expect(nextUser).not.toBeNull()
+  expect(started!.compareDocumentPosition(updated!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(updated!.parentElement?.nextElementSibling).toBe(nextUser)
 })
 
 it('keeps root collaboration activity out of the child observer capability mode', async () => {
@@ -498,6 +543,17 @@ it('renders inline activity inside the real interactive ConversationSurface desi
   expect(row?.getBoundingClientRect().height).toBeLessThan(34)
   expect(screen.getByText('I finished the root response.')).toBeVisible()
   expect(screen.getByText('Continue.')).toBeVisible()
+  const messages = screen.container.querySelector<HTMLElement>('.chat-conversation-page__messages')
+  const selection = window.getSelection()
+  const range = document.createRange()
+  range.selectNodeContents(messages!)
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  const copiedConversation = copySelection(messages!)
+  expect(copiedConversation).toContain('I will delegate the review.')
+  expect(copiedConversation).toContain('Reviewer: Started working')
+  expect(copiedConversation).toContain('I finished the root response.')
+  selection?.removeAllRanges()
   await page.screenshot({
     element: screen.container.firstElementChild as HTMLElement,
     path: '__screenshots__/CollaborationTimelineIntegration.browser.test.tsx/root-surface-inline.png'

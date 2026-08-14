@@ -6,11 +6,17 @@ import { frontendConfig, getFrontendCssVariables } from '../../../config/fronten
 import { classicDarkTheme, classicLightTheme } from '../../../config/themes/classic'
 import {
   CollaborationTimelineActivityList,
+  copyCollaborationTimelineSelection,
   type CollaborationTimelineActivity
 } from '../CollaborationTimelineActivity'
 
 const translations: Record<string, string> = {
+  'collaboration.activity.agentNameSeparator': ', ',
+  'collaboration.activity.copyAgentStatus': '{name}: {status}',
+  'collaboration.activity.moreAgents': '{count} more',
+  'collaboration.activity.moreAgentsLabel': '{count} more sub-agents: {agents}, {status}',
   'collaboration.activity.openAgentActivity': 'View sub-agent {name}: {status}',
+  'collaboration.activity.statusListSeparator': '; ',
   'collaboration.activity.status.completed': 'Completed',
   'collaboration.activity.status.failed': 'Failed',
   'collaboration.activity.status.interrupted': 'Interrupted',
@@ -48,6 +54,18 @@ function activity(
     taskNameSnapshot,
     turnId: null
   }
+}
+
+function copySelection(target: Element): string {
+  const clipboardData = new DataTransfer()
+  target.dispatchEvent(
+    new ClipboardEvent('copy', {
+      bubbles: true,
+      cancelable: true,
+      clipboardData
+    })
+  )
+  return clipboardData.getData('text/plain')
 }
 
 it('deduplicates replay, merges adjacent agents, retains updates, and exposes exact navigation', async () => {
@@ -117,25 +135,28 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
         activities={[
           activity('event-start-a', 'agent-a', 'QA', 'started', 1, 1_000, 'root-start'),
           activity('event-start-b', 'agent-b', 'Docs', 'started', 2, 1_001, 'root-start', 1),
+          activity('event-start-c', 'agent-c', 'Research', 'started', 3, 1_002, 'root-start', 1),
+          activity('event-start-d', 'agent-d', 'Review', 'started', 4, 1_003, 'root-start', 1),
+          activity('event-start-e', 'agent-e', 'Security', 'started', 5, 1_004, 'root-start', 1),
           activity(
             'event-completed',
-            'agent-c',
+            'agent-f',
             'Long compatibility and accessibility review',
             'completed',
-            3,
+            6,
             2_000,
             'root-completed'
           ),
           activity(
             'event-approval',
-            'agent-d',
+            'agent-g',
             'Deploy',
             'waiting_approval',
-            4,
+            7,
             3_000,
             'root-approval'
           ),
-          activity('event-failed', 'agent-e', 'Tests', 'failed', 5, 4_000, 'root-failed')
+          activity('event-failed', 'agent-h', 'Tests', 'failed', 8, 4_000, 'root-failed')
         ]}
         onOpenAgent={vi.fn()}
       />
@@ -144,8 +165,14 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
 
   const rows = screen.container.querySelectorAll('.collaboration-timeline__activity')
   expect(rows).toHaveLength(4)
-  expect(rows[0]?.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(2)
-  expect(screen.container.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(5)
+  expect(rows[0]?.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(3)
+  expect(screen.container.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(6)
+  expect(screen.getByText('2 more')).toBeVisible()
+  expect(
+    screen.getByRole('note', {
+      name: '2 more sub-agents: Review, Security, Started working'
+    })
+  ).toBeVisible()
   expect(screen.getByText('Started working')).toBeVisible()
   expect(screen.getByText('Completed')).toBeVisible()
   expect(screen.getByText('Waiting for approval')).toBeVisible()
@@ -156,8 +183,14 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
     })
   ).toBeVisible()
   const firstChips = rows[0]?.querySelector('.collaboration-timeline__chips') as HTMLElement
+  const firstOverflow = rows[0]?.querySelector('.collaboration-timeline__overflow') as HTMLElement
   const firstStatus = rows[0]?.querySelector('.collaboration-timeline__status') as HTMLElement
-  expect(firstChips.nextElementSibling).toBe(firstStatus)
+  expect(firstChips.compareDocumentPosition(firstOverflow) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(
+    firstOverflow.compareDocumentPosition(firstStatus) & Node.DOCUMENT_POSITION_FOLLOWING
+  ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   expect(getComputedStyle(firstChips).display).toBe('contents')
   expect(getComputedStyle(firstStatus).color).toBe('rgb(79, 86, 96)')
   expect(getComputedStyle(screen.getByText('Completed').element()).color).toBe('rgb(79, 86, 96)')
@@ -186,6 +219,66 @@ it('renders no wrapper for an empty root and stays compact at narrow width', asy
   await userEvent.keyboard('{Tab}')
   expect(document.activeElement).toBe(qa.element())
   expect(getComputedStyle(qa.element()).outlineWidth).toBe('2px')
+})
+
+it('keeps only the latest same-Agent snapshot and exposes unambiguous native copy text', async () => {
+  const onOpenAgent = vi.fn()
+  const screen = await render(
+    <div onCopy={copyCollaborationTimelineSelection}>
+      <p>Before activity</p>
+      <CollaborationTimelineActivityList
+        activities={[
+          activity('old-a', 'agent-a', 'Alpha old', 'completed', 1, 1_000, 'root', 9),
+          activity('agent-b', 'agent-b', 'Beta', 'completed', 2, 1_100, 'root', 9),
+          activity('new-a', 'agent-a', 'Alpha', 'completed', 3, 1_200, 'root', 9),
+          activity('agent-c', 'agent-c', 'Gamma', 'completed', 4, 1_300, 'root', 9),
+          activity('agent-d', 'agent-d', 'Delta', 'completed', 5, 1_400, 'root', 9)
+        ]}
+        onOpenAgent={onOpenAgent}
+      />
+      <p>After activity</p>
+    </div>
+  )
+
+  expect(screen.container.querySelectorAll('.collaboration-timeline__activity')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(3)
+  expect(screen.getByText('Alpha')).toBeVisible()
+  expect(screen.container.textContent).not.toContain('Alpha old')
+  const row = screen.container.querySelector<HTMLElement>('.collaboration-timeline__activity')
+  const selection = window.getSelection()
+  const range = document.createRange()
+  const alphaButton = screen.getByRole('button', {
+    name: 'View sub-agent Alpha: Completed'
+  })
+  range.selectNodeContents(alphaButton.element())
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  expect(copySelection(alphaButton.element())).toBe(
+    'Alpha: Completed; Beta: Completed; Gamma: Completed; Delta: Completed'
+  )
+
+  range.selectNodeContents(row!)
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  expect(copySelection(row!)).toBe(
+    'Alpha: Completed; Beta: Completed; Gamma: Completed; Delta: Completed'
+  )
+
+  const wrapper = screen.container.firstElementChild!
+  range.selectNodeContents(wrapper)
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  const wholeConversationCopy = copySelection(wrapper)
+  expect(wholeConversationCopy).toContain('Before activity')
+  expect(wholeConversationCopy).toContain(
+    'Alpha: Completed; Beta: Completed; Gamma: Completed; Delta: Completed'
+  )
+  expect(wholeConversationCopy).toContain('After activity')
+  selection?.removeAllRanges()
+
+  await userEvent.click(screen.getByRole('button', { name: 'View sub-agent Alpha: Completed' }))
+  expect(onOpenAgent).toHaveBeenCalledWith('agent-a')
+  expect(screen.getByRole('note', { name: '1 more sub-agents: Delta, Completed' })).toBeVisible()
 })
 
 it('uses readable product-theme status colors in classic dark mode', async () => {

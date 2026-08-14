@@ -516,6 +516,19 @@ wait 的 first-ready 事务不留下“cursor 已推进、ToolResult 尚未落�
 inbox、重新拼结果或把返回值当普通未持久化 ToolResult。若进程在较早的 open receipt 阶段退出，下一
 Turn 通过不可变 replay link 读取完整的认证 message 与 status 快照，在同一个事务中提交新 ToolResult 并
 关闭 source/current receipt；因此 message-bearing 与 status-only wait 都不会因换 run 永久搁浅。
+预提交与 Runtime 终态必须复用同一 bounded history projection，包括
+`history_projection_truncated` archive 元数据；大结果跨过通用 history 阈值时也只能改变一次 canonical
+投影，终态提交仍须把已提交 ToolResult 逐项保留为 exact prefix。
+Runtime 终态事务采用固定四次、总退避 260 ms（10/50/200 ms）的同一 immutable projection 重试；每次
+失败后先恢复本次尝试前的内存 Usage，再由下一次事务重新读取 SQLite 权威 trace 并执行幂等校验，避免
+重试双计费。只有终态事务成功后才通知 observer、释放 Conversation occupancy/全局 permit 和清理
+trace/context；连续失败则保留数据库 `in_progress`、单次已暂存 Usage、trace/context、permit 与 shutdown
+cancellation owner，由有界 shutdown forced-cancel 或下次启动 reconciliation 保守收口。物理数据库持续
+不可写时不会伪造终态或提前解锁；删除 fence 在重试间生效时仍按原删除流程清理，不转化为幽灵 Turn。
+该策略同时覆盖初始 Turn、Approval continuation 的成功/失败终态，以及已批准动作在 continuation 前后的
+取消终态。Approval continuation 先完成 assistant/trace/model-context/Usage 事务，再独立有界重试 pending
+action CAS；两步都成功才发布终态并释放 owner。若只有 pending CAS 耗尽，已提交的 terminal trace 和 Usage
+保持权威，pending target/status、内存 owner 与恢复快照继续保留给启动对账，不能整体重跑并再次累加 Usage。
 
 wait 最多接受 32 个不同 target；候选先按整组 Mailbox sequence 做全局 FIFO，再应用每次最多 64 条的
 预算，不能因 target 排序越过更早消息。单条 payload 复用 32 KiB 认证 envelope 的确定性截断；message
@@ -629,6 +642,21 @@ root-local sequence 合并，两个并行子 Agent/不同 root 不会串线。
 | Wake 以 final result 原子进入 `completed` / `failed`                                                                    | `completed` / `failed` | result Mailbox 本身不再额外产生 `updated`                            |
 | Wake 持久进入 `interrupted`，或 queued/claimed-before-admission 被管理中断写为 `cancelled`                              | `interrupted`          | 两者都是用户语义上的中断，不依赖内存 cancel 通知                     |
 | 除 direct child → parent 外的普通 send（含 parent → child / sibling）、result、Mailbox claim/ack、Wake lease、list/wait | `null`                 | 仍写必要 invalidation event，但根聊天无 activity                     |
+
+六个 Harness 工具不直接成为界面状态；界面只消费上表的持久领域事实：
+
+| Harness 工具      | 持久领域结果                                   | 可见 semantic activity                                     |
+| ----------------- | ---------------------------------------------- | ---------------------------------------------------------- |
+| `spawn_agent`     | initial `task` Mailbox + Wake                  | Wake 真实创建后 `started`                                  |
+| `send_message`    | `message` Mailbox，不创建 Wake                 | 投递本身无 activity；仅 child → direct parent 时 `updated` |
+| `followup_task`   | `followup` Mailbox + Wake                      | Wake 真实创建后 `started`                                  |
+| `wait_agent`      | 持久 receipt/cursor 与 Mailbox 交付状态        | 无 activity                                                |
+| `list_agents`     | 只读 tree/status 投影                          | 无 activity                                                |
+| `interrupt_agent` | 先写 interrupt receipt；后续 Wake 进入持久终态 | 仅终态提交后 `interrupted`                                 |
+
+`agent_pending_actions` 同时承载需要用户决策的手动 Approval 和已自动授权的内部
+execution journal。只有以 `status='pending'` 首次提交的 child 行才是
+`waiting_approval`；以 `approved` 写入的自动 MCP journal 不得伪造待审批活动。
 
 Activity snapshot `schemaVersion=2` 还冻结可空的精确根 Timeline 放置点：
 `rootAnchorMessageId + rootTraceBoundarySequence` 必须同时存在或同时为 `null`。领域 trigger 执行时若根

@@ -55,8 +55,19 @@ async fn write_provider_stream(stream: &mut TcpStream, delta: Value, finish_reas
     let finish = json!({
         "choices": [{ "delta": {}, "finish_reason": finish_reason }]
     });
+    let usage = json!({
+        "choices": [],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        }
+    });
     stream
-        .write_all(format!("data: {frame}\n\ndata: {finish}\n\ndata: [DONE]\n\n").as_bytes())
+        .write_all(
+            format!("data: {frame}\n\ndata: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
+                .as_bytes(),
+        )
         .await
         .unwrap();
 }
@@ -382,7 +393,15 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
                                 // Turn; a fake terminal response would only cover no_active_turn.
                                 std::future::pending::<()>().await;
                             }
-                            write_text(&mut stream, "Child completed the delegated review.").await;
+                            let child_result = if child_text.contains("security_review") {
+                                format!(
+                                    "Child completed the delegated review with evidence. {}",
+                                    "evidence ".repeat(3_000)
+                                )
+                            } else {
+                                "Child completed the delegated review.".to_string()
+                            };
+                            write_text(&mut stream, &child_result).await;
                             active.fetch_sub(1, Ordering::SeqCst);
                         } else {
                             respond_to_root_request(&mut stream, &request).await;
@@ -462,8 +481,41 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
         .find(|event| event["params"]["type"] == "done" && event["params"]["runId"] == turn.run_id)
         .unwrap();
     assert_eq!(root_done["params"]["status"], "completed", "{events:#?}");
+    assert!(events
+        .iter()
+        .all(|event| { event["params"]["code"] != "conversation_trace_persistence_failed" }));
 
     wait_for_dispatcher_idle(&database_path).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if service.turn_concurrency_gate().active() == 0
+                && storage
+                    .list_in_progress_conversation_turn_traces()
+                    .unwrap()
+                    .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal collaboration run leaked a durable Turn or concurrency permit");
+    assert!(!service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(&turn.run_id));
+    let root_usage = storage
+        .load_agent_usage_for_owner(
+            &turn.run_id,
+            ROOT_CONVERSATION_ID,
+            "assistant-collaboration-harness",
+        )
+        .unwrap()
+        .expect("large precommitted wait terminalization must persist root Usage");
+    assert!(root_usage.total_tokens.is_some_and(|tokens| tokens > 0));
+    assert!(root_usage.billable_request_count > 0);
     assert!(service
         .shutdown_collaboration_dispatcher()
         .await

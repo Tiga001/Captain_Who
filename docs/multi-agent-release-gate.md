@@ -76,8 +76,8 @@ entry points touched while making child Conversations read-only.
 
 ## Recovery and schema policy
 
-Canonical storage is version 9 and is accepted only when its normalized SQLite catalog fingerprint
-matches the frozen value. This is a development repository: version 8 or older, an unversioned
+Canonical storage is version 10 and is accepted only when its normalized SQLite catalog fingerprint
+matches the frozen value. This is a development repository: version 9 or older, an unversioned
 non-empty database, a partial catalog, or a tampered current schema returns the stable
 `development_storage_schema_reset_required` error and never rewrites the source. Tests construct
 all old or failing databases under `tempfile`/`mktemp`; live user databases are never opened,

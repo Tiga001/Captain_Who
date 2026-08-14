@@ -7,7 +7,7 @@ pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:007aac0f26f15ea9578d75a16044604786a9ceb63be3b85721557365758ed3b7";
+    "sha256:e7e716668883d424de45b18ac889616aad1bd54cfb1e43e245b2862b6ee64878";
 
 /// Opens the single supported development schema.
 ///

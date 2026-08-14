@@ -1140,6 +1140,175 @@ mod tests {
     }
 
     #[test]
+    fn only_pending_child_actions_project_waiting_approval() {
+        let connection = tree();
+        let initial = latest_root_sequence(&connection, "agent-root").unwrap();
+
+        // Automatic MCP execution journals start at `approved`. They are durable recovery facts,
+        // not user decisions, and must never masquerade as a child Approval in the root chat.
+        connection
+            .execute(
+                "INSERT INTO agent_pending_actions (
+                    action_id, run_id, conversation_id, assistant_message_id, action_type,
+                    tool_name, tool_call_id, status, target_status, action_json,
+                    agent_input_json, created_at, updated_at
+                 ) VALUES (
+                    'auto-approved-action', 'auto-run', 'conversation-child', 'auto-assistant',
+                    'mcp_tool_call', 'automatic_mcp', 'auto-call', 'approved', NULL,
+                    '{}', '{}', 3, 3
+                 )",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            latest_root_sequence(&connection, "agent-root").unwrap(),
+            initial
+        );
+
+        connection
+            .execute(
+                "INSERT INTO agent_pending_actions (
+                    action_id, run_id, conversation_id, assistant_message_id, action_type,
+                    tool_name, tool_call_id, status, target_status, action_json,
+                    agent_input_json, created_at, updated_at
+                 ) VALUES (
+                    'manual-pending-action', 'manual-run', 'conversation-child',
+                    'manual-assistant', 'tool_call', 'read_file', 'manual-call', 'pending', NULL,
+                    '{}', '{}', 4, 4
+                 )",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE agent_pending_actions
+                 SET status = 'executing', updated_at = 5
+                 WHERE action_id = 'auto-approved-action'",
+                [],
+            )
+            .unwrap();
+
+        let events = list_root_events(&connection, "agent-root", initial, 16).unwrap();
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                AgentCollaborationEventKind::ApprovalProjected,
+                AgentCollaborationEventKind::ApprovalUpdated,
+            ]
+        );
+        assert_eq!(
+            events[0].activity,
+            Some(AgentCollaborationActivitySnapshot {
+                schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
+                semantic: AgentCollaborationActivitySemantic::WaitingApproval,
+                agent_id: "agent-child".to_string(),
+                task_name_snapshot: "review".to_string(),
+                root_anchor_message_id: None,
+                root_trace_boundary_sequence: None,
+            })
+        );
+        assert!(events[1].activity.is_none());
+    }
+
+    #[test]
+    fn send_delivery_result_and_read_paths_never_emit_semantic_activity() {
+        let mut connection = tree();
+        let initial = latest_root_sequence(&connection, "agent-root").unwrap();
+
+        let sent = agent_graph_repository::send_agent_message(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "quiet-send".to_string(),
+                content: "additional context".to_string(),
+            },
+            3,
+        )
+        .unwrap();
+        let claimed = agent_graph_repository::claim_next_agent_message(
+            &mut connection,
+            "agent-child",
+            "quiet-send-claim",
+            4,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed.message_id, sent.message.message_id);
+        agent_graph_repository::acknowledge_agent_message_with_projection(
+            &mut connection,
+            &claimed.message_id,
+            "quiet-send-claim",
+            5,
+        )
+        .unwrap();
+
+        let result = agent_graph_repository::enqueue_agent_message(
+            &mut connection,
+            &EnqueueAgentMessageInput {
+                message_id: "quiet-result".to_string(),
+                root_agent_id: "agent-root".to_string(),
+                sender_agent_id: "agent-child".to_string(),
+                recipient_agent_id: "agent-root".to_string(),
+                request_id: "quiet-result-request".to_string(),
+                kind: AgentMailboxKind::Result,
+                content: "terminal result".to_string(),
+                projection_message_id: "quiet-result-projection".to_string(),
+            },
+            6,
+        )
+        .unwrap()
+        .record()
+        .clone();
+        let claimed_result = agent_graph_repository::claim_next_agent_message(
+            &mut connection,
+            "agent-root",
+            "quiet-result-claim",
+            7,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed_result.message_id, result.message_id);
+        agent_graph_repository::acknowledge_agent_message_with_projection(
+            &mut connection,
+            &claimed_result.message_id,
+            "quiet-result-claim",
+            8,
+        )
+        .unwrap();
+
+        let events = list_root_events(&connection, "agent-root", initial, 32).unwrap();
+        assert_eq!(events.len(), 6);
+        assert!(events.iter().all(|event| event.activity.is_none()));
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                AgentCollaborationEventKind::MailboxEnqueued,
+                AgentCollaborationEventKind::MailboxUpdated,
+                AgentCollaborationEventKind::MailboxUpdated,
+                AgentCollaborationEventKind::MailboxEnqueued,
+                AgentCollaborationEventKind::MailboxUpdated,
+                AgentCollaborationEventKind::MailboxUpdated,
+            ]
+        );
+
+        // list_agents/event replay style reads are projections only: they cannot advance the
+        // durable root cursor or synthesize a semantic card.
+        let cursor = latest_root_sequence(&connection, "agent-root").unwrap();
+        assert!(!list_root_events(&connection, "agent-root", 0, 32)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            latest_agent_activity_at(&connection, "agent-root", "agent-child").unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            latest_root_sequence(&connection, "agent-root").unwrap(),
+            cursor
+        );
+    }
+
+    #[test]
     fn activity_projection_failure_rolls_back_the_source_wake_and_root_sequence() {
         let mut connection = tree();
         let message = agent_graph_repository::enqueue_agent_message(

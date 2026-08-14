@@ -2258,16 +2258,14 @@ impl AgentService {
         if execution_was_cancelled && final_pending_status == PendingActionStatus::Cancelled {
             const REASON: &str =
                 "Agent run was cancelled while the approved command was executing.";
-            // Order the final cancelled receipt, pending transition, and terminal events against
-            // the same lifecycle marker used by destructive operations. If deletion won the
-            // marker first, it owns cancellation and no state or event may be recreated here.
-            let deletion_lifecycle = self
-                .deletion_lifecycle
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if deletion_lifecycle.contains_input(&record.agent_input) {
-                drop(deletion_lifecycle);
+            if self.is_agent_input_scope_deleting(&record.agent_input) {
                 self.discard_usage_context(&run_id);
+                if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                    self.release_conversation_turn_if_current(conversation_id, &run_id);
+                }
+                self.release_turn_concurrency_permit(&run_id);
+                self.discard_trace_snapshot(&run_id);
+                self.discard_exact_running_context_window_snapshot(&run_id);
                 self.unregister_cancellation(&run_id);
                 return;
             }
@@ -2277,14 +2275,13 @@ impl AgentService {
                     result: continuation.result.clone(),
                 }));
             }
-            let mut cancelled_usage = None;
             let continuation_snapshot = self
                 .trace_snapshots
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .get(&run_id)
                 .cloned();
-            let persisted =
+            let terminal =
                 if let (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
@@ -2299,43 +2296,102 @@ impl AgentService {
                         assistant_message_id,
                         REASON,
                     );
-                    match terminal {
-                        Err(error) => Err(error),
-                        Ok(terminal) => {
-                            let mut output = AgentChatOutput {
-                                content: String::new(),
-                                status: AgentRunStatus::Cancelled,
-                                run_id: run_id.clone(),
-                                events: Vec::new(),
-                                tool_definitions: Vec::new(),
-                                todo: None,
-                                usage: None,
-                                finish_reason: Some(REASON.to_string()),
-                                proposed_actions: Vec::new(),
-                                conversation_turn_trace: Some(terminal.trace.clone()),
-                            };
-                            let persisted = self.persist_final_assistant_output_with_model_context(
-                                conversation_id,
-                                assistant_message_id,
-                                &mut output,
-                                &terminal.model_context_items,
-                            );
-                            if persisted.is_ok() {
-                                cancelled_usage = output.usage.clone();
-                            }
-                            persisted
-                        }
-                    }
+                    terminal.map(|terminal| {
+                        (
+                            conversation_id.to_string(),
+                            assistant_message_id.to_string(),
+                            terminal,
+                        )
+                    })
                 } else {
                     Err(
                         "cancelled command is missing its settled conversation trace snapshot"
                             .to_string(),
                     )
                 };
-            if let Err(error) = persisted {
+            let mut output = AgentChatOutput {
+                content: String::new(),
+                status: AgentRunStatus::Cancelled,
+                run_id: run_id.clone(),
+                events: Vec::new(),
+                tool_definitions: Vec::new(),
+                todo: None,
+                usage: None,
+                finish_reason: Some(REASON.to_string()),
+                proposed_actions: Vec::new(),
+                conversation_turn_trace: terminal
+                    .as_ref()
+                    .ok()
+                    .map(|(_, _, terminal)| terminal.trace.clone()),
+            };
+            let previous_usage_state = self
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&run_id)
+                .cloned();
+            let persisted = persist_terminal_with_bounded_retry(
+                || {
+                    let deletion_lifecycle = self
+                        .deletion_lifecycle
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if deletion_lifecycle.contains_input(&record.agent_input) {
+                        return Err("项目或会话正在移除，无法持久化已取消命令终态。".to_string());
+                    }
+                    terminal.as_ref().map_err(Clone::clone).and_then(
+                        |(conversation_id, assistant_message_id, terminal)| {
+                            self.persist_final_assistant_output_with_model_context(
+                                conversation_id,
+                                assistant_message_id,
+                                &mut output,
+                                &terminal.model_context_items,
+                            )
+                        },
+                    )
+                },
+                || restore_run_usage_state(self, &run_id, &previous_usage_state),
+            )
+            .await;
+            let pending_transition = if persisted.is_ok() {
+                persist_terminal_with_bounded_retry(
+                    || {
+                        let deletion_lifecycle = self
+                            .deletion_lifecycle
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                            return Err(
+                                "项目或会话正在移除，无法完成已取消命令状态迁移。".to_string()
+                            );
+                        }
+                        self.transition_pending_status(&record, PendingActionStatus::Cancelled)
+                    },
+                    || {},
+                )
+                .await
+            } else {
+                Err("已取消命令终态未持久化，已保留 pending 记录供启动对账。".to_string())
+            };
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if deletion_lifecycle.contains_input(&record.agent_input) {
+                drop(deletion_lifecycle);
+                self.discard_usage_context(&run_id);
+                if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                    self.release_conversation_turn_if_current(conversation_id, &run_id);
+                }
+                self.release_turn_concurrency_permit(&run_id);
+                self.discard_trace_snapshot(&run_id);
+                self.discard_exact_running_context_window_snapshot(&run_id);
                 self.unregister_cancellation(&run_id);
+                return;
+            }
+            if let Err(error) = persisted {
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id),
+                    run_id: Some(run_id.clone()),
                     trace_sequence: None,
                     message: format!(
                         "无法原子持久化已取消命令的 assistant 终态与会话轨迹：{error}"
@@ -2346,26 +2402,31 @@ impl AgentService {
                 }));
                 return;
             }
-            if let Err(error) =
-                self.transition_pending_status(&record, PendingActionStatus::Cancelled)
-            {
+            if let Err(error) = pending_transition {
                 emit_pending_transition_error(
                     &notifications,
                     &run_id,
                     PendingActionStatus::Cancelled,
                     &error,
                 );
-                self.unregister_cancellation(&run_id);
                 return;
             }
+            if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                self.release_conversation_turn_if_current(conversation_id, &run_id);
+            }
+            self.release_turn_concurrency_permit(&run_id);
+            if let Some(assistant_message_id) = record.snapshot.assistant_message_id.as_deref() {
+                self.notify_durable_turn_observers(assistant_message_id);
+            }
             self.discard_trace_snapshot(&run_id);
+            self.discard_exact_running_context_window_snapshot(&run_id);
             self.unregister_cancellation(&run_id);
             let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                 run_id,
                 success: false,
                 status: Some(AgentRunStatus::Cancelled),
                 content: None,
-                usage: cancelled_usage,
+                usage: output.usage,
                 finish_reason: Some(REASON.to_string()),
                 proposed_actions: Vec::new(),
             }));
@@ -2397,10 +2458,11 @@ impl AgentService {
         .await;
     }
 
-    fn finish_cancelled_action_continuation(
+    async fn finish_cancelled_action_continuation(
         &self,
         record: &PendingActionRecord,
         notifications: &CoreServerNotificationSender,
+        final_pending_status: PendingActionStatus,
         cancellation_token: &AgentCancellationToken,
     ) {
         const REASON: &str =
@@ -2409,15 +2471,14 @@ impl AgentService {
             "The cancelled Agent run could not be durably finalized. It will be reconciled on restart.";
         let run_id = &record.snapshot.run_id;
 
-        // Order the final assistant receipt against the same lifecycle marker used by destructive
-        // mutations. Keep the guard through the synchronous durable finalization so deletion
-        // cannot win after this check and then have this worker recreate message state.
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if deletion_lifecycle.contains_input(&record.agent_input) {
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             self.discard_usage_context(run_id);
+            if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                self.release_conversation_turn_if_current(conversation_id, run_id);
+            }
+            self.release_turn_concurrency_permit(run_id);
+            self.discard_trace_snapshot(run_id);
+            self.discard_exact_running_context_window_snapshot(run_id);
             self.unregister_cancellation_if_current(run_id, cancellation_token);
             return;
         }
@@ -2428,6 +2489,32 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner())
             .get(run_id)
             .cloned();
+        let terminal = match (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+            snapshot,
+        ) {
+            (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) => {
+                cancelled_conversation_trace_from_snapshot(
+                    snapshot,
+                    run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    REASON,
+                )
+                .map(|terminal| {
+                    (
+                        conversation_id.to_string(),
+                        assistant_message_id.to_string(),
+                        terminal,
+                    )
+                })
+            }
+            _ => Err(
+                "cancelled action continuation is missing its durable conversation trace snapshot"
+                    .to_string(),
+            ),
+        };
         let mut output = AgentChatOutput {
             content: String::new(),
             status: AgentRunStatus::Cancelled,
@@ -2438,44 +2525,80 @@ impl AgentService {
             usage: None,
             finish_reason: Some(REASON.to_string()),
             proposed_actions: Vec::new(),
-            conversation_turn_trace: None,
+            conversation_turn_trace: terminal
+                .as_ref()
+                .ok()
+                .map(|(_, _, terminal)| terminal.trace.clone()),
         };
-        let persisted = match (
-            record.snapshot.conversation_id.as_deref(),
-            record.snapshot.assistant_message_id.as_deref(),
-            snapshot,
-        ) {
-            (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) => {
-                match cancelled_conversation_trace_from_snapshot(
-                    snapshot,
-                    run_id,
-                    conversation_id,
-                    assistant_message_id,
-                    REASON,
-                ) {
-                    Err(error) => Err(error),
-                    Ok(terminal) => {
-                        output.conversation_turn_trace = Some(terminal.trace);
+        let previous_usage_state = self
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(run_id)
+            .cloned();
+        let persisted = persist_terminal_with_bounded_retry(
+            || {
+                let deletion_lifecycle = self
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if deletion_lifecycle.contains_input(&record.agent_input) {
+                    return Err("项目或会话正在移除，无法持久化已取消审批续跑终态。".to_string());
+                }
+                terminal.as_ref().map_err(Clone::clone).and_then(
+                    |(conversation_id, assistant_message_id, terminal)| {
                         self.persist_final_assistant_output_with_model_context(
                             conversation_id,
                             assistant_message_id,
                             &mut output,
                             &terminal.model_context_items,
                         )
-                        .map(|()| self.invalidate_conversation_context_state(conversation_id))
+                    },
+                )
+            },
+            || restore_run_usage_state(self, run_id, &previous_usage_state),
+        )
+        .await;
+        let pending_transition = if persisted.is_ok() {
+            persist_terminal_with_bounded_retry(
+                || {
+                    let deletion_lifecycle = self
+                        .deletion_lifecycle
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if deletion_lifecycle.contains_input(&record.agent_input) {
+                        return Err(
+                            "项目或会话正在移除，无法完成已取消审批续跑的状态迁移。".to_string()
+                        );
                     }
-                }
-            }
-            _ => Err(
-                "cancelled action continuation is missing its durable conversation trace snapshot"
+                    self.transition_pending_status(record, final_pending_status)
+                },
+                || {},
+            )
+            .await
+        } else {
+            Err(
+                "已取消审批续跑的 assistant 终态未持久化，已保留非终态 pending 记录供启动对账。"
                     .to_string(),
-            ),
+            )
         };
-        drop(deletion_lifecycle);
-
-        self.unregister_cancellation_if_current(run_id, cancellation_token);
-        if let Err(error) = persisted {
+        let deletion_lifecycle = self
+            .deletion_lifecycle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if deletion_lifecycle.contains_input(&record.agent_input) {
+            drop(deletion_lifecycle);
             self.discard_usage_context(run_id);
+            if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                self.release_conversation_turn_if_current(conversation_id, run_id);
+            }
+            self.release_turn_concurrency_permit(run_id);
+            self.discard_trace_snapshot(run_id);
+            self.discard_exact_running_context_window_snapshot(run_id);
+            self.unregister_cancellation_if_current(run_id, cancellation_token);
+            return;
+        }
+        if let Err(error) = persisted {
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id.clone()),
                 trace_sequence: None,
@@ -2487,7 +2610,14 @@ impl AgentService {
             eprintln!("failed to persist cancelled action continuation: {error}");
             return;
         }
+        if let Err(error) = pending_transition {
+            emit_pending_transition_error(notifications, run_id, final_pending_status, &error);
+            return;
+        }
 
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.invalidate_conversation_context_state(conversation_id);
+        }
         if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
             self.release_conversation_turn_if_current(conversation_id, run_id);
         }
@@ -2496,6 +2626,8 @@ impl AgentService {
             self.notify_durable_turn_observers(assistant_message_id);
         }
         self.discard_trace_snapshot(run_id);
+        self.discard_exact_running_context_window_snapshot(run_id);
+        self.unregister_cancellation_if_current(run_id, cancellation_token);
         let _ = notifications.send(agent_event_notification(AgentEvent::Done {
             run_id: run_id.clone(),
             success: false,
@@ -2778,7 +2910,13 @@ impl AgentService {
             None
         };
         if cancellation_token.is_cancelled() {
-            self.finish_cancelled_action_continuation(&record, &notifications, &cancellation_token);
+            self.finish_cancelled_action_continuation(
+                &record,
+                &notifications,
+                final_pending_status,
+                &cancellation_token,
+            )
+            .await;
             return;
         }
         if self.is_agent_input_scope_deleting(&record.agent_input) {
@@ -2942,39 +3080,75 @@ impl AgentService {
             Ok(output) if output.status == AgentRunStatus::WaitingForApproval
         );
 
-        let deletion_lifecycle = self
-            .deletion_lifecycle
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if deletion_lifecycle.contains_input(&record.agent_input) {
-            drop(deletion_lifecycle);
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            terminal_event_gate.discard();
+            self.release_conversation_turn_if_current(&turn_conversation_id, &run_id);
+            self.release_turn_concurrency_permit(&run_id);
             self.discard_usage_context(&run_id);
+            self.discard_trace_snapshot(&run_id);
+            self.discard_exact_running_context_window_snapshot(&run_id);
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             return;
         }
 
-        let durable_turn_terminal = match result {
+        let mut deletion_cleanup = false;
+        let (durable_turn_terminal, settlement_committed) = match result {
             Ok(mut agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
                 let owner_ids = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
                 );
-                let persisted = match owner_ids {
-                    (Some(conversation_id), Some(assistant_message_id)) => self
-                        .persist_final_assistant_output(
-                            conversation_id,
-                            assistant_message_id,
-                            &mut agent_output,
-                        ),
-                    _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
-                };
+                let previous_usage_state = self
+                    .usage_contexts
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&run_id)
+                    .cloned();
+                let persisted = persist_terminal_with_bounded_retry(
+                    || {
+                        let deletion_lifecycle = self
+                            .deletion_lifecycle
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                            return Err("项目或会话正在移除，无法持久化审批续跑终态。".to_string());
+                        }
+                        match owner_ids {
+                            (Some(conversation_id), Some(assistant_message_id)) => self
+                                .persist_final_assistant_output(
+                                    conversation_id,
+                                    assistant_message_id,
+                                    &mut agent_output,
+                                ),
+                            _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
+                        }
+                    },
+                    || restore_run_usage_state(self, &run_id, &previous_usage_state),
+                )
+                .await;
                 let pending_transition = if persisted.is_ok() {
-                    self.transition_pending_status(&record, final_pending_status)
+                    persist_terminal_with_bounded_retry(
+                        || {
+                            let deletion_lifecycle = self
+                                .deletion_lifecycle
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if deletion_lifecycle.contains_input(&record.agent_input) {
+                                return Err(
+                                    "项目或会话正在移除，无法完成审批状态迁移。".to_string()
+                                );
+                            }
+                            self.transition_pending_status(&record, final_pending_status)
+                        },
+                        || {},
+                    )
+                    .await
                 } else {
                     Err("assistant 终态未持久化，已保留非终态 pending 记录供启动对账。".to_string())
-                }
-                .inspect_err(|error| {
+                };
+                let settlement_committed = persisted.is_ok() && pending_transition.is_ok();
+                if let Err(error) = &pending_transition {
                     terminal_event_gate.discard();
                     emit_pending_transition_error(
                         &notifications,
@@ -2982,13 +3156,21 @@ impl AgentService {
                         final_pending_status,
                         error,
                     );
-                });
+                }
                 let terminal_commit_published = pending_terminal_commit_is_publishable(
                     persisted.is_ok(),
                     pending_transition.is_ok(),
                     committed_durable_context,
                 );
-                if let (Some(conversation_id), Some(assistant_message_id)) = owner_ids {
+                let deletion_lifecycle = self
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if deletion_lifecycle.contains_input(&record.agent_input) {
+                    deletion_cleanup = true;
+                    terminal_event_gate.discard();
+                    self.discard_usage_context(&run_id);
+                } else if let (Some(conversation_id), Some(assistant_message_id)) = owner_ids {
                     if terminal_commit_published {
                         self.notify_durable_turn_observers(assistant_message_id);
                         self.emit_terminal_context_window_snapshot(
@@ -3004,7 +3186,6 @@ impl AgentService {
                             },
                         );
                     } else if let Err(error) = &persisted {
-                        self.discard_usage_context(&run_id);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id.clone()),
                             trace_sequence: None,
@@ -3024,7 +3205,10 @@ impl AgentService {
                         );
                     }
                 }
-                terminal_commit_published
+                (
+                    terminal_commit_published && !deletion_cleanup,
+                    settlement_committed,
+                )
             }
             Err(error) => {
                 terminal_event_gate.discard();
@@ -3032,119 +3216,158 @@ impl AgentService {
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
                 let message = error.to_string();
-                let terminal_projection = match (
-                    error.conversation_turn_trace().cloned(),
-                    record.snapshot.conversation_id.as_deref(),
-                    record.snapshot.assistant_message_id.as_deref(),
-                ) {
-                    (Some(trace), _, _) => Ok((trace, None)),
-                    (None, Some(conversation_id), Some(assistant_message_id)) => self
-                        .storage
-                        .get_conversation_turn_trace(assistant_message_id)
-                        .and_then(|trace| match trace {
-                            Some(trace)
-                                if trace.run_id == run_id
-                                    && trace.conversation_id == conversation_id
-                                    && trace.terminal_status
-                                        == ConversationTurnTraceTerminalStatus::InProgress =>
-                            {
-                                let model_context_items = self
+                let runtime_terminal_trace = error.conversation_turn_trace().cloned();
+                let previous_usage_state = self
+                    .usage_contexts
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner())
+                    .get(&run_id)
+                    .cloned();
+                let persisted = persist_terminal_with_bounded_retry(
+                    || {
+                        let deletion_lifecycle = self
+                            .deletion_lifecycle
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner());
+                        if deletion_lifecycle.contains_input(&record.agent_input) {
+                            return Err(
+                                "项目或会话正在移除，无法持久化审批续跑失败终态。".to_string()
+                            );
+                        }
+                        if let (Some(conversation_id), Some(assistant_message_id)) = (
+                            record.snapshot.conversation_id.as_deref(),
+                            record.snapshot.assistant_message_id.as_deref(),
+                        ) {
+                            let terminal_projection = match runtime_terminal_trace.clone() {
+                                Some(trace) => Ok((trace, None)),
+                                None => self
                                     .storage
-                                    .get_conversation_model_context_log(assistant_message_id)?
-                                    .map(|log| log.items)
-                                    .unwrap_or_default();
-                                let next_sequence = trace
-                                    .items
-                                    .last()
-                                    .map(ConversationTurnTraceItem::sequence)
-                                    .unwrap_or(0)
-                                    .saturating_add(1);
-                                let terminal = terminal_conversation_trace_from_snapshot(
-                                    ConversationTraceSnapshot {
-                                        items: trace.items,
-                                        model_context_items,
-                                        next_sequence,
-                                        truncated: trace.truncated,
-                                    },
-                                    &run_id,
-                                    conversation_id,
-                                    assistant_message_id,
-                                    ConversationTurnTraceTerminalStatus::Failed,
-                                    &message,
-                                )?;
-                                Ok((terminal.trace, Some(terminal.model_context_items)))
-                            }
-                            Some(_) => Err(
-                                "审批续跑的 durable ConversationTurnTrace 身份或状态不一致。"
-                                    .to_string(),
-                            ),
-                            None => Ok((
-                                failed_conversation_trace_without_items(
-                                    &run_id,
-                                    conversation_id,
-                                    assistant_message_id,
-                                    &message,
-                                ),
-                                Some(Vec::new()),
-                            )),
-                        }),
-                    _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
-                };
-                let persisted = if let (Some(conversation_id), Some(assistant_message_id)) = (
-                    record.snapshot.conversation_id.as_deref(),
-                    record.snapshot.assistant_message_id.as_deref(),
-                ) {
-                    let persisted = terminal_projection.and_then(
-                        |(conversation_turn_trace, model_context_items)| {
-                            self.persist_assistant_error_with_model_context(
-                                conversation_id,
-                                assistant_message_id,
-                                &message,
-                                usage.clone(),
-                                &conversation_turn_trace,
-                                model_context_items.as_deref(),
+                                    .get_conversation_turn_trace(assistant_message_id)
+                                    .and_then(|trace| match trace {
+                                        Some(trace)
+                                            if trace.run_id == run_id
+                                                && trace.conversation_id == conversation_id
+                                                && trace.terminal_status
+                                                    == ConversationTurnTraceTerminalStatus::InProgress =>
+                                        {
+                                            let model_context_items = self
+                                                .storage
+                                                .get_conversation_model_context_log(
+                                                    assistant_message_id,
+                                                )?
+                                                .map(|log| log.items)
+                                                .unwrap_or_default();
+                                            let next_sequence = trace
+                                                .items
+                                                .last()
+                                                .map(ConversationTurnTraceItem::sequence)
+                                                .unwrap_or(0)
+                                                .saturating_add(1);
+                                            let terminal =
+                                                terminal_conversation_trace_from_snapshot(
+                                                    ConversationTraceSnapshot {
+                                                        items: trace.items,
+                                                        model_context_items,
+                                                        next_sequence,
+                                                        truncated: trace.truncated,
+                                                    },
+                                                    &run_id,
+                                                    conversation_id,
+                                                    assistant_message_id,
+                                                    ConversationTurnTraceTerminalStatus::Failed,
+                                                    &message,
+                                                )?;
+                                            Ok((terminal.trace, Some(terminal.model_context_items)))
+                                        }
+                                        Some(_) => Err(
+                                            "审批续跑的 durable ConversationTurnTrace 身份或状态不一致。"
+                                                .to_string(),
+                                        ),
+                                        None => Ok((
+                                            failed_conversation_trace_without_items(
+                                                &run_id,
+                                                conversation_id,
+                                                assistant_message_id,
+                                                &message,
+                                            ),
+                                            Some(Vec::new()),
+                                        )),
+                                    }),
+                            };
+                            terminal_projection.and_then(
+                                |(conversation_turn_trace, model_context_items)| {
+                                    self.persist_assistant_error_with_model_context(
+                                        conversation_id,
+                                        assistant_message_id,
+                                        &message,
+                                        usage.clone(),
+                                        &conversation_turn_trace,
+                                        model_context_items.as_deref(),
+                                    )
+                                },
                             )
-                        },
-                    );
-                    if let Err(error) = &persisted {
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(run_id.clone()),
-                            trace_sequence: None,
-                            message: format!(
-                                "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
-                            ),
-                            recoverable: true,
-                            code: Some("conversation_trace_persistence_failed".to_string()),
-                            details: None,
-                        }));
-                    }
-                    persisted
-                } else {
-                    Err("审批续跑缺少 assistant 持久化身份。".to_string())
-                };
+                        } else {
+                            Err("审批续跑缺少 assistant 持久化身份。".to_string())
+                        }
+                    },
+                    || restore_run_usage_state(self, &run_id, &previous_usage_state),
+                )
+                .await;
                 let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
                 let pending_transition = if persisted.is_ok() {
-                    self.transition_pending_status(&record, final_pending_status)
+                    persist_terminal_with_bounded_retry(
+                        || {
+                            let deletion_lifecycle = self
+                                .deletion_lifecycle
+                                .lock()
+                                .unwrap_or_else(|lock_error| lock_error.into_inner());
+                            if deletion_lifecycle.contains_input(&record.agent_input) {
+                                return Err(
+                                    "项目或会话正在移除，无法完成审批失败状态迁移。".to_string()
+                                );
+                            }
+                            self.transition_pending_status(&record, final_pending_status)
+                        },
+                        || {},
+                    )
+                    .await
                 } else {
                     Err(
                         "assistant 失败终态未持久化，已保留非终态 pending 记录供启动对账。"
                             .to_string(),
                     )
-                }
-                .inspect_err(|transition_error| {
+                };
+                let settlement_committed = persisted.is_ok() && pending_transition.is_ok();
+                if let Err(transition_error) = &pending_transition {
                     emit_pending_transition_error(
                         &notifications,
                         &run_id,
                         final_pending_status,
                         transition_error,
                     );
-                });
+                }
                 let terminal_commit_published = pending_terminal_commit_is_publishable(
                     persisted.is_ok(),
                     pending_transition.is_ok(),
                     true,
                 );
-                if terminal_commit_published {
+                let deletion_lifecycle = self
+                    .deletion_lifecycle
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner());
+                if deletion_lifecycle.contains_input(&record.agent_input) {
+                    deletion_cleanup = true;
+                    self.discard_usage_context(&run_id);
+                } else if let Err(error) = &persisted {
+                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                        run_id: Some(run_id.clone()),
+                        trace_sequence: None,
+                        message: format!("无法原子持久化 assistant 失败终态与会话轨迹：{error}"),
+                        recoverable: true,
+                        code: Some("conversation_trace_persistence_failed".to_string()),
+                        details: None,
+                    }));
+                } else if terminal_commit_published {
                     if let (Some(conversation_id), Some(assistant_message_id)) = (
                         record.snapshot.conversation_id.as_deref(),
                         record.snapshot.assistant_message_id.as_deref(),
@@ -3177,20 +3400,27 @@ impl AgentService {
                         proposed_actions: Vec::new(),
                     }));
                 }
-                terminal_commit_published
+                (
+                    terminal_commit_published && !deletion_cleanup,
+                    settlement_committed,
+                )
             }
         };
 
-        drop(deletion_lifecycle);
-        if durable_turn_terminal {
+        if durable_turn_terminal || deletion_cleanup {
             self.release_conversation_turn_if_current(&turn_conversation_id, &run_id);
             self.release_turn_concurrency_permit(&run_id);
         }
-        if !keep_trace_snapshot {
+        if deletion_cleanup || (durable_turn_terminal && !keep_trace_snapshot) {
             self.discard_trace_snapshot(&run_id);
             self.discard_exact_running_context_window_snapshot(&run_id);
         }
-        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+        if durable_turn_terminal
+            || deletion_cleanup
+            || (keep_trace_snapshot && settlement_committed)
+        {
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+        }
     }
 }
 

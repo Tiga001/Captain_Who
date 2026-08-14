@@ -1,9 +1,11 @@
 .collaboration-timeline {
+  box-sizing: border-box;
   display: grid;
   gap: 6px;
   margin: 10px 0 14px;
   min-width: 0;
   padding: 0 4px;
+  width: 100%;
 }
 
 /* The shared message column intentionally has generous turn spacing. Inline semantic activity is
@@ -15,12 +17,9 @@
 }
 
 .collaboration-timeline__activity {
-  align-items: center;
   color: var(--mc-color-text-secondary);
-  display: flex;
-  flex-wrap: wrap;
+  display: block;
   font-size: var(--mc-font-size-chat-activity);
-  gap: 4px 5px;
   line-height: var(--mc-line-height-relaxed);
   max-width: 100%;
   min-width: 0;
@@ -34,14 +33,15 @@
 
 .collaboration-timeline__chip {
   align-items: center;
-  background: color-mix(in srgb, var(--mc-color-surface-muted) 76%, transparent);
-  border: 1px solid var(--mc-color-border-hairline);
+  background: var(--mc-color-surface-card);
+  border: 1px solid var(--mc-color-border-subtle);
   border-radius: 999px;
   color: var(--mc-color-text-secondary);
   cursor: pointer;
   display: inline-flex;
   font: inherit;
   gap: 4px;
+  margin: 2px 5px 2px 0;
   max-width: min(220px, 100%);
   min-height: 24px;
   min-width: 0;
@@ -50,6 +50,14 @@
     background-color 120ms ease,
     border-color 120ms ease,
     color 120ms ease;
+  vertical-align: middle;
+}
+
+.collaboration-timeline__overflow {
+  color: var(--mc-color-text-muted);
+  display: inline;
+  margin-right: 5px;
+  white-space: nowrap;
 }
 
 .collaboration-timeline__chip:hover {
@@ -86,6 +94,7 @@
 
 .collaboration-timeline__status {
   color: var(--mc-color-text-secondary);
+  display: inline;
   white-space: nowrap;
 }
 
@@ -95,12 +104,6 @@
 
 .collaboration-timeline__status[data-tone='failed'] {
   color: var(--mc-color-text-danger);
-}
-
-@media (max-width: 520px) {
-  .collaboration-timeline__activity {
-    align-items: center;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

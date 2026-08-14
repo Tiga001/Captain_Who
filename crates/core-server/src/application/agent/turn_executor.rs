@@ -1,5 +1,54 @@
 use super::*;
 
+const TERMINAL_PERSISTENCE_RETRY_DELAYS_MS: [u64; 3] = [10, 50, 200];
+
+/// Retries one immutable terminal settlement without weakening the durable in-progress fence.
+///
+/// `persist` may stage logical-run Usage in memory before entering SQLite. A failed attempt must
+/// therefore be rolled back before another attempt, otherwise additive Provider semantics would
+/// count the same terminal segment twice. The final failed attempt intentionally remains staged:
+/// the still-live Turn occupancy, permit, trace/context snapshots, and Usage state then describe
+/// the same unresolved durable terminal boundary until restart reconciliation or diagnosis.
+pub(super) async fn persist_terminal_with_bounded_retry<T, Persist, Rollback>(
+    mut persist: Persist,
+    mut rollback_before_retry: Rollback,
+) -> Result<T, String>
+where
+    T: Send,
+    Persist: FnMut() -> Result<T, String> + Send,
+    Rollback: FnMut() + Send,
+{
+    for delay_ms in TERMINAL_PERSISTENCE_RETRY_DELAYS_MS {
+        match persist() {
+            Ok(value) => return Ok(value),
+            Err(_) => {
+                rollback_before_retry();
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+    persist()
+}
+
+pub(super) fn restore_run_usage_state(
+    service: &AgentService,
+    run_id: &str,
+    previous: &Option<AgentRunUsageState>,
+) {
+    let mut usage_contexts = service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    match previous {
+        Some(previous) => {
+            usage_contexts.insert(run_id.to_string(), previous.clone());
+        }
+        None => {
+            usage_contexts.remove(run_id);
+        }
+    }
+}
+
 /// Public root turns and Host-authenticated Agent wakes enter the same application executor.
 ///
 /// Neither this enum nor the wake request implements `Deserialize`: collaboration identity is a
@@ -410,69 +459,111 @@ impl AgentService {
                 Ok(output) if output.status == AgentRunStatus::WaitingForApproval
             );
 
-            let deletion_lifecycle = service
+            let input_is_deleting = service
                 .deletion_lifecycle
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if deletion_lifecycle.contains_input(&pending_agent_input) {
-                drop(deletion_lifecycle);
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_input(&pending_agent_input);
+            if input_is_deleting {
+                terminal_event_gate.discard();
                 service
                     .release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
                 service.release_turn_concurrency_permit(&worker_run_id);
                 service.discard_usage_context(&worker_run_id);
+                service.discard_trace_snapshot(&worker_run_id);
+                service.discard_exact_running_context_window_snapshot(&worker_run_id);
                 service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
                 return;
             }
 
-            let durable_terminal = match result {
+            let mut deletion_cleanup = false;
+            let (durable_terminal, persistence_committed) = match result {
                 Ok(mut agent_output) => {
                     let committed_durable_context = is_terminal_run_status(agent_output.status);
-                    let persisted = service.persist_final_assistant_output(
-                        &worker_conversation_id,
-                        &worker_assistant_message_id,
-                        &mut agent_output,
-                    );
-                    if persisted.is_ok() {
-                        service.notify_durable_turn_observers(&worker_assistant_message_id);
-                    }
-                    let durable_terminal = persisted.is_ok() && committed_durable_context;
-                    if durable_terminal {
-                        service.emit_terminal_context_window_snapshot(
-                            &notifications,
-                            &pending_agent_input,
-                            &worker_run_id,
-                            &worker_conversation_id,
-                            &worker_assistant_message_id,
-                            if agent_output.status == AgentRunStatus::Cancelled {
-                                ""
-                            } else {
-                                &agent_output.content
-                            },
-                        );
-                    } else if let Err(error) = &persisted {
+                    let previous_usage_state = service
+                        .usage_contexts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(&worker_run_id)
+                        .cloned();
+                    let persisted = persist_terminal_with_bounded_retry(
+                        || {
+                            let deletion_lifecycle = service
+                                .deletion_lifecycle
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if deletion_lifecycle.contains_input(&pending_agent_input) {
+                                return Err(
+                                    "项目或会话正在移除，无法持久化 agent 终态。".to_string()
+                                );
+                            }
+                            service.persist_final_assistant_output(
+                                &worker_conversation_id,
+                                &worker_assistant_message_id,
+                                &mut agent_output,
+                            )
+                        },
+                        || restore_run_usage_state(&service, &worker_run_id, &previous_usage_state),
+                    )
+                    .await;
+                    let persistence_committed = persisted.is_ok();
+                    let deletion_lifecycle = service
+                        .deletion_lifecycle
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    let durable_terminal = if deletion_lifecycle
+                        .contains_input(&pending_agent_input)
+                    {
+                        deletion_cleanup = true;
+                        terminal_event_gate.discard();
                         service.discard_usage_context(&worker_run_id);
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(worker_run_id.clone()),
-                            trace_sequence: None,
-                            message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
-                            recoverable: true,
-                            code: Some("conversation_trace_persistence_failed".to_string()),
-                            details: None,
-                        }));
-                    }
-                    if durable_terminal {
-                        emit_terminal_events_after_persistence_for_turn(
-                            &notifications,
-                            &terminal_event_gate,
-                            &agent_output,
-                            pending_agent_input
-                                .context
-                                .as_ref()
-                                .and_then(|context| context.collaboration_identity.as_ref()),
-                            &worker_assistant_message_id,
-                        );
-                    }
-                    durable_terminal
+                        false
+                    } else {
+                        if persistence_committed {
+                            service.notify_durable_turn_observers(&worker_assistant_message_id);
+                        }
+                        let durable_terminal = persistence_committed && committed_durable_context;
+                        if durable_terminal {
+                            service.emit_terminal_context_window_snapshot(
+                                &notifications,
+                                &pending_agent_input,
+                                &worker_run_id,
+                                &worker_conversation_id,
+                                &worker_assistant_message_id,
+                                if agent_output.status == AgentRunStatus::Cancelled {
+                                    ""
+                                } else {
+                                    &agent_output.content
+                                },
+                            );
+                        } else if let Err(error) = &persisted {
+                            let _ =
+                                notifications.send(agent_event_notification(AgentEvent::Error {
+                                    run_id: Some(worker_run_id.clone()),
+                                    trace_sequence: None,
+                                    message: format!(
+                                        "无法原子持久化 assistant 终态与会话轨迹：{error}"
+                                    ),
+                                    recoverable: true,
+                                    code: Some("conversation_trace_persistence_failed".to_string()),
+                                    details: None,
+                                }));
+                        }
+                        if durable_terminal {
+                            emit_terminal_events_after_persistence_for_turn(
+                                &notifications,
+                                &terminal_event_gate,
+                                &agent_output,
+                                pending_agent_input
+                                    .context
+                                    .as_ref()
+                                    .and_then(|context| context.collaboration_identity.as_ref()),
+                                &worker_assistant_message_id,
+                            );
+                        }
+                        durable_terminal
+                    };
+                    (durable_terminal, persistence_committed)
                 }
                 Err(error) => {
                     let usage = error.usage().cloned();
@@ -488,93 +579,131 @@ impl AgentService {
                                 &message,
                             )
                         });
-                    let persisted = service.persist_assistant_error(
-                        &worker_conversation_id,
-                        &worker_assistant_message_id,
-                        &message,
-                        usage.clone(),
-                        &conversation_turn_trace,
-                    );
-                    if persisted.is_ok() {
-                        service.notify_durable_turn_observers(&worker_assistant_message_id);
-                    }
-                    let durable_terminal = persisted.is_ok();
+                    let previous_usage_state = service
+                        .usage_contexts
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner())
+                        .get(&worker_run_id)
+                        .cloned();
+                    let persisted = persist_terminal_with_bounded_retry(
+                        || {
+                            let deletion_lifecycle = service
+                                .deletion_lifecycle
+                                .lock()
+                                .unwrap_or_else(|lock_error| lock_error.into_inner());
+                            if deletion_lifecycle.contains_input(&pending_agent_input) {
+                                return Err(
+                                    "项目或会话正在移除，无法持久化 agent 失败终态。".to_string()
+                                );
+                            }
+                            service.persist_assistant_error(
+                                &worker_conversation_id,
+                                &worker_assistant_message_id,
+                                &message,
+                                usage.clone(),
+                                &conversation_turn_trace,
+                            )
+                        },
+                        || restore_run_usage_state(&service, &worker_run_id, &previous_usage_state),
+                    )
+                    .await;
+                    let persistence_committed = persisted.is_ok();
                     let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
-                    if durable_terminal {
-                        service.emit_terminal_context_window_snapshot(
-                            &notifications,
-                            &pending_agent_input,
-                            &worker_run_id,
-                            &worker_conversation_id,
-                            &worker_assistant_message_id,
-                            &message,
-                        );
-                    } else if let Err(error) = &persisted {
+                    let deletion_lifecycle = service
+                        .deletion_lifecycle
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner());
+                    let durable_terminal = if deletion_lifecycle
+                        .contains_input(&pending_agent_input)
+                    {
+                        deletion_cleanup = true;
                         terminal_event_gate.discard();
-                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                            run_id: Some(worker_run_id.clone()),
-                            trace_sequence: None,
-                            message: format!(
-                                "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
-                            ),
-                            recoverable: true,
-                            code: Some("conversation_trace_persistence_failed".to_string()),
-                            details: None,
-                        }));
-                    }
-                    if durable_terminal {
-                        let collaboration_identity = pending_agent_input
-                            .context
-                            .as_ref()
-                            .and_then(|context| context.collaboration_identity.as_ref());
-                        let terminal_error_event = terminal_event_gate
-                            .take_error_after_persistence()
-                            .unwrap_or_else(|| AgentEvent::Error {
-                                run_id: Some(worker_run_id.clone()),
-                                trace_sequence: None,
-                                message: message.clone(),
-                                recoverable: false,
-                                code,
-                                details,
-                            });
-                        emit_agent_event_notifications(
-                            &notifications,
-                            collaboration_identity,
-                            &worker_run_id,
-                            &worker_assistant_message_id,
-                            terminal_error_event,
-                        );
-                        emit_agent_event_notifications(
-                            &notifications,
-                            collaboration_identity,
-                            &worker_run_id,
-                            &worker_assistant_message_id,
-                            AgentEvent::Done {
-                                run_id: worker_run_id.clone(),
-                                success: false,
-                                status: Some(AgentRunStatus::Failed),
-                                content: Some(message),
-                                usage: cumulative_usage,
-                                finish_reason: None,
-                                proposed_actions: Vec::new(),
-                            },
-                        );
-                    }
-                    durable_terminal
+                        service.discard_usage_context(&worker_run_id);
+                        false
+                    } else {
+                        if persistence_committed {
+                            service.notify_durable_turn_observers(&worker_assistant_message_id);
+                            service.emit_terminal_context_window_snapshot(
+                                &notifications,
+                                &pending_agent_input,
+                                &worker_run_id,
+                                &worker_conversation_id,
+                                &worker_assistant_message_id,
+                                &message,
+                            );
+                        } else if let Err(error) = &persisted {
+                            terminal_event_gate.discard();
+                            let _ =
+                                notifications.send(agent_event_notification(AgentEvent::Error {
+                                    run_id: Some(worker_run_id.clone()),
+                                    trace_sequence: None,
+                                    message: format!(
+                                        "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
+                                    ),
+                                    recoverable: true,
+                                    code: Some("conversation_trace_persistence_failed".to_string()),
+                                    details: None,
+                                }));
+                        }
+                        if persistence_committed {
+                            let collaboration_identity = pending_agent_input
+                                .context
+                                .as_ref()
+                                .and_then(|context| context.collaboration_identity.as_ref());
+                            let terminal_error_event = terminal_event_gate
+                                .take_error_after_persistence()
+                                .unwrap_or_else(|| AgentEvent::Error {
+                                    run_id: Some(worker_run_id.clone()),
+                                    trace_sequence: None,
+                                    message: message.clone(),
+                                    recoverable: false,
+                                    code,
+                                    details,
+                                });
+                            emit_agent_event_notifications(
+                                &notifications,
+                                collaboration_identity,
+                                &worker_run_id,
+                                &worker_assistant_message_id,
+                                terminal_error_event,
+                            );
+                            emit_agent_event_notifications(
+                                &notifications,
+                                collaboration_identity,
+                                &worker_run_id,
+                                &worker_assistant_message_id,
+                                AgentEvent::Done {
+                                    run_id: worker_run_id.clone(),
+                                    success: false,
+                                    status: Some(AgentRunStatus::Failed),
+                                    content: Some(message),
+                                    usage: cumulative_usage,
+                                    finish_reason: None,
+                                    proposed_actions: Vec::new(),
+                                },
+                            );
+                        }
+                        persistence_committed
+                    };
+                    (durable_terminal, persistence_committed)
                 }
             };
 
-            drop(deletion_lifecycle);
-            if durable_terminal {
+            if durable_terminal || deletion_cleanup {
                 service
                     .release_conversation_turn_if_current(&worker_conversation_id, &worker_run_id);
                 service.release_turn_concurrency_permit(&worker_run_id);
             }
-            if !keep_trace_snapshot {
+            if deletion_cleanup || (durable_terminal && !keep_trace_snapshot) {
                 service.discard_trace_snapshot(&worker_run_id);
                 service.discard_exact_running_context_window_snapshot(&worker_run_id);
             }
-            service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+            if durable_terminal
+                || deletion_cleanup
+                || (keep_trace_snapshot && persistence_committed)
+            {
+                service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
+            }
         });
 
         Ok(output)
@@ -1114,5 +1243,99 @@ impl AgentService {
             result,
             terminal_event_gate,
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_persistence_retry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn retries_restore_staged_state_and_apply_the_terminal_segment_once() {
+        let attempts = Arc::new(Mutex::new(0_usize));
+        let staged_segments = Arc::new(Mutex::new(0_usize));
+        let persist_attempts = Arc::clone(&attempts);
+        let persist_segments = Arc::clone(&staged_segments);
+        let rollback_segments = Arc::clone(&staged_segments);
+
+        let result = persist_terminal_with_bounded_retry(
+            move || {
+                *persist_segments
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) += 1;
+                let mut attempts = persist_attempts
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                *attempts += 1;
+                if *attempts < 3 {
+                    Err("injected terminal transaction failure".to_string())
+                } else {
+                    Ok("committed")
+                }
+            },
+            move || {
+                *rollback_segments
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner()) = 0;
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "committed");
+        assert_eq!(
+            *attempts.lock().unwrap_or_else(|error| error.into_inner()),
+            3
+        );
+        assert_eq!(
+            *staged_segments
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+            1,
+            "retry must not apply the same additive Usage segment more than once"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_retry_keeps_the_last_staged_terminal_state_for_reconciliation() {
+        let attempts = Arc::new(Mutex::new(0_usize));
+        let staged_segments = Arc::new(Mutex::new(0_usize));
+        let persist_attempts = Arc::clone(&attempts);
+        let persist_segments = Arc::clone(&staged_segments);
+        let rollback_segments = Arc::clone(&staged_segments);
+
+        let error = persist_terminal_with_bounded_retry(
+            move || -> Result<(), String> {
+                *persist_segments
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner()) += 1;
+                *persist_attempts
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner()) += 1;
+                Err("persistent terminal transaction failure".to_string())
+            },
+            move || {
+                *rollback_segments
+                    .lock()
+                    .unwrap_or_else(|lock_error| lock_error.into_inner()) = 0;
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "persistent terminal transaction failure");
+        assert_eq!(
+            *attempts
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner()),
+            TERMINAL_PERSISTENCE_RETRY_DELAYS_MS.len() + 1
+        );
+        assert_eq!(
+            *staged_segments
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner()),
+            1,
+            "the final failed attempt remains represented while the durable Turn fence stays live"
+        );
     }
 }
