@@ -484,6 +484,7 @@ impl ToolExecutionContext {
         let invocation = crate::AgentCollaborationInvocation {
             caller: services.caller.clone(),
             selector_authorization: services.selector_authorization(),
+            caller_model_capabilities: self.model_capabilities(),
             effective_permissions: self.permissions,
             conversation_id: self.conversation_id()?.to_string(),
             run_id: self.run_id()?.to_string(),

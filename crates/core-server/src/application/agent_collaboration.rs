@@ -207,18 +207,28 @@ impl ChildAgentFactory {
         &self,
         input: &CreateChildAgentInput,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_with_expected_model_capabilities(input, None)
+    }
+
+    pub(crate) fn create_child_with_expected_model_capabilities(
+        &self,
+        input: &CreateChildAgentInput,
+        expected_model_capabilities: Option<mycopilot_core::ModelCapabilities>,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
         self.authorizer
             .authorize_spawn(&input.parent_agent_id)
             .map_err(map_spawn_authorization_error)?;
         let policy = self.authorizer.policy();
-        self.storage.create_child_agent_with_limits(
-            input,
-            mycopilot_core::AgentTreeResourceLimits {
-                max_depth: policy.max_tree_depth,
-                max_nodes: policy.max_nodes_per_tree,
-                max_task_bytes: policy.max_message_bytes,
-            },
-        )
+        self.storage
+            .create_child_agent_with_limits_and_expected_model_capabilities(
+                input,
+                mycopilot_core::AgentTreeResourceLimits {
+                    max_depth: policy.max_tree_depth,
+                    max_nodes: policy.max_nodes_per_tree,
+                    max_task_bytes: policy.max_message_bytes,
+                },
+                expected_model_capabilities,
+            )
     }
 
     pub(crate) fn resolve_trusted_running_wake(

@@ -2011,6 +2011,7 @@ fn attach_current_manual_file_effect_checkpoint(
             stable_revision: "stable-tool-set-test-v1".to_string(),
             dynamic_revision: "dynamic-tool-set-test-v1".to_string(),
             effective_revision: "effective-tool-set-test-v1".to_string(),
+            active_capability_ids: Vec::new(),
             exposed_tool_names: vec![tool.clone()],
         },
         run_context: None,

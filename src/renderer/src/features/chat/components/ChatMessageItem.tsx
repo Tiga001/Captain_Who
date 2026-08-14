@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ChevronDown,
@@ -566,8 +566,8 @@ function AgentRunView({
 
   const displayTimelineBlocks = useMemo(() => {
     type TimelineBlock =
-      | { id: string; kind: 'timeline'; items: RenderableTimelineItem[] }
-      | { id: string; kind: 'final-answer' }
+      | { kind: 'timeline'; items: RenderableTimelineItem[] }
+      | { kind: 'final-answer' }
       | {
           id: string
           kind: 'collaboration'
@@ -579,7 +579,7 @@ function AgentRunView({
 
     const syntheticItems = groupTimelineItems(run, [], { includeSkillLoadGroup: true })
     if (syntheticItems.length > 0) {
-      blocks.push({ id: 'timeline-synthetic', kind: 'timeline', items: syntheticItems })
+      blocks.push({ kind: 'timeline', items: syntheticItems })
     }
 
     const placements = new Map<number, CollaborationTimelineActivity[]>()
@@ -655,7 +655,6 @@ function AgentRunView({
       })
       if (grouped.length > 0) {
         blocks.push({
-          id: `timeline-${segmentStart}-${end}`,
           kind: 'timeline',
           items: grouped
         })
@@ -674,7 +673,7 @@ function AgentRunView({
       }
       if (index === finalAnswerTimelineItemIndex) {
         appendTimelineSegment(index)
-        blocks.push({ id: 'final-answer', kind: 'final-answer' })
+        blocks.push({ kind: 'final-answer' })
         segmentStart = index + 1
       }
     }
@@ -844,44 +843,54 @@ function AgentRunView({
           })
         }}
       />
-      {displayTimelineBlocks.map((block) => {
+      {displayTimelineBlocks.flatMap((block) => {
         if (block.kind === 'final-answer') {
           return showFinalContent ? (
-            <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} key={block.id} />
-          ) : null
+            <ChatMarkdown
+              className="chat-agent-text"
+              content={finalAnswerContent}
+              key="assistant-final-answer"
+            />
+          ) : (
+            []
+          )
         }
         if (block.kind === 'collaboration') {
-          if (!onOpenCollaborationAgent || (canToggleTimeline && timelineCollapsed)) return null
+          if (!onOpenCollaborationAgent || (canToggleTimeline && timelineCollapsed)) return []
           return (
             <CollaborationTimelineActivityList
               activities={block.activities}
-              key={block.id}
+              key={`timeline-${block.id}`}
               onOpenAgent={onOpenCollaborationAgent}
             />
           )
         }
-        if (!showTimeline) return null
-        return (
-          <Fragment key={block.id}>
-            {block.items.map((item) => (
-              <AgentTimelineItemView
-                conversationId={conversationId}
-                item={item}
-                key={item.id}
-                observerRootConversationId={observerRootConversationId}
-                projectId={projectId}
-                run={run}
-              />
-            ))}
-          </Fragment>
-        )
+        if (!showTimeline) return []
+        // Timeline segments are presentation-only placement boundaries. Their start/end changes
+        // whenever a later Tool or collaboration event arrives, so they must never own React
+        // identity. Keep every semantic item directly under the run with its durable item id.
+        return block.items.map((item) => (
+          <AgentTimelineItemView
+            conversationId={conversationId}
+            item={item}
+            key={`timeline-item:${item.id}`}
+            observerRootConversationId={observerRootConversationId}
+            projectId={projectId}
+            run={run}
+          />
+        ))
       })}
       {showFinalContent && finalAnswerTimelineItemIndex < 0 && (
-        <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
+        <ChatMarkdown
+          className="chat-agent-text"
+          content={finalAnswerContent}
+          key="assistant-final-answer"
+        />
       )}
       {isRunSettled(run) && (
         <ImageGenerationArtifactsCard
           conversationId={conversationId}
+          key={`image-artifacts:${run.runId}`}
           observerRootConversationId={observerRootConversationId}
           resolver={hostImageArtifactResolver}
           run={run}
@@ -890,6 +899,7 @@ function AgentRunView({
       {isRunSettled(run) && (
         <OfficeArtifactsCard
           conversationId={conversationId}
+          key={`office-artifacts:${run.runId}`}
           observerRootConversationId={observerRootConversationId}
           projectId={projectId}
           run={run}
@@ -897,12 +907,15 @@ function AgentRunView({
       )}
       {isRunSettled(run) && turnDiffSummary && (
         <EditSummaryCard
+          key={`edit-summary:${run.runId}`}
           onReview={onReviewLastTurn}
           readOnly={mode === 'observer'}
           summary={turnDiffSummary}
         />
       )}
-      {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
+      {isRunSettled(run) && (
+        <AssistantSources key={`assistant-sources:${run.runId}`} sources={webSearchSources} />
+      )}
       {showTokenLimitNotice && (
         <div className="agent-run__notice" role="status">
           <AlertTriangle aria-hidden="true" />

@@ -271,12 +271,14 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 8 additionally freezes the model-visible Agent collaboration selector directory and
-/// per-model-batch wait admission state across approval/restart continuation.
+/// Version 9 freezes model-visible Agent collaboration selector capabilities and removes the
+/// retired Provider-specific Skill-activation sibling deferral bit. Tools exposed in the request
+/// that produced a batch remain executable under that frozen ToolSet; newly activated Skill
+/// instructions and Tool capabilities become visible only on the next model request.
 /// The referenced payload remains encrypted in the Host vault; raw Provider continuation and
 /// reasoning are never serialized into the checkpoint. Any other schema version is rejected at
 /// the approval boundary.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 8;
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -284,6 +286,10 @@ pub struct AgentRunToolSetCheckpoint {
     pub stable_revision: String,
     pub dynamic_revision: String,
     pub effective_revision: String,
+    /// Sorted backend-owned capabilities used to build the exact request contract that produced
+    /// the paused Tool batch. Extension snapshots may already include successful effects from an
+    /// earlier sibling, so resume must not infer this boundary from their newer state.
+    pub active_capability_ids: Vec<String>,
     pub exposed_tool_names: Vec<String>,
 }
 
@@ -456,11 +462,6 @@ pub struct AgentQueuedToolCallCheckpoint {
     /// Reference into `AgentRunCheckpoint.assistant_turn_identity.tool_call_identities`.
     pub assistant_turn_id: String,
     pub provider_tool_index: u32,
-    /// Host policy attached to this exact Provider batch. When a provider-native grouped response
-    /// combines `skills_activate` with other calls, those other calls must be closed with a fixed
-    /// guard result and re-evaluated after the Skill instructions are available. Persisting the
-    /// bit prevents an approval/restart boundary from turning a deferred call into a side effect.
-    pub deferred_by_skill_activation: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

@@ -55,12 +55,6 @@ pub enum ProviderTerminalBatchSemantics {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProviderSameTurnSkillActivationSemantics {
-    FilterUnactivatedSiblings,
-    PreserveAndGuardSiblings,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderCheckpointPrivateArgumentsSemantics {
     Reject,
     RehydrateFromAuthenticatedTurn,
@@ -109,7 +103,6 @@ pub struct ProviderRuntimeCapabilities {
     partial_trace: ProviderPartialTraceSemantics,
     tool_call_source: ProviderToolCallSourceSemantics,
     terminal_batch: ProviderTerminalBatchSemantics,
-    same_turn_skill_activation: ProviderSameTurnSkillActivationSemantics,
     checkpoint_private_arguments: ProviderCheckpointPrivateArgumentsSemantics,
 }
 
@@ -123,8 +116,6 @@ impl ProviderRuntimeCapabilities {
             partial_trace: ProviderPartialTraceSemantics::IncrementalBaseline,
             tool_call_source: ProviderToolCallSourceSemantics::TextFallbackAllowed,
             terminal_batch: ProviderTerminalBatchSemantics::IndependentCalls,
-            same_turn_skill_activation:
-                ProviderSameTurnSkillActivationSemantics::FilterUnactivatedSiblings,
             checkpoint_private_arguments: ProviderCheckpointPrivateArgumentsSemantics::Reject,
         }
     }
@@ -138,8 +129,6 @@ impl ProviderRuntimeCapabilities {
             partial_trace: ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
             tool_call_source: ProviderToolCallSourceSemantics::ProviderNativeOnly,
             terminal_batch: ProviderTerminalBatchSemantics::CloseWholeProviderTurn,
-            same_turn_skill_activation:
-                ProviderSameTurnSkillActivationSemantics::PreserveAndGuardSiblings,
             checkpoint_private_arguments:
                 ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn,
         }
@@ -173,10 +162,6 @@ impl ProviderRuntimeCapabilities {
         self.terminal_batch
     }
 
-    pub const fn same_turn_skill_activation(self) -> ProviderSameTurnSkillActivationSemantics {
-        self.same_turn_skill_activation
-    }
-
     pub const fn checkpoint_private_arguments(self) -> ProviderCheckpointPrivateArgumentsSemantics {
         self.checkpoint_private_arguments
     }
@@ -185,13 +170,6 @@ impl ProviderRuntimeCapabilities {
         matches!(
             self.tool_call_source,
             ProviderToolCallSourceSemantics::ProviderNativeOnly
-        )
-    }
-
-    pub const fn preserves_skill_activation_batch(self) -> bool {
-        matches!(
-            self.same_turn_skill_activation,
-            ProviderSameTurnSkillActivationSemantics::PreserveAndGuardSiblings
         )
     }
 
@@ -630,10 +608,6 @@ mod tests {
             ProviderTerminalBatchSemantics::IndependentCalls
         );
         assert_eq!(
-            generic.same_turn_skill_activation(),
-            ProviderSameTurnSkillActivationSemantics::FilterUnactivatedSiblings
-        );
-        assert_eq!(
             generic.checkpoint_private_arguments(),
             ProviderCheckpointPrivateArgumentsSemantics::Reject
         );
@@ -676,10 +650,6 @@ mod tests {
             ProviderTerminalBatchSemantics::CloseWholeProviderTurn
         );
         assert_eq!(
-            deepseek.same_turn_skill_activation(),
-            ProviderSameTurnSkillActivationSemantics::PreserveAndGuardSiblings
-        );
-        assert_eq!(
             deepseek.checkpoint_private_arguments(),
             ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn
         );
@@ -695,13 +665,10 @@ mod tests {
             partial_trace: ProviderPartialTraceSemantics::IncrementalBaseline,
             tool_call_source: ProviderToolCallSourceSemantics::ProviderNativeOnly,
             terminal_batch: ProviderTerminalBatchSemantics::CloseWholeProviderTurn,
-            same_turn_skill_activation:
-                ProviderSameTurnSkillActivationSemantics::PreserveAndGuardSiblings,
             checkpoint_private_arguments:
                 ProviderCheckpointPrivateArgumentsSemantics::RehydrateFromAuthenticatedTurn,
         };
         assert!(independently_enabled.requires_provider_native_tool_calls());
-        assert!(independently_enabled.preserves_skill_activation_batch());
         assert!(independently_enabled.allows_encrypted_checkpoint_rehydration());
         let enabled_policy =
             independently_enabled.classify_turn(true, false, ReasoningMode::ProviderDefault);
@@ -718,12 +685,9 @@ mod tests {
             partial_trace: ProviderPartialTraceSemantics::DeferUntilProviderTurnClosed,
             tool_call_source: ProviderToolCallSourceSemantics::TextFallbackAllowed,
             terminal_batch: ProviderTerminalBatchSemantics::IndependentCalls,
-            same_turn_skill_activation:
-                ProviderSameTurnSkillActivationSemantics::FilterUnactivatedSiblings,
             checkpoint_private_arguments: ProviderCheckpointPrivateArgumentsSemantics::Reject,
         };
         assert!(!independently_disabled.requires_provider_native_tool_calls());
-        assert!(!independently_disabled.preserves_skill_activation_batch());
         assert!(!independently_disabled.allows_encrypted_checkpoint_rehydration());
         let disabled_policy =
             independently_disabled.classify_turn(true, false, ReasoningMode::ProviderDefault);

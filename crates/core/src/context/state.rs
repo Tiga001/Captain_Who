@@ -18,10 +18,7 @@ use crate::{ConversationModelContextItem, ConversationTurnTrace, WorldStateSnaps
 
 #[derive(Clone)]
 pub struct AgentContextWindowToolProjection {
-    stable_revision: String,
-    dynamic_revision: String,
-    effective_revision: String,
-    exposed_tool_names: Vec<String>,
+    tool_set: AgentRunToolSetCheckpoint,
     initial_run_world_state: WorldStateSnapshot,
     dynamic_definitions: Vec<AgentToolDefinition>,
 }
@@ -30,9 +27,9 @@ impl std::fmt::Debug for AgentContextWindowToolProjection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AgentContextWindowToolProjection")
-            .field("stable_revision", &self.stable_revision)
-            .field("dynamic_revision", &self.dynamic_revision)
-            .field("effective_revision", &self.effective_revision)
+            .field("stable_revision", &self.tool_set.stable_revision)
+            .field("dynamic_revision", &self.tool_set.dynamic_revision)
+            .field("effective_revision", &self.tool_set.effective_revision)
             .field(
                 "run_world_state_revision",
                 &self.initial_run_world_state.revision,
@@ -44,45 +41,34 @@ impl std::fmt::Debug for AgentContextWindowToolProjection {
 
 impl AgentContextWindowToolProjection {
     pub(crate) fn new(
-        stable_revision: String,
-        dynamic_revision: String,
-        effective_revision: String,
-        exposed_tool_names: Vec<String>,
+        tool_set: AgentRunToolSetCheckpoint,
         initial_run_world_state: WorldStateSnapshot,
         dynamic_definitions: Vec<AgentToolDefinition>,
     ) -> Self {
         Self {
-            stable_revision,
-            dynamic_revision,
-            effective_revision,
-            exposed_tool_names,
+            tool_set,
             initial_run_world_state,
             dynamic_definitions,
         }
     }
 
     pub fn stable_revision(&self) -> &str {
-        &self.stable_revision
+        &self.tool_set.stable_revision
     }
 
     pub fn dynamic_revision(&self) -> &str {
-        &self.dynamic_revision
+        &self.tool_set.dynamic_revision
     }
 
     pub fn effective_revision(&self) -> &str {
-        &self.effective_revision
+        &self.tool_set.effective_revision
     }
 
     /// Returns the exact Tool-set authority frozen by the same Host projection a real run uses.
     /// Approval recovery fixtures and Host persistence can reuse this instead of reproducing the
     /// registry hashing algorithm or hard-coding revision strings.
     pub fn tool_set_checkpoint(&self) -> AgentRunToolSetCheckpoint {
-        AgentRunToolSetCheckpoint {
-            stable_revision: self.stable_revision.clone(),
-            dynamic_revision: self.dynamic_revision.clone(),
-            effective_revision: self.effective_revision.clone(),
-            exposed_tool_names: self.exposed_tool_names.clone(),
-        }
+        self.tool_set.clone()
     }
 
     pub(crate) fn initial_run_world_state(&self) -> &WorldStateSnapshot {

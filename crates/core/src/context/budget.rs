@@ -412,11 +412,12 @@ impl ContextCapacityDetector {
         ))
     }
 
-    /// Estimates the assistant messages retained by `ToolCallBatch` after runtime filtering.
+    /// Estimates every assistant Tool Call retained by `ToolCallBatch`.
     ///
     /// The runtime stores parallel calls as adjacent one-call messages (only the first keeps the
     /// assistant narration), so measuring one synthetic multi-call message would undercount
-    /// structure and would charge calls discarded by a progressive-disclosure barrier.
+    /// structure. Calls emitted alongside `skills_activate` remain part of the batch; the frozen
+    /// ToolSet for that request remains the execution allowlist until the next model request.
     pub(crate) fn estimate_assistant_tool_batch_tokens(
         &self,
         content: &str,

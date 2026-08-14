@@ -34,6 +34,19 @@ impl StorageService {
         input: &CreateChildAgentInput,
         limits: AgentTreeResourceLimits,
     ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
+        self.create_child_agent_with_limits_and_expected_model_capabilities(input, limits, None)
+    }
+
+    /// Creates a child only if the selected model still has the capability fact exposed to the
+    /// caller at its sampling boundary. The comparison runs inside the same immediate transaction
+    /// that resolves settings and commits the child, closing the settings-change race without
+    /// adding model-editable capability input or another persistence column.
+    pub fn create_child_agent_with_limits_and_expected_model_capabilities(
+        &self,
+        input: &CreateChildAgentInput,
+        limits: AgentTreeResourceLimits,
+        expected_model_capabilities: Option<crate::ModelCapabilities>,
+    ) -> Result<ChildAgentSpawnRecord, ChildAgentSpawnError> {
         let limits = limits.validate()?;
         validate_spawn_input(input)?;
         let created_at = now_ms();
@@ -55,6 +68,10 @@ impl StorageService {
         .map_err(map_spawn_lookup_error)?
         {
             ensure_idempotent_spawn(&existing, input)?;
+            ensure_expected_model_capabilities(
+                existing.agent.model_snapshot.as_ref(),
+                expected_model_capabilities,
+            )?;
             // The snapshot repository owns comparison of the persisted logical-turn selector.
             ensure_existing_child_snapshot_selector(
                 &transaction,
@@ -87,6 +104,7 @@ impl StorageService {
                     reason,
                 }
             })?;
+        ensure_expected_model_capabilities(Some(&model_snapshot), expected_model_capabilities)?;
         validate_reasoning_effort(&settings, &selected_model_id, input.reasoning_effort)?;
 
         let child_agent_id = new_spawn_id("agent");
@@ -588,6 +606,26 @@ fn validate_reasoning_effort(
         || profile.reasoning.effort != requested
     {
         return Err(ChildAgentSpawnError::UnsupportedReasoningEffort(requested));
+    }
+    Ok(())
+}
+
+fn ensure_expected_model_capabilities(
+    model: Option<&crate::AgentModelSelectionSnapshot>,
+    expected: Option<crate::ModelCapabilities>,
+) -> Result<(), ChildAgentSpawnError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let model = model.ok_or(ChildAgentSpawnError::ModelUnavailable {
+        model_config_id: None,
+        reason: crate::AgentModelUnavailableReason::CapabilitiesChanged,
+    })?;
+    if model.supports_image != expected.image_input {
+        return Err(ChildAgentSpawnError::ModelUnavailable {
+            model_config_id: Some(model.model_config_id.clone()),
+            reason: crate::AgentModelUnavailableReason::CapabilitiesChanged,
+        });
     }
     Ok(())
 }

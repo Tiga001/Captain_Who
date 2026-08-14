@@ -92,15 +92,12 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
-#[cfg(test)]
-use tool_flow::enforce_skill_activation_barrier;
 use tool_flow::{
     approve_proposed_action, cancellation_preempts_tool_result, cancelled_output, done_event,
-    enforce_skill_activation_binding_barrier, execute_host_action_on_blocking_thread,
-    execute_registered_tool, extract_reason_from_args, failed_tool_call_result,
-    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
-    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
-    tool_call_bindings_from_response,
+    execute_host_action_on_blocking_thread, execute_registered_tool, extract_reason_from_args,
+    failed_tool_call_result, file_draft_from_tool_result, generate_run_id,
+    llm_image_message_from_tool_result, redact_tool_result_for_event, sanitize_max_tokens,
+    sanitize_temperature, state_event, tool_call_bindings_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -541,7 +538,7 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
-        if let Some(restored) = restored_checkpoint.as_ref() {
+        let restored_batch_tool_set = if let Some(restored) = restored_checkpoint.as_ref() {
             validate_resumed_tool_provenance(&setup_conversation_trace, &tool_registry).map_err(
                 |error| {
                     attach_failed_runtime_trace(
@@ -553,20 +550,27 @@ impl AgentRuntime {
                     )
                 },
             )?;
-            initial_tool_set
-                .validate_checkpoint(&restored.tool_set)
-                .map_err(|error| {
-                    attach_failed_runtime_trace(
-                        error,
-                        &setup_conversation_trace,
-                        &trace_run_id,
-                        trace_conversation_id.as_deref(),
-                        trace_assistant_message_id.as_deref(),
-                    )
-                })?;
-        }
+            Some(
+                initial_tool_set
+                    .restore_frozen_checkpoint(&restored.tool_set)
+                    .map_err(|error| {
+                        attach_failed_runtime_trace(
+                            error,
+                            &setup_conversation_trace,
+                            &trace_run_id,
+                            trace_conversation_id.as_deref(),
+                            trace_assistant_message_id.as_deref(),
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         let stable_tool_revision = initial_tool_set.stable_revision().to_string();
-        let mut effective_tool_set = initial_tool_set;
+        // A restored extension snapshot may already contain effects from siblings that completed
+        // before Approval. Keep draining the paused response under its request-boundary ToolSet;
+        // the loop recomputes from the newer extension state only at the next model boundary.
+        let mut effective_tool_set = restored_batch_tool_set.unwrap_or(initial_tool_set);
         let resumed_world_state_epoch = restored_checkpoint.is_some();
         let mut run_world_state = match restored_checkpoint.as_ref() {
             Some(restored) => RunWorldStateTracker::from_checkpoint(
@@ -1148,7 +1152,6 @@ impl AgentRuntime {
                         effective_tool_set.dynamic_definitions(),
                     );
                     let mut committed_message_stream_id = None;
-                    let mut committed_tool_input_preview = None;
                     let llm_response_result = if request.stream {
                         let delta_run_id = run_id.clone();
                         let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
@@ -1271,8 +1274,6 @@ impl AgentRuntime {
                                                 preview,
                                             );
                                         }
-                                        committed_tool_input_preview =
-                                            Some((stream_id.clone(), tool_input_stream.attempt()));
                                         if !user_text_blocked {
                                             committed_message_stream_id = Some(stream_id.clone());
                                         }
@@ -1353,23 +1354,6 @@ impl AgentRuntime {
                         &run_id,
                         model_request_index,
                     );
-                    let grouped_turn_skill_activation_barrier = provider_runtime_capabilities
-                        .preserves_skill_activation_batch()
-                        && tool_bindings
-                            .iter()
-                            .any(|binding| binding.runtime_call.name == "skills_activate");
-                    let (tool_bindings, deferred_for_skill_activation) =
-                        if grouped_turn_skill_activation_barrier {
-                            let deferred = tool_bindings
-                                .iter()
-                                .filter(|binding| {
-                                    binding.runtime_call.name != "skills_activate"
-                                })
-                                .count();
-                            (tool_bindings, deferred)
-                        } else {
-                            enforce_skill_activation_binding_barrier(tool_bindings)
-                        };
                     let tool_requests = tool_bindings
                         .iter()
                         .map(|binding| binding.runtime_call.clone())
@@ -1381,26 +1365,12 @@ impl AgentRuntime {
                     };
                     let suppressed_narration =
                         user_text_blocked && !response_content.trim().is_empty();
-                    let deferred_activation_guard =
-                        (deferred_for_skill_activation > 0).then(|| {
-                            format!(
-                                "The runtime deferred {deferred_for_skill_activation} tool call(s) that were planned in the same response as skills_activate. Re-evaluate those actions after the Skill activation results and complete instructions are available."
-                            )
-                        });
                     if let Some(detector) = &context_capacity_detector {
                         let mut retained_tokens = detector
                             .estimate_assistant_tool_batch_tokens(
                                 retained_assistant_content,
                                 &tool_requests,
                             );
-                        if let Some(guard) = &deferred_activation_guard {
-                            retained_tokens = retained_tokens.saturating_add(
-                                detector.estimate_message_tokens(&LlmMessage::text(
-                                    LlmMessageRole::System,
-                                    guard,
-                                )),
-                            );
-                        }
                         if suppressed_narration {
                             for message in ContextFrame::new(vec![
                                 suppressed_narration_context_item(),
@@ -1414,12 +1384,6 @@ impl AgentRuntime {
                         }
                         runtime_extensions.consume_model_input_capacity(retained_tokens);
                     }
-                    clear_deferred_tool_input_preview(
-                        &event_stream,
-                        &run_id,
-                        deferred_for_skill_activation,
-                        &mut committed_tool_input_preview,
-                    );
                     let committed_narration_sequence = if !tool_requests.is_empty()
                         && !user_text_blocked
                         && !response_content.trim().is_empty()
@@ -1511,15 +1475,6 @@ impl AgentRuntime {
                         return Err(AgentError::new(message));
                     }
 
-                    if let Some(guard) = deferred_activation_guard {
-                        active_context.push(ContextItem::text(
-                            LlmMessageRole::System,
-                            guard,
-                            ContextSource::RuntimeGuard,
-                            ContextScope::Run,
-                            ContextRetention::Retained,
-                        ));
-                    }
                     assistant_turn.set_runtime_visible_text(retained_assistant_content);
                     if assistant_turn.provider_tool_calls().is_empty() && !tool_bindings.is_empty()
                     {
@@ -1706,9 +1661,6 @@ impl AgentRuntime {
                                 provider_protocol: llm_request.provider_protocol_key.clone(),
                             });
                     }
-                    if grouped_turn_skill_activation_barrier {
-                        tool_batch.mark_skill_activation_barrier();
-                    }
                 }
 
                 let mut pending_assistant_context =
@@ -1761,8 +1713,6 @@ impl AgentRuntime {
                     let model_context_provider_identity =
                         cancellation_queued_tool_call.provider_identity()?;
                     let batch_claim = tool_batch.claim(&queued_tool_call.call);
-                    let deferred_by_skill_activation =
-                        queued_tool_call.deferred_by_skill_activation;
                     let tool_exchange_group = queued_tool_call.context_group();
                     // Durable model context intentionally keeps the Generic adapter's historical
                     // one-assistant-per-call wire shape. The live Context owns one complete Turn,
@@ -1808,24 +1758,6 @@ impl AgentRuntime {
                         },
                     );
                     let is_mcp_tool = matches!(&tool_identity, AgentToolIdentity::Mcp { .. });
-
-                    if deferred_by_skill_activation {
-                        policy_preflight_failure = Some(failed_tool_call_result(
-                            &call,
-                            AgentError::structured(
-                                "agent.skill_activation_boundary",
-                                "该工具调用与 Skill 激活出现在同一响应中，未执行；请在读取完整 Skill 指令后重新评估。",
-                                json!({
-                                    "type": "runtimeGuard",
-                                    "code": "skillActivationBoundary",
-                                    "recovery": "reEvaluateAfterSkillActivation",
-                                    "executed": false
-                                }),
-                            ),
-                        ));
-                        requires_approval = false;
-                        call.approval_status = AgentApprovalStatus::NotRequired;
-                    }
 
                     if let ToolCallBatchClaim::Duplicate {
                         semantic_fingerprint,
@@ -4049,28 +3981,6 @@ fn replace_runtime_attachment_library(
     });
     context.attachment_library = Some(library.clone());
     tool_context.replace_attachment_library(library);
-}
-
-fn clear_deferred_tool_input_preview(
-    event_stream: &AgentEventStream,
-    run_id: &str,
-    deferred_call_count: usize,
-    committed_preview: &mut Option<(String, usize)>,
-) {
-    if deferred_call_count == 0 {
-        return;
-    }
-    let Some((stream_id, attempt)) = committed_preview.take() else {
-        return;
-    };
-    // The activation barrier discards every non-activation call from this model response. Any
-    // streamed write preview belongs to one of those discarded calls and must not survive into
-    // the replanning request.
-    event_stream.emit_transient(AgentEvent::FileWritePreviewCleared {
-        run_id: run_id.to_string(),
-        stream_id,
-        attempt,
-    });
 }
 
 struct ToolResultArchiveRequest<'a> {

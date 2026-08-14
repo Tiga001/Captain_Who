@@ -762,13 +762,7 @@ pub fn prepare_context_window_tool_projection(
     .snapshot()
     .clone();
     Ok(AgentContextWindowToolProjection::new(
-        capabilities.initial_tool_set.stable_revision().to_string(),
-        capabilities.initial_tool_set.dynamic_revision().to_string(),
-        capabilities.initial_tool_set.revision().to_string(),
-        capabilities
-            .initial_tool_set
-            .checkpoint()
-            .exposed_tool_names,
+        capabilities.initial_tool_set.checkpoint(),
         initial_run_world_state,
         capabilities.initial_tool_set.dynamic_definitions().to_vec(),
     ))

@@ -430,6 +430,7 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     let mut second_model = settings.models[0].clone();
     second_model.id = "model-2".to_string();
     second_model.display_name = "Model 2".to_string();
+    second_model.supports_image = true;
     settings.models.push(second_model);
     storage.save_model_settings(settings).unwrap();
     storage
@@ -555,6 +556,10 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     assert!(first_root_text.contains("\"agentType\":\"reviewer\""));
     assert!(first_root_text.contains("\"modelConfigId\":\"model-1\""));
     assert!(first_root_text.contains("\"modelConfigId\":\"model-2\""));
+    assert!(first_root_text.contains("\"defaultModelCapabilities\":{\"imageInput\":false}"));
+    assert!(first_root_text.contains(
+        "\"modelConfigId\":\"model-2\",\"displayName\":\"Model 2\",\"capabilities\":{\"imageInput\":true}"
+    ));
     assert!(!first_root_text.contains("PRIVATE_TEMPLATE_INSTRUCTION"));
     for secret_key in [
         "must-not-enter-selector-directory",
@@ -571,6 +576,8 @@ async fn fake_provider_drives_all_six_tools_through_runtime_host_and_server_serv
     assert_eq!(final_results.len(), 8, "root tool chain={final_results:#?}");
     assert!(final_results[0]["childAgentId"].is_string());
     assert!(final_results[1]["childAgentId"].is_string());
+    assert_eq!(final_results[0]["modelCapabilities"]["imageInput"], false);
+    assert_eq!(final_results[1]["modelCapabilities"]["imageInput"], true);
     assert!(final_results[2]["messageId"].is_string());
     assert!(final_results[3]["messageId"].is_string());
     assert!(final_results[4]["agents"].is_array());

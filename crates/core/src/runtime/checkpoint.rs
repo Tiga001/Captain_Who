@@ -56,7 +56,6 @@ pub(super) struct QueuedToolCall {
     pub(super) checkpoint_persistence: AgentToolCallCheckpointPersistence,
     pub(super) assistant_content: String,
     pub(super) group_id: String,
-    pub(super) deferred_by_skill_activation: bool,
 }
 
 impl QueuedToolCall {
@@ -179,7 +178,6 @@ impl ToolCallBatch {
                         String::new()
                     },
                     group_id: format!("run:{run_id}:tool-exchange:{}", model_request_index + 1),
-                    deferred_by_skill_activation: false,
                 })
             })
             .collect::<AgentResult<VecDeque<_>>>()?;
@@ -324,15 +322,6 @@ impl ToolCallBatch {
         Ok(())
     }
 
-    /// Keeps the complete Provider turn while preventing calls planned before newly activated
-    /// Skill instructions were available from executing. This policy belongs to the batch and
-    /// is copied into approval checkpoints, so a restart cannot lose the guard.
-    pub(super) fn mark_skill_activation_barrier(&mut self) {
-        for queued in &mut self.queue {
-            queued.deferred_by_skill_activation = queued.call.name != "skills_activate";
-        }
-    }
-
     pub(super) fn context_group(&self) -> Option<ContextGroup> {
         self.queue.front().map(QueuedToolCall::context_group)
     }
@@ -398,6 +387,12 @@ impl ToolCallBatch {
                 "加密 Provider Turn 与审批检查点的完整身份不一致。",
             ));
         }
+        // `ContextFrame::restore_provider_assistant_turn` replaces the durable split projection
+        // with this exact authenticated Provider Turn and unifies its existing Tool results under
+        // the same semantic exchange group. Queued siblings must use that group too; retaining the
+        // pre-hydration checkpoint group would make a correctly ordered resumed result fail the
+        // complete Tool protocol at the next request boundary.
+        let authenticated_group_id = format!("provider-turn:{}", turn.stable_id());
         let bindings = turn
             .runtime_tool_bindings()
             .ok_or_else(|| AgentError::new("加密 Provider Turn 缺少 Runtime Tool Call 映射。"))?;
@@ -433,6 +428,7 @@ impl ToolCallBatch {
             queued.call = binding.runtime_call.clone();
             queued.checkpoint_call = checkpoint_call;
             queued.checkpoint_persistence = checkpoint_persistence;
+            queued.group_id = authenticated_group_id.clone();
         }
         Ok(())
     }
@@ -1244,7 +1240,6 @@ fn queued_tool_call_checkpoint(
         group_id: call.group_id.clone(),
         assistant_turn_id: assistant_turn_id.to_string(),
         provider_tool_index: u32::try_from(call.provider_tool_index).unwrap_or(u32::MAX),
-        deferred_by_skill_activation: call.deferred_by_skill_activation,
     })
 }
 
@@ -1379,7 +1374,6 @@ fn restore_queued_tool_calls(
                 checkpoint_persistence: AgentToolCallCheckpointPersistence::Allowed,
                 assistant_content: queued.assistant_content,
                 group_id: queued.group_id,
-                deferred_by_skill_activation: queued.deferred_by_skill_activation,
             })
         })
         .collect()
@@ -1603,7 +1597,6 @@ mod tests {
             checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
             assistant_content: String::new(),
             group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
-            deferred_by_skill_activation: false,
         };
 
         let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test", false).unwrap_err();
@@ -1638,7 +1631,6 @@ mod tests {
             checkpoint_persistence: AgentToolCallCheckpointPersistence::DeniedMcp,
             assistant_content: String::new(),
             group_id: "run:checkpoint-validation-run:tool-exchange:1:2".to_string(),
-            deferred_by_skill_activation: false,
         };
 
         let error = queued_tool_call_checkpoint(&queued, "assistant-turn-test", false).unwrap_err();
@@ -1650,41 +1642,6 @@ mod tests {
         assert!(!error
             .details()
             .is_some_and(|details| details.to_string().contains(secret)));
-    }
-
-    #[test]
-    fn deepseek_skill_activation_barrier_is_bound_to_each_queued_checkpoint_call() {
-        let registry = ToolRegistry::defaults_with_search(None);
-        let calls = vec![
-            LlmToolCall {
-                id: canonical_test_call_id(0, "activate-skill"),
-                name: "skills_activate".to_string(),
-                args: json!({ "skills": ["presentations"] }),
-            },
-            LlmToolCall {
-                id: canonical_test_call_id(1, "premature-read"),
-                name: "read_file".to_string(),
-                args: json!({ "path": "README.md" }),
-            },
-        ];
-        let mut batch = ToolCallBatch::from_model_response(
-            "run-skill-activation-boundary",
-            0,
-            String::new(),
-            calls,
-            false,
-            |call| (call.clone(), registry.checkpoint_persistence(&call.name)),
-        );
-        batch.mark_skill_activation_barrier();
-        let activation = batch.pop_front().expect("activation call");
-        let deferred = batch.pop_front().expect("deferred call");
-        assert!(!activation.deferred_by_skill_activation);
-        assert!(deferred.deferred_by_skill_activation);
-
-        let checkpoint = queued_tool_call_checkpoint(&deferred, "assistant-turn", true).unwrap();
-        let json = serde_json::to_string(&checkpoint).unwrap();
-        let restored: AgentQueuedToolCallCheckpoint = serde_json::from_str(&json).unwrap();
-        assert!(restored.deferred_by_skill_activation);
     }
 
     #[test]
@@ -1718,6 +1675,10 @@ mod tests {
             },
         );
         let authenticated_turn = batch.take_assistant_turn().unwrap();
+        let authenticated_group = ContextGroup::tool_exchange(format!(
+            "provider-turn:{}",
+            authenticated_turn.stable_id()
+        ));
         pop_test_call(&mut batch, &pending.id);
 
         let safe_checkpoint = queued_tool_call_checkpoint(
@@ -1749,6 +1710,10 @@ mod tests {
         assert_eq!(
             batch.queue.front().unwrap().checkpoint_persistence,
             AgentToolCallCheckpointPersistence::DeniedMcp
+        );
+        assert_eq!(
+            batch.queue.front().unwrap().context_group(),
+            authenticated_group
         );
     }
 
@@ -2003,6 +1968,16 @@ mod tests {
             .insert("providerPolicy".to_string(), json!(true));
         assert!(serde_json::from_value::<AgentRunCheckpoint>(extra_capability).is_err());
 
+        let mut missing_batch_capabilities = canonical.clone();
+        missing_batch_capabilities["toolSet"]
+            .as_object_mut()
+            .unwrap()
+            .remove("activeCapabilityIds");
+        assert!(
+            serde_json::from_value::<AgentRunCheckpoint>(missing_batch_capabilities).is_err(),
+            "v9 must freeze the request-boundary capability set separately from post-effect extension state"
+        );
+
         let mut extra_world_state = canonical.clone();
         extra_world_state["runWorldState"]
             .as_object_mut()
@@ -2074,14 +2049,14 @@ mod tests {
             .insert("continuationPolicy".to_string(), json!("forged"));
         assert!(serde_json::from_value::<AgentRunCheckpoint>(extra_context).is_err());
 
-        let mut missing_queued_field = canonical.clone();
-        missing_queued_field["queuedToolCalls"][0]
+        let mut legacy_skill_barrier = canonical.clone();
+        legacy_skill_barrier["queuedToolCalls"][0]
             .as_object_mut()
             .unwrap()
-            .remove("deferredBySkillActivation");
+            .insert("deferredBySkillActivation".to_string(), json!(true));
         assert!(
-            serde_json::from_value::<AgentRunCheckpoint>(missing_queued_field).is_err(),
-            "the current queued Tool Call shape must be complete"
+            serde_json::from_value::<AgentRunCheckpoint>(legacy_skill_barrier).is_err(),
+            "the v9 queued Tool Call shape must reject the retired activation barrier"
         );
 
         let mut extra = canonical;
@@ -2103,6 +2078,7 @@ mod tests {
             vec![crate::AgentCollaborationModelSelector {
                 model_config_id: "model-visible-before-approval".to_string(),
                 display_name: "Visible before approval".to_string(),
+                capabilities: ModelCapabilities { image_input: true },
             }],
         );
         let frozen_snapshot = crate::AgentCollaborationRunSnapshot {
@@ -2111,6 +2087,21 @@ mod tests {
         };
         checkpoint.tool_set = collaboration_tool_set().checkpoint();
         checkpoint.collaboration_run_snapshot = Some(frozen_snapshot.clone());
+        checkpoint.model_capabilities = ModelCapabilities { image_input: true };
+        checkpoint.run_world_state = test_run_world_state_for(true);
+
+        let checkpoint_json = serde_json::to_value(&checkpoint).unwrap();
+        assert_eq!(
+            checkpoint_json["collaborationRunSnapshot"]["selectorDirectory"]["models"][0]
+                ["capabilities"]["imageInput"],
+            true
+        );
+        let mut missing_capability = checkpoint_json;
+        missing_capability["collaborationRunSnapshot"]["selectorDirectory"]["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("capabilities");
+        assert!(serde_json::from_value::<AgentRunCheckpoint>(missing_capability).is_err());
 
         let serialized = serde_json::to_vec(&checkpoint).unwrap();
         let checkpoint: AgentRunCheckpoint = serde_json::from_slice(&serialized).unwrap();
@@ -2119,6 +2110,10 @@ mod tests {
         assert_eq!(
             restored.collaboration_run_snapshot.as_ref(),
             Some(&frozen_snapshot)
+        );
+        assert_eq!(
+            restored.model_capabilities,
+            ModelCapabilities { image_input: true }
         );
 
         let current_services = crate::AgentCollaborationRuntimeServices::new(
@@ -2129,6 +2124,7 @@ mod tests {
                 vec![crate::AgentCollaborationModelSelector {
                     model_config_id: "model-added-during-approval".to_string(),
                     display_name: "Added during approval".to_string(),
+                    capabilities: ModelCapabilities { image_input: false },
                 }],
             ),
         )
@@ -2142,6 +2138,10 @@ mod tests {
         let authorization = current_services.selector_authorization();
         assert!(authorization.allows_model_config_id("model-visible-before-approval"));
         assert!(!authorization.allows_model_config_id("model-added-during-approval"));
+        assert_eq!(
+            authorization.expected_model_capabilities(None, Some("model-visible-before-approval")),
+            Some(ModelCapabilities { image_input: true })
+        );
         assert!(!current_services.try_admit_wait_model_batch(3).unwrap());
         assert!(current_services.try_admit_wait_model_batch(4).unwrap());
     }
@@ -2256,6 +2256,23 @@ mod tests {
         ));
 
         assert!(error.to_string().contains("不支持版本 2"));
+        assert!(error
+            .to_string()
+            .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
+    }
+
+    #[test]
+    fn checkpoint_v8_skill_barrier_shape_is_rejected_instead_of_reinterpreted() {
+        let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+        checkpoint.version = 8;
+
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint,
+            "checkpoint-validation-run",
+            &continuation,
+        ));
+
+        assert!(error.to_string().contains("不支持版本 8"));
         assert!(error
             .to_string()
             .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
@@ -2965,18 +2982,27 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_round_trip_closes_pending_exchange_and_restores_queue() {
+    fn checkpoint_round_trip_preserves_skill_activation_siblings_behind_approval() {
         let pending = LlmToolCall {
             id: canonical_test_call_id(0, "round-trip-pending"),
             name: "write_file".to_string(),
             args: json!({ "phase": "finish" }),
         };
-        let queued_call_id = canonical_test_call_id(1, "round-trip-queued");
+        let activation_call_id = canonical_test_call_id(1, "round-trip-activate");
+        let queued_call_id = canonical_test_call_id(2, "round-trip-queued");
         let (mut batch, assistant_item) = test_batch_and_context_item(
             "run-1",
             "",
             vec![
                 pending.clone(),
+                LlmToolCall {
+                    id: activation_call_id.clone(),
+                    name: "skills_activate".to_string(),
+                    args: json!({
+                        "skillRef": "s_000000000000000000000000",
+                        "reason": "Use the frozen Skill selection after approval"
+                    }),
+                },
                 LlmToolCall {
                     id: queued_call_id.clone(),
                     name: "read_file".to_string(),
@@ -3038,9 +3064,13 @@ mod tests {
 
         restored
             .context
-            .validate_pending_tool_batch(&queued_call_id, &[])
+            .validate_pending_tool_batch(&activation_call_id, std::slice::from_ref(&queued_call_id))
             .unwrap();
         assert_eq!(restored.next_model_request_index, 1);
+        assert!(!restored.tool_batch.take_suppressed_narration());
+        let activation = restored.tool_batch.pop_front().unwrap();
+        assert_eq!(activation.call.id, activation_call_id);
+        assert_eq!(activation.call.name, "skills_activate");
         assert!(!restored.tool_batch.take_suppressed_narration());
         let queued = restored.tool_batch.pop_front().unwrap();
         assert_eq!(queued.call.id, queued_call_id);

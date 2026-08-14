@@ -592,6 +592,8 @@ pub enum AgentModelUnavailableReason {
     MissingConnectionIdentity,
     MissingProtocolIdentity,
     UnsupportedRuntime,
+    /// The model's capability metadata changed after the caller sampled a selector directory.
+    CapabilitiesChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

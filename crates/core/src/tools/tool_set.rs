@@ -310,8 +310,44 @@ impl EffectiveToolSet {
             stable_revision: self.stable_revision.clone(),
             dynamic_revision: self.dynamic_revision.clone(),
             effective_revision: self.revision.clone(),
+            active_capability_ids: self
+                .active_capabilities
+                .iter()
+                .map(|capability| capability.as_str().to_string())
+                .collect(),
             exposed_tool_names: self.exposed_names.iter().cloned().collect(),
         }
+    }
+
+    /// Rebuilds the exact request-boundary contract for a paused Tool batch from the current
+    /// trusted registry and permission-filtered definitions.
+    ///
+    /// Extension snapshots are intentionally allowed to be newer: a preceding sibling may have
+    /// successfully activated a Skill before a later sibling paused for Approval. The checkpoint
+    /// capability set must still be a subset of that restored extension authority, and every
+    /// revision/name is recomputed before any queued call can execute.
+    pub(crate) fn restore_frozen_checkpoint(
+        &self,
+        checkpoint: &AgentRunToolSetCheckpoint,
+    ) -> AgentResult<Self> {
+        validate_tool_set_checkpoint_shape(checkpoint)?;
+        let frozen_capabilities = checkpoint
+            .active_capability_ids
+            .iter()
+            .cloned()
+            .map(ToolCapabilityId::parse)
+            .collect::<AgentResult<BTreeSet<_>>>()?;
+        if !frozen_capabilities.is_subset(&self.active_capabilities) {
+            return Err(tool_set_checkpoint_mismatch(checkpoint, self));
+        }
+        let frozen = Self::from_validated_parts(
+            self.permitted_definitions.clone(),
+            self.registered_exposures.clone(),
+            self.registered_identities.clone(),
+            frozen_capabilities,
+        )?;
+        frozen.validate_checkpoint(checkpoint)?;
+        Ok(frozen)
     }
 
     pub(crate) fn validate_checkpoint(
@@ -323,26 +359,41 @@ impl EffectiveToolSet {
             || checkpoint.dynamic_revision != self.dynamic_revision
             || checkpoint.effective_revision != self.revision
             || checkpoint
+                .active_capability_ids
+                .iter()
+                .map(String::as_str)
+                .ne(self
+                    .active_capabilities
+                    .iter()
+                    .map(ToolCapabilityId::as_str))
+            || checkpoint
                 .exposed_tool_names
                 .iter()
                 .ne(self.exposed_names.iter())
         {
-            return Err(AgentError::structured(
-                "agent.checkpoint_tool_set_mismatch",
-                "无法恢复运行检查点：当前工具集与暂停时冻结的工具集不一致。",
-                serde_json::json!({
-                    "type": "checkpoint",
-                    "code": "toolSetMismatch",
-                    "recovery": "restartRun",
-                    "expectedStableRevision": checkpoint.stable_revision,
-                    "actualStableRevision": self.stable_revision,
-                    "expectedDynamicRevision": checkpoint.dynamic_revision,
-                    "actualDynamicRevision": self.dynamic_revision,
-                }),
-            ));
+            return Err(tool_set_checkpoint_mismatch(checkpoint, self));
         }
         Ok(())
     }
+}
+
+fn tool_set_checkpoint_mismatch(
+    checkpoint: &AgentRunToolSetCheckpoint,
+    actual: &EffectiveToolSet,
+) -> AgentError {
+    AgentError::structured(
+        "agent.checkpoint_tool_set_mismatch",
+        "无法恢复运行检查点：当前工具集与暂停时冻结的工具集不一致。",
+        serde_json::json!({
+            "type": "checkpoint",
+            "code": "toolSetMismatch",
+            "recovery": "restartRun",
+            "expectedStableRevision": checkpoint.stable_revision,
+            "actualStableRevision": actual.stable_revision,
+            "expectedDynamicRevision": checkpoint.dynamic_revision,
+            "actualDynamicRevision": actual.dynamic_revision,
+        }),
+    )
 }
 
 /// Capability expectations for application-owned dynamic Tools whose concrete implementation is
@@ -371,6 +422,14 @@ pub(crate) fn validate_tool_set_checkpoint_shape(
         || checkpoint.dynamic_revision.trim().is_empty()
         || checkpoint.effective_revision.trim().is_empty()
         || checkpoint
+            .active_capability_ids
+            .iter()
+            .any(|capability| ToolCapabilityId::parse(capability.clone()).is_err())
+        || !checkpoint
+            .active_capability_ids
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || checkpoint
             .exposed_tool_names
             .iter()
             .any(|name| name.trim().is_empty() || name.trim() != name)
@@ -380,7 +439,7 @@ pub(crate) fn validate_tool_set_checkpoint_shape(
             .all(|pair| pair[0] < pair[1])
     {
         return Err(AgentError::new(
-            "无法恢复运行检查点：冻结工具集缺少 revision，或工具名不是有序唯一集合。",
+            "无法恢复运行检查点：冻结工具集缺少 revision，或 capability/tool 不是有序唯一集合。",
         ));
     }
     Ok(())
@@ -575,6 +634,32 @@ mod tests {
         assert_eq!(projected.dynamic_revision(), with.dynamic_revision());
         assert_eq!(projected.revision(), with.revision());
         with.validate_checkpoint(&with.checkpoint()).unwrap();
+
+        let frozen_before_activation = without.checkpoint();
+        let restored_batch = with
+            .restore_frozen_checkpoint(&frozen_before_activation)
+            .expect("post-effect authority must restore the earlier request ToolSet exactly");
+        assert_eq!(restored_batch.checkpoint(), frozen_before_activation);
+        assert!(!restored_batch.contains("a_dynamic"));
+        assert!(with.contains("a_dynamic"));
+
+        let mut forged_capability = frozen_before_activation.clone();
+        forged_capability.active_capability_ids = vec!["skill.forged".to_string()];
+        let error = with
+            .restore_frozen_checkpoint(&forged_capability)
+            .unwrap_err();
+        assert_eq!(error.code(), Some("agent.checkpoint_tool_set_mismatch"));
+
+        let mut duplicate_capability = with.checkpoint();
+        duplicate_capability.active_capability_ids = vec![
+            OFFICE_DOCUMENTS_CAPABILITY.to_string(),
+            OFFICE_DOCUMENTS_CAPABILITY.to_string(),
+        ];
+        assert!(validate_tool_set_checkpoint_shape(&duplicate_capability).is_err());
+        let mut unsorted_capabilities = with.checkpoint();
+        unsorted_capabilities.active_capability_ids =
+            vec!["skill.z".to_string(), "skill.a".to_string()];
+        assert!(validate_tool_set_checkpoint_shape(&unsorted_capabilities).is_err());
 
         let mut tampered = with.checkpoint();
         tampered.exposed_tool_names.pop();

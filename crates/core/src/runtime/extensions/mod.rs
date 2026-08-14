@@ -758,6 +758,7 @@ mod tests {
                     stable_revision: "stable-tool-set-v1:test".to_string(),
                     dynamic_revision: "dynamic-tool-set-v1:test".to_string(),
                     effective_revision: "effective-tool-set-v1:test".to_string(),
+                    active_capability_ids: Vec::new(),
                     exposed_tool_names: Vec::new(),
                 },
                 run_context: None,

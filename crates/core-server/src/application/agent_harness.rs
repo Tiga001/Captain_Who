@@ -182,6 +182,9 @@ impl AgentCollaborationHarnessAdapter {
                     .map(|model| AgentCollaborationModelSelector {
                         model_config_id: model.id.clone(),
                         display_name: model.display_name.clone(),
+                        capabilities: mycopilot_core::ModelCapabilities {
+                            image_input: model.supports_image,
+                        },
                     })
                     .collect::<Vec<_>>()
             })
@@ -201,6 +204,9 @@ impl AgentCollaborationHarnessAdapter {
                             name: template.name,
                             description: template.description,
                             model_display_name: resolved.model.display_name,
+                            default_model_capabilities: mycopilot_core::ModelCapabilities {
+                                image_input: resolved.model.supports_image,
+                            },
                         })
                 })
                 .collect(),
@@ -281,31 +287,50 @@ impl AgentCollaborationHarnessAdapter {
                     &invocation.selector_authorization,
                     &request,
                 )?;
+                let expected_model_capabilities = invocation
+                    .selector_authorization
+                    .expected_model_capabilities(
+                        request.agent_type.as_deref(),
+                        request.model_config_id.as_deref(),
+                    )
+                    .or_else(|| {
+                        (request.agent_type.is_none() && request.model_config_id.is_none())
+                            .then_some(invocation.caller_model_capabilities)
+                    });
                 self.authorizer
                     .authorize_spawn(&caller.agent_id)
                     .and_then(|_| self.authorizer.authorize_message_size(&request.message))
                     .map_err(authorizer_error)?;
                 let child = ChildAgentFactory::new(Arc::clone(&self.storage))
-                    .create_child(&CreateChildAgentInput {
-                        parent_agent_id: caller.agent_id.clone(),
-                        creation_request_id: request_id,
-                        task_name: request.task_name,
-                        task: request.message,
-                        template_machine_key: request.agent_type,
-                        explicit_model_id: request.model_config_id,
-                        reasoning_effort: request.reasoning_effort,
-                        fork_turns: request.fork_turns,
-                    })
+                    .create_child_with_expected_model_capabilities(
+                        &CreateChildAgentInput {
+                            parent_agent_id: caller.agent_id.clone(),
+                            creation_request_id: request_id,
+                            task_name: request.task_name,
+                            task: request.message,
+                            template_machine_key: request.agent_type,
+                            explicit_model_id: request.model_config_id,
+                            reasoning_effort: request.reasoning_effort,
+                            fork_turns: request.fork_turns,
+                        },
+                        expected_model_capabilities,
+                    )
                     .map_err(spawn_error)?;
                 self.notify_work_available()?;
+                let model = child.agent.model_snapshot.ok_or_else(|| {
+                    collaboration_error(
+                        "conflict",
+                        false,
+                        "Spawned child is missing its frozen model snapshot.".to_string(),
+                    )
+                })?;
                 AgentCollaborationToolResult::Spawned {
                     child_agent_id: child.agent.agent_id,
                     task_path: child.agent.task_path,
-                    model_display_name: child
-                        .agent
-                        .model_snapshot
-                        .map(|model| model.display_name)
-                        .unwrap_or_else(|| "Unavailable".to_string()),
+                    model_display_name: model.display_name,
+                    model_capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: model.supports_image,
+                    },
                     status: AgentDisplayStatus::Queued,
                 }
             }
@@ -726,12 +751,18 @@ mod tests {
                     name: format!("Type {index:02}"),
                     description: "Fixture".to_string(),
                     model_display_name: "Model".to_string(),
+                    default_model_capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: index % 2 == 0,
+                    },
                 })
                 .collect(),
             (0..34)
                 .map(|index| AgentCollaborationModelSelector {
                     model_config_id: format!("model-{index:02}"),
                     display_name: format!("Model {index:02}"),
+                    capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: index % 2 == 0,
+                    },
                 })
                 .collect(),
         );
@@ -870,6 +901,7 @@ mod tests {
             .unwrap();
         assert!(before.selector_directory.templates.is_empty());
         assert_eq!(before.selector_directory.models.len(), 1);
+        assert!(!before.selector_directory.models[0].capabilities.image_input);
 
         let template = storage
             .create_agent_template(&CreateAgentTemplateInput {
@@ -890,6 +922,11 @@ mod tests {
         assert_eq!(
             enabled.selector_directory.templates[0].agent_type,
             "reviewer"
+        );
+        assert!(
+            !enabled.selector_directory.templates[0]
+                .default_model_capabilities
+                .image_input
         );
         let encoded = serde_json::to_string(&enabled.selector_directory).unwrap();
         assert!(!encoded.contains("PRIVATE_CATALOG_INSTRUCTIONS"));
@@ -950,8 +987,11 @@ mod tests {
         let stale_after_sampling = adapter
             .execute(
                 AgentCollaborationInvocation {
-                    caller: frozen_caller,
-                    selector_authorization: frozen_authorization,
+                    caller: frozen_caller.clone(),
+                    selector_authorization: frozen_authorization.clone(),
+                    caller_model_capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: false,
+                    },
                     effective_permissions: mycopilot_core::AgentPermissions::default(),
                     conversation_id: "conversation-catalog".to_string(),
                     run_id: "run-stale-after-sampling".to_string(),
@@ -977,15 +1017,69 @@ mod tests {
         );
         assert_eq!(stale_after_sampling.details().unwrap()["retryable"], false);
 
+        // A selector-less spawn inherits the caller Conversation's model. Its capability is still
+        // frozen in the caller's Run/World State, so changing image support before Host execution
+        // must fail inside the atomic spawn transaction rather than create a different child.
+        let mut changed_settings = storage.load_model_settings().unwrap().unwrap();
+        changed_settings.models[0].supports_image = true;
+        storage.save_model_settings(changed_settings).unwrap();
+        let changed_capabilities = adapter
+            .execute(
+                AgentCollaborationInvocation {
+                    caller: frozen_caller,
+                    selector_authorization: frozen_authorization,
+                    caller_model_capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: false,
+                    },
+                    effective_permissions: mycopilot_core::AgentPermissions::default(),
+                    conversation_id: "conversation-catalog".to_string(),
+                    run_id: "run-stale-after-sampling".to_string(),
+                    assistant_message_id: "assistant-stale-after-sampling".to_string(),
+                    model_batch_index: 2,
+                    tool_call_id: "call-capability-changed-after-sampling".to_string(),
+                    action: AgentCollaborationAction::Spawn(AgentSpawnRequest {
+                        task_name: "capability_changed".to_string(),
+                        message: "Use the exact sampled model capability.".to_string(),
+                        agent_type: None,
+                        model_config_id: None,
+                        reasoning_effort: None,
+                        fork_turns: AgentForkTurns::None,
+                    }),
+                },
+                AgentCollaborationExecutionControl::new(AgentCancellationToken::new(), None),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            changed_capabilities.code(),
+            Some("agent.collaboration.unavailable")
+        );
+        assert!(changed_capabilities
+            .to_string()
+            .contains("CapabilitiesChanged"));
+        let root = storage
+            .get_agent_node_by_conversation("conversation-catalog")
+            .unwrap()
+            .expect("the attempted root collaboration call materializes only the root");
+        assert_eq!(storage.list_agent_tree(&root.agent_id).unwrap().len(), 1);
+
         let runtime = adapter
             .runtime_services_for_conversation("conversation-catalog")
             .unwrap();
+        assert!(
+            runtime.selector_directory.models[0]
+                .capabilities
+                .image_input
+        );
         let selector_authorization = runtime.selector_authorization();
         let error = adapter
             .execute(
                 AgentCollaborationInvocation {
                     caller: runtime.caller,
                     selector_authorization,
+                    caller_model_capabilities: mycopilot_core::ModelCapabilities {
+                        image_input: true,
+                    },
                     effective_permissions: mycopilot_core::AgentPermissions::default(),
                     conversation_id: "conversation-catalog".to_string(),
                     run_id: "run-stale-after-sampling".to_string(),

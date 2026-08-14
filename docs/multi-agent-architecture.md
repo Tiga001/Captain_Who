@@ -562,14 +562,21 @@ Dispatcher、RPC 或 UI。只有 Host 注入可信 `AgentCollaborationCaller` �
   Conversation 或历史。不增加第七个工具。
 
 Host 每个 Turn 提供当时快照的脱敏 selector 目录：已启用模板的 machine key/名称/简介/
-模型显示名，以及可用 model config id/显示名。目录按稳定 key 排序，每类最多 32 项、
+模型显示名及其 `defaultModelCapabilities.imageInput`，以及可用 model config id/显示名和
+`capabilities.imageInput`。能力直接投影自模型设置的 `supports_image`，模型不得按名称或品牌猜测。
+无视觉能力的父 Agent 可把可访问图片委派给目录中明确支持图像输入的 child；这不会扩大 child 的
+项目、文件、Sandbox、Tool/MCP/Skill 或 Approval 权限。目录按稳定 key 排序，每类最多 32 项、
 总 JSON 最多 16 KiB，确定性截断并标记 `truncated`；类型上无 API key、URL、Provider 配置或模板
 instructions。目录只帮模型选择，过期/被截断 selector 仍由后端严格返回 unavailable，不模糊
 匹配。目录插入系统提示词前把 `<`、`>`、`&`、反引号和 Unicode 行分隔符编码为可逆 JSON
 Unicode escape，防止用户可编辑的名称/简介闭合数据标签或打开 Markdown 指令边界；16 KiB 总上限按
 编码后的实际字节重新执行，解码后的 selector 值不变。实际可调用 selector 集合与目录来自同一份
 Host-authored snapshot，并随 Turn checkpoint 持久化；Approval continuation 或进程恢复继续使用原 Turn
-的授权快照，不能在恢复时重算目录后获得模型从未看到的新 selector。
+的授权快照，不能在恢复时重算目录后获得模型从未看到的新 selector。`spawn_agent` 在创建事务内再次
+比较所选模型当前 `supports_image` 与本轮冻结目录；设置在采样与执行间改变时 fail-closed，不创建能力
+与模型所见目录不一致的 child；省略 model/template selector 时，比较本轮 checkpoint 已冻结的 caller
+模型能力与实际继承模型。成功 ToolResult 回传 child 实际冻结的
+`modelCapabilities.imageInput`，便于父 Agent 依据事实安排后续工作。
 
 可能跨过持久副作用边界的 spawn/send/follow-up/wait/interrupt 都使用 authoritative
 cancellation settlement，不把已提交的 Host future 遗留在 Run 外。`wait_agent` ready 返回时 ToolResult 已和

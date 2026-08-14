@@ -77,7 +77,7 @@ Tool observation 文本现在只序列化精简后的 `result`/`error`，不再�
 | 条件能力       | `office_document`、`office_spreadsheet`、`office_presentation`、`image_generation`                                              |
 | 动态 Extension | `todo_update`、`skills_activate`                                                                                                |
 
-激活 Skill 后披露的应用自有 Tool 仍走同一 `ToolRegistry` 投影管线。其 Schema 绑定 Skill revision，注册新 Tool 时必须同时增加消费者契约，不能在本文件中虚构固定结果字段。
+激活 Skill 后披露的应用自有 Tool 仍走同一 `ToolRegistry` 投影管线。其 Schema 绑定 Skill revision，注册新 Tool 时必须同时增加消费者契约，不能在本文件中虚构固定结果字段。模型可在同一响应中同时调用 `skills_activate` 与该请求已经披露的其他 Tool；这些 sibling 调用按生成响应时冻结的 ToolSet、权限、Approval 与 Sandbox 契约正常执行。完整 Skill 指令和新解锁 Tool 只从下一次模型请求生效，同响应中猜测新 Tool 仍按“当前未暴露”拒绝。若该批次在后续 sibling 进入 Approval，v9 checkpoint 会分别保留请求边界的 capability/ToolSet 与已经发生的 extension 效果；恢复先在旧 ToolSet 下结算整批，下一模型边界才采用激活后的新能力。DeepSeek 等 exact-grouped Provider 恢复时，queued sibling 还会重绑定到已认证 Provider Turn 的统一交换分组。该语义不随 Provider profile 改变。
 
 审批 Host action 与结果：
 

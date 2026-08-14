@@ -121,7 +121,7 @@ impl AgentTool for AgentCollaborationTool {
         let (name, description, input_schema) = match self.kind {
             AgentCollaborationToolKind::Spawn => (
                 "spawn_agent",
-                "Create one direct persistent child Agent and queue its initial task. Exact agent_type and model selectors must come from the collaboration directory in the system prompt.",
+                "Create one direct persistent child Agent and queue its initial task. Exact agent_type and model selectors must come from the collaboration directory. For visual work, select only a directory entry whose authoritative imageInput capability is true; never infer capability from a name.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -569,6 +569,22 @@ mod tests {
         assert_eq!(
             AgentCollaborationTool::new(AgentCollaborationToolKind::List).cancellation_settlement(),
             AgentToolCancellationSettlement::Interruptible
+        );
+    }
+
+    #[test]
+    fn invocation_carries_the_host_frozen_caller_model_capability() {
+        let executor = Arc::new(CountingWaitExecutor::default());
+        let (context, _) = collaboration_context(executor);
+        let context = context
+            .with_model_capabilities(crate::ModelCapabilities { image_input: true })
+            .with_tool_call_id("call-capability-projection".to_string());
+        let (_, invocation) = context
+            .agent_collaboration_invocation(crate::AgentCollaborationAction::List)
+            .unwrap();
+        assert_eq!(
+            invocation.caller_model_capabilities,
+            crate::ModelCapabilities { image_input: true }
         );
     }
 

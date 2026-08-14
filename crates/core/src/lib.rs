@@ -116,9 +116,8 @@ pub use provider_registration::{
     ProviderContextProjectionSemantics, ProviderContinuationRequirement,
     ProviderPartialTraceSemantics, ProviderPrivateReplaySemantics, ProviderProfileSettingsKind,
     ProviderProfileUiDescriptor, ProviderRegistration, ProviderRuntimeCapabilities,
-    ProviderSameTurnSkillActivationSemantics, ProviderTerminalBatchSemantics,
-    ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics, ProviderTurnRuntimePolicy,
-    ProviderUsageSemantics,
+    ProviderTerminalBatchSemantics, ProviderToolCallSourceSemantics, ProviderToolExchangeSemantics,
+    ProviderTurnRuntimePolicy, ProviderUsageSemantics,
 };
 
 /// Rebuilds the model-only projection for a result restored from an approval checkpoint.

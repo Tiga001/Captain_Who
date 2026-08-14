@@ -6,7 +6,7 @@
 use crate::provider_profile::ReasoningEffort;
 use crate::{
     AgentCancellationToken, AgentDisplayStatus, AgentForkTurns, AgentSteerInputQueue,
-    AgentWaitTargetSnapshot,
+    AgentWaitTargetSnapshot, ModelCapabilities,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -53,6 +53,8 @@ pub struct AgentCollaborationTemplateSelector {
     pub name: String,
     pub description: String,
     pub model_display_name: String,
+    /// Capabilities of the exact default model resolved for this template when the Turn began.
+    pub default_model_capabilities: ModelCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +62,8 @@ pub struct AgentCollaborationTemplateSelector {
 pub struct AgentCollaborationModelSelector {
     pub model_config_id: String,
     pub display_name: String,
+    /// Host-authored capabilities for this exact model configuration in this Turn's snapshot.
+    pub capabilities: ModelCapabilities,
 }
 
 /// Bounded, presentation-safe selector snapshot supplied to the model for this Turn only.
@@ -185,8 +189,8 @@ impl AgentCollaborationRunSnapshot {
 /// Exact allow-list frozen from the bounded, model-visible selector directory for one Turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentCollaborationSelectorAuthorization {
-    agent_types: Vec<String>,
-    model_config_ids: Vec<String>,
+    agent_types: Vec<(String, ModelCapabilities)>,
+    model_config_ids: Vec<(String, ModelCapabilities)>,
 }
 
 impl AgentCollaborationSelectorAuthorization {
@@ -195,24 +199,53 @@ impl AgentCollaborationSelectorAuthorization {
             agent_types: directory
                 .templates
                 .iter()
-                .map(|selector| selector.agent_type.clone())
+                .map(|selector| {
+                    (
+                        selector.agent_type.clone(),
+                        selector.default_model_capabilities,
+                    )
+                })
                 .collect(),
             model_config_ids: directory
                 .models
                 .iter()
-                .map(|selector| selector.model_config_id.clone())
+                .map(|selector| (selector.model_config_id.clone(), selector.capabilities))
                 .collect(),
         }
     }
 
     pub fn allows_agent_type(&self, agent_type: &str) -> bool {
-        self.agent_types.iter().any(|allowed| allowed == agent_type)
+        self.agent_types
+            .iter()
+            .any(|(allowed, _)| allowed == agent_type)
     }
 
     pub fn allows_model_config_id(&self, model_config_id: &str) -> bool {
         self.model_config_ids
             .iter()
-            .any(|allowed| allowed == model_config_id)
+            .any(|(allowed, _)| allowed == model_config_id)
+    }
+
+    /// Returns the capability fact the model saw for the selector that determines this spawn's
+    /// model. An explicit model overrides a template default, matching child model selection.
+    pub fn expected_model_capabilities(
+        &self,
+        agent_type: Option<&str>,
+        model_config_id: Option<&str>,
+    ) -> Option<ModelCapabilities> {
+        if let Some(model_config_id) = model_config_id {
+            return self
+                .model_config_ids
+                .iter()
+                .find(|(allowed, _)| allowed == model_config_id)
+                .map(|(_, capabilities)| *capabilities);
+        }
+        agent_type.and_then(|agent_type| {
+            self.agent_types
+                .iter()
+                .find(|(allowed, _)| allowed == agent_type)
+                .map(|(_, capabilities)| *capabilities)
+        })
     }
 }
 
@@ -295,6 +328,9 @@ impl AgentCollaborationRuntimeServices {
 pub struct AgentCollaborationInvocation {
     pub caller: AgentCollaborationCaller,
     pub selector_authorization: AgentCollaborationSelectorAuthorization,
+    /// Capability of the caller model frozen for this logical Run. It is Host-only fallback
+    /// authorization for selector-less spawn and never comes from model-authored arguments.
+    pub caller_model_capabilities: ModelCapabilities,
     /// Exact authority copied from the Host-authenticated ToolExecutionContext. It is not part of
     /// any model tool schema or action payload.
     pub effective_permissions: crate::AgentPermissions,
@@ -393,6 +429,7 @@ pub enum AgentCollaborationToolResult {
         child_agent_id: String,
         task_path: String,
         model_display_name: String,
+        model_capabilities: ModelCapabilities,
         status: AgentDisplayStatus,
     },
     MessageQueued {
@@ -426,11 +463,13 @@ impl AgentCollaborationToolResult {
                 child_agent_id,
                 task_path,
                 model_display_name,
+                model_capabilities,
                 status,
             } => json!({
                 "childAgentId": child_agent_id,
                 "taskPath": task_path,
                 "modelDisplayName": model_display_name,
+                "modelCapabilities": model_capabilities,
                 "status": status,
             }),
             Self::MessageQueued {
@@ -508,6 +547,9 @@ mod tests {
                 name: format!("Name {index}"),
                 description: "x".repeat(700),
                 model_display_name: "Display".to_string(),
+                default_model_capabilities: ModelCapabilities {
+                    image_input: index % 2 == 0,
+                },
             })
             .collect();
         let models = (0..40)
@@ -515,6 +557,9 @@ mod tests {
             .map(|index| AgentCollaborationModelSelector {
                 model_config_id: format!("model-{index:02}"),
                 display_name: format!("Model {index}"),
+                capabilities: ModelCapabilities {
+                    image_input: index % 2 == 0,
+                },
             })
             .collect();
         let directory = AgentCollaborationSelectorDirectory::bounded(templates, models);
@@ -540,6 +585,36 @@ mod tests {
         ] {
             assert!(!encoded.contains(secret));
         }
+        assert!(encoded.contains("defaultModelCapabilities"));
+        assert!(encoded.contains("capabilities"));
+    }
+
+    #[test]
+    fn selector_authorization_freezes_the_capability_of_the_effective_selector() {
+        let directory = AgentCollaborationSelectorDirectory::bounded(
+            vec![AgentCollaborationTemplateSelector {
+                agent_type: "vision_reviewer".to_string(),
+                name: "Vision reviewer".to_string(),
+                description: "Review images".to_string(),
+                model_display_name: "Template vision model".to_string(),
+                default_model_capabilities: ModelCapabilities { image_input: true },
+            }],
+            vec![AgentCollaborationModelSelector {
+                model_config_id: "text-model".to_string(),
+                display_name: "Text model".to_string(),
+                capabilities: ModelCapabilities { image_input: false },
+            }],
+        );
+        let authorization = AgentCollaborationSelectorAuthorization::from_directory(&directory);
+        assert_eq!(
+            authorization.expected_model_capabilities(Some("vision_reviewer"), None),
+            Some(ModelCapabilities { image_input: true })
+        );
+        assert_eq!(
+            authorization.expected_model_capabilities(Some("vision_reviewer"), Some("text-model")),
+            Some(ModelCapabilities { image_input: false })
+        );
+        assert_eq!(authorization.expected_model_capabilities(None, None), None);
     }
 
     #[test]
@@ -559,5 +634,20 @@ mod tests {
                 "targets": []
             })
         );
+    }
+
+    #[test]
+    fn spawn_result_reports_the_frozen_child_model_capabilities() {
+        let value = AgentCollaborationToolResult::Spawned {
+            child_agent_id: "agent-vision".into(),
+            task_path: "/root/vision".into(),
+            model_display_name: "Vision".into(),
+            model_capabilities: ModelCapabilities { image_input: true },
+            status: AgentDisplayStatus::Queued,
+        }
+        .into_model_value()
+        .unwrap();
+        assert_eq!(value["modelCapabilities"]["imageInput"], true);
+        assert_eq!(value["modelDisplayName"], "Vision");
     }
 }
