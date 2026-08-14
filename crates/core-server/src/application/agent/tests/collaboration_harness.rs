@@ -769,6 +769,16 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
             task_name: "Root".to_string(),
         })
         .unwrap();
+    // A child can only exist after a trusted root Turn admitted the spawn Tool. Reproduce that
+    // production invariant so startup recovery exercises the queued child, rather than an
+    // impossible graph whose parent never committed an effective-permission snapshot.
+    seed_root_effective_permissions(
+        &storage,
+        root_agent_id,
+        root_conversation_id,
+        "startup-recovery-root",
+        AgentPermissions::default(),
+    );
     let child =
         crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage))
             .create_child(&mycopilot_core::CreateChildAgentInput {
@@ -800,7 +810,12 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
         .start_collaboration_dispatcher(notifications)
         .unwrap();
     let terminal = wait_for_terminal_wake(&storage, &child.initial_wake.wake_id).await;
-    assert_eq!(terminal.status, mycopilot_core::AgentWakeStatus::Completed);
+    assert_eq!(
+        terminal.status,
+        mycopilot_core::AgentWakeStatus::Completed,
+        "startup recovery terminal error: {:?}",
+        terminal.terminal_error
+    );
     wait_for_dispatcher_idle(&database_path).await;
     assert!(service
         .shutdown_collaboration_dispatcher()
@@ -822,8 +837,16 @@ async fn process_start_dispatcher_recovers_a_queued_child_without_a_new_root_tur
         .collect::<Vec<_>>();
     expected_names.sort();
     assert_eq!(collaboration_tool_names(&requests[0]), expected_names);
-    assert!(storage
+    let root_traces = storage
         .list_conversation_turn_traces(root_conversation_id)
-        .unwrap()
-        .is_empty());
+        .unwrap();
+    assert_eq!(root_traces.len(), 1, "startup cannot open a new root Turn");
+    assert_eq!(
+        root_traces[0].assistant_message_id,
+        "assistant-permission-seed-startup-recovery-root"
+    );
+    assert_eq!(
+        root_traces[0].terminal_status,
+        ConversationTurnTraceTerminalStatus::Completed
+    );
 }

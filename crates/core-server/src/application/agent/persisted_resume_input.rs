@@ -201,19 +201,13 @@ impl PersistedAgentResumeInput {
                     .to_string()
             })?;
         }
-        if input
-            .context
-            .as_ref()
-            .and_then(|context| context.collaboration_identity.as_ref())
+        if input.context.as_ref().map(run_authority_snapshot)
             != resume_checkpoint
                 .run_context
                 .as_ref()
-                .and_then(|context| context.collaboration_identity.as_ref())
+                .map(run_authority_snapshot)
         {
-            return Err(
-                "pending Agent collaboration identity disagrees with its frozen checkpoint"
-                    .to_string(),
-            );
+            return Err("pending Agent authority disagrees with its frozen checkpoint".to_string());
         }
 
         Ok(Self {
@@ -316,15 +310,12 @@ impl PersistedAgentResumeInput {
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
-        if self
-            .context
-            .as_ref()
-            .and_then(|context| context.collaboration_identity.as_ref())
+        if self.context.as_ref().map(run_authority_snapshot)
             != self
                 .resume_checkpoint
                 .run_context
                 .as_ref()
-                .and_then(|context| context.collaboration_identity.as_ref())
+                .map(run_authority_snapshot)
         {
             return Err(PersistedAgentResumeInputError::InvalidShape);
         }
@@ -386,6 +377,15 @@ impl PersistedAgentResumeInput {
             },
         })
     }
+}
+
+fn run_authority_snapshot(
+    context: &AgentRunContext,
+) -> (
+    mycopilot_core::AgentPermissions,
+    Option<&mycopilot_core::AgentCollaborationIdentity>,
+) {
+    (context.permissions, context.collaboration_identity.as_ref())
 }
 
 pub(super) fn persisted_endpoint_digest(value: &str) -> String {
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn collaboration_identity_round_trips_only_when_checkpoint_and_input_agree() {
+    fn collaboration_identity_and_permissions_round_trip_only_when_checkpoint_and_input_agree() {
         let identity = mycopilot_core::AgentCollaborationIdentity {
             agent_id: "agent-child".to_string(),
             root_agent_id: "agent-root".to_string(),
@@ -643,6 +643,28 @@ mod tests {
         assert_eq!(
             PersistedAgentResumeInput::decode(&mismatched.to_string()).unwrap_err(),
             PersistedAgentResumeInputError::InvalidShape
+        );
+
+        let mut mismatched_permissions = serde_json::from_str::<Value>(&encoded).unwrap();
+        mismatched_permissions["resumeCheckpoint"]["runContext"]["permissions"]["read"] =
+            Value::String("all".to_string());
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&mismatched_permissions.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::InvalidShape
+        );
+
+        let mut in_memory_mismatch = input;
+        in_memory_mismatch
+            .context
+            .as_mut()
+            .unwrap()
+            .permissions
+            .read = mycopilot_core::AgentReadPermission::All;
+        assert_eq!(
+            PersistedAgentResumeInput::from_agent_input(&in_memory_mismatch)
+                .err()
+                .unwrap(),
+            "pending Agent authority disagrees with its frozen checkpoint"
         );
     }
 

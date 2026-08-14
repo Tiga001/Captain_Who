@@ -1,7 +1,8 @@
 use super::*;
 use mycopilot_core::{
-    AgentCollaborationEventKind, AgentCollaborationEventRecord, AgentDisplayStatus, AgentLifecycle,
-    AgentNodeRecord, AgentTemplateRecord, ConversationMessageOrigin,
+    AgentCollaborationActivitySemantic, AgentCollaborationEventKind, AgentCollaborationEventRecord,
+    AgentDisplayStatus, AgentLifecycle, AgentNodeRecord, AgentTemplateRecord,
+    ConversationMessageOrigin,
 };
 use mycopilot_protocol_rs::{
     AgentConversationLocatorDto, AgentConversationLocatorRequest, AgentConversationModeDto,
@@ -11,12 +12,14 @@ use mycopilot_protocol_rs::{
     AgentObserverMessageDto, AgentSummaryDto, AgentTemplateBindingDto, AgentTemplateCreateRequest,
     AgentTemplateDeleteRequest, AgentTemplateDto, AgentTemplateListDto, AgentTemplateListRequest,
     AgentTemplateSetEnabledRequest, AgentTemplateUpdateRequest, AgentTreeLookupDto,
-    AgentTreeRequest, AgentTreeSnapshotDto, CollaborationApprovalDecisionDto,
+    AgentTreeRequest, AgentTreeSnapshotDto, CollaborationActivitySemanticDto,
+    CollaborationActivitySnapshotDto, CollaborationApprovalDecisionDto,
     CollaborationApprovalDecisionRequest, CollaborationApprovalDecisionResultDto,
     CollaborationApprovalListDto, CollaborationApprovalListRequest,
     CollaborationApprovalProjectionDto, CollaborationApprovalStatusDto,
     CollaborationEventEnvelopeDto, CollaborationEventKindDto, CollaborationEventsPageDto,
-    CollaborationEventsRequest, AGENT_COLLABORATION_SCHEMA_VERSION,
+    CollaborationEventsRequest, AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
+    AGENT_COLLABORATION_EVENT_SCHEMA_VERSION, AGENT_COLLABORATION_SCHEMA_VERSION,
 };
 
 const TREE_LIMIT: usize = 1_024;
@@ -542,8 +545,12 @@ fn display_status_dto(value: AgentDisplayStatus) -> AgentDisplayStatusDto {
 }
 
 pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationEventEnvelopeDto {
+    debug_assert_eq!(
+        record.schema_version,
+        AGENT_COLLABORATION_EVENT_SCHEMA_VERSION
+    );
     CollaborationEventEnvelopeDto {
-        schema_version: AGENT_COLLABORATION_SCHEMA_VERSION,
+        schema_version: record.schema_version,
         event_id: record.event_id,
         sequence: record.root_sequence,
         workspace_id: record.workspace_id,
@@ -576,6 +583,34 @@ pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationE
             }
         },
         resource_revision: record.resource_revision,
+        activity: record
+            .activity
+            .map(|activity| CollaborationActivitySnapshotDto {
+                schema_version: AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION,
+                semantic: match activity.semantic {
+                    AgentCollaborationActivitySemantic::Started => {
+                        CollaborationActivitySemanticDto::Started
+                    }
+                    AgentCollaborationActivitySemantic::Updated => {
+                        CollaborationActivitySemanticDto::Updated
+                    }
+                    AgentCollaborationActivitySemantic::WaitingApproval => {
+                        CollaborationActivitySemanticDto::WaitingApproval
+                    }
+                    AgentCollaborationActivitySemantic::Completed => {
+                        CollaborationActivitySemanticDto::Completed
+                    }
+                    AgentCollaborationActivitySemantic::Failed => {
+                        CollaborationActivitySemanticDto::Failed
+                    }
+                    AgentCollaborationActivitySemantic::Interrupted => {
+                        CollaborationActivitySemanticDto::Interrupted
+                    }
+                },
+                agent_id: activity.agent_id,
+                task_name_snapshot: activity.task_name_snapshot,
+                root_anchor_message_id: activity.root_anchor_message_id,
+            }),
         occurred_at: record.created_at,
     }
 }

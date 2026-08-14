@@ -19,6 +19,8 @@ import {
 } from './agentCommandSessionParsers'
 
 export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
+export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 2 as const
+export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 1 as const
 
 export const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
 export const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
@@ -185,8 +187,21 @@ export type CollaborationEventKind =
   | 'approval_projected'
   | 'approval_updated'
 
+export type CollaborationActivitySemantic =
+  'started' | 'updated' | 'waiting_approval' | 'completed' | 'failed' | 'interrupted'
+
+export interface CollaborationActivitySnapshot {
+  schemaVersion: typeof AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION
+  semantic: CollaborationActivitySemantic
+  /** Presentation subject; the outer event agent remains the invalidation subject. */
+  agentId: string
+  taskNameSnapshot: string
+  /** Trusted assistant message in the root Conversation, or null when no such identity exists. */
+  rootAnchorMessageId: string | null
+}
+
 export interface CollaborationEventEnvelope {
-  schemaVersion: typeof AGENT_COLLABORATION_SCHEMA_VERSION
+  schemaVersion: typeof AGENT_COLLABORATION_EVENT_SCHEMA_VERSION
   eventId: string
   sequence: number
   workspaceId: string | null
@@ -200,6 +215,7 @@ export interface CollaborationEventEnvelope {
   messageId: string | null
   kind: CollaborationEventKind
   resourceRevision: number
+  activity: CollaborationActivitySnapshot | null
   occurredAt: number
 }
 
@@ -434,6 +450,24 @@ function schema(value: unknown, context: string): typeof AGENT_COLLABORATION_SCH
   if (value !== AGENT_COLLABORATION_SCHEMA_VERSION)
     throw new Error(`Invalid ${context}.schemaVersion`)
   return AGENT_COLLABORATION_SCHEMA_VERSION
+}
+
+function eventSchema(
+  value: unknown,
+  context: string
+): typeof AGENT_COLLABORATION_EVENT_SCHEMA_VERSION {
+  if (value !== AGENT_COLLABORATION_EVENT_SCHEMA_VERSION)
+    throw new Error(`Invalid ${context}.schemaVersion`)
+  return AGENT_COLLABORATION_EVENT_SCHEMA_VERSION
+}
+
+function activitySchema(
+  value: unknown,
+  context: string
+): typeof AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
+  if (value !== AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION)
+    throw new Error(`Invalid ${context}.schemaVersion`)
+  return AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION
 }
 
 export function parseAgentTreeRequest(value: unknown): AgentTreeRequest {
@@ -866,12 +900,49 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       'messageId',
       'kind',
       'resourceRevision',
+      'activity',
       'occurredAt'
     ],
     'CollaborationEventEnvelope'
   )
+  const activity =
+    item.activity === null
+      ? null
+      : (() => {
+          const snapshot = record(item.activity, 'CollaborationActivitySnapshot')
+          exact(
+            snapshot,
+            ['schemaVersion', 'semantic', 'agentId', 'taskNameSnapshot', 'rootAnchorMessageId'],
+            'CollaborationActivitySnapshot'
+          )
+          return {
+            schemaVersion: activitySchema(snapshot.schemaVersion, 'CollaborationActivitySnapshot'),
+            semantic: oneOf(
+              snapshot.semantic,
+              [
+                'started',
+                'updated',
+                'waiting_approval',
+                'completed',
+                'failed',
+                'interrupted'
+              ] as const,
+              'CollaborationActivitySnapshot.semantic'
+            ),
+            agentId: text(snapshot.agentId, 'CollaborationActivitySnapshot.agentId'),
+            taskNameSnapshot: text(
+              snapshot.taskNameSnapshot,
+              'CollaborationActivitySnapshot.taskNameSnapshot',
+              256
+            ),
+            rootAnchorMessageId: nullableText(
+              snapshot.rootAnchorMessageId,
+              'CollaborationActivitySnapshot.rootAnchorMessageId'
+            )
+          } satisfies CollaborationActivitySnapshot
+        })()
   const parsed: CollaborationEventEnvelope = {
-    schemaVersion: schema(item.schemaVersion, 'CollaborationEventEnvelope'),
+    schemaVersion: eventSchema(item.schemaVersion, 'CollaborationEventEnvelope'),
     eventId: text(item.eventId, 'eventId'),
     sequence: integer(item.sequence, 'sequence', 1),
     workspaceId: nullableText(item.workspaceId, 'workspaceId'),
@@ -900,10 +971,28 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
       'kind'
     ),
     resourceRevision: integer(item.resourceRevision, 'resourceRevision', 1),
+    activity,
     occurredAt: integer(item.occurredAt, 'occurredAt')
   }
   if (parsed.workspaceId !== parsed.projectId) {
     throw new Error('Invalid CollaborationEventEnvelope identity')
+  }
+  if (parsed.activity) {
+    const expectedKind: Readonly<Record<CollaborationActivitySemantic, CollaborationEventKind>> = {
+      started: 'wake_created',
+      updated: 'mailbox_enqueued',
+      waiting_approval: 'approval_projected',
+      completed: 'wake_updated',
+      failed: 'wake_updated',
+      interrupted: 'wake_updated'
+    }
+    const hasValidSubject =
+      parsed.activity.semantic === 'updated'
+        ? parsed.activity.agentId !== parsed.agentId
+        : parsed.activity.agentId === parsed.agentId
+    if (parsed.kind !== expectedKind[parsed.activity.semantic] || !hasValidSubject) {
+      throw new Error('Invalid CollaborationEventEnvelope activity')
+    }
   }
   return parsed
 }

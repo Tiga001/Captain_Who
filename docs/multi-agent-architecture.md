@@ -251,7 +251,11 @@ Mailbox 与 Conversation message 服务不同消费者，但不能形成双写�
 - 可信协作身份放在共享 `AgentRunContext`，由 Host 从 Agent/Wake/Mailbox 事实构造，并随 approval
   resume 的显式 allowlist 持久化；Renderer 和模型不能提供或覆盖。普通根 Turn 的身份为 `None`，
   系统提示词逐字保持原样；子 Turn 只在同一 prompt builder 尾部追加有界身份 overlay。
-- 子 Agent 不继承超过根 Agent 的权限。模板不能提升权限。
+- 子 Agent 的新 Turn 以直接父节点最新的持久 effective-permission snapshot 为继承基线，并与完整
+  祖先链 snapshot 逐字段取交集；任一祖先快照缺失或损坏都 fail closed。因此根权限收紧会立即成为
+  任意后代下一 Turn 的上界，模板、项目策略和动态策略只能继续收紧，不能提升权限。一次已开始的
+  Run 冻结其 `AgentRunContext.permissions`；Approval continuation 恢复 checkpoint 中的原值，不在
+  恢复时重算。下一次 follow-up/Wake 才重新读取父/祖先的最新持久快照。
 - 子 Agent 产生的 Approval 仍属于原 Turn/checkpoint，但用户可操作投影必须路由到根界面，并
   标明来源；本约束在第 4、5 轮实现。
 - 每个 Agent 的 Usage 沿用现有 Conversation/message/model 记录和展示。父节点收到的结果不得
@@ -324,8 +328,9 @@ Conversation 本来没有模型时才允许进入默认分支，任何已经指�
 公开聊天入口只能构造 `HumanRoot`，在任何写入前拒绝子 Conversation；Host 内部 Wake 使用不可
 反序列化的严格类型，并从 running Wake、claim lease、Mailbox projection 和 Agent node 重新解析
 协作身份。两者最终进入同一个 Turn executor 和 Runtime segment。父任务只使用已有的唯一
-`role=user / origin=agent` 投影，不再插入第二条 user 消息。子权限是 Host 的明确最小策略，不取自
-模型参数；Usage 仍归自己的 Conversation。
+`role=user / origin=agent` 投影，不再插入第二条 user 消息。子权限只在同一 Turn admission 事务中从
+可信父/祖先权限快照解析，不取自模型参数；事务把最终权限写入该 child 的 1:1 durable snapshot，再
+构造冻结的 `AgentRunContext`。Usage 仍归自己的 Conversation。
 
 单活跃 Turn 的权威边界不是内存 Runtime。准备阶段使用 SQLite `BEGIN IMMEDIATE`，在任何全量
 Conversation 写入前检查 durable active trace，并在同一事务中提交输入投影、pending assistant 和
@@ -585,9 +590,12 @@ Conversation/Project 的删除行为保持不变。
 target 对外统一表现为 permission denied，不能充当存在性探针。默认产品限制是深度 8、每树 64 节点、
 Harness 消息 64 KiB 和 Dispatcher 全局并发 4。节点数/深度在 child spawn 的同一个
 `BEGIN IMMEDIATE` 内校验，不能由两个并发 spawn 同时越过；既有 request 的幂等 retry 在配额检查前返回
-原记录。Mailbox 仍保留第 3 轮的持久硬配额。模板没有权限字段，因此当前不可能提权；child Wake 始终由
-Host 注入保守 `AgentPermissions::default()`，未来若模板增加声明，也只能与 root/project/dynamic policy
-逐字段取交集。
+原记录。Mailbox 仍保留第 3 轮的持久硬配额。模板当前没有权限字段，因此视为中性上界，不能把
+`AgentPermissions::default()` 误当模板策略强行降权。root/child Turn admission 在同一
+`BEGIN IMMEDIATE` 中写 `agent_effective_permission_snapshots`；旧根首次协作时由可信
+`ToolExecutionContext` 在任何 Harness 动作前补齐 root snapshot，模型 payload 没有权限字段。child 新
+Wake 以直接父 snapshot 为基线，再与完整祖先链逐字段取交集；缺任一 snapshot 都拒绝启动。未来模板、
+项目或动态策略只有接入真实策略来源时才作为额外上界参与 meet。
 
 child Approval 不复制审批表或状态机。`agent_pending_actions`、checkpoint、原 child Run 和 action audit
 继续是真相；renderer 看到的是按 root tree JOIN 得到的逻辑投影。稳定 `approval_id` 是后端 framed
@@ -611,6 +619,17 @@ runtime parser 与 root/agent/project 身份回验，Preload 仅开放固定 all
 `listEvents(afterSequence)` 从该日志补洞。全局 sequence 只供 server notifier 扫描，renderer 永远按
 root-local sequence 合并，两个并行子 Agent/不同 root 不会串线。
 
+语义 activity 由同一 canonical trigger 在领域事务内生成；Renderer 不从摘要或模型文本猜测：
+
+| 持久领域 mutation                                                                                                       | `activity.semantic`    | 约束                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------- |
+| initial task / follow-up 对应的 Wake INSERT                                                                             | `started`              | 仅真实 `task` / `followup` source；result Wake 不产生                |
+| direct child → parent 的非终态 `message` Mailbox INSERT                                                                 | `updated`              | activity subject 是 sender child；outer event subject 仍是 recipient |
+| child pending Approval INSERT                                                                                           | `waiting_approval`     | 保留原 child/run/assistant identity                                  |
+| Wake 以 final result 原子进入 `completed` / `failed`                                                                    | `completed` / `failed` | result Mailbox 本身不再额外产生 `updated`                            |
+| Wake 持久进入 `interrupted`，或 queued/claimed-before-admission 被管理中断写为 `cancelled`                              | `interrupted`          | 两者都是用户语义上的中断，不依赖内存 cancel 通知                     |
+| 除 direct child → parent 外的普通 send（含 parent → child / sibling）、result、Mailbox claim/ack、Wake lease、list/wait | `null`                 | 仍写必要 invalidation event，但根聊天无 activity                     |
+
 Core 进程启动时先冻结当前 durable global cursor，再发一次严格的全局
 `agent.collaboration.resync(core_started)`，随后只从该 cursor 之后订阅 outbox。这样现存 Main/renderer
 不会把重启前后窗口误当成“已经同步”；cursor 冻结后提交的 mutation 仍由 event replay 覆盖。模型设置
@@ -623,15 +642,17 @@ Core 进程启动时先冻结当前 durable global cursor，再发一次严格�
 `materialized=false/tree=null`，是健康的“无协作”状态；真正存储/RPC 失败保持 error 并在下一 durable
 notification 或显式 hydrate 时重试。
 
-renderer 的 `CollaborationStore` 只保存 root-scoped Agent tree/display snapshot。notification 是失效提示：
-store 忽略重复/其他 root，按持久日志验证连续 sequence，遇缺口或乱序后重新水合数据库 snapshot；它不
-复制 Conversation 消息 reducer。窗口 reload 新建 store 后直接水合数据库。observer Conversation 使用
+renderer 的 `CollaborationStore` 只保存 root-scoped Agent tree/display 索引和 bounded semantic activity
+projection，不保存 Conversation 消息或 reducer。notification 是失效提示：store 忽略重复/其他 root，
+按持久日志验证连续 sequence，遇缺口或乱序后重新水合数据库 snapshot；窗口 reload 新建 store 后直接
+水合数据库。observer Conversation 使用
 专用严格 DTO，保留安全的完整 chat display 投影（attachments、Agent run/UI state）并为每个 user-role
 输入附带可信 human/agent/historical-snapshot origin；UI 不得把 agent-origin 显示成“你”。
 
-跨进程协作 DTO 仍为 `schemaVersion=1`。第 4 轮冻结的 canonical storage 是 v7；第 5 轮为根 Agent
-Conversation 的 provenance-aware fork authority 升至 v8。v7 及更早开发库继续采用既有
-reset-required、原库不改写策略。
+跨进程协作基础 DTO 仍为 `schemaVersion=1`，带必填 nullable activity 的 event envelope 独立升至
+`schemaVersion=2`。第 4 轮冻结的 canonical storage 是 v7；第 5 轮为根 Agent Conversation 的
+provenance-aware fork authority 升至 v8；持久权限快照和语义 activity projection 将当前基线升至
+v9。v8 及更早开发库继续采用既有 reset-required、原库不改写策略。
 
 ### 第 5 轮：前端复用与完整用户体验
 

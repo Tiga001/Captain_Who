@@ -6,6 +6,7 @@ import type {
 } from '@mycopilot/protocol'
 import type { CollaborationDataSource } from './collaborationClient'
 import { CollaborationStore } from './collaborationStore'
+import { MAX_COLLABORATION_TIMELINE_ACTIVITIES } from './collaborationStore'
 
 vi.mock('../../host/hostClient', () => ({ hostClient: { agent: {} } }))
 
@@ -27,7 +28,7 @@ function event(
   agentId = `root:${rootConversationId}`
 ): CollaborationEventEnvelope {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     eventId: `${rootConversationId}:${sequence}`,
     sequence,
     workspaceId: 'project-a',
@@ -41,7 +42,37 @@ function event(
     messageId: null,
     kind: 'agent_updated',
     resourceRevision: sequence,
+    activity: null,
     occurredAt: sequence
+  }
+}
+
+function activityEvent(
+  rootConversationId: string,
+  sequence: number,
+  agentId: string,
+  semantic: NonNullable<CollaborationEventEnvelope['activity']>['semantic'],
+  taskNameSnapshot = agentId
+): CollaborationEventEnvelope {
+  const outerAgentId = semantic === 'updated' ? `root:${rootConversationId}` : agentId
+  const kind =
+    semantic === 'started'
+      ? 'wake_created'
+      : semantic === 'updated'
+        ? 'mailbox_enqueued'
+        : semantic === 'waiting_approval'
+          ? 'approval_projected'
+          : 'wake_updated'
+  return {
+    ...event(rootConversationId, sequence, outerAgentId),
+    kind,
+    activity: {
+      schemaVersion: 1,
+      agentId,
+      rootAnchorMessageId: null,
+      semantic,
+      taskNameSnapshot
+    }
   }
 }
 
@@ -58,6 +89,17 @@ function page(
     lastSequence: events.at(-1)?.sequence ?? 0,
     hasMore
   }
+}
+
+function durableEventsThrough(
+  rootConversationId: string,
+  afterSequence: number,
+  lastSequence: number,
+  agentId?: string
+): CollaborationEventEnvelope[] {
+  return Array.from({ length: Math.max(0, lastSequence - afterSequence) }, (_, index) =>
+    event(rootConversationId, afterSequence + index + 1, agentId)
+  )
 }
 
 async function settle(): Promise<void> {
@@ -106,9 +148,11 @@ describe('CollaborationStore', () => {
       listEvents: vi.fn(async ({ afterSequence }) =>
         page(
           'root-conversation',
-          exposeEvents && afterSequence === 2
-            ? [event('root-conversation', 3), event('root-conversation', 4)]
-            : []
+          durableEventsThrough(
+            'root-conversation',
+            afterSequence,
+            exposeEvents ? 4 : authoritative.lastSequence
+          )
         )
       ),
       subscribe: vi.fn((next) => {
@@ -203,9 +247,7 @@ describe('CollaborationStore', () => {
       listEvents: vi.fn(async ({ afterSequence }) =>
         page(
           'root-conversation',
-          authoritative.lastSequence > afterSequence
-            ? [event('root-conversation', authoritative.lastSequence)]
-            : []
+          durableEventsThrough('root-conversation', afterSequence, authoritative.lastSequence)
         )
       ),
       subscribe(next) {
@@ -241,7 +283,9 @@ describe('CollaborationStore', () => {
         if (attempts === 1) throw new Error('temporarily unavailable')
         return tree('root-conversation', 1)
       }),
-      listEvents: vi.fn(async () => page('root-conversation', [])),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page('root-conversation', durableEventsThrough('root-conversation', afterSequence, 1))
+      ),
       subscribe: (next) => {
         handler = next
         return () => undefined
@@ -267,7 +311,12 @@ describe('CollaborationStore', () => {
     let authoritative = tree('root-conversation', 2)
     const source: CollaborationDataSource = {
       getTree: vi.fn(async () => authoritative),
-      listEvents: vi.fn(async () => page('root-conversation', [])),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(
+          'root-conversation',
+          durableEventsThrough('root-conversation', afterSequence, authoritative.lastSequence)
+        )
+      ),
       subscribe: () => () => undefined,
       subscribeResync: (next) => {
         resync = next
@@ -301,6 +350,7 @@ describe('CollaborationStore', () => {
     store.start()
     await settle()
     expect(store.getSnapshot()).toEqual({
+      activities: [],
       agentInvalidationSequences: {},
       error: false,
       hydrationRevision: 1,
@@ -314,7 +364,9 @@ describe('CollaborationStore', () => {
     let resync: (() => void) | undefined
     const source: CollaborationDataSource = {
       getTree: vi.fn(async () => tree('root-conversation', 2)),
-      listEvents: vi.fn(async () => page('root-conversation', [])),
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page('root-conversation', durableEventsThrough('root-conversation', afterSequence, 2))
+      ),
       subscribe: () => () => undefined,
       subscribeResync: (next) => {
         resync = next
@@ -347,7 +399,9 @@ describe('CollaborationStore', () => {
       listEvents: vi.fn(async ({ afterSequence }) =>
         page(
           'root-conversation',
-          exposeEvents && afterSequence === 2 ? [event('root-conversation', 3, childB)] : []
+          exposeEvents && afterSequence === 2
+            ? [event('root-conversation', 3, childB)]
+            : durableEventsThrough('root-conversation', afterSequence, authoritative.lastSequence)
         )
       ),
       subscribe: (next) => {
@@ -385,8 +439,18 @@ describe('CollaborationStore', () => {
     }
     const source: CollaborationDataSource = {
       getTree: vi.fn(async () => authoritative),
-      listEvents: vi.fn(async () =>
-        page('root-conversation', exposeGap ? [event('root-conversation', 4, childB)] : [])
+      listEvents: vi.fn(async ({ afterSequence }) =>
+        page(
+          'root-conversation',
+          exposeGap && afterSequence === 2
+            ? [event('root-conversation', 4, childB)]
+            : durableEventsThrough(
+                'root-conversation',
+                afterSequence,
+                authoritative.lastSequence,
+                exposeGap ? childB : undefined
+              )
+        )
       ),
       subscribe: (next) => {
         handler = next
@@ -411,11 +475,12 @@ describe('CollaborationStore', () => {
     })
   })
 
-  it('fully invalidates observers when the authoritative snapshot advances beyond replay', async () => {
+  it('continues durable replay when the authoritative snapshot advances during catch-up', async () => {
     let handler: ((value: CollaborationEventEnvelope) => void) | undefined
     const childA = 'agent-child-a'
     const childB = 'agent-child-b'
     let exposeEvents = false
+    let servedInitialIncrement = false
     let authoritative: AgentTreeSnapshot = {
       ...tree('root-conversation', 2),
       agents: [childSummary(childA, 'child-a'), childSummary(childB, 'child-b')]
@@ -425,7 +490,16 @@ describe('CollaborationStore', () => {
       listEvents: vi.fn(async ({ afterSequence }) =>
         page(
           'root-conversation',
-          exposeEvents && afterSequence === 2 ? [event('root-conversation', 3, childA)] : []
+          exposeEvents && afterSequence === 2 && !servedInitialIncrement
+            ? ((servedInitialIncrement = true), [event('root-conversation', 3, childA)])
+            : exposeEvents
+              ? durableEventsThrough(
+                  'root-conversation',
+                  afterSequence,
+                  authoritative.lastSequence,
+                  childB
+                )
+              : durableEventsThrough('root-conversation', afterSequence, authoritative.lastSequence)
         )
       ),
       subscribe: (next) => {
@@ -448,10 +522,86 @@ describe('CollaborationStore', () => {
     await settle()
 
     expect(store.getSnapshot()).toMatchObject({
-      agentInvalidationSequences: { [childA]: 5, [childB]: 5 },
-      hydrationRevision: hydrationRevision + 1,
+      agentInvalidationSequences: { [childA]: 3, [childB]: 5 },
+      hydrationRevision,
       tree: { lastSequence: 5 }
     })
+  })
+
+  it('rebuilds semantic activity after restart and ignores duplicate or out-of-order notices', async () => {
+    let handler: ((value: CollaborationEventEnvelope) => void) | undefined
+    let durable = [
+      activityEvent('root-conversation', 1, 'agent-a', 'started', 'Researcher'),
+      activityEvent('root-conversation', 2, 'agent-a', 'updated', 'Researcher')
+    ]
+    let authoritative = tree('root-conversation', durable.length)
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => authoritative),
+      listEvents: vi.fn(async ({ afterSequence, limit }) => {
+        const events = durable.slice(afterSequence, afterSequence + limit)
+        return page('root-conversation', events, afterSequence + events.length < durable.length)
+      }),
+      subscribe(next) {
+        handler = next
+        return () => undefined
+      },
+      subscribeResync: () => () => undefined
+    }
+
+    const first = new CollaborationStore('root-conversation', source)
+    first.start()
+    await vi.waitFor(() => expect(first.getSnapshot().loading).toBe(false))
+    expect(first.getSnapshot().activities.map((activity) => activity.semantic)).toEqual([
+      'started',
+      'updated'
+    ])
+    first.destroy()
+
+    durable = [
+      ...durable,
+      activityEvent('root-conversation', 3, 'agent-a', 'completed', 'Researcher'),
+      activityEvent('root-conversation', 4, 'agent-a', 'started', 'Researcher')
+    ]
+    authoritative = tree('root-conversation', durable.length)
+    const reloaded = new CollaborationStore('root-conversation', source)
+    reloaded.start()
+    await vi.waitFor(() => expect(reloaded.getSnapshot().loading).toBe(false))
+    handler?.(durable[3]!)
+    handler?.(durable[1]!)
+    handler?.(durable[3]!)
+    await settle()
+    expect(reloaded.getSnapshot().activities.map((activity) => activity.sequence)).toEqual([
+      1, 2, 3, 4
+    ])
+  })
+
+  it('retains the latest deterministic 2,048 semantic activities while advancing the full log', async () => {
+    const total = MAX_COLLABORATION_TIMELINE_ACTIVITIES + 17
+    const durable = Array.from({ length: total }, (_, index) =>
+      activityEvent(
+        'root-conversation',
+        index + 1,
+        `agent-${index % 3}`,
+        index % 2 === 0 ? 'started' : 'updated'
+      )
+    )
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => tree('root-conversation', total)),
+      listEvents: vi.fn(async ({ afterSequence, limit }) => {
+        const events = durable.slice(afterSequence, afterSequence + limit)
+        return page('root-conversation', events, afterSequence + events.length < total)
+      }),
+      subscribe: () => () => undefined,
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+
+    expect(store.getSnapshot().tree?.lastSequence).toBe(total)
+    expect(store.getSnapshot().activities).toHaveLength(MAX_COLLABORATION_TIMELINE_ACTIVITIES)
+    expect(store.getSnapshot().activities[0]?.sequence).toBe(18)
+    expect(store.getSnapshot().activities.at(-1)?.sequence).toBe(total)
   })
 })
 

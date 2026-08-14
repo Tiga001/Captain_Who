@@ -94,7 +94,7 @@ describe('CoreServer collaboration client', () => {
 
     await expect(
       server.getCollaborationTree({ rootConversationId: 'conversation-root' })
-    ).resolves.toMatchObject({ tree: { agents: expect.any(Array), lastSequence: 12 } })
+    ).resolves.toMatchObject({ tree: { agents: expect.any(Array), lastSequence: 13 } })
     await expect(
       server.loadCollaborationObserverConversation({
         rootConversationId: 'conversation-root',
@@ -107,9 +107,9 @@ describe('CoreServer collaboration client', () => {
 
     const handler = vi.fn()
     server.onCollaborationEvent(handler)
-    receiver?.(round5Scenario.settledEventPage.events[0])
+    receiver?.(round5Scenario.settledEventPage.events.at(-1))
     expect(handler).toHaveBeenCalledWith(
-      expect.objectContaining({ rootConversationId: 'conversation-root', sequence: 13 })
+      expect.objectContaining({ rootConversationId: 'conversation-root', sequence: 15 })
     )
   })
 

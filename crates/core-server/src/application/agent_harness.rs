@@ -261,6 +261,19 @@ impl AgentCollaborationHarnessAdapter {
             return Err(permission_denied());
         }
         let caller = self.ensure_and_validate_caller(&invocation.caller)?;
+        // Every collaboration action first refreshes the caller's latest effective permissions
+        // from the exact Host-authenticated ToolExecutionContext. This makes a tightened root Turn
+        // visible before follow-up/interrupt/send can schedule descendant work, while the current
+        // caller Run remains frozen in its own context/checkpoint.
+        self.storage
+            .record_agent_effective_permissions_for_active_turn(
+                &caller.agent_id,
+                &invocation.conversation_id,
+                &invocation.run_id,
+                &invocation.assistant_message_id,
+                invocation.effective_permissions,
+            )
+            .map_err(graph_error)?;
         let request_id = stable_request_id(&invocation.run_id, &invocation.tool_call_id);
         let output = match invocation.action {
             AgentCollaborationAction::Spawn(request) => {
@@ -625,7 +638,8 @@ fn permission_denied() -> AgentError {
 mod tests {
     use super::*;
     use mycopilot_core::storage::models::{
-        ChatConversationRecord, ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
+        ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
+        ProjectRecord,
     };
     use mycopilot_core::{
         AgentCancellationToken, AgentForkTurns, AgentModelUnavailableReason, AgentSpawnRequest,
@@ -870,7 +884,7 @@ mod tests {
             })
             .unwrap();
         let enabled = adapter
-            .preview_runtime_services_for_conversation("conversation-catalog")
+            .runtime_services_for_conversation("conversation-catalog")
             .unwrap();
         assert_eq!(enabled.selector_directory.templates.len(), 1);
         assert_eq!(
@@ -896,6 +910,40 @@ mod tests {
             .unwrap();
         assert!(refreshed.selector_directory.templates.is_empty());
 
+        let (conversation, revision) = storage
+            .load_conversation_for_turn("conversation-catalog")
+            .unwrap();
+        let mut conversation = conversation.unwrap();
+        conversation.messages.push(ChatMessageRecord {
+            id: "assistant-stale-after-sampling".to_string(),
+            role: "assistant".to_string(),
+            content: "Thinking...".to_string(),
+            created_at: 2,
+            status: Some("pending".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+        conversation.updated_at = 2;
+        let active_trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-stale-after-sampling",
+            "conversation-catalog",
+            "assistant-stale-after-sampling",
+        );
+        storage
+            .save_conversation_and_begin_turn(
+                conversation,
+                revision,
+                None,
+                mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                    mycopilot_core::AgentPermissions::default(),
+                ),
+                &active_trace,
+                2,
+                2,
+            )
+            .unwrap();
+
         // The model-visible snapshot remains the admission authority for this logical Turn, but
         // it does not resurrect a template disabled after sampling: Factory revalidation fails
         // closed instead of silently inheriting another model.
@@ -904,6 +952,7 @@ mod tests {
                 AgentCollaborationInvocation {
                     caller: frozen_caller,
                     selector_authorization: frozen_authorization,
+                    effective_permissions: mycopilot_core::AgentPermissions::default(),
                     conversation_id: "conversation-catalog".to_string(),
                     run_id: "run-stale-after-sampling".to_string(),
                     assistant_message_id: "assistant-stale-after-sampling".to_string(),
@@ -937,9 +986,10 @@ mod tests {
                 AgentCollaborationInvocation {
                     caller: runtime.caller,
                     selector_authorization,
+                    effective_permissions: mycopilot_core::AgentPermissions::default(),
                     conversation_id: "conversation-catalog".to_string(),
-                    run_id: "run-stale-template".to_string(),
-                    assistant_message_id: "assistant-stale-template".to_string(),
+                    run_id: "run-stale-after-sampling".to_string(),
+                    assistant_message_id: "assistant-stale-after-sampling".to_string(),
                     model_batch_index: 1,
                     tool_call_id: "call-stale-template".to_string(),
                     action: AgentCollaborationAction::Spawn(AgentSpawnRequest {

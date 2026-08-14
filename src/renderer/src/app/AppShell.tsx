@@ -100,7 +100,6 @@ import { useAgentRunLifecycle } from './useAgentRunLifecycle'
 import { useProviderTransition } from '../features/agentRun/useProviderTransition'
 import { selectRenderableModelTransitionOperations } from '../features/chat/modelTransitionUiState'
 import { useOptionalCollaborationStore } from '../features/agentCollaboration/useCollaborationStore'
-import { CollaborationActivityPanel } from '../features/agentCollaboration/CollaborationActivityPanel'
 import { CollaborationApprovalPanel } from '../features/agentCollaboration/CollaborationApprovalPanel'
 import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
@@ -362,20 +361,14 @@ export function AppShell() {
   const collaborationContent = useMemo(
     () =>
       collaborationChildren.length > 0 ? (
-        <>
-          <CollaborationActivityPanel
-            agents={collaborationChildren}
-            onOpenAgent={openAgentCenter}
-          />
-          <CollaborationApprovalPanel
-            approvals={projectedCollaborationApprovals}
-            loadError={collaborationApprovalError}
-            mode="interactive"
-            onDecision={decideCollaborationApproval}
-            onOpenAgent={openAgentCenter}
-            onRetryLoad={() => void refreshCollaborationApprovals()}
-          />
-        </>
+        <CollaborationApprovalPanel
+          approvals={projectedCollaborationApprovals}
+          loadError={collaborationApprovalError}
+          mode="interactive"
+          onDecision={decideCollaborationApproval}
+          onOpenAgent={openAgentCenter}
+          onRetryLoad={() => void refreshCollaborationApprovals()}
+        />
       ) : null,
     [
       collaborationApprovalError,
@@ -1651,6 +1644,7 @@ export function AppShell() {
             ) : (
               <ChatConversationPage
                 collaborationContent={collaborationContent}
+                collaborationTimelineActivities={collaborationSnapshot?.activities ?? []}
                 composerDraft={activeDraft}
                 conversation={activeConversation}
                 contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
@@ -1675,6 +1669,7 @@ export function AppShell() {
                 onModelTransitionCancel={cancelActiveProviderTransition}
                 onModelTransitionConfirm={confirmActiveProviderTransition}
                 onModelTransitionRetry={retryActiveProviderTransition}
+                onOpenCollaborationAgent={openAgentCenter}
                 onEditLastUserMessage={submitEditedLastUserMessage}
                 onContinueInNewTask={(forkPoint) =>
                   continueInNewTask(activeConversation.id, forkPoint)

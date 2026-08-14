@@ -1799,7 +1799,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
         unreachable!("fixture is a command action")
     };
     let call = checkpoint_call_for_command(command);
-    let checkpoint = AgentRunCheckpoint {
+    let mut checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
@@ -1840,6 +1840,7 @@ fn restart_conservatively_blocks_interrupted_manual_command_deletion() {
     context.project_id = Some("project-restart-manual".to_string());
     context.workspace.as_mut().expect("workspace").project_id =
         Some("project-restart-manual".to_string());
+    checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
     let agent_input_json = PersistedAgentResumeInput::from_agent_input(&agent_input)
@@ -1999,7 +2000,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         })
         .unwrap();
     let call = checkpoint_call_for_command(&command);
-    let checkpoint = AgentRunCheckpoint {
+    let mut checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
@@ -2037,6 +2038,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
     let mut agent_input = command_test_input(fixture.path());
     let context = agent_input.context.as_mut().unwrap();
     context.conversation_id = Some("conversation-manual-command".to_string());
+    checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
     let record = PendingActionRecord {

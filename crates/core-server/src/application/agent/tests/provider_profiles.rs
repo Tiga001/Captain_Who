@@ -631,6 +631,20 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
             task_name: "Root".to_string(),
         })
         .unwrap();
+    let inherited_permissions = AgentPermissions {
+        read: mycopilot_core::AgentReadPermission::All,
+        write: mycopilot_core::AgentWritePermission::WorkspaceOnly,
+        command: mycopilot_core::AgentCommandPermission::AutoApprove,
+        command_safety: mycopilot_core::AgentCommandSafetyPolicy::Guarded,
+        patch: mycopilot_core::AgentPatchPermission::AutoApprove,
+    };
+    seed_root_effective_permissions(
+        &storage,
+        "agent-root-for-child",
+        "conversation-root-for-child",
+        "root-for-child",
+        inherited_permissions,
+    );
     let spawn = storage
         .create_child_agent(&mycopilot_core::CreateChildAgentInput {
             parent_agent_id: "agent-root-for-child".to_string(),
@@ -714,6 +728,14 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
         .unwrap()
         .expect("child Turn Usage is owned by its independent Conversation");
     assert_eq!(usage.conversation_id, spawn.agent.conversation_id);
+    assert_eq!(
+        storage
+            .get_agent_effective_permission_snapshot(&spawn.agent.agent_id)
+            .unwrap()
+            .unwrap()
+            .permissions,
+        inherited_permissions
+    );
     assert!(storage
         .load_agent_usage_for_owner(
             &turn.run_id,
@@ -738,6 +760,36 @@ async fn trusted_child_wake_uses_the_root_loop_without_duplicating_the_parent_ta
     let provider_request = model_server.await.unwrap();
     assert_eq!(provider_request["reasoning_effort"], "high");
     let provider_messages = provider_request["messages"].as_array().unwrap();
+    let run_world_state = provider_messages
+        .iter()
+        .map(provider_message_text)
+        .find(|content| {
+            content.contains("<backend_world_state_record>")
+                && content.contains("permissions.effective")
+        })
+        .expect("the real child Runtime projects its effective permissions to the provider");
+    let run_world_state = run_world_state
+        .lines()
+        .find_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .unwrap_or_else(|| {
+            panic!("the child Runtime emits one canonical World State JSON record: {run_world_state:?}")
+        });
+    let effective_permissions = run_world_state["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|section| section["id"] == "permissions.effective")
+        .expect("the child Runtime World State contains effective permissions");
+    assert_eq!(
+        effective_permissions["value"],
+        json!({
+            "read": "all",
+            "write": "workspace_only",
+            "command": "auto_approve",
+            "commandSafety": "guarded",
+            "patch": "auto_approve"
+        })
+    );
     assert_eq!(
         provider_messages
             .iter()
@@ -810,6 +862,13 @@ async fn dispatcher_runs_two_persisted_children_and_an_idle_followup_through_the
             task_name: "Root".to_string(),
         })
         .unwrap();
+    seed_root_effective_permissions(
+        &storage,
+        root_agent_id,
+        root_conversation_id,
+        "dispatcher-root",
+        AgentPermissions::default(),
+    );
 
     let factory =
         crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage));
@@ -916,16 +975,28 @@ async fn dispatcher_runs_two_persisted_children_and_an_idle_followup_through_the
             mycopilot_core::AgentMailboxDeliveryStatus::Queued
         );
     }
-    assert!(storage
+    let root_traces = storage
         .list_conversation_turn_traces(root_conversation_id)
-        .unwrap()
-        .is_empty());
-    assert!(storage
+        .unwrap();
+    assert_eq!(root_traces.len(), 1);
+    assert_eq!(
+        root_traces[0].assistant_message_id,
+        "assistant-permission-seed-dispatcher-root"
+    );
+    assert_eq!(
+        root_traces[0].terminal_status,
+        ConversationTurnTraceTerminalStatus::Completed
+    );
+    let root_messages = storage
         .load_conversation(root_conversation_id)
         .unwrap()
         .unwrap()
-        .messages
-        .is_empty());
+        .messages;
+    assert_eq!(root_messages.len(), 1);
+    assert_eq!(
+        root_messages[0].id,
+        "assistant-permission-seed-dispatcher-root"
+    );
     assert!(storage
         .claim_next_agent_wake(root_agent_id, "root-must-not-auto-wake")
         .unwrap()
@@ -1050,6 +1121,13 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
             task_name: "Root".to_string(),
         })
         .unwrap();
+    seed_root_effective_permissions(
+        &storage,
+        "agent-recovery-root",
+        "conversation-recovery-root",
+        "recovery-root",
+        AgentPermissions::default(),
+    );
     let child =
         crate::application::agent_collaboration::ChildAgentFactory::new(Arc::clone(&storage))
             .create_child(&mycopilot_core::CreateChildAgentInput {
@@ -1103,6 +1181,7 @@ async fn recovered_unknown_child_releases_startup_permit_and_accepts_a_later_fol
                 claim_token: claimed.claim_token.clone().unwrap(),
                 source_agent_message_id: claimed.source_agent_message_id.clone().unwrap(),
             }),
+            mycopilot_core::AgentTurnPermissionSource::InheritTrustedAncestors,
             &[claimed.source_agent_message_id.clone().unwrap()],
             &trace,
             admitted_at + 1,

@@ -207,7 +207,7 @@ const smokeSteps = [
     ]
   },
   {
-    label: 'storage: canonical v8, reset refusal, and migration failure recovery',
+    label: 'storage: canonical v9, reset refusal, and migration failure recovery',
     command: ['cargo', 'test', '-p', 'mycopilot-core', '--lib', 'storage::migrations::tests']
   },
   {

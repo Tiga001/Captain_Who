@@ -207,6 +207,69 @@ fn test_model_settings() -> ModelSettingsRecord {
     }
 }
 
+fn seed_root_effective_permissions(
+    storage: &StorageService,
+    root_agent_id: &str,
+    conversation_id: &str,
+    suffix: &str,
+    permissions: AgentPermissions,
+) -> mycopilot_core::AgentEffectivePermissionSnapshot {
+    let (conversation, revision) = storage.load_conversation_for_turn(conversation_id).unwrap();
+    let mut conversation = conversation.unwrap();
+    let assistant_message_id = format!("assistant-permission-seed-{suffix}");
+    let run_id = format!("run-permission-seed-{suffix}");
+    let created_at = mycopilot_core::storage::now_ms().max(conversation.updated_at + 1);
+    conversation.messages.push(ChatMessageRecord {
+        id: assistant_message_id.clone(),
+        role: "assistant".to_string(),
+        content: "permission seed".to_string(),
+        created_at,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    conversation.updated_at = created_at;
+    let trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+        &run_id,
+        conversation_id,
+        &assistant_message_id,
+    );
+    storage
+        .save_conversation_and_begin_turn(
+            conversation,
+            revision,
+            None,
+            mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(permissions),
+            &trace,
+            created_at,
+            created_at,
+        )
+        .unwrap();
+    let snapshot = storage
+        .get_agent_effective_permission_snapshot(root_agent_id)
+        .unwrap()
+        .unwrap();
+    let terminal = mycopilot_core::completed_conversation_trace_without_items(
+        &run_id,
+        conversation_id,
+        &assistant_message_id,
+    );
+    storage
+        .finalize_chat_message_with_conversation_trace(
+            conversation_id,
+            &assistant_message_id,
+            "permission seed complete",
+            Some("sent"),
+            "completed",
+            &terminal,
+            created_at,
+            created_at + 1,
+        )
+        .unwrap();
+    snapshot
+}
+
 fn checkpoint_call_for_command(command: &AgentCommandRequest) -> AgentToolCall {
     let mut args = json!({
         "command": command.command,

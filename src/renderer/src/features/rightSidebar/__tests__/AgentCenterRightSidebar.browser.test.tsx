@@ -230,6 +230,7 @@ function snapshot(
     workspaceId: 'workspace-a'
   }
   return {
+    activities: [],
     agentInvalidationSequences: Object.fromEntries(
       tree.agents.map((agent) => [agent.agentId, tree.lastSequence])
     ),

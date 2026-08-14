@@ -762,6 +762,32 @@ pub struct TrustedAgentWakeTurnAdmission {
     pub source_agent_message_id: String,
 }
 
+/// Host-only authority source for one durable Turn admission.
+///
+/// A public human/root Turn supplies the Host-authenticated effective permission set. A trusted
+/// child Wake never supplies its own authority: storage resolves the direct parent snapshot and
+/// intersects it with every durable ancestor snapshot under the same write transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentTurnPermissionSource {
+    HostAuthenticatedRoot(crate::AgentPermissions),
+    InheritTrustedAncestors,
+}
+
+/// Latest durable effective permission snapshot for an Agent identity. This is an execution
+/// authority fact, not a model-visible selector or an Agent-node creation capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEffectivePermissionSnapshot {
+    pub agent_id: String,
+    pub root_agent_id: String,
+    pub conversation_id: String,
+    pub source_run_id: String,
+    pub source_assistant_message_id: String,
+    pub permissions: crate::AgentPermissions,
+    pub revision: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcknowledgeAgentTaskAndWakeInput {
     pub message_id: String,

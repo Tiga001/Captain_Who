@@ -89,8 +89,20 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     );
     let event: CollaborationEventEnvelopeDto =
         serde_json::from_value(fixture["event"].clone()).unwrap();
+    assert_eq!(
+        event.schema_version,
+        AGENT_COLLABORATION_EVENT_SCHEMA_VERSION
+    );
     assert_eq!(event.sequence, 7);
-    assert_eq!(event.kind, CollaborationEventKindDto::TurnStarted);
+    assert_eq!(event.kind, CollaborationEventKindDto::WakeCreated);
+    assert_eq!(
+        event.activity.as_ref().unwrap().semantic,
+        CollaborationActivitySemanticDto::Started
+    );
+    assert_eq!(
+        event.activity.as_ref().unwrap().schema_version,
+        AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION
+    );
     assert_eq!(event.workspace_id, event.project_id);
     let observer: AgentObserverConversationDto =
         serde_json::from_value(fixture["observer"].clone()).unwrap();
@@ -148,6 +160,24 @@ fn agent_collaboration_contract_matches_the_typescript_fixture_and_is_strict() {
     let mut unknown = fixture["tree"].clone();
     unknown["providerSecret"] = serde_json::json!("must-not-cross");
     assert!(serde_json::from_value::<AgentTreeSnapshotDto>(unknown).is_err());
+    let mut unknown_activity = fixture["event"].clone();
+    unknown_activity["activity"]["forged"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(unknown_activity).is_err());
+    let mut missing_activity = fixture["event"].clone();
+    missing_activity.as_object_mut().unwrap().remove("activity");
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(missing_activity).is_err());
+    let mut wrong_semantic_kind = fixture["event"].clone();
+    wrong_semantic_kind["activity"]["semantic"] = serde_json::json!("completed");
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(wrong_semantic_kind).is_err());
+    let mut wrong_started_subject = fixture["event"].clone();
+    wrong_started_subject["activity"]["agentId"] = serde_json::json!("agent-other");
+    assert!(
+        serde_json::from_value::<CollaborationEventEnvelopeDto>(wrong_started_subject).is_err()
+    );
+    let mut forged_update = fixture["event"].clone();
+    forged_update["kind"] = serde_json::json!("mailbox_enqueued");
+    forged_update["activity"]["semantic"] = serde_json::json!("updated");
+    assert!(serde_json::from_value::<CollaborationEventEnvelopeDto>(forged_update).is_err());
 }
 
 #[test]
@@ -190,7 +220,17 @@ fn round5_collaboration_scenario_is_strict_across_rust_and_typescript() {
         "model-2"
     );
     assert_eq!(settled.last_sequence, page.last_sequence);
-    assert_eq!(page.events[0].run_id.as_deref(), Some("run-review"));
+    assert_eq!(page.events.len(), 15);
+    assert!(page
+        .events
+        .windows(2)
+        .all(|pair| pair[1].sequence == pair[0].sequence + 1));
+    let terminal_event = page.events.last().unwrap();
+    assert_eq!(terminal_event.run_id.as_deref(), Some("run-review"));
+    assert_eq!(
+        terminal_event.activity.as_ref().unwrap().semantic,
+        CollaborationActivitySemanticDto::Completed
+    );
     assert_eq!(observers[0].conversation_id, "conversation-review");
     assert_eq!(observers[1].conversation_id, "conversation-compatibility");
     assert_eq!(approvals.approvals.len(), 2);

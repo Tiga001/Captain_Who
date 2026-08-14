@@ -2,10 +2,10 @@ use super::*;
 #[cfg(test)]
 use crate::CreateAgentNodeInput;
 use crate::{
-    AcknowledgeAgentTaskAndWakeInput, AgentGraphError, AgentLifecycle, AgentMailboxMessageRecord,
-    AgentNodeRecord, AgentWakeRequestRecord, AgentWakeStatus, ConversationMessageOrigin,
-    EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
-    FinishAgentWakeWithResultInput, IdempotentCreate,
+    AcknowledgeAgentTaskAndWakeInput, AgentEffectivePermissionSnapshot, AgentGraphError,
+    AgentLifecycle, AgentMailboxMessageRecord, AgentNodeRecord, AgentPermissions,
+    AgentWakeRequestRecord, AgentWakeStatus, ConversationMessageOrigin, EnqueueAgentMessageInput,
+    EnqueueAgentWakeInput, EnsureRootAgentInput, FinishAgentWakeWithResultInput, IdempotentCreate,
 };
 
 fn unavailable(error: String) -> AgentGraphError {
@@ -57,6 +57,37 @@ impl StorageService {
     ) -> Result<Option<AgentNodeRecord>, AgentGraphError> {
         let connection = self.state.connection().map_err(unavailable)?;
         agent_graph_repository::get_agent_node_by_conversation(&connection, conversation_id)
+    }
+
+    pub fn get_agent_effective_permission_snapshot(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentEffectivePermissionSnapshot>, AgentGraphError> {
+        let connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::get_agent_effective_permission_snapshot(&connection, agent_id)
+    }
+
+    /// Records permissions copied from the exact Host-authenticated ToolExecutionContext of an
+    /// active Turn. The repository validates Agent/Conversation/Run/assistant identity together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_agent_effective_permissions_for_active_turn(
+        &self,
+        agent_id: &str,
+        conversation_id: &str,
+        run_id: &str,
+        assistant_message_id: &str,
+        permissions: AgentPermissions,
+    ) -> Result<AgentEffectivePermissionSnapshot, AgentGraphError> {
+        let mut connection = self.state.connection().map_err(unavailable)?;
+        agent_graph_repository::record_agent_effective_permissions_for_active_turn(
+            &mut connection,
+            agent_id,
+            conversation_id,
+            run_id,
+            assistant_message_id,
+            permissions,
+            now_ms(),
+        )
     }
 
     pub fn list_agent_children(

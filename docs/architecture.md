@@ -58,14 +58,17 @@ keeps its live overlay and refuses the potentially stale response until a target
 explicit reload can obtain a durable snapshot.
 
 The durable boundary in this round is the Agent tree, Conversation history, approval projection,
-template records, and root-local collaboration event log. The root-chat activity surface is a
-current-state projection keyed by stable Agent ID: reload reconstructs one latest row per child,
-not a durable timeline of every collaboration action. The observer envelope is only a low-latency
-overlay and is not persisted; durable Conversation snapshots and the collaboration event log remain
-recovery truth after gaps, Core restart, and window reload. Both live and restored child activity
-use the one Conversation reducer rather than a second token/chat store. The right-sidebar
-navigation stack and local disclosure/scroll UI state are renderer state and are not presented as
-persisted collaboration facts.
+template records, and root-local collaboration event log. Root chat renders the log's typed,
+backend-authored semantic activity (`started`, `updated`, `waiting_approval`, and terminal states)
+inside the one Conversation timeline. It never reconstructs activity from model prose, Tool JSON,
+Mailbox details, or the latest Agent summary. Reload and gap recovery replay the monotonic log from
+sequence zero; the Renderer retains the latest 2,048 semantic items as a documented UI-history
+window while still advancing across every non-display invalidation event. The observer envelope is
+only a low-latency overlay and is not persisted; durable Conversation snapshots and the
+collaboration event log remain recovery truth after gaps, Core restart, and window reload. Both
+live and restored child chat use the one Conversation reducer rather than a second token/chat
+store. The right-sidebar navigation stack and local disclosure/scroll UI state are renderer state
+and are not presented as persisted collaboration facts.
 
 An interactive root that has been materialized as an Agent still uses the existing Conversation
 fork service. Its collaboration-owned fork mode commits the target Conversation, an independent

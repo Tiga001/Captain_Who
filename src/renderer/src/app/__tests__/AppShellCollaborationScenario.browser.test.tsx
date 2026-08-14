@@ -134,17 +134,19 @@ vi.mock('../../host/hostClient', () => ({
       listCollaborationEvents: vi.fn(
         async ({
           afterSequence,
+          limit,
           rootConversationId
         }: {
           afterSequence: number
+          limit: number
           rootConversationId: string
         }) => {
           const page = scenarioState.eventPage
-          if (
-            !page ||
-            page.rootConversationId !== rootConversationId ||
-            afterSequence >= page.lastSequence
-          ) {
+          const visibleSequence =
+            scenarioState.currentTree?.rootConversationId === rootConversationId
+              ? scenarioState.currentTree.lastSequence
+              : 0
+          if (!page || page.rootConversationId !== rootConversationId) {
             return {
               ok: true,
               value: {
@@ -157,7 +159,19 @@ vi.mock('../../host/hostClient', () => ({
               }
             }
           }
-          return { ok: true, value: page }
+          const available = page.events.filter(
+            (event) => event.sequence > afterSequence && event.sequence <= visibleSequence
+          )
+          const events = available.slice(0, limit)
+          return {
+            ok: true,
+            value: {
+              ...page,
+              events,
+              hasMore: available.length > events.length,
+              lastSequence: visibleSequence
+            }
+          }
         }
       ),
       loadCollaborationObserverConversation: vi.fn(
@@ -395,17 +409,31 @@ describe('AppShell deterministic collaboration scenario', () => {
     const screen = await render(<AppShell />)
     await screen.getByRole('button', { name: 'select-conversation-root' }).click()
 
-    await expect.element(screen.getByTestId('collaboration-activity')).toBeVisible()
+    await expect.element(screen.getByTestId('collaboration-timeline')).toBeVisible()
     await expect
-      .poll(() => screen.container.querySelectorAll('.collaboration-activity__agent').length)
-      .toBe(2)
-    expect(screen.container.textContent).toContain('Model One')
-    expect(screen.container.textContent).toContain('Model Two')
+      .poll(() => screen.container.querySelectorAll('.collaboration-timeline__chip').length)
+      .toBeGreaterThanOrEqual(2)
     expect(screen.container.querySelectorAll('[data-approval-id]')).toHaveLength(2)
     await captureStableScreenshot(
       screen.container.querySelector('.main-panel__surface') ?? screen.container,
       '__screenshots__/AppShellCollaborationScenario.browser.test.tsx/root-collaboration.png'
     )
+
+    const timelineReviewChip = screen.container.querySelector<HTMLButtonElement>(
+      '.collaboration-timeline__chip[data-agent-id="agent-review"]'
+    )
+    if (!timelineReviewChip) throw new Error('Missing review Agent timeline chip')
+    await page.elementLocator(timelineReviewChip).click()
+    await expect
+      .poll(() =>
+        screen.container.querySelector(
+          '.agent-center__observer [data-conversation-id="conversation-review"]'
+        )
+      )
+      .not.toBeNull()
+    await expect
+      .poll(() => scenarioState.observerLoadRequests)
+      .toContain('conversation-root:conversation-review')
 
     const approveCard = screen.container.querySelector<HTMLElement>(
       '[data-approval-id="approval-approve"]'
@@ -426,7 +454,7 @@ describe('AppShell deterministic collaboration scenario', () => {
     }
     const rejectionScreen = await render(<AppShell />)
     await rejectionScreen.getByRole('button', { name: 'select-conversation-root' }).click()
-    await expect.element(rejectionScreen.getByTestId('collaboration-activity')).toBeVisible()
+    await expect.element(rejectionScreen.getByTestId('collaboration-timeline')).toBeVisible()
     const rejectButton = await rejectionScreen.getByRole('button', {
       name: enUSTranslations['agent.approval.dialog.reject']
     })
@@ -455,6 +483,8 @@ describe('AppShell deterministic collaboration scenario', () => {
     await expect
       .element(rejectionScreen.getByRole('button', { name: 'Open security_review' }))
       .toBeVisible()
+    expect(rejectionScreen.container.textContent).toContain('Model One')
+    expect(rejectionScreen.container.textContent).toContain('Model Two')
     await expect
       .poll(() => rejectionScreen.container.querySelector('.agent-center__observer'))
       .toBeNull()
@@ -624,33 +654,47 @@ describe('AppShell deterministic collaboration scenario', () => {
   it('converges through the durable sequence, survives remount and drops the old root scope', async () => {
     const first = await render(<AppShell />)
     await first.getByRole('button', { name: 'select-conversation-root' }).click()
-    await expect.element(first.getByTestId('collaboration-activity')).toBeVisible()
+    await expect.element(first.getByTestId('collaboration-timeline')).toBeVisible()
 
     scenarioState.currentTree = parseAgentTreeSnapshot(scenarioFixture.settledTree)
     emitCollaborationEvent(
-      parseCollaborationEventEnvelope(scenarioFixture.settledEventPage.events[0])
+      parseCollaborationEventEnvelope(scenarioFixture.settledEventPage.events.at(-1))
     )
     await expect
       .poll(() =>
-        first.container.querySelector('[data-agent-id="agent-review"]')?.getAttribute('data-status')
+        first.container.querySelector(
+          '.collaboration-timeline__activity[data-semantic="completed"] [data-agent-id="agent-review"]'
+        )
       )
-      .toBe('latest_completed')
+      .not.toBeNull()
     await first.unmount()
 
     const reloaded = await render(<AppShell />)
     await reloaded.getByRole('button', { name: 'select-conversation-root' }).click()
-    await expect.element(reloaded.getByTestId('collaboration-activity')).toBeVisible()
+    await expect.element(reloaded.getByTestId('collaboration-timeline')).toBeVisible()
     expect(
-      reloaded.container
-        .querySelector('[data-agent-id="agent-compatibility"]')
-        ?.getAttribute('data-status')
-    ).toBe('latest_interrupted')
+      reloaded.container.querySelector(
+        '.collaboration-timeline__activity[data-semantic="interrupted"] [data-agent-id="agent-compatibility"]'
+      )
+    ).not.toBeNull()
     await reloaded.getByRole('button', { name: 'Subagents' }).click()
+    expect(
+      reloaded
+        .getByRole('button', { name: 'Open compatibility_review' })
+        .element()
+        .getAttribute('data-status')
+    ).toBe('latest_interrupted')
+    expect(
+      reloaded
+        .getByRole('button', { name: 'Open security_review' })
+        .element()
+        .getAttribute('data-status')
+    ).toBe('latest_completed')
     expect(reloaded.container.textContent).toContain('Completed')
 
     await reloaded.getByRole('button', { name: 'select-conversation-other' }).click()
     await expect
-      .poll(() => reloaded.container.querySelector('[data-testid="collaboration-activity"]'))
+      .poll(() => reloaded.container.querySelector('[data-testid="collaboration-timeline"]'))
       .toBeNull()
     expect(
       reloaded.container.querySelector('[data-conversation-surface-mode="observer"]')

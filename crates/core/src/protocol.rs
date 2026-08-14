@@ -747,6 +747,46 @@ impl Default for AgentPermissions {
     }
 }
 
+impl AgentPermissions {
+    /// Returns the component-wise intersection of two permission ceilings.
+    ///
+    /// This is deliberately a meet operation rather than an override: a child, template, project,
+    /// or dynamic policy can only retain or remove authority already present in the other input.
+    pub fn meet(self, ceiling: Self) -> Self {
+        Self {
+            read: match (self.read, ceiling.read) {
+                (AgentReadPermission::All, AgentReadPermission::All) => AgentReadPermission::All,
+                _ => AgentReadPermission::WorkspaceOnly,
+            },
+            write: match (self.write, ceiling.write) {
+                (AgentWritePermission::All, AgentWritePermission::All) => AgentWritePermission::All,
+                (AgentWritePermission::Denied, _) | (_, AgentWritePermission::Denied) => {
+                    AgentWritePermission::Denied
+                }
+                _ => AgentWritePermission::WorkspaceOnly,
+            },
+            command: match (self.command, ceiling.command) {
+                (AgentCommandPermission::AutoApprove, AgentCommandPermission::AutoApprove) => {
+                    AgentCommandPermission::AutoApprove
+                }
+                _ => AgentCommandPermission::RequireApproval,
+            },
+            command_safety: match (self.command_safety, ceiling.command_safety) {
+                (AgentCommandSafetyPolicy::FullAccess, AgentCommandSafetyPolicy::FullAccess) => {
+                    AgentCommandSafetyPolicy::FullAccess
+                }
+                _ => AgentCommandSafetyPolicy::Guarded,
+            },
+            patch: match (self.patch, ceiling.patch) {
+                (AgentPatchPermission::AutoApprove, AgentPatchPermission::AutoApprove) => {
+                    AgentPatchPermission::AutoApprove
+                }
+                _ => AgentPatchPermission::RequireApproval,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPromptWorkMode {
@@ -3732,5 +3772,31 @@ mod tests {
         assert_eq!(retry["attempt"], 2);
         assert_eq!(retry["maxAttempts"], 6);
         assert!(retry.get("reason").is_none());
+    }
+
+    #[test]
+    fn agent_permission_meet_is_component_wise_and_never_widens() {
+        let full = AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: AgentPatchPermission::AutoApprove,
+        };
+        let custom = AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            patch: AgentPatchPermission::AutoApprove,
+        };
+        let minimum = AgentPermissions::default();
+
+        assert_eq!(full.meet(custom), custom);
+        assert_eq!(custom.meet(full), custom);
+        assert_eq!(custom.meet(minimum), minimum);
+        assert_eq!(minimum.meet(custom), minimum);
+        assert_eq!(full.meet(full), full);
+        assert_eq!(minimum.meet(minimum), minimum);
     }
 }

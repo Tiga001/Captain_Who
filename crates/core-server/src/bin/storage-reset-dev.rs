@@ -1348,7 +1348,7 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_reset_failure_preserves_current_v8_source_and_recovery_backup() {
+    fn confirmed_reset_failure_preserves_current_v9_source_and_recovery_backup() {
         let fixture = tempfile::tempdir().unwrap();
         let secret = "confirmed-reset-failure-secret";
         populated_storage(fixture.path(), secret);
@@ -1389,10 +1389,10 @@ mod tests {
             1,
             "one immutable recovery snapshot must remain"
         );
-        // A canonical v8 database uses WAL mode. Exercise the actual recovery shape by restoring
+        // A canonical v9 database uses WAL mode. Exercise the actual recovery shape by restoring
         // the immutable snapshot to a writable database identity instead of mutating the only
         // backup merely to inspect it.
-        let recovered_database = fixture.path().join("recovered-v8.sqlite");
+        let recovered_database = fixture.path().join("recovered-v9.sqlite");
         fs::copy(&backups[0], &recovered_database).unwrap();
         let backup = Connection::open(&recovered_database).unwrap();
         mycopilot_core::storage::migrations::run_migrations(&backup).unwrap();
@@ -1401,7 +1401,7 @@ mod tests {
             backup
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         assert_eq!(
             backup

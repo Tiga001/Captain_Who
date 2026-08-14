@@ -516,6 +516,13 @@ mod tests {
         assert!(spawn
             .action(json!({"task_name":"Review","message":"Check","sender":"forged"}))
             .is_err());
+        assert!(spawn
+            .action(json!({
+                "task_name":"Review",
+                "message":"Check",
+                "permissions": {"read":"all","write":"all"}
+            }))
+            .is_err());
         let wait = AgentCollaborationTool::new(AgentCollaborationToolKind::Wait);
         assert!(wait.action(json!({"targets":[],"timeout_ms":0})).is_err());
         assert!(wait

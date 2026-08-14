@@ -4647,6 +4647,13 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
             task_name: "Root".to_string(),
         })
         .unwrap();
+    seed_root_effective_permissions(
+        &storage,
+        "agent-child-approval-root",
+        "conversation-child-approval-root",
+        "child-approval-root",
+        AgentPermissions::default(),
+    );
     storage
         .save_conversation(ChatConversationRecord {
             id: "conversation-foreign-approval-root".to_string(),
@@ -4766,6 +4773,7 @@ async fn child_approval_continuation_persists_waiting_to_running_before_runtime(
                 claim_token: claimed.claim_token.clone().unwrap(),
                 source_agent_message_id: claimed.source_agent_message_id.clone().unwrap(),
             }),
+            mycopilot_core::AgentTurnPermissionSource::InheritTrustedAncestors,
             &[claimed.source_agent_message_id.clone().unwrap()],
             &trace,
             admitted_at + 1,

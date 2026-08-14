@@ -7,14 +7,16 @@ use crate::storage::{
     chat_repository, conversation_model_context_repository, conversation_trace_repository,
 };
 use crate::{
-    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentDisplayStatus,
-    AgentDisplayStatusSnapshot, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
+    AcknowledgeAgentTaskAndWakeInput, AgentCollaborationIdentity, AgentCommandPermission,
+    AgentCommandSafetyPolicy, AgentDisplayStatus, AgentDisplayStatusSnapshot,
+    AgentEffectivePermissionSnapshot, AgentGraphError, AgentLifecycle, AgentMailboxDeliveryStatus,
     AgentMailboxKind, AgentMailboxMessageRecord, AgentMessageDispatch, AgentModelSelectionSnapshot,
-    AgentModelSelectionSource, AgentNodeRecord, AgentResultArtifactKind,
-    AgentResultArtifactReference, AgentTemplateSnapshot, AgentTurnResultEnvelope,
-    AgentTurnResultSettlement, AgentWakeRecoveryAction, AgentWakeRecoveryBatch,
-    AgentWakeRequestRecord, AgentWakeStatus, ChildAgentSpawnRecord, ConversationMessageOrigin,
-    CreateAgentNodeInput, EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
+    AgentModelSelectionSource, AgentNodeRecord, AgentPatchPermission, AgentPermissions,
+    AgentReadPermission, AgentResultArtifactKind, AgentResultArtifactReference,
+    AgentTemplateSnapshot, AgentTurnResultEnvelope, AgentTurnResultSettlement,
+    AgentWakeRecoveryAction, AgentWakeRecoveryBatch, AgentWakeRequestRecord, AgentWakeStatus,
+    AgentWritePermission, ChildAgentSpawnRecord, ConversationMessageOrigin, CreateAgentNodeInput,
+    EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
     FinishAgentTurnResultInput, FinishAgentWakeWithResultInput, IdempotentCreate,
     InterruptAgentExecutionOutcome, ReasoningEffort, SendAgentMessageRequest,
     TrustedActiveChildWakeBundle, AGENT_GRAPH_SCHEMA_VERSION, AGENT_RESULT_ENVELOPE_SCHEMA_VERSION,
@@ -65,6 +67,15 @@ const WAKE_SELECT: &str = "
            status_revision, claim_token, lease_expires_at, result_message_id, terminal_error,
            run_id, assistant_message_id, created_at, claimed_at, started_at, completed_at
     FROM agent_wake_requests";
+
+const EFFECTIVE_PERMISSION_SELECT: &str = "
+    SELECT snapshot.agent_id, snapshot.schema_version, snapshot.root_agent_id,
+           snapshot.conversation_id, snapshot.source_run_id,
+           snapshot.source_assistant_message_id, snapshot.read_permission,
+           snapshot.write_permission, snapshot.command_permission,
+           snapshot.command_safety_policy, snapshot.patch_permission, snapshot.revision,
+           snapshot.created_at, snapshot.updated_at
+    FROM agent_effective_permission_snapshots AS snapshot";
 
 pub fn ensure_root_agent(
     connection: &mut Connection,
@@ -356,6 +367,213 @@ pub fn get_agent_node_by_conversation(
 ) -> Result<Option<AgentNodeRecord>, AgentGraphError> {
     validate_id("conversation_id", conversation_id)?;
     query_node_by_conversation(connection, conversation_id)
+}
+
+pub fn get_agent_effective_permission_snapshot(
+    connection: &Connection,
+    agent_id: &str,
+) -> Result<Option<AgentEffectivePermissionSnapshot>, AgentGraphError> {
+    validate_id("agent_id", agent_id)?;
+    query_effective_permission_snapshot(connection, agent_id)
+}
+
+/// Persists the Host-authenticated permissions of an exact active Turn. This covers the lazy-root
+/// case where the root node is materialized only while constructing collaboration Host services.
+#[allow(clippy::too_many_arguments)]
+pub fn record_agent_effective_permissions_for_active_turn(
+    connection: &mut Connection,
+    agent_id: &str,
+    conversation_id: &str,
+    run_id: &str,
+    assistant_message_id: &str,
+    permissions: AgentPermissions,
+    updated_at: i64,
+) -> Result<AgentEffectivePermissionSnapshot, AgentGraphError> {
+    let transaction = immediate(connection)?;
+    let snapshot = record_agent_effective_permissions_in_transaction(
+        &transaction,
+        agent_id,
+        conversation_id,
+        run_id,
+        assistant_message_id,
+        permissions,
+        updated_at,
+    )?;
+    transaction.commit().map_err(write_error)?;
+    Ok(snapshot)
+}
+
+/// Resolves a child permission set from the direct parent and every durable ancestor. The direct
+/// parent is the inheritance baseline; older ancestor snapshots are dynamic ceilings which stop a
+/// stale intermediate Agent from retaining authority after the root has tightened it.
+pub(crate) fn inherit_agent_permissions_in_transaction(
+    transaction: &Connection,
+    child_agent_id: &str,
+) -> Result<AgentPermissions, AgentGraphError> {
+    validate_id("child_agent_id", child_agent_id)?;
+    let child = ensure_active_agent(transaction, child_agent_id)?;
+    let direct_parent_id = child
+        .parent_agent_id
+        .as_deref()
+        .ok_or_else(|| conflict("root Agent cannot inherit child Wake permissions"))?;
+    let mut statement = transaction
+        .prepare(&format!(
+            "WITH RECURSIVE ancestors(agent_id, parent_agent_id, depth) AS (
+                 SELECT agent_id, parent_agent_id, 0
+                 FROM agent_nodes WHERE agent_id = ?1
+                 UNION ALL
+                 SELECT parent.agent_id, parent.parent_agent_id, child.depth + 1
+                 FROM agent_nodes AS parent
+                 JOIN ancestors AS child ON parent.agent_id = child.parent_agent_id
+             )
+             {EFFECTIVE_PERMISSION_SELECT}
+             JOIN ancestors ON ancestors.agent_id = snapshot.agent_id
+             WHERE ancestors.depth > 0
+             ORDER BY ancestors.depth"
+        ))
+        .map_err(read_error)?;
+    let snapshots = statement
+        .query_map([child_agent_id], read_effective_permission_row)
+        .map_err(read_error)?
+        .map(|row| {
+            row.map_err(read_error)
+                .and_then(decode_effective_permission_snapshot)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+
+    let ancestor_count = transaction
+        .query_row(
+            "WITH RECURSIVE ancestors(agent_id, parent_agent_id) AS (
+                 SELECT agent_id, parent_agent_id
+                 FROM agent_nodes WHERE agent_id = ?1
+                 UNION ALL
+                 SELECT parent.agent_id, parent.parent_agent_id
+                 FROM agent_nodes AS parent
+                 JOIN ancestors AS child ON parent.agent_id = child.parent_agent_id
+             )
+             SELECT COUNT(*) - 1 FROM ancestors",
+            [child_agent_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(read_error)?;
+    if ancestor_count <= 0
+        || snapshots.len() != usize::try_from(ancestor_count).unwrap_or(usize::MAX)
+    {
+        return Err(conflict(
+            "trusted child permission inheritance is missing a durable ancestor snapshot",
+        ));
+    }
+    let direct_parent = snapshots
+        .first()
+        .filter(|snapshot| snapshot.agent_id == direct_parent_id)
+        .ok_or_else(|| corrupt("direct parent permission snapshot is missing or misordered"))?;
+    if snapshots.iter().any(|snapshot| {
+        snapshot.root_agent_id != child.root_agent_id || snapshot.conversation_id.is_empty()
+    }) {
+        return Err(corrupt(
+            "ancestor permission snapshot crosses the child Agent root tree",
+        ));
+    }
+    Ok(snapshots
+        .iter()
+        .skip(1)
+        .fold(direct_parent.permissions, |effective, ancestor| {
+            effective.meet(ancestor.permissions)
+        }))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_agent_effective_permissions_in_transaction(
+    transaction: &Connection,
+    agent_id: &str,
+    conversation_id: &str,
+    run_id: &str,
+    assistant_message_id: &str,
+    permissions: AgentPermissions,
+    updated_at: i64,
+) -> Result<AgentEffectivePermissionSnapshot, AgentGraphError> {
+    for (field, value) in [
+        ("agent_id", agent_id),
+        ("conversation_id", conversation_id),
+        ("run_id", run_id),
+        ("assistant_message_id", assistant_message_id),
+    ] {
+        validate_id(field, value)?;
+    }
+    validate_time(updated_at)?;
+    let node = ensure_active_agent(transaction, agent_id)?;
+    if node.conversation_id != conversation_id {
+        return Err(conflict(
+            "Agent effective permissions do not match the bound Conversation",
+        ));
+    }
+    let exact_active_turn = transaction
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM conversation_turn_traces
+                 WHERE conversation_id = ?1 AND run_id = ?2
+                   AND assistant_message_id = ?3 AND terminal_status = 'in_progress'
+             )",
+            params![conversation_id, run_id, assistant_message_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(read_error)?;
+    if !exact_active_turn {
+        return Err(conflict(
+            "Agent effective permissions require the exact active Turn identity",
+        ));
+    }
+    let existing = query_effective_permission_snapshot(transaction, agent_id)?;
+    let changed = existing.as_ref().is_none_or(|snapshot| {
+        snapshot.source_run_id != run_id
+            || snapshot.source_assistant_message_id != assistant_message_id
+            || snapshot.permissions != permissions
+    });
+    if changed {
+        let created_at = existing
+            .as_ref()
+            .map_or(updated_at, |snapshot| snapshot.created_at);
+        let next_updated_at = existing.as_ref().map_or(updated_at, |snapshot| {
+            updated_at.max(snapshot.updated_at.saturating_add(1))
+        });
+        transaction
+            .execute(
+                "INSERT INTO agent_effective_permission_snapshots (
+                     agent_id, schema_version, root_agent_id, conversation_id, source_run_id,
+                     source_assistant_message_id, read_permission, write_permission,
+                     command_permission, command_safety_policy, patch_permission, revision,
+                     created_at, updated_at
+                 ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11, ?12)
+                 ON CONFLICT(agent_id) DO UPDATE SET
+                     source_run_id = excluded.source_run_id,
+                     source_assistant_message_id = excluded.source_assistant_message_id,
+                     read_permission = excluded.read_permission,
+                     write_permission = excluded.write_permission,
+                     command_permission = excluded.command_permission,
+                     command_safety_policy = excluded.command_safety_policy,
+                     patch_permission = excluded.patch_permission,
+                     revision = agent_effective_permission_snapshots.revision + 1,
+                     updated_at = excluded.updated_at",
+                params![
+                    agent_id,
+                    &node.root_agent_id,
+                    conversation_id,
+                    run_id,
+                    assistant_message_id,
+                    read_permission_as_str(permissions.read),
+                    write_permission_as_str(permissions.write),
+                    command_permission_as_str(permissions.command),
+                    command_safety_as_str(permissions.command_safety),
+                    patch_permission_as_str(permissions.patch),
+                    created_at,
+                    next_updated_at,
+                ],
+            )
+            .map_err(write_error)?;
+    }
+    query_effective_permission_snapshot(transaction, agent_id)?
+        .ok_or_else(|| corrupt("Agent effective permission snapshot disappeared after upsert"))
 }
 
 /// Reconstructs and verifies the durable facts required to execute a child Wake.
@@ -3322,6 +3540,83 @@ fn query_node_by_conversation(
         .transpose()
 }
 
+fn query_effective_permission_snapshot(
+    connection: &Connection,
+    agent_id: &str,
+) -> Result<Option<AgentEffectivePermissionSnapshot>, AgentGraphError> {
+    connection
+        .query_row(
+            &format!("{EFFECTIVE_PERMISSION_SELECT} WHERE snapshot.agent_id = ?1"),
+            [agent_id],
+            read_effective_permission_row,
+        )
+        .optional()
+        .map_err(read_error)?
+        .map(decode_effective_permission_snapshot)
+        .transpose()
+}
+
+fn read_effective_permission_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<EffectivePermissionRow> {
+    Ok(EffectivePermissionRow {
+        agent_id: row.get(0)?,
+        schema_version: row.get(1)?,
+        root_agent_id: row.get(2)?,
+        conversation_id: row.get(3)?,
+        source_run_id: row.get(4)?,
+        source_assistant_message_id: row.get(5)?,
+        read_permission: row.get(6)?,
+        write_permission: row.get(7)?,
+        command_permission: row.get(8)?,
+        command_safety_policy: row.get(9)?,
+        patch_permission: row.get(10)?,
+        revision: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+struct EffectivePermissionRow {
+    agent_id: String,
+    schema_version: i64,
+    root_agent_id: String,
+    conversation_id: String,
+    source_run_id: String,
+    source_assistant_message_id: String,
+    read_permission: String,
+    write_permission: String,
+    command_permission: String,
+    command_safety_policy: String,
+    patch_permission: String,
+    revision: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn decode_effective_permission_snapshot(
+    row: EffectivePermissionRow,
+) -> Result<AgentEffectivePermissionSnapshot, AgentGraphError> {
+    validate_schema_version(row.schema_version)?;
+    Ok(AgentEffectivePermissionSnapshot {
+        agent_id: row.agent_id,
+        root_agent_id: row.root_agent_id,
+        conversation_id: row.conversation_id,
+        source_run_id: row.source_run_id,
+        source_assistant_message_id: row.source_assistant_message_id,
+        permissions: AgentPermissions {
+            read: parse_read_permission(&row.read_permission)?,
+            write: parse_write_permission(&row.write_permission)?,
+            command: parse_command_permission(&row.command_permission)?,
+            command_safety: parse_command_safety(&row.command_safety_policy)?,
+            patch: parse_patch_permission(&row.patch_permission)?,
+        },
+        revision: positive_u64(row.revision, "Agent effective permission revision")?,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
 fn query_node_by_root_conversation(
     connection: &Connection,
     conversation_id: &str,
@@ -4095,6 +4390,83 @@ fn validate_schema_version(value: i64) -> Result<(), AgentGraphError> {
     }
 }
 
+fn read_permission_as_str(value: AgentReadPermission) -> &'static str {
+    match value {
+        AgentReadPermission::WorkspaceOnly => "workspace_only",
+        AgentReadPermission::All => "all",
+    }
+}
+
+fn parse_read_permission(value: &str) -> Result<AgentReadPermission, AgentGraphError> {
+    match value {
+        "workspace_only" => Ok(AgentReadPermission::WorkspaceOnly),
+        "all" => Ok(AgentReadPermission::All),
+        _ => Err(corrupt("unknown effective read permission")),
+    }
+}
+
+fn write_permission_as_str(value: AgentWritePermission) -> &'static str {
+    match value {
+        AgentWritePermission::Denied => "denied",
+        AgentWritePermission::WorkspaceOnly => "workspace_only",
+        AgentWritePermission::All => "all",
+    }
+}
+
+fn parse_write_permission(value: &str) -> Result<AgentWritePermission, AgentGraphError> {
+    match value {
+        "denied" => Ok(AgentWritePermission::Denied),
+        "workspace_only" => Ok(AgentWritePermission::WorkspaceOnly),
+        "all" => Ok(AgentWritePermission::All),
+        _ => Err(corrupt("unknown effective write permission")),
+    }
+}
+
+fn command_permission_as_str(value: AgentCommandPermission) -> &'static str {
+    match value {
+        AgentCommandPermission::RequireApproval => "require_approval",
+        AgentCommandPermission::AutoApprove => "auto_approve",
+    }
+}
+
+fn parse_command_permission(value: &str) -> Result<AgentCommandPermission, AgentGraphError> {
+    match value {
+        "require_approval" => Ok(AgentCommandPermission::RequireApproval),
+        "auto_approve" => Ok(AgentCommandPermission::AutoApprove),
+        _ => Err(corrupt("unknown effective command permission")),
+    }
+}
+
+fn command_safety_as_str(value: AgentCommandSafetyPolicy) -> &'static str {
+    match value {
+        AgentCommandSafetyPolicy::Guarded => "guarded",
+        AgentCommandSafetyPolicy::FullAccess => "full_access",
+    }
+}
+
+fn parse_command_safety(value: &str) -> Result<AgentCommandSafetyPolicy, AgentGraphError> {
+    match value {
+        "guarded" => Ok(AgentCommandSafetyPolicy::Guarded),
+        "full_access" => Ok(AgentCommandSafetyPolicy::FullAccess),
+        _ => Err(corrupt("unknown effective command safety policy")),
+    }
+}
+
+fn patch_permission_as_str(value: AgentPatchPermission) -> &'static str {
+    match value {
+        AgentPatchPermission::RequireApproval => "require_approval",
+        AgentPatchPermission::AutoApprove => "auto_approve",
+    }
+}
+
+fn parse_patch_permission(value: &str) -> Result<AgentPatchPermission, AgentGraphError> {
+    match value {
+        "require_approval" => Ok(AgentPatchPermission::RequireApproval),
+        "auto_approve" => Ok(AgentPatchPermission::AutoApprove),
+        _ => Err(corrupt("unknown effective patch permission")),
+    }
+}
+
 fn validate_id(field: &'static str, value: &str) -> Result<(), AgentGraphError> {
     validate_bounded_text(field, value, 1, MAX_ID_BYTES)
 }
@@ -4222,7 +4594,7 @@ fn write_error(_: rusqlite::Error) -> AgentGraphError {
 mod tests {
     use super::*;
     use crate::storage::{
-        chat_repository, migrations,
+        agent_collaboration_event_repository, chat_repository, migrations,
         models::{ChatConversationMetaRecord, ChatMessageRecord},
     };
 
@@ -4332,6 +4704,68 @@ mod tests {
         )
         .unwrap();
         connection
+    }
+
+    fn full_permissions() -> AgentPermissions {
+        AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: AgentPatchPermission::AutoApprove,
+        }
+    }
+
+    fn record_permissions_for_test_turn(
+        connection: &mut Connection,
+        agent_id: &str,
+        conversation_id: &str,
+        suffix: &str,
+        permissions: AgentPermissions,
+        timestamp: i64,
+    ) -> AgentEffectivePermissionSnapshot {
+        let assistant_message_id = format!("assistant-permissions-{suffix}");
+        let run_id = format!("run-permissions-{suffix}");
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     ?1, ?2, 'assistant', 'permission fixture', 'pending', ?3,
+                     (SELECT COALESCE(MAX(position), -1) + 1 FROM messages
+                      WHERE conversation_id = ?2)
+                 )",
+                params![&assistant_message_id, conversation_id, timestamp],
+            )
+            .unwrap();
+        let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            &run_id,
+            conversation_id,
+            &assistant_message_id,
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            connection, &trace, timestamp, timestamp,
+        )
+        .unwrap();
+        let snapshot = record_agent_effective_permissions_for_active_turn(
+            connection,
+            agent_id,
+            conversation_id,
+            &run_id,
+            &assistant_message_id,
+            permissions,
+            timestamp,
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE conversation_turn_traces
+                 SET terminal_status = 'completed', completed_at = ?1, updated_at = ?1
+                 WHERE run_id = ?2 AND terminal_status = 'in_progress'",
+                params![timestamp.saturating_add(1), &run_id],
+            )
+            .unwrap();
+        snapshot
     }
 
     fn message_input(
@@ -4464,6 +4898,155 @@ mod tests {
             14,
         );
         assert!(matches!(duplicate_name, Err(AgentGraphError::Conflict(_))));
+    }
+
+    #[test]
+    fn effective_permissions_inherit_direct_parent_and_meet_every_ancestor_snapshot() {
+        let mut connection = setup_tree();
+        create_agent_node(
+            &mut connection,
+            &child_input(
+                "agent-grand",
+                "agent-root",
+                "agent-child",
+                "conversation-grand",
+                "grand",
+                "/root/review/grand",
+            ),
+            12,
+        )
+        .unwrap();
+        let custom_parent = AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: AgentPatchPermission::AutoApprove,
+        };
+        record_permissions_for_test_turn(
+            &mut connection,
+            "agent-root",
+            "conversation-root",
+            "root-full",
+            full_permissions(),
+            20,
+        );
+        record_permissions_for_test_turn(
+            &mut connection,
+            "agent-child",
+            "conversation-child",
+            "child-custom",
+            custom_parent,
+            30,
+        );
+
+        let inherited = inherit_agent_permissions_in_transaction(&connection, "agent-grand")
+            .expect("the direct parent snapshot should be the initial authority");
+        assert_eq!(inherited, custom_parent);
+
+        // Root tightens while the intermediate child remains idle. A direct follow-up of the
+        // grandchild must not inherit the child's now-stale broader snapshot.
+        record_permissions_for_test_turn(
+            &mut connection,
+            "agent-root",
+            "conversation-root",
+            "root-tightened",
+            AgentPermissions::default(),
+            40,
+        );
+        let tightened = inherit_agent_permissions_in_transaction(&connection, "agent-grand")
+            .expect("the complete ancestor chain should remain available");
+        assert_eq!(tightened, AgentPermissions::default());
+        let followup = follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-grand".to_string(),
+                request_id: "root-direct-grand-tightened".to_string(),
+                content: "Run only with the root's newly tightened authority.".to_string(),
+            },
+            50,
+        )
+        .unwrap();
+        let claimed = claim_next_dispatchable_agent_wake(
+            &mut connection,
+            "claim-root-direct-grand-tightened",
+            51,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed.agent_id, "agent-grand");
+        assert_eq!(
+            claimed.source_agent_message_id,
+            Some(followup.message.message_id)
+        );
+        assert_eq!(
+            inherit_agent_permissions_in_transaction(&connection, "agent-grand").unwrap(),
+            AgentPermissions::default()
+        );
+        assert_eq!(
+            get_agent_effective_permission_snapshot(&connection, "agent-root")
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
+    }
+
+    #[test]
+    fn permission_inheritance_and_active_turn_recording_fail_closed_on_missing_or_forged_facts() {
+        let mut connection = setup_tree();
+        let missing =
+            inherit_agent_permissions_in_transaction(&connection, "agent-child").unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("missing a durable ancestor snapshot"),
+            "{missing}"
+        );
+
+        connection
+            .execute(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'assistant-forged-permissions', 'conversation-root', 'assistant',
+                     'permission fixture', 'pending', 20, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+            "run-forged-permissions",
+            "conversation-root",
+            "assistant-forged-permissions",
+        );
+        crate::storage::conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            &trace,
+            20,
+            20,
+        )
+        .unwrap();
+        let forged = record_agent_effective_permissions_for_active_turn(
+            &mut connection,
+            "agent-child",
+            "conversation-root",
+            "run-forged-permissions",
+            "assistant-forged-permissions",
+            full_permissions(),
+            20,
+        )
+        .unwrap_err();
+        assert!(
+            forged.to_string().contains("bound Conversation"),
+            "{forged}"
+        );
+        assert!(
+            get_agent_effective_permission_snapshot(&connection, "agent-child")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -4849,6 +5432,9 @@ mod tests {
         );
         assert_eq!(running_display.latest_wake_status_revision, Some(2));
 
+        let before_interrupt =
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap();
         transition_agent_wake(
             &mut connection,
             &active_wake.wake_id,
@@ -4858,6 +5444,29 @@ mod tests {
             25,
         )
         .unwrap();
+        let interrupt_events = agent_collaboration_event_repository::list_root_events(
+            &connection,
+            "agent-root",
+            before_interrupt,
+            8,
+        )
+        .unwrap();
+        let interrupt_activities = interrupt_events
+            .iter()
+            .filter_map(|event| event.activity.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(interrupt_activities.len(), 1);
+        assert_eq!(
+            interrupt_activities[0].semantic,
+            crate::AgentCollaborationActivitySemantic::Interrupted
+        );
+        assert_eq!(interrupt_activities[0].agent_id, "agent-child");
+        assert!(interrupt_events.iter().any(|event| {
+            event.kind == crate::AgentCollaborationEventKind::WakeUpdated
+                && event.activity.as_ref().is_some_and(|activity| {
+                    activity.semantic == crate::AgentCollaborationActivitySemantic::Interrupted
+                })
+        }));
         let mut terminal_trace =
             crate::storage::conversation_trace_repository::get_trace_for_message(
                 &connection,
@@ -5091,12 +5700,41 @@ mod tests {
             summary: "nested review complete".to_string(),
             terminal_error: None,
         };
+        let before_finish =
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap();
         let settled = finish_agent_turn_with_result(&mut connection, &finish, 35).unwrap();
         assert_eq!(settled.result_message.sender_agent_id, "agent-grand");
         assert_eq!(settled.result_message.recipient_agent_id, "agent-child");
         assert_eq!(settled.envelope.artifact_refs.len(), 1);
         assert!(settled.parent_wake.is_some());
         assert!(!settled.result_message.content.contains("usage"));
+        let settlement_events = agent_collaboration_event_repository::list_root_events(
+            &connection,
+            "agent-root",
+            before_finish,
+            16,
+        )
+        .unwrap();
+        let settlement_activities = settlement_events
+            .iter()
+            .filter_map(|event| event.activity.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(settlement_activities.len(), 1);
+        assert_eq!(
+            settlement_activities[0].semantic,
+            crate::AgentCollaborationActivitySemantic::Completed
+        );
+        assert_eq!(settlement_activities[0].agent_id, "agent-grand");
+        assert!(settlement_events.iter().any(|event| {
+            event.kind == crate::AgentCollaborationEventKind::MailboxEnqueued
+                && event.message_id.as_deref() == Some(settled.result_message.message_id.as_str())
+                && event.activity.is_none()
+        }));
+        assert!(settlement_events.iter().all(|event| {
+            event.activity.is_none()
+                || event.kind == crate::AgentCollaborationEventKind::WakeUpdated
+        }));
 
         let later_artifact_id = format!("sha256:{}", "b".repeat(64));
         connection
@@ -5120,6 +5758,11 @@ mod tests {
         let retry = finish_agent_turn_with_result(&mut connection, &finish, 37).unwrap();
         assert_eq!(retry.envelope, settled.envelope);
         assert_eq!(retry.envelope.artifact_refs.len(), 1);
+        assert_eq!(
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap(),
+            settlement_events.last().unwrap().root_sequence
+        );
 
         let parent_wake = settled.parent_wake.as_ref().unwrap();
         connection
@@ -5196,6 +5839,9 @@ mod tests {
             claim_next_agent_wake(&mut connection, "agent-child", "root-result-claim", 42)
                 .unwrap()
                 .unwrap();
+        let before_failed_finish =
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap();
         let root_settlement = finish_agent_turn_with_result(
             &mut connection,
             &FinishAgentTurnResultInput {
@@ -5222,6 +5868,29 @@ mod tests {
                 .status,
             AgentDisplayStatus::LatestFailed
         );
+        let failed_events = agent_collaboration_event_repository::list_root_events(
+            &connection,
+            "agent-root",
+            before_failed_finish,
+            16,
+        )
+        .unwrap();
+        let failed_activities = failed_events
+            .iter()
+            .filter_map(|event| event.activity.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(failed_activities.len(), 1);
+        assert_eq!(
+            failed_activities[0].semantic,
+            crate::AgentCollaborationActivitySemantic::Failed
+        );
+        assert_eq!(failed_activities[0].agent_id, "agent-child");
+        assert!(failed_events.iter().any(|event| {
+            event.kind == crate::AgentCollaborationEventKind::MailboxEnqueued
+                && event.message_id.as_deref()
+                    == Some(root_settlement.result_message.message_id.as_str())
+                && event.activity.is_none()
+        }));
     }
 
     #[test]
@@ -5396,6 +6065,9 @@ mod tests {
         enqueue_agent_wake(&mut connection, &wake_input("interrupt-one"), 20).unwrap();
         enqueue_agent_wake(&mut connection, &wake_input("interrupt-two"), 21).unwrap();
 
+        let before_queued_interrupt =
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap();
         let first = interrupt_agent_execution(
             &mut connection,
             "agent-root",
@@ -5410,6 +6082,38 @@ mod tests {
                 wake_id: "wake-interrupt-one".to_string()
             }
         );
+        assert_eq!(
+            get_agent_wake(&connection, "wake-interrupt-one")
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentWakeStatus::Cancelled
+        );
+        let queued_interrupt_events = agent_collaboration_event_repository::list_root_events(
+            &connection,
+            "agent-root",
+            before_queued_interrupt,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            queued_interrupt_events
+                .iter()
+                .filter_map(|event| event.activity.as_ref())
+                .map(|activity| activity.semantic)
+                .collect::<Vec<_>>(),
+            vec![crate::AgentCollaborationActivitySemantic::Interrupted]
+        );
+        assert!(queued_interrupt_events.iter().any(|event| {
+            event.kind == crate::AgentCollaborationEventKind::WakeUpdated
+                && event.agent_id == "agent-child"
+                && event.activity.as_ref().is_some_and(|activity| {
+                    activity.agent_id == "agent-child" && activity.task_name_snapshot == "review"
+                })
+        }));
+        let after_queued_interrupt =
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap();
         let retry = interrupt_agent_execution(
             &mut connection,
             "agent-root",
@@ -5420,6 +6124,12 @@ mod tests {
         .unwrap();
         assert_eq!(retry, first, "a retry cannot cancel the next queued Wake");
         assert_eq!(
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap(),
+            after_queued_interrupt,
+            "the idempotent interrupt receipt cannot duplicate timeline activity"
+        );
+        assert_eq!(
             get_agent_wake(&connection, "wake-interrupt-two")
                 .unwrap()
                 .unwrap()
@@ -5427,12 +6137,24 @@ mod tests {
             AgentWakeStatus::Queued
         );
 
+        let claimed = claim_next_agent_wake(
+            &mut connection,
+            "agent-child",
+            "interrupt-claimed-token",
+            24,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(claimed.wake_id, "wake-interrupt-two");
+        let before_claimed_interrupt =
+            agent_collaboration_event_repository::latest_root_sequence(&connection, "agent-root")
+                .unwrap();
         let second = interrupt_agent_execution(
             &mut connection,
             "agent-root",
             "agent-child",
             "interrupt-request-two",
-            24,
+            25,
         )
         .unwrap();
         assert_eq!(
@@ -5441,12 +6163,33 @@ mod tests {
                 wake_id: "wake-interrupt-two".to_string()
             }
         );
+        let claimed_interrupt_events = agent_collaboration_event_repository::list_root_events(
+            &connection,
+            "agent-root",
+            before_claimed_interrupt,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            claimed_interrupt_events
+                .iter()
+                .filter_map(|event| event.activity.as_ref())
+                .map(|activity| activity.semantic)
+                .collect::<Vec<_>>(),
+            vec![crate::AgentCollaborationActivitySemantic::Interrupted]
+        );
+        assert_eq!(
+            get_agent_display_status(&connection, "agent-child")
+                .unwrap()
+                .status,
+            AgentDisplayStatus::LatestInterrupted
+        );
         assert!(interrupt_agent_execution(
             &mut connection,
             "agent-child",
             "agent-root",
             "interrupt-upward-forbidden",
-            25,
+            26,
         )
         .is_err());
     }

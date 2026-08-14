@@ -666,7 +666,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         runtime_binding: None,
     };
     let call = checkpoint_call_for_command(&command);
-    let checkpoint = AgentRunCheckpoint {
+    let mut checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-before-spawn".to_string(),
         pending_action_id: None,
@@ -721,6 +721,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         attachment_library: None,
         permissions: AgentPermissions::default(),
     });
+    checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
     service
@@ -817,7 +818,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         approval_status: AgentApprovalStatus::Required,
         reason: Some("exercise the pre-spawn continuation lease".to_string()),
     };
-    let checkpoint = AgentRunCheckpoint {
+    let mut checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         pending_action_id: None,
@@ -872,6 +873,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         attachment_library: None,
         permissions: AgentPermissions::default(),
     });
+    checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
 
     save_test_pending_provider_for_input(&storage, &mut agent_input);
@@ -1019,7 +1021,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         runtime_binding: None,
     };
     let call = checkpoint_call_for_command(&command);
-    let checkpoint = AgentRunCheckpoint {
+    let mut checkpoint = AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-command-cancel".to_string(),
         pending_action_id: None,
@@ -1074,6 +1076,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         attachment_library: None,
         permissions: AgentPermissions::default(),
     });
+    checkpoint.run_context = agent_input.context.clone();
     agent_input.resume_checkpoint = Some(checkpoint);
     save_test_pending_provider_for_input(&storage, &mut agent_input);
     let record = PendingActionRecord {

@@ -40,6 +40,11 @@ import { getConversationTurnNavigationItems } from './conversationTurnNavigation
 import { getLatestAgentTodo } from './todoLifetime'
 import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus } from '../agentRun/agentActionUtils'
+import {
+  CollaborationTimelineActivityList,
+  normalizeCollaborationTimelineActivities,
+  type CollaborationTimelineActivity
+} from '../agentCollaboration/CollaborationTimelineActivity'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
 
@@ -60,6 +65,8 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   mode: 'interactive'
   /** Root-only semantic collaboration activity supplied by the durable tree/event projection. */
   collaborationContent?: ReactNode
+  /** Typed durable semantic activity; generic Tool/Mailbox/model text never enters this path. */
+  collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   contextWindowIndicatorEnabled?: boolean
   contextWindowSnapshot?: AgentContextWindowSnapshot
   composerDraft: ChatComposerDraft
@@ -85,6 +92,7 @@ export interface InteractiveConversationSurfaceProps extends ConversationSurface
   onModelTransitionCancel?: () => void
   onModelTransitionConfirm?: () => void | Promise<void>
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
+  onOpenCollaborationAgent?: (agentId: string) => void
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
@@ -165,6 +173,7 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
 
 interface ChatMessageListProps {
   agentLabelsById?: Readonly<Record<string, string>>
+  collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   conversation: ChatConversation
   editSelectedModelAvailable: boolean
   editSelectedModelSupportsImage: boolean
@@ -183,6 +192,7 @@ interface ChatMessageListProps {
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   onModelTransitionRetry?: (operation: AgentProviderTransitionOperation) => void | Promise<void>
+  onOpenCollaborationAgent?: (agentId: string) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
   parentAgentId?: string | null
@@ -193,6 +203,7 @@ interface ChatMessageListProps {
 
 export const ChatMessageList = memo(function ChatMessageList({
   agentLabelsById,
+  collaborationTimelineActivities = [],
   conversation,
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
@@ -207,6 +218,7 @@ export const ChatMessageList = memo(function ChatMessageList({
   onOpenContinuationOrigin,
   onMessageUiStateChange,
   onModelTransitionRetry,
+  onOpenCollaborationAgent,
   onRejectAgentAction,
   onReviewLastTurn,
   parentAgentId,
@@ -215,7 +227,36 @@ export const ChatMessageList = memo(function ChatMessageList({
   turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
   const continuationOrigin = conversation.continuationOrigin
-  const messageIds = new Set(conversation.messages.map((message) => message.id))
+  const collaborationAgentNavigation = mode === 'interactive' ? onOpenCollaborationAgent : undefined
+  const messageIds = useMemo(
+    () => new Set(conversation.messages.map((message) => message.id)),
+    [conversation.messages]
+  )
+  const collaborationTimeline = useMemo(() => {
+    const beforeMessage = new Map<string, CollaborationTimelineActivity[]>()
+    const afterMessage = new Map<string, CollaborationTimelineActivity[]>()
+    const tail: CollaborationTimelineActivity[] = []
+    const normalized = normalizeCollaborationTimelineActivities(collaborationTimelineActivities)
+    for (const activity of normalized) {
+      if (activity.rootAnchorMessageId && messageIds.has(activity.rootAnchorMessageId)) {
+        const slot = afterMessage.get(activity.rootAnchorMessageId) ?? []
+        slot.push(activity)
+        afterMessage.set(activity.rootAnchorMessageId, slot)
+        continue
+      }
+      const nextMessage = conversation.messages.find(
+        (message) => message.createdAt > activity.occurredAt
+      )
+      if (!nextMessage) {
+        tail.push(activity)
+        continue
+      }
+      const slot = beforeMessage.get(nextMessage.id) ?? []
+      slot.push(activity)
+      beforeMessage.set(nextMessage.id, slot)
+    }
+    return { afterMessage, beforeMessage, tail }
+  }, [collaborationTimelineActivities, conversation.messages, messageIds])
   const [observerTimelineCollapsed, setObserverTimelineCollapsed] = useState<
     Readonly<Record<string, boolean>>
   >({})
@@ -228,6 +269,12 @@ export const ChatMessageList = memo(function ChatMessageList({
     <>
       {conversation.messages.map((message) => (
         <Fragment key={message.id}>
+          {collaborationAgentNavigation && (
+            <CollaborationTimelineActivityList
+              activities={collaborationTimeline.beforeMessage.get(message.id) ?? []}
+              onOpenAgent={collaborationAgentNavigation}
+            />
+          )}
           <ChatMessageItem
             agentLabelsById={agentLabelsById}
             conversationId={conversation.id}
@@ -273,6 +320,12 @@ export const ChatMessageList = memo(function ChatMessageList({
             }
             turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
           />
+          {collaborationAgentNavigation && (
+            <CollaborationTimelineActivityList
+              activities={collaborationTimeline.afterMessage.get(message.id) ?? []}
+              onOpenAgent={collaborationAgentNavigation}
+            />
+          )}
           {continuationOrigin?.boundaryMessageId === message.id && (
             <ConversationContinuationDivider
               onOpen={
@@ -337,6 +390,12 @@ export const ChatMessageList = memo(function ChatMessageList({
             operation={operation}
           />
         ))}
+      {collaborationAgentNavigation && (
+        <CollaborationTimelineActivityList
+          activities={collaborationTimeline.tail}
+          onOpenAgent={collaborationAgentNavigation}
+        />
+      )}
     </>
   )
 })
@@ -509,6 +568,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
         >
           <ChatMessageList
             agentLabelsById={props.mode === 'observer' ? props.agentLabelsById : undefined}
+            collaborationTimelineActivities={interactive?.collaborationTimelineActivities}
             conversation={conversation}
             editSelectedModelAvailable={interactive?.editSelectedModelAvailable ?? false}
             editSelectedModelSupportsImage={interactive?.editSelectedModelSupportsImage ?? false}
@@ -523,6 +583,7 @@ export function ConversationSurface(props: ConversationSurfaceProps) {
             onOpenContinuationOrigin={interactive?.onOpenContinuationOrigin}
             onMessageUiStateChange={interactive?.onMessageUiStateChange}
             onModelTransitionRetry={interactive?.onModelTransitionRetry}
+            onOpenCollaborationAgent={interactive?.onOpenCollaborationAgent}
             onRejectAgentAction={interactive?.onRejectAgentAction}
             onReviewLastTurn={interactive?.onReviewLastTurn}
             parentAgentId={props.mode === 'observer' ? props.parentAgentId : undefined}

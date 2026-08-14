@@ -1,0 +1,104 @@
+.collaboration-timeline {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 14px;
+  min-width: 0;
+  padding: 0 4px;
+}
+
+/* The shared message column intentionally has generous turn spacing. Inline semantic activity is
+   part of that turn, so collapse only its two surrounding flex gaps without changing chat rows. */
+.chat-conversation-page__messages > .collaboration-timeline {
+  margin-block: -34px;
+  position: relative;
+  z-index: 2;
+}
+
+.collaboration-timeline__activity {
+  align-items: center;
+  color: var(--mc-color-text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--mc-font-size-chat-activity);
+  gap: 6px;
+  min-width: 0;
+}
+
+.collaboration-timeline__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.collaboration-timeline__chip {
+  align-items: center;
+  background: color-mix(in srgb, var(--mc-color-text-accent) 9%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--mc-color-text-accent) 24%, var(--mc-color-border-subtle));
+  border-radius: 999px;
+  color: var(--mc-color-text-primary);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  gap: 5px;
+  max-width: min(240px, 100%);
+  min-width: 0;
+  padding: 3px 8px;
+}
+
+.collaboration-timeline__chip:hover {
+  background: color-mix(in srgb, var(--mc-color-text-accent) 15%, transparent);
+}
+
+.collaboration-timeline__chip:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.collaboration-timeline__chip svg {
+  flex: 0 0 auto;
+  height: 13px;
+  width: 13px;
+}
+
+.collaboration-timeline__chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collaboration-timeline__status[data-tone='started'],
+.collaboration-timeline__status[data-tone='updated'] {
+  color: var(--mc-color-text-accent);
+}
+
+.collaboration-timeline__status[data-tone='waiting_approval'] {
+  color: var(--mc-color-text-accent);
+}
+
+.collaboration-timeline__status[data-tone='completed'] {
+  color: var(--mc-color-status-success-text);
+}
+
+.collaboration-timeline__status[data-tone='failed'] {
+  color: var(--mc-color-text-danger);
+}
+
+.collaboration-timeline__status[data-tone='interrupted'] {
+  color: var(--mc-color-text-muted);
+}
+
+@media (max-width: 520px) {
+  .collaboration-timeline {
+    padding-inline: 0;
+  }
+
+  .collaboration-timeline__activity {
+    align-items: flex-start;
+  }
+
+  .collaboration-timeline__chips {
+    flex-basis: 100%;
+  }
+}

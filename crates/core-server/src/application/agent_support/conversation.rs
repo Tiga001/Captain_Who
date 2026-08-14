@@ -105,7 +105,8 @@ pub(crate) fn prepare_agent_wake_turn(
         max_tokens: None,
         temperature: None,
         prompt_preferences: None,
-        // Child authority is a Host policy. It is never inherited from a model-authored payload.
+        // Required construction placeholder only. Atomic Turn admission replaces this with the
+        // direct-parent/ancestor durable inheritance result before RunContext is created.
         permissions: AgentPermissions::default(),
     };
     prepare_conversation_turn_from_source(
@@ -129,7 +130,7 @@ pub(crate) fn prepare_agent_wake_turn(
 fn prepare_conversation_turn_from_source(
     storage: &StorageService,
     skills_service: &SkillsService,
-    input: AgentConversationTurnInput,
+    mut input: AgentConversationTurnInput,
     run_id: &str,
     source: ConversationTurnInputSource,
     reservation: TurnReservationMode,
@@ -385,15 +386,30 @@ fn prepare_conversation_turn_from_source(
                     Some(wake_admission.as_ref())
                 }
             };
-            storage.save_conversation_and_begin_turn_with_preloaded_agent_messages(
-                conversation,
-                expected_revision,
-                trusted_wake,
-                &preloaded_agent_message_ids,
-                &initial_trace,
-                assistant_created_at,
-                now_ms().max(assistant_created_at),
-            )?;
+            let permission_source = match &source {
+                ConversationTurnInputSource::Human => {
+                    mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                        input.permissions,
+                    )
+                }
+                ConversationTurnInputSource::ExistingAgentProjection { .. } => {
+                    mycopilot_core::AgentTurnPermissionSource::InheritTrustedAncestors
+                }
+            };
+            let (_, effective_permissions) = storage
+                .save_conversation_and_begin_turn_with_preloaded_agent_messages(
+                    conversation,
+                    expected_revision,
+                    trusted_wake,
+                    permission_source,
+                    &preloaded_agent_message_ids,
+                    &initial_trace,
+                    assistant_created_at,
+                    now_ms().max(assistant_created_at),
+                )?;
+            // Child authority is resolved only inside durable Turn admission. The placeholder on
+            // AgentConversationTurnInput never reaches RunContext or a model/tool boundary.
+            input.permissions = effective_permissions;
         }
     }
     if matches!(&source, ConversationTurnInputSource::Human) {

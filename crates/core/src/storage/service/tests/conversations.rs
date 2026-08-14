@@ -472,6 +472,9 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
             candidate_a.clone(),
             initial_revision,
             None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                crate::AgentPermissions::default(),
+            ),
             &trace_a,
             3,
             3,
@@ -513,7 +516,17 @@ fn stale_full_conversation_snapshot_cannot_delete_an_active_turn_before_unique_c
         "assistant-candidate-b",
     );
     let error = service
-        .save_conversation_and_begin_turn(candidate_b, active_revision, None, &trace_b, 3, 3)
+        .save_conversation_and_begin_turn(
+            candidate_b,
+            active_revision,
+            None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                crate::AgentPermissions::default(),
+            ),
+            &trace_b,
+            3,
+            3,
+        )
         .unwrap_err();
     assert!(error.contains("active durable Turn"), "{error}");
 
@@ -594,7 +607,17 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
         "assistant-completed-a",
     );
     service
-        .save_conversation_and_begin_turn(candidate_a, initial_revision, None, &trace_a, 3, 3)
+        .save_conversation_and_begin_turn(
+            candidate_a,
+            initial_revision,
+            None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                crate::AgentPermissions::default(),
+            ),
+            &trace_a,
+            3,
+            3,
+        )
         .unwrap();
     let terminal_a = crate::completed_conversation_trace_without_items(
         "run-completed-a",
@@ -658,7 +681,17 @@ fn completed_turn_revision_fences_a_cross_host_stale_full_snapshot() {
         "assistant-stale-b",
     );
     let error = service
-        .save_conversation_and_begin_turn(stale_candidate_b, initial_revision, None, &trace_b, 3, 3)
+        .save_conversation_and_begin_turn(
+            stale_candidate_b,
+            initial_revision,
+            None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                crate::AgentPermissions::default(),
+            ),
+            &trace_b,
+            3,
+            3,
+        )
         .unwrap_err();
     assert!(error.contains("Conversation changed"), "{error}");
     assert_eq!(
@@ -724,7 +757,17 @@ fn turn_commit_rechecks_graph_identity_and_lifecycle_inside_the_write_transactio
         )
         .unwrap();
     let error = service
-        .save_conversation_and_begin_turn(candidate, revision, None, &trace, 2, 2)
+        .save_conversation_and_begin_turn(
+            candidate,
+            revision,
+            None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                crate::AgentPermissions::default(),
+            ),
+            &trace,
+            2,
+            2,
+        )
         .unwrap_err();
     assert!(error.contains("active root Agent"), "{error}");
     assert!(service
@@ -738,6 +781,78 @@ fn turn_commit_rechecks_graph_identity_and_lifecycle_inside_the_write_transactio
         .messages
         .iter()
         .all(|message| message.id != "assistant-graph-fence"));
+}
+
+#[test]
+fn root_permission_snapshot_is_atomic_with_turn_admission_and_survives_reopen() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-permission-reopen";
+    service
+        .save_conversation(conversation(
+            conversation_id,
+            None,
+            "message-permission-reopen-user",
+        ))
+        .unwrap();
+    service
+        .ensure_root_agent(&EnsureRootAgentInput {
+            agent_id: "agent-permission-reopen".to_string(),
+            conversation_id: conversation_id.to_string(),
+            creation_request_id: "ensure-permission-reopen".to_string(),
+            task_name: "Root".to_string(),
+        })
+        .unwrap();
+    let (candidate, revision) = service.load_conversation_for_turn(conversation_id).unwrap();
+    let mut candidate = candidate.unwrap();
+    candidate.messages.push(ChatMessageRecord {
+        id: "assistant-permission-reopen".to_string(),
+        role: "assistant".to_string(),
+        content: "Thinking...".to_string(),
+        created_at: 2,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    candidate.updated_at = 2;
+    let trace = crate::ConversationTraceSnapshot::default().in_progress_trace(
+        "run-permission-reopen",
+        conversation_id,
+        "assistant-permission-reopen",
+    );
+    let full = crate::AgentPermissions {
+        read: crate::AgentReadPermission::All,
+        write: crate::AgentWritePermission::All,
+        command: crate::AgentCommandPermission::AutoApprove,
+        command_safety: crate::AgentCommandSafetyPolicy::FullAccess,
+        patch: crate::AgentPatchPermission::AutoApprove,
+    };
+    let (_, admitted) = service
+        .save_conversation_and_begin_turn(
+            candidate,
+            revision,
+            None,
+            crate::AgentTurnPermissionSource::HostAuthenticatedRoot(full),
+            &trace,
+            2,
+            2,
+        )
+        .unwrap();
+    assert_eq!(admitted, full);
+    drop(service);
+
+    let reopened = fixture.service();
+    let snapshot = reopened
+        .get_agent_effective_permission_snapshot("agent-permission-reopen")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.permissions, full);
+    assert_eq!(snapshot.source_run_id, "run-permission-reopen");
+    assert_eq!(
+        snapshot.source_assistant_message_id,
+        "assistant-permission-reopen"
+    );
 }
 
 #[test]

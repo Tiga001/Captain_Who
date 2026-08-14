@@ -1,6 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 pub const AGENT_COLLABORATION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -209,7 +211,28 @@ pub enum CollaborationEventKindDto {
     ApprovalUpdated,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollaborationActivitySemanticDto {
+    Started,
+    Updated,
+    WaitingApproval,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CollaborationActivitySnapshotDto {
+    pub schema_version: u32,
+    pub semantic: CollaborationActivitySemanticDto,
+    pub agent_id: String,
+    pub task_name_snapshot: String,
+    pub root_anchor_message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CollaborationEventEnvelopeDto {
     pub schema_version: u32,
@@ -226,7 +249,111 @@ pub struct CollaborationEventEnvelopeDto {
     pub message_id: Option<String>,
     pub kind: CollaborationEventKindDto,
     pub resource_revision: u64,
+    pub activity: Option<CollaborationActivitySnapshotDto>,
     pub occurred_at: i64,
+}
+
+/// A bare `Option<T>` silently maps a missing JSON field to `None`. Routing through an explicit
+/// deserializer makes event schema v2 distinguish a present `null` activity (known non-semantic
+/// event) from an older envelope which predates the projection.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollaborationEventEnvelopeWireDto {
+    schema_version: u32,
+    event_id: String,
+    sequence: u64,
+    workspace_id: Option<String>,
+    project_id: Option<String>,
+    root_agent_id: String,
+    root_conversation_id: String,
+    agent_id: String,
+    conversation_id: String,
+    turn_id: Option<String>,
+    run_id: Option<String>,
+    message_id: Option<String>,
+    kind: CollaborationEventKindDto,
+    resource_revision: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    activity: Option<CollaborationActivitySnapshotDto>,
+    occurred_at: i64,
+}
+
+impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CollaborationEventEnvelopeWireDto::deserialize(deserializer)?;
+        if wire.schema_version != AGENT_COLLABORATION_EVENT_SCHEMA_VERSION {
+            return Err(D::Error::custom("unsupported collaboration event schema"));
+        }
+        if wire.workspace_id != wire.project_id {
+            return Err(D::Error::custom(
+                "collaboration event workspace/project identity mismatch",
+            ));
+        }
+        if let Some(activity) = wire.activity.as_ref() {
+            if activity.schema_version != AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
+                return Err(D::Error::custom(
+                    "unsupported collaboration activity schema",
+                ));
+            }
+            let valid_kind = matches!(
+                (activity.semantic, wire.kind),
+                (
+                    CollaborationActivitySemanticDto::Started,
+                    CollaborationEventKindDto::WakeCreated
+                ) | (
+                    CollaborationActivitySemanticDto::Updated,
+                    CollaborationEventKindDto::MailboxEnqueued
+                ) | (
+                    CollaborationActivitySemanticDto::WaitingApproval,
+                    CollaborationEventKindDto::ApprovalProjected
+                ) | (
+                    CollaborationActivitySemanticDto::Completed
+                        | CollaborationActivitySemanticDto::Failed
+                        | CollaborationActivitySemanticDto::Interrupted,
+                    CollaborationEventKindDto::WakeUpdated
+                )
+            );
+            let valid_subject = match activity.semantic {
+                CollaborationActivitySemanticDto::Updated => activity.agent_id != wire.agent_id,
+                _ => activity.agent_id == wire.agent_id,
+            };
+            if !valid_kind || !valid_subject {
+                return Err(D::Error::custom(
+                    "collaboration activity kind/subject mismatch",
+                ));
+            }
+        }
+
+        Ok(Self {
+            schema_version: wire.schema_version,
+            event_id: wire.event_id,
+            sequence: wire.sequence,
+            workspace_id: wire.workspace_id,
+            project_id: wire.project_id,
+            root_agent_id: wire.root_agent_id,
+            root_conversation_id: wire.root_conversation_id,
+            agent_id: wire.agent_id,
+            conversation_id: wire.conversation_id,
+            turn_id: wire.turn_id,
+            run_id: wire.run_id,
+            message_id: wire.message_id,
+            kind: wire.kind,
+            resource_revision: wire.resource_revision,
+            activity: wire.activity,
+            occurred_at: wire.occurred_at,
+        })
+    }
 }
 
 /// Process-local child stream. Durable observer snapshots and the collaboration event log remain

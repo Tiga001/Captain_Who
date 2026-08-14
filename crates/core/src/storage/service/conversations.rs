@@ -713,19 +713,22 @@ impl StorageService {
     /// Atomically installs the provisional messages and the durable one-active-Turn trace.
     /// `BEGIN IMMEDIATE` plus the canonical partial unique index serializes independent Hosts;
     /// a losing Host leaves neither messages nor metadata behind.
+    #[allow(clippy::too_many_arguments)]
     pub fn save_conversation_and_begin_turn(
         &self,
         conversation: ChatConversationRecord,
         expected_revision: Option<i64>,
         trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        permission_source: crate::AgentTurnPermissionSource,
         trace: &ConversationTurnTrace,
         trace_created_at: i64,
         trace_updated_at: i64,
-    ) -> Result<ChatConversationRecord, String> {
+    ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
         self.save_conversation_and_begin_turn_with_preloaded_agent_messages(
             conversation,
             expected_revision,
             trusted_wake,
+            permission_source,
             &[],
             trace,
             trace_created_at,
@@ -739,11 +742,12 @@ impl StorageService {
         conversation: ChatConversationRecord,
         expected_revision: Option<i64>,
         trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        permission_source: crate::AgentTurnPermissionSource,
         preloaded_agent_message_ids: &[String],
         trace: &ConversationTurnTrace,
         trace_created_at: i64,
         trace_updated_at: i64,
-    ) -> Result<ChatConversationRecord, String> {
+    ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         let transaction = connection
@@ -781,6 +785,28 @@ impl StorageService {
             }
             (None, None) => {}
         }
+        let effective_permissions = match (permission_source, trusted_wake, bound_agent.as_ref()) {
+            (
+                crate::AgentTurnPermissionSource::HostAuthenticatedRoot(permissions),
+                None,
+                None | Some((_, None, _)),
+            ) => permissions,
+            (
+                crate::AgentTurnPermissionSource::InheritTrustedAncestors,
+                Some(_),
+                Some((agent_id, Some(_), _)),
+            ) => agent_graph_repository::inherit_agent_permissions_in_transaction(
+                &transaction,
+                agent_id,
+            )
+            .map_err(|error| error.to_string())?,
+            _ => {
+                return Err(
+                    "Turn permission authority does not match its trusted root/child admission."
+                        .to_string(),
+                );
+            }
+        };
         let claimed_wake = if let Some(trusted) = trusted_wake {
             let wake = transaction
                 .query_row(
@@ -887,6 +913,18 @@ impl StorageService {
             trace_updated_at,
         )
         .map_err(storage_error)?;
+        if let Some((agent_id, _, _)) = bound_agent.as_ref() {
+            agent_graph_repository::record_agent_effective_permissions_in_transaction(
+                &transaction,
+                agent_id,
+                &conversation.id,
+                &trace.run_id,
+                &trace.assistant_message_id,
+                effective_permissions,
+                trace_updated_at,
+            )
+            .map_err(|error| error.to_string())?;
+        }
         agent_delivery_repository::bind_turn_start_messages_in_transaction(
             &transaction,
             &crate::BindAgentTurnStartInput {
@@ -927,7 +965,7 @@ impl StorageService {
             }
         }
         transaction.commit().map_err(storage_error)?;
-        Ok(conversation)
+        Ok((conversation, effective_permissions))
     }
 
     pub fn save_conversation_meta(

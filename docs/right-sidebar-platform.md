@@ -51,8 +51,13 @@ The module is bound to the active root Conversation, not merely to the project/w
   second compact chat implementation.
 
 `AppShell` is the sole owner of the active-root collaboration store. It supplies the same snapshot
-and per-Agent validated invalidation sequence to the Agent Center, root-chat activity/approval
-projections, and observer refreshes. A hydration revision additionally invalidates every observer
+and per-Agent validated invalidation sequence to the Agent Center, root-chat semantic
+activity/approval projections, and observer refreshes. The store replays the durable event log from
+sequence zero after reload, resync, or a detected gap, validates every sequence, and atomically
+publishes a bounded latest-2,048 semantic activity window. Root chat merges those typed events into
+the shared Conversation timeline by durable anchor when present and otherwise by
+`occurredAt`/sequence; it never derives status from the Agent Center's current-state rows. A
+hydration revision additionally invalidates every observer
 after a gap, restart resync, or window reload. An observer change is
 identity-scoped so a late response for Agent A cannot appear under Agent B; same-Agent invalidation
 refreshes may retain the last authorized snapshot rather than flashing unrelated or empty content.
@@ -73,9 +78,10 @@ creation; the center continues to display each existing Agent's creation snapsho
 
 Agent identities, latest statuses, templates, approvals, and child Conversation history recover
 from the database. The open Agent Center page/detail, local collapse state, and scroll position are
-not persisted across a full renderer reload. Root-chat collaboration activity currently
-reconstructs the latest Agent summary per stable Agent ID; it does not persist a separate card for
-every historical send, wait, or Tool call. Live observer envelopes are an unpersisted latency
+not persisted across a full renderer reload. The Agent Center remains a current-state index;
+root-chat collaboration history instead comes from the durable typed semantic log and appears
+inline with ordinary messages. Low-value send, wait, Tool JSON, and duplicate terminal plumbing do
+not receive semantic activity projections. Live observer envelopes are an unpersisted latency
 overlay, not a second stream store; persisted Conversation snapshots and the collaboration event
 log rehydrate and overwrite transient state after gaps, process restart, or window reload. This
 module adds no child write path, tree deletion control, graph canvas, or cross-root dashboard.

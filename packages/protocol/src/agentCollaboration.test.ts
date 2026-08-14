@@ -102,10 +102,15 @@ describe('agent collaboration protocol', () => {
       'model-2'
     ])
     expect(settled.lastSequence).toBe(eventPage.lastSequence)
-    expect(eventPage.events[0]).toMatchObject({
+    expect(eventPage.events).toHaveLength(15)
+    expect(eventPage.events.map((event) => event.sequence)).toEqual(
+      Array.from({ length: 15 }, (_, index) => index + 1)
+    )
+    expect(eventPage.events.at(-1)).toMatchObject({
       agentId: 'agent-review',
       runId: 'run-review',
-      sequence: 13
+      sequence: 15,
+      activity: { semantic: 'completed' }
     })
     expect(observers.map((observer) => observer?.conversationId)).toEqual([
       'conversation-review',
@@ -156,7 +161,12 @@ describe('agent collaboration protocol', () => {
     ).toBe('conversation-root')
     expect(parseCollaborationEventEnvelope(fixture.event)).toMatchObject({
       sequence: 7,
-      kind: 'turn_started',
+      kind: 'wake_created',
+      activity: {
+        semantic: 'started',
+        agentId: 'agent-child',
+        taskNameSnapshot: 'Research'
+      },
       rootConversationId: 'conversation-root'
     })
     expect(
@@ -503,6 +513,31 @@ describe('agent collaboration protocol', () => {
         workspaceId: 'workspace-other'
       })
     ).toThrow(/identity/)
+
+    expect(() =>
+      parseCollaborationEventEnvelope({ ...(fixture.event as object), schemaVersion: 1 })
+    ).toThrow(/schemaVersion/)
+    const missingActivity = structuredClone(fixture.event) as Record<string, unknown>
+    delete missingActivity.activity
+    expect(() => parseCollaborationEventEnvelope(missingActivity)).toThrow(/Missing.*activity/)
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...(fixture.event as object),
+        activity: { ...(fixture.event as { activity: object }).activity, semantic: 'completed' }
+      })
+    ).toThrow(/activity/)
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...(fixture.event as object),
+        activity: { ...(fixture.event as { activity: object }).activity, agentId: 'agent-other' }
+      })
+    ).toThrow(/activity/)
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...(fixture.event as object),
+        activity: { ...(fixture.event as { activity: object }).activity, forged: true }
+      })
+    ).toThrow(/forged/)
   })
 
   it('accepts bounded image previews but rejects forged observer actor combinations', () => {

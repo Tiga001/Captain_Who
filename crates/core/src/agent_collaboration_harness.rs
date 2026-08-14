@@ -295,6 +295,9 @@ impl AgentCollaborationRuntimeServices {
 pub struct AgentCollaborationInvocation {
     pub caller: AgentCollaborationCaller,
     pub selector_authorization: AgentCollaborationSelectorAuthorization,
+    /// Exact authority copied from the Host-authenticated ToolExecutionContext. It is not part of
+    /// any model tool schema or action payload.
+    pub effective_permissions: crate::AgentPermissions,
     pub conversation_id: String,
     pub run_id: String,
     pub assistant_message_id: String,
