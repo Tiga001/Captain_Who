@@ -17,6 +17,8 @@ Never expose OfficeCLI arguments, slide DOM paths, executable paths, runtime ver
 
 Use `skills_list_resources` to locate `templates/builder.mjs`, then materialize it once with `skills_materialize_resource` into a new workspace path. Patch and rerun that same builder; do not create a trail of replacement scripts.
 
+Immediately after materializing or modifying any `.mjs` Builder, run `node --check <builder>.mjs` as a separate `run_command` call. Never combine the check and build with `&&`, `|`, or `;`. A non-zero check forbids the build: patch the same Builder and check it again. Any later edit invalidates the successful check.
+
 Execute that materialized file with `run_command` and a direct logical `node <builder>.mjs --output <file.pptx>` command. Omit `runtimeProfile` and `observe`: the host verifies this run's materialization receipt, derives the `presentations` profile from the static Office output, binds the pinned runtime, and observes that output automatically. Never use system Node.js, `pip`, `npm`, inline code, heredocs, or shell redirection.
 
 Bind templates, data, images, attachments, and earlier generated files through `run_command.inputs`:
@@ -30,7 +32,9 @@ Bind templates, data, images, attachments, and earlier generated files through `
 
 Use the exact path returned by the producing tool or supplied by the user. The Host automatically recognizes workspace, absolute/system, `@attachments/...`, `image-artifact://...`, and revision-bound `skill://...` paths. `mountPath` is optional and defaults to the source filename. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
 
-Every Builder command must declare its generated presentation with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
+Every Builder build command must declare its generated presentation with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. After a runtime failure, repair the Builder source, input bindings, or provenance/materialization state, then run the syntax check again before rebuilding. Never retry the same failing Builder command unchanged.
+
+Treat the gates independently: `syntax-valid != runtime-valid != PPTX-valid`. The syntax check proves only that Node.js can parse the Builder; execution and final native validation/rendering remain mandatory.
 
 ## Completion gate
 

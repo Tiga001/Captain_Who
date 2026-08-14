@@ -1086,6 +1086,56 @@ mod tests {
     }
 
     #[test]
+    fn presentations_skill_requires_separate_builder_syntax_preflight() {
+        let workflows = include_str!("bundled/presentations/references/workflows.md");
+
+        for required in [
+            "Immediately after materializing or modifying any `.mjs` Builder",
+            "`node --check <builder>.mjs` as a separate `run_command` call",
+            "Never combine the check and build with `&&`, `|`, or `;`",
+            "Any later edit invalidates the successful check",
+            "Every Builder build command must declare",
+            "repair the Builder source, input bindings, or provenance/materialization state",
+            "Never retry the same failing Builder command unchanged",
+            "`syntax-valid != runtime-valid != PPTX-valid`",
+        ] {
+            assert!(
+                PRESENTATIONS_SOURCE.contains(required),
+                "presentation instructions are missing `{required}`"
+            );
+        }
+
+        for required in [
+            "\"command\": \"node --check scripts/build_deck.mjs\"",
+            "If the check exits\nnon-zero, do not build",
+            "Editing the file after a successful\ncheck invalidates that result",
+            "Every Builder build command must declare",
+            "Repeat the syntax check\nbefore the next build even when the source did not change",
+            "Never retry the same failing Builder\ncommand unchanged",
+            "`syntax-valid != runtime-valid != PPTX-valid`",
+        ] {
+            assert!(
+                workflows.contains(required),
+                "presentation workflow is missing `{required}`"
+            );
+        }
+
+        assert!(!PRESENTATIONS_SOURCE.contains("Every Builder command must declare"));
+        assert!(!workflows.contains("Every Builder command must declare"));
+
+        let check = workflows
+            .find("\"command\": \"node --check scripts/build_deck.mjs\"")
+            .unwrap();
+        let build = workflows
+            .find("\"command\": \"node scripts/build_deck.mjs --output")
+            .unwrap();
+        assert!(
+            check < build,
+            "syntax preflight must precede Builder execution"
+        );
+    }
+
+    #[test]
     fn bundled_resources_are_listable_readable_and_builder_templates_materialize() {
         let service = SkillsService::new().with_bundled_source().unwrap();
         for (local_id, heading, template_path, marker, destination) in [

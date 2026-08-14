@@ -513,10 +513,11 @@ fn trusted_managed_pdf_profile(
     if infer_managed_artifact_builder_command(command)
         .map_err(builder_contract_error)?
         .is_some_and(|builder| {
-            builder
-                .output_paths
-                .iter()
-                .any(|output| office_profile_for_output(output).is_some())
+            builder.node_syntax_check
+                || builder
+                    .output_paths
+                    .iter()
+                    .any(|output| office_profile_for_output(output).is_some())
         })
     {
         return Ok(None);
@@ -844,7 +845,9 @@ fn derive_managed_builder_config(
 
     let mut inferred_profiles = BTreeSet::new();
     let mut office_outputs = Vec::new();
+    let mut node_syntax_check = false;
     if let Some(builder) = builder {
+        node_syntax_check = builder.node_syntax_check;
         for output in builder.output_paths {
             if let Some(profile) = office_profile_for_output(&output) {
                 inferred_profiles.insert(profile);
@@ -878,7 +881,7 @@ fn derive_managed_builder_config(
             inferred_outputs: Vec::new(),
         });
     }
-    if host_builder_profile.is_some() && inferred_profile.is_none() {
+    if host_builder_profile.is_some() && inferred_profile.is_none() && !node_syntax_check {
         return Err(AgentError::structured(
             "managedBuilder.invalidOutputContract",
             "后端验证的 Managed Builder 必须声明一个静态 .docx、.xlsx 或 .pptx `--output`。",
@@ -938,7 +941,7 @@ fn derive_managed_builder_config(
         ));
     }
     let runtime_profile = host_builder_profile.or(explicit_profile);
-    let observe = if runtime_profile.is_some() {
+    let observe = if runtime_profile.is_some() && !node_syntax_check {
         let mut observe =
             explicit_observe.unwrap_or_else(default_office_artifact_observation_request);
         for output in &office_outputs {
@@ -2374,6 +2377,150 @@ mod tests {
             assert!(observe.expected_outputs[0].starts_with("outputs/"));
             validate_frozen_command_trace_args(&request, &args).unwrap();
         }
+    }
+
+    #[test]
+    fn current_run_presentation_builder_syntax_check_uses_frozen_runtime_without_observation() {
+        let workspace = tempfile::tempdir().unwrap();
+        let script = "scripts/build_deck.mjs";
+        let script_path = workspace.path().join(script);
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "export const deck = true;\n").unwrap();
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+        let run_id = "run-presentation-syntax-check";
+        record_materialized_builder(
+            &storage,
+            run_id,
+            AgentCommandRuntimeProfile::Presentations,
+            script,
+        );
+        let args = json!({"command": format!("node --check {script}")});
+        let call = AgentToolCall {
+            id: "tool-presentation-syntax-check".to_string(),
+            tool: "run_command".to_string(),
+            args: args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: Some("conversation-presentation-syntax-check".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("presentation syntax check".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            }))
+            .with_skill_resources(Some(pdf_skill_session(APPLICATION_BUNDLED_SKILL_SOURCE_ID))),
+            test_binding(
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node,
+                &[("pptxgenjs", "4.0.1")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(storage));
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        let binding = request
+            .runtime_binding
+            .as_deref()
+            .expect("current-Run materialization binds the managed runtime");
+        assert_eq!(binding.profile, AgentCommandRuntimeProfile::Presentations);
+        assert_eq!(binding.kind, AgentCommandRuntimeKind::Node);
+        assert!(request.observe.is_none());
+        assert!(request.inputs.is_empty());
+        validate_frozen_command_trace_args(&request, &args).unwrap();
+
+        let restored: AgentCommandRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        validate_frozen_command_trace_args(&restored, &args).unwrap();
+        assert_eq!(restored.runtime_binding, request.runtime_binding);
+    }
+
+    #[test]
+    fn ordinary_node_syntax_check_is_not_rebound_without_a_matching_current_run_receipt() {
+        let workspace = tempfile::tempdir().unwrap();
+        let script = "scripts/build_deck.mjs";
+        let script_path = workspace.path().join(script);
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::write(&script_path, "export const deck = true;\n").unwrap();
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+        record_materialized_builder(
+            &storage,
+            "different-run",
+            AgentCommandRuntimeProfile::Presentations,
+            script,
+        );
+        let base = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            collaboration_identity: None,
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("untrusted syntax check".to_string()),
+                root_path: Some(workspace.path().to_string_lossy().into_owned()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                ..Default::default()
+            },
+        }));
+        let context = with_profile_resolver(
+            base,
+            test_binding(
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node,
+                &[("pptxgenjs", "4.0.1")],
+            ),
+        )
+        .with_runtime_services("current-run".to_string(), Some(storage));
+
+        let ordinary_args = json!({"command": format!("node --check {script}")});
+        let ordinary_call = AgentToolCall {
+            id: "tool-ordinary-syntax-check".to_string(),
+            tool: "run_command".to_string(),
+            args: ordinary_args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let ordinary = command_request_from_call(&context, &ordinary_call).unwrap();
+        assert!(ordinary.runtime_binding.is_none());
+        assert!(ordinary.observe.is_none());
+        validate_frozen_command_trace_args(&ordinary, &ordinary_args).unwrap();
+
+        let explicit_args = json!({
+            "command": format!("node --check {script}"),
+            "runtimeProfile": "presentations"
+        });
+        let explicit_call = AgentToolCall {
+            id: "tool-explicit-managed-syntax-check".to_string(),
+            tool: "run_command".to_string(),
+            args: explicit_args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let explicit = command_request_from_call(&context, &explicit_call).unwrap();
+        assert_eq!(
+            explicit
+                .runtime_binding
+                .as_deref()
+                .map(|binding| binding.profile),
+            Some(AgentCommandRuntimeProfile::Presentations)
+        );
+        assert!(explicit.observe.is_none());
+        validate_frozen_command_trace_args(&explicit, &explicit_args).unwrap();
     }
 
     #[test]

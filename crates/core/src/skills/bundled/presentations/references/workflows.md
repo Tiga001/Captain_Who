@@ -5,6 +5,7 @@
 - [Route the task](#route-the-task)
 - [Native semantic contract](#native-semantic-contract)
 - [Create and reuse one Builder](#create-and-reuse-one-builder)
+- [Preflight every Builder revision](#preflight-every-builder-revision)
 - [Bind inputs declaratively](#bind-inputs-declaratively)
 - [Observe every file effect](#observe-every-file-effect)
 - [Consume render outputs](#consume-render-outputs)
@@ -111,6 +112,32 @@ static Office output, and binds observation; omit `runtimeProfile` and `observe`
 private executable path, system Python/Node.js, `pip`, `npm`, inline code, a heredoc, or shell
 redirection.
 
+## Preflight every Builder revision
+
+Immediately after materializing or patching an `.mjs` Builder, syntax-check that exact file in its
+own `run_command` call:
+
+```json
+{
+  "command": "node --check scripts/build_deck.mjs",
+  "cwd": ".",
+  "reason": "Check the presentation builder syntax before execution"
+}
+```
+
+Do not join the check to a build with `&&`, a pipe (`|`), or a semicolon (`;`). If the check exits
+non-zero, do not build: patch the same file and check it again. Editing the file after a successful
+check invalidates that result, so check the new revision before executing it.
+
+If execution fails, inspect the error and `artifactObservation`, then repair the Builder source,
+`run_command.inputs`, or provenance/materialization state that caused it. Repeat the syntax check
+before the next build even when the source did not change. Never retry the same failing Builder
+command unchanged or vary only `reason` or the output filename to evade duplicate-call protection.
+
+Keep the three gates distinct: `syntax-valid != runtime-valid != PPTX-valid`. `node --check` proves
+only that Node.js can parse the file. A successful Builder run is still required for runtime/API
+correctness, followed by native package validation and rendering for PPTX and visual correctness.
+
 ## Bind inputs declaratively
 
 Every input needed by a Builder must be explicit in `run_command.inputs`:
@@ -140,7 +167,7 @@ attachment library path, or another private storage path directly.
 
 ## Observe every file effect
 
-Every Builder command must declare its expected `.pptx` with exactly one static `--output`
+Every Builder build command must declare its expected `.pptx` with exactly one static `--output`
 argument. The Host automatically binds `observe.kinds=["office"]` and copies that path into
 `observe.expectedOutputs`. Paths are relative to `cwd` unless workspace-external output is
 authorized with `write=all`. Use an explicit `observe.additionalRoots` only to discover other

@@ -125,9 +125,9 @@ pub(crate) fn prepare_managed_command_session(
         root.as_deref(),
         Some(&cwd),
     )?;
-    if let Some(builder) = infer_managed_artifact_builder_command(&request.command)
-        .map_err(CommandExecutionError::from)?
-    {
+    let managed_builder = infer_managed_artifact_builder_command(&request.command)
+        .map_err(CommandExecutionError::from)?;
+    if let Some(builder) = managed_builder.as_ref() {
         validate_managed_artifact_builder_output_scope(
             root.as_deref(),
             &cwd,
@@ -287,6 +287,55 @@ pub(crate) fn prepare_managed_command_session(
     arguments.extend(parsed.process_arguments.iter().cloned());
     let mut environment =
         managed_environment(&prepared_runtime.invocation, prepared_inputs.as_ref());
+    let requires_automatic_node_syntax_check = should_automatically_check_node_builder(
+        binding.profile,
+        binding.kind,
+        &parsed,
+        managed_builder.as_ref(),
+    );
+    if requires_automatic_node_syntax_check {
+        let script = parsed
+            .script
+            .as_deref()
+            .expect("managed Node Builder carries a saved script");
+        let redactions = managed_node_syntax_check_redactions(
+            provider.component_root(),
+            &prepared_runtime.invocation,
+            &cwd,
+            script,
+        );
+        let syntax_check = run_managed_node_syntax_check(
+            &prepared_runtime.invocation,
+            script,
+            &cwd,
+            &environment,
+            &cancellation_token,
+            redactions,
+        );
+        if !syntax_check.succeeded() {
+            let mut result = managed_node_syntax_check_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                resolution.clone(),
+                syntax_check,
+            );
+            result.input_files = input_evidence;
+            return Ok(immediate(result));
+        }
+        if let Err(error) = provider.verify_integrity() {
+            let code = format!("artifactRuntime.{}", error.code().stable_name());
+            let runtime = with_resolution_error(
+                resolution.clone(),
+                &code,
+                error.recovery().stable_name(),
+                provider_error_message(error.code()),
+            );
+            let mut result = runtime_failure_result(root.as_deref(), &cwd, request, runtime, 0);
+            result.input_files = input_evidence;
+            return Ok(immediate(result));
+        }
+    }
     let hard_timeout = managed_command_hard_timeout(managed_pdf, request.timeout_ms);
     let launch = if let Some(workspace) = managed_workspace.as_ref() {
         let pdf_cli = match provider.pdf_cli_path() {
@@ -382,6 +431,16 @@ pub(crate) fn prepare_managed_command_session(
             prepared_inputs.as_ref(),
             provider.component_root(),
         )
+    } else if parsed.node_syntax_check {
+        managed_node_syntax_check_redactions(
+            provider.component_root(),
+            &prepared_runtime.invocation,
+            &cwd,
+            parsed
+                .script
+                .as_deref()
+                .expect("managed Node syntax check carries a saved script"),
+        )
     } else {
         super::output_capture::ProcessOutputRedactionSet::default()
     };
@@ -432,6 +491,288 @@ fn managed_command_hard_timeout(
     } else {
         requested_timeout_ms.map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)))
     }
+}
+
+fn should_automatically_check_node_builder(
+    profile: AgentCommandRuntimeProfile,
+    kind: AgentCommandRuntimeKind,
+    parsed: &ManagedArtifactCommand,
+    builder: Option<&ManagedArtifactBuilderCommand>,
+) -> bool {
+    profile == AgentCommandRuntimeProfile::Presentations
+        && kind == AgentCommandRuntimeKind::Node
+        && !parsed.node_syntax_check
+        && builder.is_some_and(|builder| !builder.output_paths.is_empty())
+}
+
+#[derive(Debug)]
+struct ManagedNodeSyntaxCheckExecution {
+    exit_code: Option<i32>,
+    stdout: Option<CapturedProcessOutput>,
+    stderr: Option<CapturedProcessOutput>,
+    timed_out: bool,
+    cancelled: bool,
+    duration_ms: u64,
+    error: Option<String>,
+}
+
+impl ManagedNodeSyntaxCheckExecution {
+    fn failed(started: Instant, error: impl Into<String>) -> Self {
+        Self {
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            timed_out: false,
+            cancelled: false,
+            duration_ms: elapsed_millis_saturating(started),
+            error: Some(error.into()),
+        }
+    }
+
+    fn succeeded(&self) -> bool {
+        self.exit_code == Some(0) && !self.timed_out && !self.cancelled && self.error.is_none()
+    }
+}
+
+fn run_managed_node_syntax_check(
+    invocation: &ArtifactRuntimeInvocation,
+    script: &str,
+    cwd: &Path,
+    environment: &[(OsString, OsString)],
+    cancellation: &AgentCancellationToken,
+    redactions: super::output_capture::ProcessOutputRedactionSet,
+) -> ManagedNodeSyntaxCheckExecution {
+    let started = Instant::now();
+    if cancellation.is_cancelled() {
+        return ManagedNodeSyntaxCheckExecution {
+            cancelled: true,
+            ..ManagedNodeSyntaxCheckExecution::failed(
+                started,
+                "Managed Builder Node 语法预检在启动前被取消。",
+            )
+        };
+    }
+
+    let mut arguments = invocation.arguments_prefix().to_vec();
+    arguments.push(OsString::from("--check"));
+    arguments.push(OsString::from(script));
+    let launch = CommandDirectLaunchPlan::isolated(
+        invocation.executable().to_path_buf(),
+        arguments,
+        environment.to_vec(),
+    );
+    let plan = CommandSpawnPlan::direct(
+        "managed-node-syntax-check".to_string(),
+        cwd.to_path_buf(),
+        None,
+        Some(Duration::from_millis(MANAGED_NODE_SYNTAX_CHECK_TIMEOUT_MS)),
+        launch,
+    );
+    let mut command = plan.build();
+    let mut child = match command.spawn() {
+        Ok(child) => ManagedCommandChild::new(child),
+        Err(_) => {
+            return ManagedNodeSyntaxCheckExecution::failed(
+                started,
+                "无法启动固定受管 Node 进行 Builder 语法预检。",
+            )
+        }
+    };
+    let Some(stdout) = child.child_mut().stdout.take() else {
+        return ManagedNodeSyntaxCheckExecution::failed(
+            started,
+            "无法捕获受管 Node 语法预检的 stdout。",
+        );
+    };
+    let Some(stderr) = child.child_mut().stderr.take() else {
+        return ManagedNodeSyntaxCheckExecution::failed(
+            started,
+            "无法捕获受管 Node 语法预检的 stderr。",
+        );
+    };
+    let capture_policy = ProcessOutputCapturePolicy::process_default();
+    let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
+    let stdout_reader = super::output_capture::spawn_process_output_capture_with_observers(
+        stdout,
+        capture_budget.clone(),
+        capture_policy,
+        Some(crate::AgentCommandOutputStream::Stdout),
+        None,
+        None,
+        redactions.clone(),
+    );
+    let stderr_reader = super::output_capture::spawn_process_output_capture_with_observers(
+        stderr,
+        capture_budget,
+        capture_policy,
+        Some(crate::AgentCommandOutputStream::Stderr),
+        None,
+        None,
+        redactions,
+    );
+
+    let mut timed_out = false;
+    let mut cancelled = false;
+    let mut error = None;
+    let exit_status = loop {
+        match try_wait_command_process_group(child.child_mut()) {
+            Ok(Some(status)) => {
+                child.mark_reaped();
+                break Some(status);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                error = Some("等待受管 Node 语法预检失败。".to_string());
+                force_terminate_command_process_group(child.child_mut());
+                let status = child.child_mut().wait().ok();
+                if status.is_some() {
+                    child.mark_reaped();
+                }
+                break status;
+            }
+        }
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            force_terminate_command_process_group(child.child_mut());
+            let status = child.child_mut().wait().ok();
+            if status.is_some() {
+                child.mark_reaped();
+            }
+            break status;
+        }
+        if started.elapsed() >= Duration::from_millis(MANAGED_NODE_SYNTAX_CHECK_TIMEOUT_MS) {
+            timed_out = true;
+            force_terminate_command_process_group(child.child_mut());
+            let status = child.child_mut().wait().ok();
+            if status.is_some() {
+                child.mark_reaped();
+            }
+            break status;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    drop(child);
+
+    let stdout = match join_process_output_capture(stdout_reader, "受管 Node 语法预检 stdout")
+    {
+        Ok(capture) => Some(capture),
+        Err(_) => {
+            error.get_or_insert_with(|| "读取受管 Node 语法预检 stdout 失败。".to_string());
+            None
+        }
+    };
+    let stderr = match join_process_output_capture(stderr_reader, "受管 Node 语法预检 stderr")
+    {
+        Ok(capture) => Some(capture),
+        Err(_) => {
+            error.get_or_insert_with(|| "读取受管 Node 语法预检 stderr 失败。".to_string());
+            None
+        }
+    };
+    ManagedNodeSyntaxCheckExecution {
+        exit_code: exit_status
+            .as_ref()
+            .and_then(std::process::ExitStatus::code),
+        stdout,
+        stderr,
+        timed_out,
+        cancelled,
+        duration_ms: elapsed_millis_saturating(started),
+        error,
+    }
+}
+
+fn managed_node_syntax_check_failure_result(
+    root: Option<&Path>,
+    cwd: &Path,
+    request: &AgentCommandRequest,
+    resolution: AgentCommandRuntimeResolution,
+    execution: ManagedNodeSyntaxCheckExecution,
+) -> AgentCommandExecutionResult {
+    let (code, recovery, message) = if execution.cancelled {
+        (
+            ERROR_BUILDER_SYNTAX_CHECK_FAILED,
+            "retry",
+            "Managed Builder Node 语法预检已取消；Builder 未启动。",
+        )
+    } else if execution.timed_out {
+        (
+            ERROR_BUILDER_SYNTAX_CHECK_FAILED,
+            "retry",
+            "Managed Builder Node 语法预检超时；Builder 未启动。",
+        )
+    } else if execution.error.is_some() || execution.exit_code.is_none() {
+        (
+            ERROR_BUILDER_SYNTAX_CHECK_FAILED,
+            ArtifactRuntimeRecovery::RepairComponent.stable_name(),
+            "Managed Builder Node 语法预检无法完成；Builder 未启动。",
+        )
+    } else {
+        (
+            ERROR_BUILDER_SYNTAX_INVALID,
+            "changeBuilder",
+            "Managed Builder 未通过 Node 语法校验；Builder 未启动。请修复脚本后重新检查。",
+        )
+    };
+    let runtime = with_resolution_error(resolution, code, recovery, message);
+    let mut result = if execution.cancelled {
+        runtime_cancelled_result(root, cwd, request, runtime)
+    } else {
+        runtime_failure_result(root, cwd, request, runtime, execution.duration_ms)
+    };
+    result.exit_code = execution.exit_code;
+    result.timed_out = execution.timed_out;
+    result.cancelled = execution.cancelled;
+    result.duration_ms = execution.duration_ms;
+    result.output_capture = ProcessOutputCaptureMetadata::from_optional_streams(
+        execution.stdout.as_ref(),
+        execution.stderr.as_ref(),
+        execution.stdout.is_none() || execution.stderr.is_none(),
+    );
+    if let Some(stdout) = execution.stdout.as_ref() {
+        result.stdout = stdout.preview().to_string();
+        result.stdout_truncated = stdout.preview_truncated();
+        result.stdout_spool = stdout.spool();
+    } else {
+        result.stdout_truncated = true;
+    }
+    if let Some(stderr) = execution.stderr.as_ref() {
+        result.stderr = stderr.preview().to_string();
+        result.stderr_truncated = stderr.preview_truncated();
+        result.stderr_spool = stderr.spool();
+    } else {
+        result.stderr_truncated = true;
+    }
+    result
+}
+
+fn managed_node_syntax_check_redactions(
+    runtime_root: &Path,
+    invocation: &ArtifactRuntimeInvocation,
+    cwd: &Path,
+    script: &str,
+) -> super::output_capture::ProcessOutputRedactionSet {
+    let mut replacements = Vec::new();
+    let requested_script = Path::new(script);
+    let script_path = if requested_script.is_absolute() {
+        requested_script.to_path_buf()
+    } else {
+        cwd.join(requested_script)
+    };
+    let script_projection = if requested_script.is_absolute() {
+        "<managed-builder>"
+    } else {
+        script
+    };
+    append_private_path_spellings(&mut replacements, &script_path, script_projection);
+    append_private_path_spellings(&mut replacements, cwd, ".");
+    append_private_path_spellings(&mut replacements, runtime_root, "<managed-runtime>");
+    append_private_path_spellings(&mut replacements, invocation.executable(), "<managed-node>");
+    super::output_capture::ProcessOutputRedactionSet::new(replacements)
+}
+
+fn elapsed_millis_saturating(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn managed_pdf_output_redactions(
@@ -696,13 +1037,17 @@ fn append_private_path_spellings(
 
 const ERROR_INVALID_COMMAND: &str = "artifactRuntime.invalidCommandShape";
 const ERROR_UNAVAILABLE: &str = "artifactRuntime.unavailable";
+const ERROR_BUILDER_SYNTAX_INVALID: &str = "managedBuilder.syntaxInvalid";
+const ERROR_BUILDER_SYNTAX_CHECK_FAILED: &str = "managedBuilder.syntaxCheckFailed";
 const MANAGED_PDF_HARD_TIMEOUT_MS: u64 = 300_000;
+const MANAGED_NODE_SYNTAX_CHECK_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManagedArtifactCommand {
     script: Option<String>,
     process_arguments: Vec<OsString>,
     pdf_shell: Option<super::managed_pdf_shell::ManagedPdfShellPlan>,
+    node_syntax_check: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -710,6 +1055,7 @@ pub(crate) struct ManagedArtifactBuilderCommand {
     pub kind: AgentCommandRuntimeKind,
     pub script: String,
     pub output_paths: Vec<String>,
+    pub node_syntax_check: bool,
 }
 
 pub(crate) fn infer_managed_artifact_command_kind(
@@ -721,7 +1067,7 @@ pub(crate) fn infer_managed_artifact_command_kind(
         "python" | "python3" => AgentCommandRuntimeKind::Python,
         _ => {
             return Err(
-                "runtimeProfile 只支持以 `node <script>.mjs`、`python <script>.py` 或 `python3 <script>.py` 开始的直接脚本调用。"
+                "runtimeProfile 只支持 `node <script>.mjs`、`node --check <script>.mjs`、`python <script>.py` 或 `python3 <script>.py` 直接调用。"
                     .to_string(),
             )
         }
@@ -738,7 +1084,12 @@ pub(crate) fn infer_managed_artifact_builder_command(
 ) -> Result<Option<ManagedArtifactBuilderCommand>, String> {
     let tokens = match managed_artifact_command_tokens(command) {
         Ok(tokens) => tokens,
-        Err(error) if looks_like_office_builder_intent(command) => return Err(error),
+        Err(error)
+            if looks_like_office_builder_intent(command)
+                || looks_like_node_syntax_check_intent(command) =>
+        {
+            return Err(error)
+        }
         Err(_) => return Ok(None),
     };
     let kind = match tokens[0].as_str() {
@@ -748,7 +1099,12 @@ pub(crate) fn infer_managed_artifact_builder_command(
     };
     let parsed = match parse_managed_artifact_command(command, kind) {
         Ok(parsed) => parsed,
-        Err(error) if looks_like_office_builder_intent(command) => return Err(error),
+        Err(error)
+            if looks_like_office_builder_intent(command)
+                || looks_like_node_syntax_check_intent(command) =>
+        {
+            return Err(error)
+        }
         Err(_) => return Ok(None),
     };
 
@@ -803,6 +1159,7 @@ pub(crate) fn infer_managed_artifact_builder_command(
             .script
             .expect("ordinary managed artifact commands always carry a saved script"),
         output_paths,
+        node_syntax_check: parsed.node_syntax_check,
     }))
 }
 
@@ -819,6 +1176,15 @@ fn looks_like_office_builder_intent(command: &str) -> bool {
         && [".docx", ".xlsx", ".pptx"]
             .iter()
             .any(|extension| lower.contains(extension))
+}
+
+fn looks_like_node_syntax_check_intent(command: &str) -> bool {
+    let command = command.trim_start();
+    command.strip_prefix("node").is_some_and(|rest| {
+        rest.starts_with(char::is_whitespace)
+            && rest.contains("--check")
+            && rest.to_ascii_lowercase().contains(".mjs")
+    })
 }
 
 /// Revalidates every host-bound Builder output against the effective write scope.
@@ -943,14 +1309,35 @@ fn parse_managed_artifact_command(
             expected_programs.join(" 或 ")
         ));
     }
-    let script = &tokens[1];
+    let (script_index, node_syntax_check) = match (kind, tokens[1].as_str()) {
+        (AgentCommandRuntimeKind::Node, "--check") => {
+            if tokens.len() != 3 {
+                return Err(
+                    "Managed Artifact Runtime 的 Node 语法预检只接受精确的 `node --check <script>.mjs` 调用。"
+                        .to_string(),
+                );
+            }
+            (2, true)
+        }
+        (_, option) if option.starts_with('-') => {
+            return Err(
+                "Managed Artifact Runtime 禁止 -e、-c、-m 及其他内联代码或启动选项；Node 仅额外支持精确的 `--check <script>.mjs`。"
+                    .to_string(),
+            )
+        }
+        _ => (1, false),
+    };
+    let script = &tokens[script_index];
+    if script.starts_with('-') {
+        return Err("Managed Artifact Runtime 脚本路径不能以 `-` 开始。".to_string());
+    }
     let expected_extension = match kind {
         AgentCommandRuntimeKind::Node => "mjs",
         AgentCommandRuntimeKind::Python => "py",
     };
     if Path::new(script).extension().and_then(OsStr::to_str) != Some(expected_extension) {
         return Err(format!(
-            "Managed Artifact Runtime 的 {} 调用必须以已保存的 .{expected_extension} 脚本作为第二个 token。",
+            "Managed Artifact Runtime 的 {} 调用必须指定一个已保存的 .{expected_extension} 脚本参数。",
             runtime_kind_name(kind)
         ));
     }
@@ -959,6 +1346,7 @@ fn parse_managed_artifact_command(
         script: Some(script.clone()),
         process_arguments: tokens[1..].iter().map(OsString::from).collect(),
         pdf_shell: None,
+        node_syntax_check,
     })
 }
 
@@ -975,6 +1363,7 @@ fn parse_frozen_managed_command(
             script: None,
             process_arguments: Vec::new(),
             pdf_shell: Some(pdf_shell),
+            node_syntax_check: false,
         });
     }
     parse_managed_artifact_command(command, binding.kind)
@@ -1019,12 +1408,6 @@ fn managed_artifact_command_tokens(command: &str) -> Result<Vec<String>, String>
     let tokens = &lexed.segments[0].tokens;
     if tokens.len() < 2 {
         return Err("Managed Artifact Runtime 命令必须包含一个已保存的脚本路径。".to_string());
-    }
-    let script = &tokens[1];
-    if script.starts_with('-') {
-        return Err(
-            "Managed Artifact Runtime 禁止 -e、-c、-m 及其他内联代码或启动选项。".to_string(),
-        );
     }
     Ok(tokens.clone())
 }
@@ -1270,8 +1653,103 @@ fn runtime_kind_name(kind: AgentCommandRuntimeKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::artifact_runtime::ArtifactRuntimeKind;
+    use crate::AgentApprovalStatus;
     use std::collections::BTreeMap;
+    use std::io::Read;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn fake_managed_node(runtime_root: &Path, marker: &Path) -> ArtifactRuntimeInvocation {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = runtime_root.join("bin/node");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(
+            &executable,
+            br#"#!/bin/sh
+if [ "$1" = "--check" ]; then
+  script="$2"
+  case "$script" in
+    /*) absolute_script="$script" ;;
+    *) absolute_script="$PWD/$script" ;;
+  esac
+  invalid=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      *SYNTAX_ERROR*) invalid=1 ;;
+    esac
+  done < "$script"
+  if [ "$invalid" -eq 1 ]; then
+    printf '%s: SyntaxError: fixture\n' "$absolute_script" >&2
+    printf 'runtime=%s\n' "$0" >&2
+    exit 1
+  fi
+  exit 0
+fi
+shift
+output=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output" ]; then
+    shift
+    output="$1"
+  fi
+  shift
+done
+printf 'builder-ran' > "$TEST_BUILDER_MARKER"
+if [ -n "$output" ]; then
+  printf 'deck' > "$output"
+fi
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        ArtifactRuntimeInvocation::new(
+            "test-bundle".to_string(),
+            "test-revision".to_string(),
+            "test-fingerprint".to_string(),
+            ArtifactRuntimeKind::Node,
+            "test-node".to_string(),
+            executable,
+            Vec::new(),
+            BTreeMap::from([(
+                OsString::from("TEST_BUILDER_MARKER"),
+                marker.as_os_str().to_os_string(),
+            )]),
+        )
+    }
+
+    fn syntax_check_request(command: &str) -> AgentCommandRequest {
+        AgentCommandRequest {
+            id: "syntax-check-test".to_string(),
+            command: command.to_string(),
+            cwd: None,
+            timeout_ms: None,
+            approval_status: AgentApprovalStatus::Approved,
+            risk_level: None,
+            reason: None,
+            observe: None,
+            inputs: Vec::new(),
+            runtime_binding: None,
+        }
+    }
+
+    fn syntax_check_resolution() -> AgentCommandRuntimeResolution {
+        AgentCommandRuntimeResolution {
+            schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
+            provider_id: "test-provider".to_string(),
+            profile: Some(AgentCommandRuntimeProfile::Presentations),
+            profile_revision: Some("test-profile".to_string()),
+            bundle_version: Some("test-bundle".to_string()),
+            bundle_revision: Some("test-revision".to_string()),
+            kind: AgentCommandRuntimeKind::Node,
+            runtime_version: Some("test-node".to_string()),
+            runtime_fingerprint: Some("test-fingerprint".to_string()),
+            resolved_packages: Vec::new(),
+            error_code: None,
+            recovery: None,
+            message: None,
+        }
+    }
 
     #[test]
     fn validates_only_direct_saved_script_invocations() {
@@ -1301,6 +1779,160 @@ mod tests {
             parse_managed_artifact_command("python -m build", AgentCommandRuntimeKind::Python,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn node_syntax_check_accepts_only_the_exact_saved_mjs_shape() {
+        let parsed = parse_managed_artifact_command(
+            "node --check 'scripts/build deck.mjs'",
+            AgentCommandRuntimeKind::Node,
+        )
+        .unwrap();
+        assert!(parsed.node_syntax_check);
+        assert_eq!(parsed.script.as_deref(), Some("scripts/build deck.mjs"));
+        assert_eq!(
+            parsed.process_arguments,
+            [
+                OsString::from("--check"),
+                OsString::from("scripts/build deck.mjs")
+            ]
+        );
+        for command in [
+            "node --check build.mjs --output deck.pptx",
+            "node --check build.mjs | tee check.log",
+            "node --check build.mjs && node build.mjs",
+            "node --check -- build.mjs",
+        ] {
+            assert!(
+                infer_managed_artifact_builder_command(command).is_err(),
+                "malformed syntax check unexpectedly passed: {command}"
+            );
+        }
+        for ordinary in ["node --check", "node --check build.js"] {
+            assert!(
+                infer_managed_artifact_builder_command(ordinary)
+                    .unwrap()
+                    .is_none(),
+                "ordinary Node check was incorrectly claimed as a managed .mjs Builder: {ordinary}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_node_builder_syntax_gate_fails_closed_without_running_builder() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = fixture.path().join("private-workspace");
+        let runtime_root = fixture.path().join("private-runtime");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("builder.marker");
+        let expected_output = workspace.join("deck.pptx");
+        let script = "build_deck.mjs";
+        fs::write(workspace.join(script), "const broken = SYNTAX_ERROR;\n").unwrap();
+        let invocation = fake_managed_node(&runtime_root, &marker);
+        let environment = managed_environment(&invocation, None);
+        let execution = run_managed_node_syntax_check(
+            &invocation,
+            script,
+            &workspace,
+            &environment,
+            &AgentCancellationToken::new(),
+            managed_node_syntax_check_redactions(&runtime_root, &invocation, &workspace, script),
+        );
+        assert!(!execution.succeeded());
+        assert_eq!(execution.exit_code, Some(1));
+        assert!(
+            !marker.exists(),
+            "syntax failure must not execute Builder body"
+        );
+        assert!(
+            !expected_output.exists(),
+            "syntax failure must not create the declared output"
+        );
+
+        let result = managed_node_syntax_check_failure_result(
+            Some(&workspace),
+            &workspace,
+            &syntax_check_request("node build_deck.mjs --output deck.pptx"),
+            syntax_check_resolution(),
+            execution,
+        );
+        assert_eq!(
+            result.runtime.as_ref().unwrap().error_code.as_deref(),
+            Some(ERROR_BUILDER_SYNTAX_INVALID)
+        );
+        assert!(result.error.as_deref().unwrap().contains("Builder 未启动"));
+        for private in [
+            workspace.to_string_lossy().as_ref(),
+            runtime_root.to_string_lossy().as_ref(),
+            invocation.executable().to_string_lossy().as_ref(),
+        ] {
+            assert!(!result.stderr.contains(private));
+        }
+        assert!(result.stderr.contains(script));
+        let mut spool = String::new();
+        result
+            .stderr_spool
+            .reopen()
+            .unwrap()
+            .read_to_string(&mut spool)
+            .unwrap();
+        assert!(!spool.contains(workspace.to_string_lossy().as_ref()));
+        assert!(!spool.contains(runtime_root.to_string_lossy().as_ref()));
+        assert!(spool.contains(script));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_node_builder_syntax_gate_allows_the_pinned_builder_launch() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let runtime_root = fixture.path().join("runtime");
+        fs::create_dir_all(&workspace).unwrap();
+        let marker = workspace.join("builder.marker");
+        let output = workspace.join("deck.pptx");
+        let script = "build_deck.mjs";
+        fs::write(workspace.join(script), "export const deck = true;\n").unwrap();
+        let invocation = fake_managed_node(&runtime_root, &marker);
+        let environment = managed_environment(&invocation, None);
+        let syntax_check = run_managed_node_syntax_check(
+            &invocation,
+            script,
+            &workspace,
+            &environment,
+            &AgentCancellationToken::new(),
+            managed_node_syntax_check_redactions(&runtime_root, &invocation, &workspace, script),
+        );
+        assert!(syntax_check.succeeded());
+        assert!(
+            !marker.exists(),
+            "syntax check itself must not run Builder body"
+        );
+
+        let launch = CommandDirectLaunchPlan::isolated(
+            invocation.executable().to_path_buf(),
+            [
+                OsString::from(script),
+                OsString::from("--output"),
+                output.as_os_str().to_os_string(),
+            ]
+            .into_iter()
+            .collect(),
+            environment,
+        );
+        let status = CommandSpawnPlan::direct(
+            "node build_deck.mjs --output deck.pptx".to_string(),
+            workspace.clone(),
+            Some(&workspace),
+            Some(Duration::from_secs(5)),
+            launch,
+        )
+        .build()
+        .status()
+        .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "builder-ran");
+        assert_eq!(fs::read_to_string(output).unwrap(), "deck");
     }
 
     #[test]
