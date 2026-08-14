@@ -2494,6 +2494,7 @@ async fn rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_pre
     .await;
     let first_pending = service.list_pending_actions();
     assert_eq!(first_pending.len(), 1);
+    let first_action_id = first_pending[0].action_id.clone();
     service
         .approve_action(
             &turn.run_id,
@@ -2516,6 +2517,16 @@ async fn rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_pre
     second_call_events.extend(waiting_events);
     second_call_events.push(second_waiting);
     assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 1);
+
+    let first_durable = storage
+        .get_pending_agent_action(&pending_action_storage_id(&turn.run_id, &first_action_id))
+        .unwrap()
+        .expect("the first MCP action must remain durably auditable");
+    assert_eq!(
+        first_durable.status, "completed",
+        "the predecessor CAS must settle before the successor approval becomes observable"
+    );
+    assert_eq!(first_durable.target_status.as_deref(), Some("completed"));
 
     let second_pending = service.list_pending_actions();
     assert_eq!(second_pending.len(), 1);
@@ -2621,6 +2632,159 @@ async fn rejecting_a_second_mcp_call_after_success_preserves_the_exact_trace_pre
     assert!(rendered.contains("\"dispatchCertainty\":\"definitely_not_dispatched\""));
     assert!(!rendered.contains("mcp.tool_outcome_unknown"));
     assert!(!rendered.contains("conversation_trace_persistence_failed"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn predecessor_cas_failure_rolls_back_successor_before_visibility_or_dispatch() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let _first_request = read_json_request(&mut first).await;
+        write_tool_call_stream_with_id(&mut first, "atomic-predecessor-call").await;
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.unwrap();
+        let second_request = read_json_request(&mut second).await;
+        write_tool_call_stream_with_id(&mut second, "rolled-back-successor-call").await;
+        drop(second);
+        second_request
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("mcp-successor-rollback.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    save_test_pending_provider(
+        &storage,
+        "mcp-successor-rollback-model",
+        &format!("http://{address}/v1/chat/completions"),
+        "fixed-test-model-token",
+        "disabled",
+        "",
+    );
+    let invoker = ApprovalLifecycleInvoker::with_descriptor(lifecycle_descriptor());
+    let service = AgentService::new(Arc::clone(&storage))
+        .with_mcp_tool_invoker(Arc::clone(&invoker) as Arc<dyn McpToolInvoker>);
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let _notification_guard = notifications.clone();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-mcp-successor-rollback".to_string()),
+                project_id: None,
+                model_id: "mcp-successor-rollback-model".to_string(),
+                context_window_indicator_enabled: false,
+                content: "Call the owned MCP fixture twice.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-mcp-successor-rollback".to_string()),
+                assistant_message_id: Some("assistant-mcp-successor-rollback".to_string()),
+                max_tokens: Some(1_024),
+                temperature: None,
+                prompt_preferences: None,
+                permissions: Default::default(),
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+
+    wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "approval_required"
+    })
+    .await;
+    wait_for_notification_matching(&mut receiver, |notification| {
+        notification["params"]["type"] == "done"
+            && notification["params"]["status"] == "waiting_for_approval"
+    })
+    .await;
+    let first_pending = service.list_pending_actions();
+    assert_eq!(first_pending.len(), 1);
+    let predecessor_storage_id =
+        pending_action_storage_id(&turn.run_id, &first_pending[0].action_id);
+
+    rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_atomic_predecessor_terminal_cas
+             BEFORE UPDATE OF status ON agent_pending_actions
+             WHEN OLD.status = 'executing' AND NEW.status = 'completed'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected predecessor terminal CAS failure');
+             END;",
+        )
+        .unwrap();
+
+    service
+        .approve_action(&turn.run_id, &first_pending[0].action_id, notifications)
+        .unwrap();
+    let (failure, observed) =
+        wait_for_notification_matching_with_seen(&mut receiver, |notification| {
+            notification["params"]["type"] == "error"
+                && notification["params"]["code"] == "pending_action_transition_failed"
+        })
+        .await;
+    assert_eq!(
+        failure["params"]["code"],
+        "pending_action_transition_failed"
+    );
+    assert!(observed
+        .iter()
+        .all(|notification| notification["params"]["type"] != "approval_required"));
+    assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 1);
+    assert!(service.list_pending_actions().is_empty());
+
+    {
+        let pending_actions = service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(pending_actions.len(), 1);
+        assert_eq!(
+            pending_actions[&predecessor_storage_id].snapshot.status,
+            PendingActionStatus::Executing
+        );
+        assert!(pending_actions.values().all(|record| {
+            record.snapshot.tool_call_id.as_deref() != Some("rolled-back-successor-call")
+        }));
+    }
+
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let successor_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM agent_pending_actions WHERE tool_call_id = ?1",
+            ["rolled-back-successor-call"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(successor_count, 0);
+    let (predecessor_status, predecessor_target): (String, Option<String>) = connection
+        .query_row(
+            "SELECT status, target_status FROM agent_pending_actions WHERE action_id = ?1",
+            [&predecessor_storage_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(predecessor_status, "executing");
+    assert_eq!(predecessor_target.as_deref(), Some("completed"));
+    connection
+        .execute_batch("DROP TRIGGER fail_atomic_predecessor_terminal_cas;")
+        .unwrap();
+    drop(connection);
+
+    let _second_request = model_server.await.unwrap();
+    drop(service);
+    drop(storage);
+    let recovered_storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let recovered = AgentService::new(Arc::clone(&recovered_storage));
+    assert!(recovered.list_pending_actions().is_empty());
+    let predecessor = recovered_storage
+        .get_pending_agent_action(&predecessor_storage_id)
+        .unwrap()
+        .expect("startup reconciliation must retain the predecessor audit row");
+    assert_eq!(predecessor.status, "completed");
+    assert_eq!(predecessor.target_status.as_deref(), Some("completed"));
+    assert_eq!(invoker.invocation_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -56,4 +56,60 @@ describe('Main Agent IPC collaboration routing', () => {
       expect.any(Function)
     )
   })
+
+  it('routes an atomic Turn rewrite through the Agent invocation envelope', async () => {
+    getAllWindows.mockReturnValue([])
+    const output = {
+      runId: 'run-new',
+      eventName: 'agent.event',
+      conversationId: 'conversation-root',
+      userMessageId: 'user-new',
+      assistantMessageId: 'assistant-new',
+      userMessage: {
+        id: 'user-new',
+        role: 'user',
+        content: 'corrected',
+        createdAt: 10,
+        status: 'sent'
+      },
+      assistantMessage: {
+        id: 'assistant-new',
+        role: 'assistant',
+        content: '',
+        createdAt: 11,
+        status: 'pending'
+      },
+      activatedSkills: []
+    }
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onProviderTransition: vi.fn(),
+      onCollaborationEvent: vi.fn(),
+      onCollaborationObserverEvent: vi.fn(),
+      onCollaborationResync: vi.fn(),
+      rewriteConversationTurn: vi.fn().mockResolvedValue(output)
+    }
+    const ipcMain = { handle: vi.fn(), on: vi.fn() }
+    registerAgentIpc(ipcMain as never, coreServer as never)
+    const registration = ipcMain.handle.mock.calls.find(
+      ([channel]) => channel === HOST_CHANNELS.agent.rewriteConversationTurn
+    )
+    const handler = registration?.[1]
+    const input = {
+      requestId: 'rewrite-request-1',
+      sourceUserMessageId: 'user-old',
+      sourceAssistantMessageId: 'assistant-old',
+      turn: {
+        conversationId: 'conversation-root',
+        modelId: 'generic-model',
+        content: 'corrected',
+        userMessageId: 'user-new',
+        assistantMessageId: 'assistant-new'
+      }
+    }
+
+    expect(handler).toBeTypeOf('function')
+    await expect(handler?.({}, input)).resolves.toEqual({ ok: true, value: output })
+    expect(coreServer.rewriteConversationTurn).toHaveBeenCalledWith(input)
+  })
 })

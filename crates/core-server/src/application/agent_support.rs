@@ -55,8 +55,8 @@ pub(super) use types::{
 };
 pub use types::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
-    AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
-    AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
+    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
     AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
     AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
     AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,

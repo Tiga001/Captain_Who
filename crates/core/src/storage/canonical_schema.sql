@@ -2371,6 +2371,180 @@ CREATE TABLE conversation_turn_traces (
 CREATE UNIQUE INDEX conversation_turn_traces_one_active_turn
             ON conversation_turn_traces (conversation_id)
             WHERE terminal_status = 'in_progress';
+CREATE TABLE conversation_turn_rewrites (
+            request_id TEXT PRIMARY KEY CHECK (
+                typeof(request_id) = 'text'
+                AND length(CAST(request_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            request_fingerprint TEXT NOT NULL CHECK (
+                length(request_fingerprint) = 71
+                AND substr(request_fingerprint, 1, 7) = 'sha256:'
+                AND substr(request_fingerprint, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            conversation_id TEXT NOT NULL,
+            source_user_message_id TEXT NOT NULL UNIQUE,
+            source_assistant_message_id TEXT NOT NULL UNIQUE,
+            replacement_user_message_id TEXT NOT NULL UNIQUE,
+            replacement_assistant_message_id TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL UNIQUE,
+            response_json TEXT NOT NULL CHECK (
+                json_valid(response_json)
+                AND json_type(response_json) = 'object'
+                AND length(CAST(response_json AS BLOB)) BETWEEN 2 AND 1048576
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (source_user_message_id) REFERENCES messages(id)
+                ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+            FOREIGN KEY (source_assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id)
+                ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+            FOREIGN KEY (replacement_user_message_id) REFERENCES messages(id)
+                ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+            FOREIGN KEY (replacement_assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id)
+                ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+            CHECK (source_user_message_id != source_assistant_message_id),
+            CHECK (replacement_user_message_id != replacement_assistant_message_id),
+            CHECK (source_user_message_id != replacement_user_message_id),
+            CHECK (source_assistant_message_id != replacement_assistant_message_id)
+        );
+CREATE INDEX conversation_turn_rewrites_conversation
+            ON conversation_turn_rewrites(conversation_id, created_at, request_id);
+CREATE TRIGGER validate_conversation_turn_rewrite_insert
+        BEFORE INSERT ON conversation_turn_rewrites
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages AS source_user
+            JOIN messages AS source_assistant
+              ON source_assistant.id = NEW.source_assistant_message_id
+             AND source_assistant.conversation_id = source_user.conversation_id
+            JOIN conversation_turn_traces AS source_trace
+              ON source_trace.assistant_message_id = source_assistant.id
+             AND source_trace.conversation_id = source_assistant.conversation_id
+            JOIN messages AS replacement_user
+              ON replacement_user.id = NEW.replacement_user_message_id
+             AND replacement_user.conversation_id = source_user.conversation_id
+            JOIN messages AS replacement_assistant
+              ON replacement_assistant.id = NEW.replacement_assistant_message_id
+             AND replacement_assistant.conversation_id = source_user.conversation_id
+            JOIN conversation_turn_traces AS replacement_trace
+              ON replacement_trace.assistant_message_id = replacement_assistant.id
+             AND replacement_trace.conversation_id = replacement_assistant.conversation_id
+            WHERE source_user.id = NEW.source_user_message_id
+              AND source_user.conversation_id = NEW.conversation_id
+              AND source_user.role = 'user'
+              AND source_user.status = 'sent'
+              AND (
+                  source_user.input_origin_kind IS NULL
+                  OR source_user.input_origin_kind = 'human'
+                  OR (
+                      source_user.input_origin_kind = 'snapshot'
+                      AND source_user.snapshot_original_origin_kind = 'human'
+                  )
+              )
+              AND source_assistant.role = 'assistant'
+              AND source_user.position < source_assistant.position
+              AND source_trace.terminal_status IN ('completed', 'failed', 'cancelled')
+              AND replacement_user.role = 'user'
+              AND replacement_user.status = 'sent'
+              AND (
+                  replacement_user.input_origin_kind IS NULL
+                  OR replacement_user.input_origin_kind = 'human'
+              )
+              AND replacement_assistant.role = 'assistant'
+              AND replacement_assistant.status = 'pending'
+              AND source_assistant.position < replacement_user.position
+              AND replacement_user.position < replacement_assistant.position
+              AND replacement_trace.run_id = NEW.run_id
+              AND replacement_trace.terminal_status = 'in_progress'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM conversation_turn_rewrites AS hidden
+                  WHERE hidden.conversation_id = NEW.conversation_id
+                    AND (
+                        hidden.source_user_message_id = source_user.id
+                        OR hidden.source_assistant_message_id = source_assistant.id
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM messages AS between_source
+                  WHERE between_source.conversation_id = NEW.conversation_id
+                    AND between_source.position > source_user.position
+                    AND between_source.position < source_assistant.position
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM conversation_turn_rewrites AS hidden
+                        WHERE hidden.conversation_id = between_source.conversation_id
+                          AND (
+                              hidden.source_user_message_id = between_source.id
+                              OR hidden.source_assistant_message_id = between_source.id
+                          )
+                    )
+                    AND (
+                        between_source.role = 'assistant'
+                        OR (
+                            between_source.role = 'user'
+                            AND (
+                                between_source.input_origin_kind IS NULL
+                                OR between_source.input_origin_kind = 'human'
+                                OR (
+                                    between_source.input_origin_kind = 'snapshot'
+                                    AND between_source.snapshot_original_origin_kind = 'human'
+                                )
+                            )
+                        )
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM messages AS later
+                  WHERE later.conversation_id = NEW.conversation_id
+                    AND later.position > source_assistant.position
+                    AND later.id NOT IN (
+                        NEW.replacement_user_message_id,
+                        NEW.replacement_assistant_message_id
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM conversation_turn_rewrites AS hidden
+                        WHERE hidden.conversation_id = later.conversation_id
+                          AND (
+                              hidden.source_user_message_id = later.id
+                              OR hidden.source_assistant_message_id = later.id
+                          )
+                    )
+                    AND (
+                        later.role = 'assistant'
+                        OR (
+                            later.role = 'user'
+                            AND (
+                                later.input_origin_kind IS NULL
+                                OR later.input_origin_kind = 'human'
+                                OR (
+                                    later.input_origin_kind = 'snapshot'
+                                    AND later.snapshot_original_origin_kind = 'human'
+                                )
+                            )
+                        )
+                    )
+              )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invalid Conversation Turn rewrite boundary');
+        END;
+CREATE TRIGGER prevent_conversation_turn_rewrite_update
+        BEFORE UPDATE ON conversation_turn_rewrites
+        BEGIN
+            SELECT RAISE(ABORT, 'Conversation Turn rewrite receipt is immutable');
+        END;
+CREATE TRIGGER prevent_conversation_turn_rewrite_delete
+        BEFORE DELETE ON conversation_turn_rewrites
+        WHEN EXISTS (
+            SELECT 1 FROM conversations WHERE id = OLD.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'Conversation Turn rewrite receipt is immutable');
+        END;
 CREATE TABLE agent_effective_permission_snapshots (
             agent_id TEXT PRIMARY KEY CHECK (
                 typeof(agent_id) = 'text'

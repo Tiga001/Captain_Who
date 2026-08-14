@@ -35,6 +35,7 @@ import type {
   ChatComposerDraft,
   ChatConversation,
   ChatGuidanceTimelineItem,
+  ChatMessage,
   ChatMessageUiState,
   ChatQueuedMessage,
   ChatSubmitOptions
@@ -47,13 +48,10 @@ import {
 import { mergeSkillSelections } from '../features/skills/skillSelection'
 import {
   defaultUiPreferences,
-  deleteChatMessages,
   loadConversation,
   loadInputAttachments,
   saveComposerDraft,
-  saveConversationMeta,
-  saveUiPreferences,
-  upsertChatMessages
+  saveUiPreferences
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { THINKING_PLACEHOLDER } from '../features/agentRun/constants'
@@ -61,8 +59,7 @@ import { NEW_CONVERSATION_DRAFT_ID } from './appConstants'
 import type { ActiveRunBinding } from './appTypes'
 import {
   applyAgentEventToChatMessage,
-  applyOptimisticGuidanceToChatMessage,
-  ensureAgentRun
+  applyOptimisticGuidanceToChatMessage
 } from '../features/agentRun/agentEventReducer'
 import {
   createAssistantMessage,
@@ -103,6 +100,19 @@ import { useOptionalCollaborationStore } from '../features/agentCollaboration/us
 import { CollaborationApprovalPanel } from '../features/agentCollaboration/CollaborationApprovalPanel'
 import { useCollaborationApprovals } from '../features/agentCollaboration/useCollaborationApprovals'
 import { AgentObserverConversationSurface } from '../features/agentCollaboration/AgentObserverConversationSurface'
+
+interface EditRewriteAttempt {
+  assistantMessage: ChatMessage
+  attachments: NonNullable<ChatSubmitOptions['attachments']>
+  content: string
+  modelId: string
+  permissionMode: ChatSubmitOptions['permissionMode']
+  projectId: string | null
+  requestId: string
+  skills: SkillSelection[]
+  title?: string
+  userMessage: ChatMessage
+}
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -210,6 +220,8 @@ export function AppShell() {
   const recoveredGuidanceKeysRef = useRef<Set<string>>(new Set())
   const autoSubmitQueuedMessageRef = useRef<(conversationId: string) => void>(() => undefined)
   const editSubmissionSeqRef = useRef(0)
+  const editRewriteInFlightRef = useRef<Set<string>>(new Set())
+  const editRewriteAttemptsRef = useRef<Map<string, EditRewriteAttempt>>(new Map())
   const pendingProviderTransitionSubmissionsRef = useRef<
     Map<
       string,
@@ -1165,44 +1177,32 @@ export function AppShell() {
       if (!messageContent.trim()) {
         throw new Error(t('chat.emptyMessage'))
       }
-      if (!activeDraftSelectedModel) {
+      // Editing is one atomic logical replacement inside the current Conversation. Do not run a
+      // Provider transition first: an incompatible transition may compact through the very Turn
+      // that is about to be replaced, after which the rewrite can no longer be truthful. A model
+      // change remains available as an ordinary subsequent Turn.
+      const rewriteModel = latestConversation.modelId
+        ? (enabledModels.find((model) => model.id === latestConversation.modelId) ?? null)
+        : activeDraftSelectedModel
+      if (!rewriteModel) {
         throw new Error(t('chat.noEnabledModels'))
       }
       if (
         attachments.some((attachment) => attachment.kind === 'image') &&
-        !activeDraftSelectedModel.supportsImage
+        !rewriteModel.supportsImage
       ) {
         throw new Error(t('chat.unsupportedImageWarning'))
       }
-
-      await waitForConversationSaves(conversationId)
-      const transitionOutcome = await requestProviderTransition(
-        conversationId,
-        activeDraftSelectedModel.id
-      )
-      if (transitionOutcome.status !== 'completed') {
-        throw new Error(
-          transitionOutcome.status === 'confirmation_required' ||
-            transitionOutcome.status === 'running'
-            ? t('chat.modelTransition.confirmThenRetryEdit')
-            : t('chat.modelTransition.requestFailed')
-        )
-      }
-
-      const conversationAfterTransition = conversationsRef.current.find(
-        (candidate) => candidate.id === conversationId
-      )
-      if (
-        !conversationAfterTransition ||
-        conversationAfterTransition.archivedAt ||
-        conversationAfterTransition.pendingArchivedAt !== undefined
-      ) {
-        throw new Error(t('chat.editMessageUnavailable'))
-      }
-
-      const now = Math.max(Date.now(), latestConversation.updatedAt + 1)
-      const modelId = transitionOutcome.operation.modelId
+      const modelId = rewriteModel.id
       const permissionMode = activeDraft.permissionMode
+      const sourceAutoTitle = createConversationTitle(
+        latestEditableTurn.userMessage.content,
+        t('chat.newConversation')
+      )
+      const replacementTitle =
+        latestConversation.title === sourceAutoTitle
+          ? createConversationTitle(messageContent, t('chat.newConversation'))
+          : undefined
       const editedSkillSelections =
         latestEditableTurn.assistantMessage.agentRun?.explicitSkillSelections ??
         latestEditableTurn.assistantMessage.agentRun?.activatedSkills?.map((skill) => ({
@@ -1210,108 +1210,116 @@ export function AppShell() {
           revision: skill.revision
         })) ??
         []
-      const userMessage = createUserMessage(messageContent, attachments)
-      const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
-      const messagesBeforeEditedTurn = latestConversation.messages.slice(
-        0,
-        latestEditableTurn.userIndex
-      )
-      const nextConversation: ChatConversation = {
-        ...latestConversation,
-        messages: [...messagesBeforeEditedTurn, userMessage, assistantMessage],
-        modelId,
-        updatedAt: now,
-        unreadAt: null
+      if (editRewriteInFlightRef.current.has(conversationId)) {
+        throw new Error(t('chat.editMessageUnavailable'))
       }
-
-      const oldRunId = latestEditableTurn.assistantMessage.agentRun?.runId
-      if (oldRunId) {
-        cancelledRunIdsRef.current.add(oldRunId)
-        cleanupRunBinding(oldRunId)
-      }
-
-      cancelledPendingMessageIdsRef.current.add(latestEditableTurn.assistantMessage.id)
       const submissionSeq = (editSubmissionSeqRef.current += 1)
-      setScrollTargetMessageId(null)
-      setActiveConversationInitialScrollTop(null)
-      setConversationScrollToBottomSignal((signal) => signal + 1)
-      setConversationsWithRef((currentConversations) =>
-        currentConversations.map((candidate) =>
-          candidate.id === conversationId ? nextConversation : candidate
-        )
-      )
-      updateDraft(
+      const rewriteIdentity = JSON.stringify({
+        attachmentIds,
+        content,
         conversationId,
-        createComposerDraft({
+        modelId,
+        permissionMode,
+        skills: editedSkillSelections,
+        sourceAssistantMessageId: latestEditableTurn.assistantMessage.id,
+        sourceUserMessageId: latestEditableTurn.userMessage.id,
+        title: replacementTitle
+      })
+      let rewriteAttempt = editRewriteAttemptsRef.current.get(rewriteIdentity)
+      if (!rewriteAttempt) {
+        const frozenAttachments = attachments.map((attachment) => ({ ...attachment }))
+        const frozenSkills = editedSkillSelections.map((selection) => ({ ...selection }))
+        rewriteAttempt = {
+          assistantMessage: createAssistantMessage(THINKING_PLACEHOLDER, 'pending'),
+          attachments: frozenAttachments,
+          content,
           modelId,
           permissionMode,
-          projectId: latestConversation.projectId
-        })
-      )
-
-      void (async () => {
-        try {
-          await saveConversationMeta(nextConversation)
-          await deleteChatMessages(conversationId, [
-            latestEditableTurn.userMessage.id,
-            latestEditableTurn.assistantMessage.id
-          ])
-          await upsertChatMessages(
-            conversationId,
-            [userMessage, assistantMessage],
-            latestEditableTurn.userIndex
-          )
-
-          if (editSubmissionSeqRef.current !== submissionSeq) return
-
-          await requestAssistantResponse(
-            conversationId,
-            userMessage.id,
-            assistantMessage.id,
-            content,
-            modelId,
-            latestConversation.projectId,
-            permissionMode,
-            attachments,
-            editedSkillSelections,
-            undefined
-          )
-        } catch (error) {
-          if (editSubmissionSeqRef.current !== submissionSeq) return
-          const errorMessage = error instanceof Error ? error.message : String(error)
-          restoreSubmittedSkills(conversationId, editedSkillSelections, {
-            modelId,
-            permissionMode,
-            projectId: latestConversation.projectId
-          })
-          updateAssistantMessage(
-            conversationId,
-            assistantMessage.id,
-            (currentMessage) => ({
-              ...currentMessage,
-              content: errorMessage,
-              status: 'error',
-              agentRun: {
-                ...ensureAgentRun(currentMessage.agentRun, null, 'failed'),
-                error: errorMessage
-              }
-            }),
-            { touchConversation: true }
+          projectId: latestConversation.projectId,
+          requestId: createId('conversation-turn-rewrite-request'),
+          skills: frozenSkills,
+          title: replacementTitle,
+          userMessage: createUserMessage(
+            buildMessageContentWithAttachments(content, frozenAttachments),
+            frozenAttachments
           )
         }
-      })()
+        editRewriteAttemptsRef.current.set(rewriteIdentity, rewriteAttempt)
+        if (editRewriteAttemptsRef.current.size > 32) {
+          const oldestIdentity = editRewriteAttemptsRef.current.keys().next().value
+          if (oldestIdentity) editRewriteAttemptsRef.current.delete(oldestIdentity)
+        }
+      }
+      const { assistantMessage, userMessage } = rewriteAttempt
+      editRewriteInFlightRef.current.add(conversationId)
+      try {
+        const committed = await requestAssistantResponse(
+          conversationId,
+          userMessage.id,
+          assistantMessage.id,
+          rewriteAttempt.content,
+          rewriteAttempt.modelId,
+          rewriteAttempt.projectId,
+          rewriteAttempt.permissionMode,
+          rewriteAttempt.attachments,
+          rewriteAttempt.skills,
+          rewriteAttempt.title,
+          {
+            requestId: rewriteAttempt.requestId,
+            sourceAssistantMessageId: latestEditableTurn.assistantMessage.id,
+            sourceUserMessageId: latestEditableTurn.userMessage.id
+          }
+        )
+        if (!committed) return
+        editRewriteAttemptsRef.current.delete(rewriteIdentity)
+        if (editSubmissionSeqRef.current !== submissionSeq) return
+
+        const rewrittenConversation = conversationsRef.current.find(
+          (candidate) => candidate.id === conversationId
+        )
+        if (
+          !rewrittenConversation ||
+          rewrittenConversation.archivedAt ||
+          rewrittenConversation.pendingArchivedAt !== undefined ||
+          !rewrittenConversation.messages.some((message) => message.id === userMessage.id) ||
+          !rewrittenConversation.messages.some((message) => message.id === assistantMessage.id)
+        ) {
+          return
+        }
+        updateDraft(
+          conversationId,
+          createComposerDraft({
+            modelId: rewriteAttempt.modelId,
+            permissionMode: rewriteAttempt.permissionMode,
+            projectId: rewriteAttempt.projectId
+          })
+        )
+        if (activeConversationIdRef.current === conversationId) {
+          setScrollTargetMessageId(null)
+          setActiveConversationInitialScrollTop(null)
+          setConversationScrollToBottomSignal((signal) => signal + 1)
+        }
+      } catch (error) {
+        if (editSubmissionSeqRef.current === submissionSeq) {
+          restoreSubmittedSkills(conversationId, rewriteAttempt.skills, {
+            modelId: rewriteAttempt.modelId,
+            permissionMode: rewriteAttempt.permissionMode,
+            projectId: rewriteAttempt.projectId
+          })
+        }
+        throw error
+      } finally {
+        editRewriteInFlightRef.current.delete(conversationId)
+      }
     },
     [
       activeDraft.permissionMode,
       activeDraftSelectedModel,
-      cleanupRunBinding,
+      enabledModels,
       requestAssistantResponse,
-      requestProviderTransition,
       restoreSubmittedSkills,
-      setConversationsWithRef,
       t,
       updateDraft,
-      updateAssistantMessage,
       waitForConversationSaves,
       waitForMessageUpserts
     ]

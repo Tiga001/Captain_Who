@@ -7,6 +7,7 @@ import type { ActivatedSkillSummary, SkillSelection } from './skills'
 export const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
 export const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
 export const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
+export const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 export const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
 export const AGENT_COMMAND_SESSIONS_LIST_METHOD = 'agent.commandSessions.list'
 export const AGENT_COMMAND_SESSIONS_GET_METHOD = 'agent.commandSessions.get'
@@ -810,6 +811,17 @@ export interface AgentConversationTurnInput {
   permissions?: AgentPermissions
   /** Ordered, revision-bound Skills selected for this agent run. */
   skills?: SkillSelection[]
+}
+
+/**
+ * Replaces only the latest settled human Turn inside the same Conversation.
+ * The source Turn remains an immutable audit/Usage fact and is removed only from active views.
+ */
+export interface AgentConversationTurnRewriteInput {
+  requestId: string
+  sourceUserMessageId: string
+  sourceAssistantMessageId: string
+  turn: AgentConversationTurnInput
 }
 
 export type AgentGuidanceStatus = 'queued' | 'applied' | 'rejected' | 'abandoned'

@@ -118,6 +118,15 @@ fn query_message_hits(
                   AND m.snapshot_original_origin_kind IS 'agent'
               )
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM conversation_turn_rewrites AS rewrite
+              WHERE rewrite.conversation_id = m.conversation_id
+                AND (
+                    rewrite.source_user_message_id = m.id
+                    OR rewrite.source_assistant_message_id = m.id
+                )
+          )
           AND m.content <> ''
           AND lower(m.content) LIKE ?1 ESCAPE '\\'
         ORDER BY c.updated_at DESC, m.position ASC, m.created_at ASC
@@ -160,6 +169,15 @@ fn query_title_hits(
               SELECT 1
               FROM messages
               WHERE messages.conversation_id = conversations.id
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM conversation_turn_rewrites AS rewrite
+                    WHERE rewrite.conversation_id = messages.conversation_id
+                      AND (
+                          rewrite.source_user_message_id = messages.id
+                          OR rewrite.source_assistant_message_id = messages.id
+                      )
+                )
                 AND NOT (
                     messages.input_origin_kind IS 'agent'
                     OR (

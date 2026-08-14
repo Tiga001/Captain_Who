@@ -165,6 +165,51 @@ fn save_provider_profile_fixture(
     storage.save_model_settings(settings).unwrap();
 }
 
+fn fork_transition_summary_generator() -> ContextCompactionSummaryGenerator {
+    Arc::new(|request, cancellation| {
+        Box::pin(async move {
+            cancellation.check()?;
+            let observation = mycopilot_core::ModelRequestObservation {
+                schema_version: mycopilot_core::MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
+                id: format!("model-request-{}", request.operation_id),
+                run_id: request.run_id.clone(),
+                conversation_id: Some(request.conversation_id.clone()),
+                assistant_message_id: Some(request.assistant_message_id.clone()),
+                operation_id: Some(request.operation_id.clone()),
+                request_index: request.request_index,
+                purpose: mycopilot_core::ModelRequestPurpose::ContextCompaction,
+                model: "model-2".to_string(),
+                api_style: mycopilot_core::AgentApiStyle::OpenAiCompatible,
+                status: mycopilot_core::ModelRequestObservationStatus::Completed,
+                estimate: None,
+                actual_usage: None,
+                finish_reason: Some("stop".to_string()),
+                error_code: None,
+                error_message: None,
+                started_at: 10,
+                completed_at: 11,
+                tool_set: None,
+            };
+            Ok(AgentContextCompactionGenerationOutput {
+                draft: ContextCompactionSummaryDraft {
+                    id: format!("transition-summary-{}", request.operation_id),
+                    source_revision: request.prefix.source_revision.clone(),
+                    content: "Durable provider transition summary.".to_string(),
+                    continuity: request.continuity,
+                    generation: ContextCompactionGeneration::test(),
+                    source_input_tokens: request.source_input_tokens,
+                    summary_input_tokens: 8,
+                    continuity_input_tokens: 8,
+                    uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
+                    replacement_input_tokens: 16,
+                    created_at: now_ms(),
+                },
+                observation,
+            })
+        })
+    })
+}
+
 fn turn_input(model_id: &str) -> AgentConversationTurnInput {
     AgentConversationTurnInput {
         conversation_id: None,
@@ -576,6 +621,731 @@ async fn ordinary_root_turn_is_durable_before_its_terminal_event() {
             && message["content"]
                 .as_str()
                 .is_some_and(|content| content.contains("Verify the frozen provider profile"))
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rewrite_turn_is_atomic_replayable_and_runs_with_only_the_active_context() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for answer in ["Original answer.", "Replacement answer."] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(read_provider_request(&mut stream).await);
+            write_provider_stream(
+                &mut stream,
+                json!({ "role": "assistant", "content": answer }),
+                "stop",
+            )
+            .await;
+        }
+        requests
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: "rewrite-project".to_string(),
+            name: "Rewrite project".to_string(),
+            path: Some(fixture.path().to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    save_provider_profile_fixture(
+        &storage,
+        &format!("http://{address}/v1/chat/completions"),
+        None,
+    );
+    let service =
+        AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
+            .unwrap();
+    let source_attachment = mycopilot_core::AgentInputAttachment {
+        id: "rewrite-source-attachment".to_string(),
+        kind: mycopilot_core::AgentInputAttachmentKind::File,
+        name: "evidence.txt".to_string(),
+        mime_type: Some("text/plain".to_string()),
+        size_bytes: 16,
+        encoding: mycopilot_core::AgentInputAttachmentEncoding::Utf8,
+        data: "durable evidence".to_string(),
+        truncated: None,
+    };
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut initial = turn_input("model-1");
+    initial.conversation_id = Some("conversation-rewrite-provider".to_string());
+    initial.project_id = Some("rewrite-project".to_string());
+    initial.content = "Original prompt must disappear".to_string();
+    initial.user_message_id = Some("rewrite-source-user".to_string());
+    initial.assistant_message_id = Some("rewrite-source-assistant".to_string());
+    initial.attachments = vec![source_attachment.clone()];
+    initial.permissions.write = AgentWritePermission::WorkspaceOnly;
+    let source = service
+        .start_conversation_turn(initial, notifications)
+        .unwrap();
+    assert_eq!(
+        collect_until_done(&mut receiver).await.last().unwrap()["params"]["status"],
+        "completed"
+    );
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let replacement_content = "Replacement prompt is authoritative";
+    let mut replacement = turn_input("model-1");
+    replacement.conversation_id = Some(source.conversation_id.clone());
+    replacement.project_id = Some("rewrite-project".to_string());
+    replacement.content = replacement_content.to_string();
+    replacement.user_message_id = Some("rewrite-replacement-user".to_string());
+    replacement.assistant_message_id = Some("rewrite-replacement-assistant".to_string());
+    replacement.attachments = vec![source_attachment.clone()];
+    replacement.title = Some(create_conversation_title(replacement_content));
+    replacement.permissions = AgentPermissions::default();
+    let rewrite = AgentConversationTurnRewriteInput {
+        request_id: "rewrite-provider-request".to_string(),
+        source_user_message_id: source.user_message_id.clone(),
+        source_assistant_message_id: source.assistant_message_id.clone(),
+        turn: replacement,
+    };
+    let replacement = service
+        .rewrite_conversation_turn(rewrite.clone(), notifications)
+        .unwrap();
+    assert_eq!(
+        collect_until_done(&mut receiver).await.last().unwrap()["params"]["status"],
+        "completed"
+    );
+
+    let active = storage
+        .load_conversation(&source.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.title, create_conversation_title(replacement_content));
+    assert_eq!(
+        active
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rewrite-replacement-user", "rewrite-replacement-assistant"]
+    );
+    assert_eq!(active.messages[1].content, "Replacement answer.");
+    assert!(storage
+        .search_chats(&mycopilot_core::storage::models::ChatSearchInput {
+            query: "Original prompt must disappear".to_string(),
+            limit: Some(10),
+        })
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        storage
+            .search_chats(&mycopilot_core::storage::models::ChatSearchInput {
+                query: "Replacement prompt".to_string(),
+                limit: Some(10),
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    let active_world_state = storage
+        .list_active_conversation_world_state_records(&source.conversation_id)
+        .unwrap();
+    assert!(active_world_state.iter().any(|entry| {
+        entry.effective_before_message_id.as_deref() == Some("rewrite-replacement-user")
+    }));
+
+    let replacement_attachment_id = replacement.user_message.attachments[0].id.clone();
+    assert_ne!(replacement_attachment_id, source_attachment.id);
+    let loaded = storage
+        .load_input_attachments(&[source_attachment.id.clone(), replacement_attachment_id])
+        .unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert!(loaded
+        .iter()
+        .all(|attachment| attachment.data == "ZHVyYWJsZSBldmlkZW5jZQ=="));
+    let active_library = storage
+        .build_attachment_library_context(&source.conversation_id, Some("rewrite-project"))
+        .unwrap();
+    assert_eq!(
+        active_library
+            .conversation_attachments
+            .iter()
+            .map(|attachment| attachment.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![replacement.user_message.attachments[0].id.as_str()]
+    );
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-rewrite-project-peer".to_string(),
+            project_id: Some("rewrite-project".to_string()),
+            model_id: Some("model-1".to_string()),
+            title: "Peer".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "rewrite-peer-user".to_string(),
+                role: "user".to_string(),
+                content: "peer".to_string(),
+                created_at: 20,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 20,
+            updated_at: 20,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let peer_library = storage
+        .build_attachment_library_context(
+            "conversation-rewrite-project-peer",
+            Some("rewrite-project"),
+        )
+        .unwrap();
+    assert_eq!(
+        peer_library
+            .project_attachments
+            .iter()
+            .map(|attachment| attachment.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![replacement.user_message.attachments[0].id.as_str()]
+    );
+
+    let replay = service
+        .rewrite_conversation_turn(rewrite, tokio::sync::mpsc::unbounded_channel().0)
+        .unwrap();
+    assert_eq!(replay.run_id, replacement.run_id);
+    assert_eq!(replay.assistant_message.status.as_deref(), Some("sent"));
+    assert_eq!(replay.assistant_message.content, "Replacement answer.");
+
+    let requests = model_server.await.unwrap();
+    let replacement_request = provider_request_message_text(&requests[1]);
+    assert!(replacement_request.contains(replacement_content));
+    assert!(!replacement_request.contains("Original prompt must disappear"));
+    assert!(!replacement_request.contains("Original answer."));
+}
+
+#[test]
+fn rewrite_pre_runtime_failure_is_fail_closed_then_replays_the_failed_terminal() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    storage
+        .save_project(ProjectRecord {
+            id: "rewrite-failure-project".to_string(),
+            name: "Rewrite failure project".to_string(),
+            path: Some(fixture.path().to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-rewrite-failure".to_string(),
+            project_id: Some("rewrite-failure-project".to_string()),
+            model_id: Some("model-1".to_string()),
+            title: "source".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "rewrite-failure-source-user".to_string(),
+                role: "user".to_string(),
+                content: "source".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    storage
+        .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+            agent_id: "rewrite-failure-root".to_string(),
+            conversation_id: "conversation-rewrite-failure".to_string(),
+            creation_request_id: "rewrite-failure-root-request".to_string(),
+            task_name: "Rewrite failure".to_string(),
+        })
+        .unwrap();
+    let (mut source, revision) = storage
+        .load_conversation_for_turn("conversation-rewrite-failure")
+        .unwrap();
+    let mut source = source.take().unwrap();
+    source.messages.push(ChatMessageRecord {
+        id: "rewrite-failure-source-assistant".to_string(),
+        role: "assistant".to_string(),
+        content: "Thinking...".to_string(),
+        created_at: 2,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    let source_trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+        "rewrite-failure-source-run",
+        "conversation-rewrite-failure",
+        "rewrite-failure-source-assistant",
+    );
+    storage
+        .save_conversation_and_begin_turn(
+            source,
+            revision,
+            None,
+            mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                AgentPermissions::default(),
+            ),
+            &source_trace,
+            2,
+            2,
+        )
+        .unwrap();
+    let source_terminal = mycopilot_core::completed_conversation_trace_without_items(
+        "rewrite-failure-source-run",
+        "conversation-rewrite-failure",
+        "rewrite-failure-source-assistant",
+    );
+    storage
+        .finalize_chat_message_with_conversation_trace(
+            "conversation-rewrite-failure",
+            "rewrite-failure-source-assistant",
+            "source answer",
+            Some("sent"),
+            "completed",
+            &source_terminal,
+            2,
+            3,
+        )
+        .unwrap();
+    let service =
+        AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
+            .unwrap();
+
+    let (mut replacement, revision) = storage
+        .load_conversation_for_turn("conversation-rewrite-failure")
+        .unwrap();
+    let mut replacement = replacement.take().unwrap();
+    let replacement_user = ChatMessageRecord {
+        id: "rewrite-failure-user".to_string(),
+        role: "user".to_string(),
+        content: "replacement".to_string(),
+        created_at: 4,
+        status: Some("sent".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    };
+    let replacement_assistant = ChatMessageRecord {
+        id: "rewrite-failure-assistant".to_string(),
+        role: "assistant".to_string(),
+        content: "Thinking...".to_string(),
+        created_at: 5,
+        status: Some("pending".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    };
+    replacement
+        .messages
+        .extend([replacement_user.clone(), replacement_assistant.clone()]);
+    replacement.updated_at = 5;
+    let response = AgentConversationTurnOutput {
+        run_id: "rewrite-failure-run".to_string(),
+        event_name: AGENT_EVENT_NAME.to_string(),
+        conversation_id: "conversation-rewrite-failure".to_string(),
+        user_message_id: replacement_user.id.clone(),
+        assistant_message_id: replacement_assistant.id.clone(),
+        user_message: replacement_user,
+        assistant_message: replacement_assistant,
+        activated_skills: Vec::new(),
+        skill_activation_revision: None,
+    };
+    let admission = mycopilot_core::storage::conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission {
+        request_id: "rewrite-failure-request".to_string(),
+        request_fingerprint: format!("sha256:{}", "d".repeat(64)),
+        conversation_id: "conversation-rewrite-failure".to_string(),
+        source_user_message_id: "rewrite-failure-source-user".to_string(),
+        source_assistant_message_id: "rewrite-failure-source-assistant".to_string(),
+        replacement_user_message_id: "rewrite-failure-user".to_string(),
+        replacement_assistant_message_id: "rewrite-failure-assistant".to_string(),
+        run_id: "rewrite-failure-run".to_string(),
+        response_json: serde_json::to_string(&response).unwrap(),
+        created_at: 5,
+    };
+    let replacement_trace = mycopilot_core::ConversationTraceSnapshot::default().in_progress_trace(
+        "rewrite-failure-run",
+        "conversation-rewrite-failure",
+        "rewrite-failure-assistant",
+    );
+    let prepared_attachments = storage
+        .prepare_conversation_turn_rewrite_attachments(
+            "conversation-rewrite-failure",
+            "rewrite-failure-user",
+            Some("rewrite-failure-project"),
+            &[],
+            4,
+        )
+        .unwrap();
+    storage
+        .rewrite_conversation_turn_and_begin_turn(
+            replacement,
+            revision,
+            mycopilot_core::AgentTurnPermissionSource::HostAuthenticatedRoot(
+                AgentPermissions::default(),
+            ),
+            &[],
+            &replacement_trace,
+            5,
+            5,
+            &admission,
+            &prepared_attachments,
+        )
+        .unwrap();
+
+    let fault = rusqlite::Connection::open(&database_path).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER fail_rewrite_terminalization
+             BEFORE UPDATE ON messages
+             WHEN NEW.id = 'rewrite-failure-assistant'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected rewrite settlement failure');
+             END;",
+        )
+        .unwrap();
+    let error = service
+        .settle_prepared_rewrite_failure(
+            "conversation-rewrite-failure",
+            "rewrite-failure-assistant",
+            Some("rewrite-failure-run"),
+            "rewrite-failure-request",
+            "injected pre-runtime failure",
+        )
+        .unwrap_err();
+    assert!(error.contains("injected rewrite settlement failure"));
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace("rewrite-failure-assistant")
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::InProgress
+    );
+    fault
+        .execute_batch("DROP TRIGGER fail_rewrite_terminalization;")
+        .unwrap();
+    let settled = service
+        .settle_prepared_rewrite_failure(
+            "conversation-rewrite-failure",
+            "rewrite-failure-assistant",
+            Some("rewrite-failure-run"),
+            "rewrite-failure-request",
+            "injected pre-runtime failure",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled.assistant_message.status.as_deref(), Some("error"));
+    assert_eq!(
+        storage
+            .get_conversation_turn_trace("rewrite-failure-assistant")
+            .unwrap()
+            .unwrap()
+            .terminal_status,
+        ConversationTurnTraceTerminalStatus::Failed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reopened_assistant_and_provider_transition_forks_complete_human_turns() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let model_server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_provider_request(&mut stream).await;
+            write_provider_stream(
+                &mut stream,
+                json!({ "role": "assistant", "content": "Continued fork answer." }),
+                "stop",
+            )
+            .await;
+            requests.push(request);
+        }
+        requests
+    });
+
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+    let source_conversation_id = "conversation-root-fork-source";
+    let source_assistant_message_id = "assistant-root-fork-source";
+    let (assistant_fork_id, divider_fork_id) = {
+        let storage = Arc::new(StorageService::open(&database_path).unwrap());
+        let mut settings = test_model_settings();
+        settings.api_url = format!("http://{address}/v1/chat/completions");
+        settings.api_token = "fork-transition-token".to_string();
+        let mut target_model = settings.models[0].clone();
+        target_model.id = "model-2".to_string();
+        target_model.display_name = "Model 2".to_string();
+        target_model.provider_profile_config =
+            mycopilot_core::ProviderProfileConfig::deepseek_v4_default();
+        settings.models.push(target_model);
+        storage.save_model_settings(settings).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: source_conversation_id.to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Fork continuation source".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "user-root-fork-source".to_string(),
+                        role: "user".to_string(),
+                        content: "Inspect the source file".to_string(),
+                        created_at: 1,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: source_assistant_message_id.to_string(),
+                        role: "assistant".to_string(),
+                        content: "Source inspection complete.".to_string(),
+                        created_at: 2,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        // This raw row intentionally has no renderer Timeline. The durable Trace
+                        // below makes the Fork view richer than its immutable persisted snapshot.
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        storage
+            .ensure_root_agent(&mycopilot_core::EnsureRootAgentInput {
+                agent_id: "agent-root-fork-source".to_string(),
+                conversation_id: source_conversation_id.to_string(),
+                creation_request_id: "ensure-root-fork-source".to_string(),
+                task_name: "Fork continuation source".to_string(),
+            })
+            .unwrap();
+
+        let source_trace = completed_trace(source_conversation_id, source_assistant_message_id);
+        let runtime_call_id = history_call_id();
+        let model_context_items = vec![
+            ConversationModelContextItem {
+                sequence: 0,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: "I am creating the requested file.".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 1,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: runtime_call_id.clone(),
+                    name: "write_file".to_string(),
+                    args: json!({
+                        "filePath": "src/history.rs",
+                        "mode": "create",
+                        "content": "durable source content"
+                    }),
+                    provider_identity: AgentProviderToolCallIdentity {
+                        provider_tool_index: 0,
+                        provider_call_id: "write-history".to_string(),
+                        runtime_call_id: runtime_call_id.clone(),
+                    },
+                }],
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 2,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: r#"{"ok":true,"result":{"status":"applied"}}"#.to_string(),
+                tool_call_id: Some(runtime_call_id),
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        ];
+        let mut in_progress = source_trace.clone();
+        in_progress.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+        storage
+            .append_in_progress_conversation_turn_trace_and_apply_guidances(
+                &in_progress,
+                &model_context_items,
+                2,
+                2,
+            )
+            .unwrap();
+        storage
+            .replace_conversation_turn_trace(&source_trace, 2, 3)
+            .unwrap();
+
+        let assistant_fork = storage
+            .fork_conversation_request_view(
+                mycopilot_core::storage::models::ForkConversationRequest {
+                    request_id: "fork-assistant-reply-and-continue".to_string(),
+                    source_conversation_id: source_conversation_id.to_string(),
+                    fork_point:
+                        mycopilot_core::storage::models::ConversationForkPoint::AssistantReply {
+                            assistant_message_id: source_assistant_message_id.to_string(),
+                        },
+                },
+            )
+            .unwrap();
+        let assistant_fork_run: Value = serde_json::from_str(
+            assistant_fork.conversation.messages[1]
+                .agent_run_json
+                .as_deref()
+                .expect("assistant Fork view must reconstruct its durable tool Timeline"),
+        )
+        .unwrap();
+        assert_eq!(assistant_fork_run["timeline"][0]["type"], "message");
+        assert_eq!(assistant_fork_run["timeline"][1]["type"], "tool_call");
+        let assistant_fork_id = assistant_fork.conversation.id;
+
+        let transition_service = AgentService::new(Arc::clone(&storage))
+            .with_context_compaction_summary_generator(fork_transition_summary_generator());
+        let preflight = transition_service
+            .preflight_provider_transition(AgentProviderTransitionPreflightInput {
+                conversation_id: source_conversation_id.to_string(),
+                target_model_id: "model-2".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            preflight.decision,
+            AgentProviderTransitionDecision::RequiresCompaction
+        );
+        let (transition_notifications, mut transition_receiver) =
+            tokio::sync::mpsc::unbounded_channel();
+        let transition = transition_service
+            .start_provider_transition(
+                AgentProviderTransitionStartInput {
+                    conversation_id: source_conversation_id.to_string(),
+                    target_model_id: "model-2".to_string(),
+                    transition_token: preflight.transition_token.unwrap(),
+                },
+                transition_notifications,
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = transition_receiver
+                    .recv()
+                    .await
+                    .expect("provider transition event channel closed");
+                if event["params"]["status"] == "completed" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("provider transition must complete deterministically");
+        assert_eq!(
+            storage
+                .load_conversation(source_conversation_id)
+                .unwrap()
+                .unwrap()
+                .model_id
+                .as_deref(),
+            Some("model-2")
+        );
+
+        let divider_fork = storage
+            .fork_conversation_request_view(
+                mycopilot_core::storage::models::ForkConversationRequest {
+                    request_id: "fork-provider-divider-and-continue".to_string(),
+                    source_conversation_id: source_conversation_id.to_string(),
+                    fork_point: mycopilot_core::storage::models::ConversationForkPoint::ProviderTransitionBoundary {
+                        operation_id: transition.operation_id,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            divider_fork.conversation.model_id.as_deref(),
+            Some("model-2")
+        );
+        assert_eq!(
+            storage
+                .get_active_context_compaction_summary(&divider_fork.conversation.id)
+                .unwrap()
+                .unwrap()
+                .content,
+            "Durable provider transition summary."
+        );
+        let forked_run: Value = serde_json::from_str(
+            divider_fork.conversation.messages[1]
+                .agent_run_json
+                .as_deref()
+                .expect("divider Fork view must reconstruct its durable tool Timeline"),
+        )
+        .unwrap();
+        assert_eq!(forked_run["timeline"][0]["type"], "message");
+        assert_eq!(forked_run["timeline"][1]["type"], "tool_call");
+        (assistant_fork_id, divider_fork.conversation.id)
+    };
+
+    // A new Host process uses the raw admission snapshot and must not feed the reconstructed
+    // renderer Timeline back through the immutable snapshot guard.
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service =
+        AgentService::try_new_with_startup_reconciliation(Arc::clone(&storage), false, None)
+            .unwrap();
+    for (suffix, conversation_id, model_id) in [
+        ("assistant", &assistant_fork_id, "model-1"),
+        ("divider", &divider_fork_id, "model-2"),
+    ] {
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut input = turn_input(model_id);
+        input.conversation_id = Some(conversation_id.clone());
+        input.content = format!("Continue from the {suffix} forked snapshot");
+        input.user_message_id = Some(format!("user-root-{suffix}-fork-next"));
+        input.assistant_message_id = Some(format!("assistant-root-{suffix}-fork-next"));
+
+        let turn = service
+            .start_conversation_turn(input, notifications)
+            .expect("reopened collaboration root Fork must admit a human Turn");
+        let events = collect_until_done(&mut receiver).await;
+        assert_eq!(events.last().unwrap()["params"]["status"], "completed");
+
+        let conversation = storage.load_conversation(conversation_id).unwrap().unwrap();
+        assert_eq!(conversation.messages.len(), 4);
+        assert_eq!(conversation.messages[3].id, turn.assistant_message_id);
+        assert_eq!(conversation.messages[3].content, "Continued fork answer.");
+        let old_run: Value =
+            serde_json::from_str(conversation.messages[1].agent_run_json.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(old_run["timeline"][0]["type"], "message");
+        assert_eq!(old_run["timeline"][1]["type"], "tool_call");
+    }
+
+    let requests = model_server.await.unwrap();
+    let request_texts = requests
+        .iter()
+        .map(provider_request_message_text)
+        .collect::<Vec<_>>();
+    assert!(request_texts
+        .iter()
+        .any(|text| text.contains("Continue from the assistant forked snapshot")));
+    assert!(request_texts.iter().any(|text| {
+        text.contains("Durable provider transition summary.")
+            && text.contains("Continue from the divider forked snapshot")
     }));
 }
 

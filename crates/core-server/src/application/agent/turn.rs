@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 impl AgentService {
     /// Public transport adapter. Renderer input can only create a human/root Turn; trusted Agent
@@ -16,7 +17,103 @@ impl AgentService {
 
     pub(super) fn start_human_root_turn(
         &self,
+        input: AgentConversationTurnInput,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        self.start_human_root_turn_internal(input, None, notifications)
+    }
+
+    pub fn rewrite_conversation_turn(
+        &self,
+        mut input: AgentConversationTurnRewriteInput,
+        notifications: CoreServerNotificationSender,
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
+        let request_id = strict_rewrite_identity(&input.request_id, "requestId")?;
+        let source_user_message_id =
+            strict_rewrite_identity(&input.source_user_message_id, "sourceUserMessageId")?;
+        let source_assistant_message_id = strict_rewrite_identity(
+            &input.source_assistant_message_id,
+            "sourceAssistantMessageId",
+        )?;
+        let conversation_id = input
+            .turn
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "编辑重发必须指定 conversationId。".to_string())?;
+        let conversation_id = strict_rewrite_identity(conversation_id, "conversationId")?;
+        let user_message_id = input
+            .turn
+            .user_message_id
+            .as_deref()
+            .ok_or_else(|| "编辑重发必须指定新的 userMessageId。".to_string())?;
+        let user_message_id = strict_rewrite_identity(user_message_id, "userMessageId")?;
+        let assistant_message_id = input
+            .turn
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "编辑重发必须指定新的 assistantMessageId。".to_string())?;
+        let assistant_message_id =
+            strict_rewrite_identity(assistant_message_id, "assistantMessageId")?;
+        if source_user_message_id == source_assistant_message_id
+            || user_message_id == assistant_message_id
+            || source_user_message_id == user_message_id
+            || source_assistant_message_id == assistant_message_id
+        {
+            return Err("编辑重发的新旧消息 ID 必须互不冲突。".to_string().into());
+        }
+        self.authorize_user_conversation_write(&conversation_id)?;
+
+        let request_bytes =
+            serde_json::to_vec(&input).map_err(|error| format!("无法验证编辑重发请求：{error}"))?;
+        let request_fingerprint = format!("sha256:{:x}", Sha256::digest(&request_bytes));
+        if let Some(existing) = self.storage.get_conversation_turn_rewrite(&request_id)? {
+            if existing.request_fingerprint != request_fingerprint
+                || existing.conversation_id != conversation_id
+                || existing.source_user_message_id != source_user_message_id
+                || existing.source_assistant_message_id != source_assistant_message_id
+                || existing.replacement_user_message_id != user_message_id
+                || existing.replacement_assistant_message_id != assistant_message_id
+            {
+                return Err(
+                    "edit_turn_request_conflict: requestId 已用于其他编辑重发请求。"
+                        .to_string()
+                        .into(),
+                );
+            }
+            return active_rewrite_turn_output(&self.storage, &existing)
+                .map_err(AgentServiceError::from);
+        }
+
+        // Source attachment IDs remain bound to the immutable old user message. The replacement
+        // receives deterministic IDs so an RPC replay produces the same rows and file paths
+        // without moving or overwriting source facts.
+        for (index, attachment) in input.turn.attachments.iter_mut().enumerate() {
+            let mut digest = Sha256::new();
+            digest.update(b"conversation-turn-rewrite-attachment-v1\0");
+            digest.update(request_id.as_bytes());
+            digest.update((index as u64).to_be_bytes());
+            digest.update(attachment.id.as_bytes());
+            digest.update(attachment.name.as_bytes());
+            digest.update(attachment.data.as_bytes());
+            attachment.id = format!("attachment-rewrite-{:x}", digest.finalize());
+        }
+
+        self.start_human_root_turn_internal(
+            input.turn,
+            Some(HumanConversationTurnRewrite {
+                request_id,
+                request_fingerprint,
+                source_user_message_id,
+                source_assistant_message_id,
+            }),
+            notifications,
+        )
+    }
+
+    fn start_human_root_turn_internal(
+        &self,
         mut input: AgentConversationTurnInput,
+        rewrite: Option<HumanConversationTurnRewrite>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         // Normalize all identities before admission. In particular, a new Conversation must be
@@ -40,6 +137,28 @@ impl AgentService {
             .conversation_admission
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(rewrite) = &rewrite {
+            if let Some(existing) = self
+                .storage
+                .get_conversation_turn_rewrite(&rewrite.request_id)?
+            {
+                if existing.request_fingerprint != rewrite.request_fingerprint
+                    || existing.conversation_id != conversation_id
+                    || existing.source_user_message_id != rewrite.source_user_message_id
+                    || existing.source_assistant_message_id != rewrite.source_assistant_message_id
+                    || existing.replacement_user_message_id != user_message_id
+                    || existing.replacement_assistant_message_id != assistant_message_id
+                {
+                    return Err(
+                        "edit_turn_request_conflict: requestId 已用于其他编辑重发请求。"
+                            .to_string()
+                            .into(),
+                    );
+                }
+                return active_rewrite_turn_output(&self.storage, &existing)
+                    .map_err(AgentServiceError::from);
+            }
+        }
         if self.is_project_deleting(input.project_id.as_deref())
             || self.is_conversation_deleting(Some(&conversation_id))
         {
@@ -80,6 +199,18 @@ impl AgentService {
         }
         let (previous_conversation, expected_revision) =
             self.storage.load_conversation_for_turn(&conversation_id)?;
+        if rewrite.is_some()
+            && previous_conversation
+                .as_ref()
+                .and_then(|conversation| conversation.model_id.as_deref())
+                != Some(input.model_id.as_str())
+        {
+            return Err(
+                "edit_turn_model_change_not_supported: 编辑重发必须继续使用当前会话模型；请先完成编辑，再通过新的普通 Turn 切换模型。"
+                    .to_string()
+                    .into(),
+            );
+        }
         self.ensure_provider_transition_ready_for_send(&conversation_id, &input.model_id)?;
         if previous_conversation.is_some()
             && self.storage.conversation_revision(&conversation_id)? != expected_revision
@@ -113,16 +244,56 @@ impl AgentService {
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
 
-        let prepared = match prepare_reserved_human_turn(
-            &self.storage,
-            &self.skills,
-            input,
-            &run_id,
-            previous_conversation.clone(),
-            expected_revision,
-        ) {
-            Ok(prepared) => prepared,
+        let prepared_outcome = match rewrite.clone() {
+            Some(rewrite) => prepare_reserved_human_rewrite_turn(
+                &self.storage,
+                &self.skills,
+                input,
+                &run_id,
+                previous_conversation.clone(),
+                expected_revision,
+                rewrite,
+            ),
+            None => prepare_reserved_human_turn(
+                &self.storage,
+                &self.skills,
+                input,
+                &run_id,
+                previous_conversation.clone(),
+                expected_revision,
+            )
+            .map(|prepared| PreparedConversationTurnOutcome::Prepared(Box::new(prepared))),
+        };
+        let prepared = match prepared_outcome {
+            Ok(PreparedConversationTurnOutcome::Prepared(prepared)) => *prepared,
+            Ok(PreparedConversationTurnOutcome::Replayed(output)) => {
+                self.release_turn_concurrency_permit(&run_id);
+                self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                return Ok(*output);
+            }
             Err(error) => {
+                if let Some(rewrite) = &rewrite {
+                    let cause = error.to_string();
+                    return match self.settle_prepared_rewrite_failure(
+                        &conversation_id,
+                        &assistant_message_id,
+                        Some(&run_id),
+                        &rewrite.request_id,
+                        &cause,
+                    ) {
+                        Ok(output) => {
+                            self.release_turn_concurrency_permit(&run_id);
+                            self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                            output.ok_or_else(|| AgentServiceError::from(cause))
+                        }
+                        Err(settlement_error) => Err(format!(
+                            "{cause}；同时无法终态化已接受的编辑重发 Turn：{settlement_error}"
+                        )
+                        .into()),
+                    };
+                }
                 self.release_turn_concurrency_permit(&run_id);
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
@@ -141,15 +312,25 @@ impl AgentService {
             }
         };
 
-        self.launch_prepared_initial_turn(
-            prepared,
-            cancellation_token,
-            notifications,
+        let rollback = if let Some(rewrite) = &rewrite {
+            PreparedTurnRollback::Rewrite {
+                request_id: rewrite.request_id.clone(),
+            }
+        } else {
             PreparedTurnRollback::Human {
                 user_message_id,
                 previous: previous_conversation,
                 previous_world_state_was_empty,
-            },
-        )
+            }
+        };
+        self.launch_prepared_initial_turn(prepared, cancellation_token, notifications, rollback)
     }
+}
+
+fn strict_rewrite_identity(value: &str, field: &str) -> Result<String, AgentServiceError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed != value || value.len() > 256 {
+        return Err(format!("编辑重发的 {field} 无效。").into());
+    }
+    Ok(value.to_string())
 }

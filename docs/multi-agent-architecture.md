@@ -691,7 +691,7 @@ projection，不保存 Conversation 消息或 reducer。notification 是失效�
 跨进程协作基础 DTO 仍为 `schemaVersion=1`，带必填 nullable activity 的 event envelope 独立升至
 `schemaVersion=2`。第 4 轮冻结的 canonical storage 是 v7；第 5 轮为根 Agent Conversation 的
 provenance-aware fork authority 升至 v8；持久权限快照和语义 activity projection 将当前基线升至
-v10。v9 及更早开发库继续采用既有 reset-required、原库不改写策略。
+v11。v10 及更早开发库继续采用既有 reset-required、原库不改写策略。
 
 ### 第 5 轮：前端复用与完整用户体验
 
@@ -708,6 +708,11 @@ receipt 和带来源的历史 snapshot。Agent-origin 输入保留 original Agen
 Session、Skill 与 MCP action journal 生成 renderer-safe projection。MCP 参数、结果正文和 diagnostics 不
 进入该投影；旧版本已经 scrub 且从未落安全 invocation receipt 的 MCP 历史降级为 generic Tool，不伪造
 执行身份。
+
+Conversation 读取明确区分持久原始表示与展示表示：renderer/observer 可以把 Trace Timeline 和权威
+Usage 投影到 `agent_run_json`，但 Turn admission/CAS 必须读取 SQLite 中的原始消息字段。展示投影不得
+回写或参与 fork snapshot 的不可变比较；因此重开 fork 后继续对话只追加新 Turn，历史 snapshot 的原始
+JSON 与 provenance 始终不变。
 
 ### 第 6 轮：可靠性、迁移与发布门禁
 

@@ -11,6 +11,7 @@ import type {
   AgentCommandSessionListOutput,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentConversationTurnRewriteInput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentEvent,
@@ -312,6 +313,7 @@ const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
 const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = 'storage.loadInputAttachments'
+const AGENT_REWRITE_CONVERSATION_TURN_METHOD = 'agent.rewriteConversationTurn'
 const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
 const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
 const AGENT_COLLABORATION_LOCATE_CONVERSATION_METHOD = 'agent.collaboration.locateConversation'
@@ -826,6 +828,15 @@ export class CoreServer {
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {
     return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnInput>(
       AGENT_START_CONVERSATION_TURN_METHOD,
+      input
+    )
+  }
+
+  rewriteConversationTurn(
+    input: AgentConversationTurnRewriteInput
+  ): Promise<AgentConversationTurnOutput> {
+    return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnRewriteInput>(
+      AGENT_REWRITE_CONVERSATION_TURN_METHOD,
       input
     )
   }

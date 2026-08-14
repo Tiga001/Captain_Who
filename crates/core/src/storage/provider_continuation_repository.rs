@@ -455,6 +455,11 @@ pub(crate) fn list_replayable_for_conversation(
         WHERE continuation.conversation_id = ?1
           AND continuation.state IN ('active', 'superseded')
           AND continuation.activated_at IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM conversation_turn_rewrites AS rewrite
+              WHERE rewrite.conversation_id = continuation.conversation_id
+                AND rewrite.source_assistant_message_id = continuation.assistant_message_id
+          )
         ORDER BY owner.position ASC,
                  continuation.run_id ASC,
                  continuation.request_index ASC,
@@ -490,6 +495,11 @@ pub(crate) fn has_replayable_for_conversation(
             WHERE continuation.conversation_id = ?1
               AND continuation.state IN ('active', 'superseded')
               AND continuation.activated_at IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                  WHERE rewrite.conversation_id = continuation.conversation_id
+                    AND rewrite.source_assistant_message_id = continuation.assistant_message_id
+              )
             LIMIT 1
         )
         ",

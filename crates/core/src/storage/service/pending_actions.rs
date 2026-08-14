@@ -472,6 +472,14 @@ fn validate_frozen_manual_file_effect_tool_call(
             )?;
             Some(office_operation.reason.clone())
         }
+        AgentProposedAction::McpToolCall { approval } => {
+            if approval.call.args != *operation {
+                return Err(format!(
+                    "启动对账发现 MCP 操作 {action_id} 的冻结 ToolCall 参数不一致。"
+                ));
+            }
+            approval.call.reason.clone()
+        }
         _ => unreachable!("manual_file_effect_identity already rejected this action"),
     };
     Ok(reason)
@@ -520,6 +528,7 @@ fn manual_file_effect_has_authoritative_settlement(
         durable_trace.validate()?;
         let action = serde_json::from_str::<AgentProposedAction>(&pending.action_json)
             .map_err(|error| format!("frozen file-effect action is invalid: {error}"))?;
+        let is_mcp_action = matches!(action, AgentProposedAction::McpToolCall { .. });
         let (_, expected_tool, expected_call_id, _) = manual_file_effect_identity(&action)?;
 
         let matching_calls = durable_trace
@@ -543,8 +552,15 @@ fn manual_file_effect_has_authoritative_settlement(
             return Err("durable trace must contain one matching ToolCall".to_string());
         }
         let (call_sequence, trace_tool, operation, call_approval_status) = matching_calls[0];
-        if call_approval_status != crate::AgentApprovalStatus::Approved {
-            return Err("durable trace ToolCall is not approved".to_string());
+        let expected_trace_approval_status = if is_mcp_action {
+            // Provider ToolCalls are immutable. MCP approval is represented by the terminal audit
+            // and paired ToolResult rather than rewriting the frozen call from required.
+            crate::AgentApprovalStatus::Required
+        } else {
+            crate::AgentApprovalStatus::Approved
+        };
+        if call_approval_status != expected_trace_approval_status {
+            return Err("durable trace ToolCall approval state is inconsistent".to_string());
         }
         let reason = validate_frozen_manual_file_effect_tool_call(
             &pending.action_id,
@@ -580,14 +596,34 @@ fn manual_file_effect_has_authoritative_settlement(
             id: expected_call_id,
             tool: expected_tool,
             args: operation.clone(),
-            approval_status: crate::AgentApprovalStatus::Approved,
+            approval_status: expected_trace_approval_status,
             reason,
         };
-        let expected_result_item = crate::conversation_trace::projected_tool_result_trace_item(
+        let mut expected_result_item = crate::conversation_trace::projected_tool_result_trace_item(
             result_sequence,
             &expected_call,
             &audited_tool_result,
         );
+        if is_mcp_action {
+            // MCP result content is archived independently after the safe terminal audit is
+            // written. Archive metadata belongs to the validated trace, not the redacted audit
+            // ToolResult, so exclude only that trace-owned field from the semantic comparison.
+            if let (
+                ConversationTurnTraceItem::ToolResult {
+                    archive: durable_archive,
+                    ..
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    archive: expected_archive,
+                    ..
+                },
+            ) = (
+                &durable_trace.items[result_index],
+                &mut expected_result_item,
+            ) {
+                *expected_archive = durable_archive.clone();
+            }
+        }
         if durable_trace.items[result_index] != expected_result_item {
             return Err(
                 "durable trace ToolResult payload differs from the terminal audit".to_string(),
@@ -1417,6 +1453,97 @@ impl StorageService {
         }
     }
 
+    /// Publishes a successor approval and terminalizes its predecessor as one durable fact.
+    ///
+    /// The predecessor's paired ToolResult and `target_status` were committed before model
+    /// continuation. Once that continuation proposes another approval, the successor row becomes
+    /// the recovery anchor for the Run. The insert and predecessor CAS must therefore commit
+    /// together: exposing either half alone can leave an actionable orphan approval or lose the
+    /// only continuation checkpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_pending_agent_action_with_predecessor_settlement(
+        &self,
+        successor: AgentPendingActionRecord,
+        predecessor_action_id: &str,
+        predecessor_expected_status: &str,
+        predecessor_terminal_status: &str,
+        predecessor_terminal_agent_input_json: &str,
+        updated_at: i64,
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
+        if successor.action_id == predecessor_action_id {
+            return Err("successor approval must not replace its predecessor".to_string());
+        }
+        if successor.status != "pending" || successor.target_status.is_some() {
+            return Err("successor approval must be a fresh pending action".to_string());
+        }
+        if !matches!(
+            predecessor_terminal_status,
+            "rejected" | "cancelled" | "completed" | "failed"
+        ) {
+            return Err("predecessor settlement requires a terminal target status".to_string());
+        }
+
+        let mut connection = self.state.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let predecessor =
+            pending_action_repository::load_pending_action(&transaction, predecessor_action_id)
+                .map_err(storage_error)?
+                .ok_or_else(|| "successor approval has no durable predecessor".to_string())?;
+        if predecessor.run_id != successor.run_id
+            || predecessor.conversation_id != successor.conversation_id
+            || predecessor.assistant_message_id != successor.assistant_message_id
+        {
+            return Err("successor approval and predecessor ownership do not match".to_string());
+        }
+        if predecessor.target_status.as_deref() != Some(predecessor_terminal_status) {
+            return Err(
+                "predecessor terminal target was not durably committed before its successor"
+                    .to_string(),
+            );
+        }
+        let predecessor_already_terminal = predecessor.status == predecessor_terminal_status;
+        if !predecessor_already_terminal && predecessor.status != predecessor_expected_status {
+            return Err(format!(
+                "predecessor status changed before successor publication: expected={predecessor_expected_status}, actual={}",
+                predecessor.status
+            ));
+        }
+
+        let outcome = pending_action_repository::store_pending_action(&transaction, &successor)
+            .map_err(storage_error)?;
+        if let pending_action_repository::PendingActionStoreOutcome::Conflict {
+            existing_run_id,
+            existing_status,
+        } = &outcome
+        {
+            return Err(format!(
+                "待审批操作 actionId={} 已属于 runId={}（status={}）；拒绝覆盖冻结快照。",
+                successor.action_id, existing_run_id, existing_status
+            ));
+        }
+
+        if !predecessor_already_terminal {
+            let affected = pending_action_repository::transition_pending_action(
+                &transaction,
+                predecessor_action_id,
+                predecessor_expected_status,
+                predecessor_terminal_status,
+                predecessor_terminal_agent_input_json,
+                updated_at,
+            )
+            .map_err(storage_error)?;
+            if affected != 1 {
+                return Err(format!(
+                    "前置待审批操作终态迁移必须且只能更新一条记录，actionId={predecessor_action_id}，实际更新 {affected} 条。"
+                ));
+            }
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(outcome)
+    }
+
     pub fn list_pending_agent_actions(&self) -> Result<Vec<AgentPendingActionRecord>, String> {
         let connection = self.state.connection()?;
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
@@ -1499,6 +1626,15 @@ impl StorageService {
         let mut retired_successors = HashSet::new();
         let mut claimed_successors = HashSet::new();
         for record in &interrupted {
+            if record.action_type == "mcp_tool_call"
+                && record.status == "executing"
+                && !manual_file_effect_has_authoritative_settlement(&transaction, record)?
+            {
+                return Err(format!(
+                    "启动对账拒绝采用缺少权威审计与 ToolResult 证据的 MCP 目标终态：{}",
+                    record.action_id
+                ));
+            }
             let durable_run_status = match (
                 record.conversation_id.as_deref(),
                 record.assistant_message_id.as_deref(),

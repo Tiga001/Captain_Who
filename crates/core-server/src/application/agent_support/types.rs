@@ -157,7 +157,7 @@ pub struct AgentFileWriteDiffPage {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentConversationTurnInput {
     pub conversation_id: Option<String>,
@@ -178,6 +178,15 @@ pub struct AgentConversationTurnInput {
     pub prompt_preferences: Option<AgentPromptPreferences>,
     #[serde(default)]
     pub permissions: AgentPermissions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentConversationTurnRewriteInput {
+    pub request_id: String,
+    pub source_user_message_id: String,
+    pub source_assistant_message_id: String,
+    pub turn: AgentConversationTurnInput,
 }
 
 fn context_window_indicator_enabled_by_default() -> bool {
@@ -318,7 +327,7 @@ pub struct AgentContextWindowSnapshotOutput {
     pub snapshot: Option<AgentContextWindowSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConversationTurnOutput {
     pub run_id: String,

@@ -1,5 +1,35 @@
 use super::*;
 
+pub(crate) fn active_rewrite_turn_output(
+    storage: &StorageService,
+    rewrite: &mycopilot_core::storage::conversation_turn_rewrite_repository::ConversationTurnRewriteRecord,
+) -> Result<AgentConversationTurnOutput, String> {
+    let mut output = serde_json::from_str::<AgentConversationTurnOutput>(&rewrite.response_json)
+        .map_err(|_| "edit_turn_replay_corrupt: stored response is invalid".to_string())?;
+    let conversation = storage
+        .load_conversation(&rewrite.conversation_id)?
+        .ok_or_else(|| {
+            "edit_turn_replay_corrupt: replacement conversation is missing".to_string()
+        })?;
+    output.user_message = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == rewrite.replacement_user_message_id)
+        .cloned()
+        .ok_or_else(|| {
+            "edit_turn_replay_corrupt: replacement user message is missing".to_string()
+        })?;
+    output.assistant_message = conversation
+        .messages
+        .iter()
+        .find(|message| message.id == rewrite.replacement_assistant_message_id)
+        .cloned()
+        .ok_or_else(|| {
+            "edit_turn_replay_corrupt: replacement assistant message is missing".to_string()
+        })?;
+    Ok(output)
+}
+
 pub(crate) struct PreparedConversationTurn {
     pub(crate) output: AgentConversationTurnOutput,
     pub(crate) agent_input: AgentChatInput,
@@ -9,6 +39,19 @@ pub(crate) struct PreparedConversationTurn {
     /// serialized into `AgentChatInput`.
     pub(crate) skill_resources:
         Option<std::sync::Arc<mycopilot_core::skills::SkillResourceSession>>,
+}
+
+pub(crate) enum PreparedConversationTurnOutcome {
+    Prepared(Box<PreparedConversationTurn>),
+    Replayed(Box<AgentConversationTurnOutput>),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HumanConversationTurnRewrite {
+    pub(crate) request_id: String,
+    pub(crate) request_fingerprint: String,
+    pub(crate) source_user_message_id: String,
+    pub(crate) source_assistant_message_id: String,
 }
 
 enum ConversationTurnInputSource {
@@ -40,7 +83,7 @@ pub(crate) fn prepare_conversation_turn(
         Some(conversation_id) => storage.load_conversation_for_turn(&conversation_id)?,
         None => (None, None),
     };
-    prepare_conversation_turn_from_source(
+    match prepare_conversation_turn_from_source(
         storage,
         skills_service,
         input,
@@ -49,7 +92,15 @@ pub(crate) fn prepare_conversation_turn(
         TurnReservationMode::PrepareOnly,
         existing,
         expected_revision,
-    )
+        None,
+    )? {
+        PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
+        PreparedConversationTurnOutcome::Replayed(_) => {
+            Err("prepare-only Turn cannot replay an edit request"
+                .to_string()
+                .into())
+        }
+    }
 }
 
 pub(crate) fn prepare_reserved_human_turn(
@@ -60,6 +111,35 @@ pub(crate) fn prepare_reserved_human_turn(
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
 ) -> Result<PreparedConversationTurn, AgentServiceError> {
+    match prepare_conversation_turn_from_source(
+        storage,
+        skills_service,
+        input,
+        run_id,
+        ConversationTurnInputSource::Human,
+        TurnReservationMode::CommitDurableLease,
+        existing,
+        expected_revision,
+        None,
+    )? {
+        PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
+        PreparedConversationTurnOutcome::Replayed(_) => {
+            Err("ordinary human Turn cannot replay an edit request"
+                .to_string()
+                .into())
+        }
+    }
+}
+
+pub(crate) fn prepare_reserved_human_rewrite_turn(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    input: AgentConversationTurnInput,
+    run_id: &str,
+    existing: Option<ChatConversationRecord>,
+    expected_revision: Option<i64>,
+    rewrite: HumanConversationTurnRewrite,
+) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     prepare_conversation_turn_from_source(
         storage,
         skills_service,
@@ -69,6 +149,7 @@ pub(crate) fn prepare_reserved_human_turn(
         TurnReservationMode::CommitDurableLease,
         existing,
         expected_revision,
+        Some(rewrite),
     )
 }
 
@@ -109,7 +190,7 @@ pub(crate) fn prepare_agent_wake_turn(
         // direct-parent/ancestor durable inheritance result before RunContext is created.
         permissions: AgentPermissions::default(),
     };
-    prepare_conversation_turn_from_source(
+    match prepare_conversation_turn_from_source(
         storage,
         skills_service,
         input,
@@ -123,7 +204,15 @@ pub(crate) fn prepare_agent_wake_turn(
         TurnReservationMode::CommitDurableLease,
         Some(existing),
         Some(expected_revision),
-    )
+        None,
+    )? {
+        PreparedConversationTurnOutcome::Prepared(prepared) => Ok(*prepared),
+        PreparedConversationTurnOutcome::Replayed(_) => {
+            Err("trusted Agent Wake cannot replay a human edit request"
+                .to_string()
+                .into())
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,7 +225,8 @@ fn prepare_conversation_turn_from_source(
     reservation: TurnReservationMode,
     existing: Option<ChatConversationRecord>,
     expected_revision: Option<i64>,
-) -> Result<PreparedConversationTurn, AgentServiceError> {
+    rewrite: Option<HumanConversationTurnRewrite>,
+) -> Result<PreparedConversationTurnOutcome, AgentServiceError> {
     let content = input.content.trim().to_string();
     if content.is_empty() {
         return Err("消息内容不能为空。".to_string().into());
@@ -282,6 +372,35 @@ fn prepare_conversation_turn_from_source(
 
     conversation.project_id = resolved_project_id.clone();
     conversation.model_id = Some(model_id.clone());
+    if let Some(rewrite) = &rewrite {
+        if let Some(title) = input
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            let source = conversation
+                .messages
+                .iter()
+                .find(|message| message.id == rewrite.source_user_message_id)
+                .ok_or_else(|| "edit_turn_title_source_missing: 编辑源消息不存在。".to_string())?;
+            let source_is_first_user = conversation
+                .messages
+                .iter()
+                .find(|message| message.role == "user")
+                .is_some_and(|message| message.id == source.id);
+            if !source_is_first_user
+                || conversation.title != create_conversation_title(&source.content)
+            {
+                return Err(
+                    "edit_turn_title_not_automatic: 手工标题不能由编辑重发覆盖。"
+                        .to_string()
+                        .into(),
+                );
+            }
+            conversation.title = title.to_string();
+        }
+    }
     conversation.updated_at = timestamp;
 
     let history_traces = storage.list_conversation_turn_traces(&conversation_id)?;
@@ -293,6 +412,10 @@ fn prepare_conversation_turn_from_source(
         .map_err(|error| error.to_string())?;
     history_excluded_message_ids.push(user_message_id.clone());
     history_excluded_message_ids.push(assistant_message_id.clone());
+    if let Some(rewrite) = &rewrite {
+        history_excluded_message_ids.push(rewrite.source_user_message_id.clone());
+        history_excluded_message_ids.push(rewrite.source_assistant_message_id.clone());
+    }
     let history_excluded_refs = history_excluded_message_ids
         .iter()
         .map(String::as_str)
@@ -359,6 +482,18 @@ fn prepare_conversation_turn_from_source(
         ui_state_json: None,
     };
 
+    let turn_output = AgentConversationTurnOutput {
+        run_id: run_id.to_string(),
+        event_name: AGENT_EVENT_NAME.to_string(),
+        conversation_id: conversation_id.clone(),
+        user_message_id: user_message_id.clone(),
+        assistant_message_id: assistant_message_id.clone(),
+        user_message: user_message.clone(),
+        assistant_message: assistant_message.clone(),
+        activated_skills: prepared_skills.summaries.clone(),
+        skill_activation_revision: prepared_skills.revision.clone(),
+    };
+
     let mut model_input_projection_ids = history_messages
         .iter()
         .filter_map(|message| message.message_id.clone())
@@ -372,6 +507,17 @@ fn prepare_conversation_turn_from_source(
         upsert_message(&mut conversation.messages, user_message.clone());
     }
     upsert_message(&mut conversation.messages, assistant_message.clone());
+    let mut prepared_rewrite_attachments = if rewrite.is_some() {
+        Some(storage.prepare_conversation_turn_rewrite_attachments(
+            &conversation_id,
+            &user_message_id,
+            resolved_project_id.as_deref(),
+            &input.attachments,
+            timestamp,
+        )?)
+    } else {
+        None
+    };
     match reservation {
         #[cfg(test)]
         TurnReservationMode::PrepareOnly => {
@@ -396,23 +542,72 @@ fn prepare_conversation_turn_from_source(
                     mycopilot_core::AgentTurnPermissionSource::InheritTrustedAncestors
                 }
             };
-            let (_, effective_permissions) = storage
-                .save_conversation_and_begin_turn_with_preloaded_agent_messages(
+            let effective_permissions = if let Some(rewrite) = &rewrite {
+                let response_json = serde_json::to_string(&turn_output)
+                    .map_err(|error| format!("无法持久化编辑重发响应：{error}"))?;
+                let admission = mycopilot_core::storage::conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission {
+                    request_id: rewrite.request_id.clone(),
+                    request_fingerprint: rewrite.request_fingerprint.clone(),
+                    conversation_id: conversation_id.clone(),
+                    source_user_message_id: rewrite.source_user_message_id.clone(),
+                    source_assistant_message_id: rewrite.source_assistant_message_id.clone(),
+                    replacement_user_message_id: user_message_id.clone(),
+                    replacement_assistant_message_id: assistant_message_id.clone(),
+                    run_id: run_id.to_string(),
+                    response_json,
+                    created_at: assistant_created_at,
+                };
+                let admission_result = storage.rewrite_conversation_turn_and_begin_turn(
                     conversation,
                     expected_revision,
-                    trusted_wake,
                     permission_source,
                     &preloaded_agent_message_ids,
                     &initial_trace,
                     assistant_created_at,
                     now_ms().max(assistant_created_at),
-                )?;
+                    &admission,
+                    prepared_rewrite_attachments
+                        .as_ref()
+                        .expect("rewrite attachments were prepared"),
+                );
+                let (_, permissions, outcome) = match admission_result {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        if let Some(prepared) = prepared_rewrite_attachments.take() {
+                            storage
+                                .discard_prepared_conversation_turn_rewrite_attachments(prepared);
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if let mycopilot_core::storage::service::ConversationTurnRewriteBeginOutcome::Replayed(record) = outcome {
+                    if let Some(prepared) = prepared_rewrite_attachments.take() {
+                        storage.discard_prepared_conversation_turn_rewrite_attachments(prepared);
+                    }
+                    let output = active_rewrite_turn_output(storage, &record)?;
+                    return Ok(PreparedConversationTurnOutcome::Replayed(Box::new(output)));
+                }
+                permissions
+            } else {
+                storage
+                    .save_conversation_and_begin_turn_with_preloaded_agent_messages(
+                        conversation,
+                        expected_revision,
+                        trusted_wake,
+                        permission_source,
+                        &preloaded_agent_message_ids,
+                        &initial_trace,
+                        assistant_created_at,
+                        now_ms().max(assistant_created_at),
+                    )?
+                    .1
+            };
             // Child authority is resolved only inside durable Turn admission. The placeholder on
             // AgentConversationTurnInput never reaches RunContext or a model/tool boundary.
             input.permissions = effective_permissions;
         }
     }
-    if matches!(&source, ConversationTurnInputSource::Human) {
+    if matches!(&source, ConversationTurnInputSource::Human) && rewrite.is_none() {
         storage.save_input_attachments(
             &conversation_id,
             &user_message_id,
@@ -515,34 +710,26 @@ fn prepare_conversation_turn_from_source(
         (None, None) => None,
     };
 
-    Ok(PreparedConversationTurn {
-        skill_resources,
-        usage_context: AgentRunUsageContext {
-            conversation_id: conversation_id.clone(),
-            assistant_message_id: assistant_message_id.clone(),
-            run_id: run_id.to_string(),
-            project_id: resolved_project_id.clone(),
-            model_id: model.id.clone(),
-            model_name: model.display_name.clone(),
-            provider_usage_semantics,
-            input_price: Some(model.input_price.clone()),
-            cached_input_price: Some(model.effective_cached_input_price().to_string()),
-            output_price: Some(model.output_price.clone()),
-            started_at: timestamp,
+    Ok(PreparedConversationTurnOutcome::Prepared(Box::new(
+        PreparedConversationTurn {
+            skill_resources,
+            usage_context: AgentRunUsageContext {
+                conversation_id: conversation_id.clone(),
+                assistant_message_id: assistant_message_id.clone(),
+                run_id: run_id.to_string(),
+                project_id: resolved_project_id.clone(),
+                model_id: model.id.clone(),
+                model_name: model.display_name.clone(),
+                provider_usage_semantics,
+                input_price: Some(model.input_price.clone()),
+                cached_input_price: Some(model.effective_cached_input_price().to_string()),
+                output_price: Some(model.output_price.clone()),
+                started_at: timestamp,
+            },
+            output: turn_output,
+            agent_input,
         },
-        output: AgentConversationTurnOutput {
-            run_id: run_id.to_string(),
-            event_name: AGENT_EVENT_NAME.to_string(),
-            conversation_id,
-            user_message_id,
-            assistant_message_id,
-            user_message,
-            assistant_message,
-            activated_skills: prepared_skills.summaries,
-            skill_activation_revision: prepared_skills.revision,
-        },
-        agent_input,
-    })
+    )))
 }
 
 #[cfg(test)]

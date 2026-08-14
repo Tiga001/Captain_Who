@@ -9,6 +9,7 @@ import type {
   AgentCommandSessionListOutput,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentConversationTurnRewriteInput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentEvent,
@@ -378,6 +379,9 @@ export interface AgentHostApi {
   ): Promise<HostInvocationResult<AgentProviderTransitionStatusOutput>>
   startConversationTurn(
     input: AgentConversationTurnInput
+  ): Promise<HostInvocationResult<AgentConversationTurnOutput>>
+  rewriteConversationTurn(
+    input: AgentConversationTurnRewriteInput
   ): Promise<HostInvocationResult<AgentConversationTurnOutput>>
   getContextWindowSnapshot(
     input: AgentContextWindowSnapshotInput

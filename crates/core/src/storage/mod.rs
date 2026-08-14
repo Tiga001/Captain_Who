@@ -22,6 +22,7 @@ pub(crate) mod conversation_history_open;
 pub mod conversation_history_repository;
 pub mod conversation_model_context_repository;
 pub mod conversation_trace_repository;
+pub mod conversation_turn_rewrite_repository;
 pub mod database_instance_lock;
 mod database_snapshot;
 pub mod file_draft_repository;

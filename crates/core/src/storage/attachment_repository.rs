@@ -169,6 +169,15 @@ pub fn list_conversation_attachments_for_library(
             attachment.created_at
         FROM attachments AS attachment
         WHERE attachment.conversation_id = ?1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM conversation_turn_rewrites AS rewrite
+            WHERE rewrite.conversation_id = attachment.conversation_id
+              AND (
+                  rewrite.source_user_message_id = attachment.message_id
+                  OR rewrite.source_assistant_message_id = attachment.message_id
+              )
+          )
           AND (
             NOT EXISTS (
                 SELECT 1
@@ -224,6 +233,15 @@ pub fn list_project_attachments_for_library_excluding_conversation(
         FROM attachments AS attachment
         WHERE attachment.project_id = ?1
           AND attachment.conversation_id != ?2
+          AND NOT EXISTS (
+            SELECT 1
+            FROM conversation_turn_rewrites AS rewrite
+            WHERE rewrite.conversation_id = attachment.conversation_id
+              AND (
+                  rewrite.source_user_message_id = attachment.message_id
+                  OR rewrite.source_assistant_message_id = attachment.message_id
+              )
+          )
           AND (
             NOT EXISTS (
                 SELECT 1

@@ -106,6 +106,9 @@ export function registerAgentIpc(ipcMain: TrustedIpcMain, coreServer: CoreServer
   ipcMain.handle(HOST_CHANNELS.agent.startConversationTurn, (_event, input) =>
     captureHostInvocation(() => coreServer.startConversationTurn(input))
   )
+  ipcMain.handle(HOST_CHANNELS.agent.rewriteConversationTurn, (_event, input) =>
+    captureHostInvocation(() => coreServer.rewriteConversationTurn(input))
+  )
   ipcMain.handle(HOST_CHANNELS.agent.getContextWindowSnapshot, (_event, input) =>
     captureHostInvocation(() => coreServer.getContextWindowSnapshot(input))
   )

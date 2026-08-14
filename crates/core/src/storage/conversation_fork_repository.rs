@@ -10,9 +10,9 @@ use crate::storage::{
     context_compaction_receipt_repository, context_compaction_repository,
     conversation_context_adaptation_repository, conversation_history_archive_repository,
     conversation_history_open, conversation_model_context_repository,
-    conversation_trace_repository, file_draft_repository, guidance_repository,
-    model_request_observation_repository, provider_continuation_repository, turn_diff_repository,
-    world_state_repository,
+    conversation_trace_repository, conversation_turn_rewrite_repository, file_draft_repository,
+    guidance_repository, model_request_observation_repository, provider_continuation_repository,
+    turn_diff_repository, world_state_repository,
 };
 use crate::{
     bounded_root_agent_task_name,
@@ -298,7 +298,7 @@ pub(crate) fn build_fork_plan_at_point(
         }
     };
     ensure_no_active_command_sessions(connection, source_conversation_id)?;
-    let source = chat_repository::get_conversation(connection, source_conversation_id)
+    let source = chat_repository::get_active_conversation(connection, source_conversation_id)
         .map_err(database_error)?
         .ok_or_else(|| "原任务不存在。".to_string())?;
     let active_chain =
@@ -1355,13 +1355,28 @@ fn world_state_records_visible_at_cutoff(
                 .is_none_or(|summary_id| visible_summary_ids.contains(summary_id))
         })
         .ok_or_else(|| "没有任何 World State epoch 的压缩边界在分叉 cutoff 内可见。".to_string())?;
-    let entries =
+    let mut entries =
         world_state_repository::list_records_for_epoch(connection, conversation_id, &epoch_id)
             .map_err(|error| error.to_string())?
             .into_iter()
             .map(world_state_repository::ConversationWorldStateJournalEntry::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
+    let replacements = conversation_turn_rewrite_repository::replacement_message_ids_by_source(
+        connection,
+        conversation_id,
+    )
+    .map_err(database_error)?;
+    for entry in &mut entries {
+        if let Some(anchor) = entry.effective_before_message_id.as_deref() {
+            entry.effective_before_message_id = Some(
+                conversation_turn_rewrite_repository::resolve_active_message_id(
+                    &replacements,
+                    anchor,
+                )?,
+            );
+        }
+    }
     let Some(first) = entries.first() else {
         return Err("选中的 World State epoch 没有 initial full snapshot。".to_string());
     };

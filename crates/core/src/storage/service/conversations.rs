@@ -88,7 +88,7 @@ impl StorageService {
     pub fn load_conversations(&self) -> Result<Vec<ChatConversationRecord>, String> {
         let connection = self.state.connection()?;
         let mut conversations =
-            chat_repository::list_conversations(&connection).map_err(storage_error)?;
+            chat_repository::list_active_conversations(&connection).map_err(storage_error)?;
         self.attach_message_attachments(&connection, &mut conversations)?;
         attach_message_guidance_timelines(&connection, &mut conversations)?;
         Ok(conversations)
@@ -154,8 +154,9 @@ impl StorageService {
         conversation_id: &str,
     ) -> Result<Option<ChatConversationRecord>, String> {
         let connection = self.state.connection()?;
-        let mut conversation = chat_repository::get_conversation(&connection, conversation_id)
-            .map_err(storage_error)?;
+        let mut conversation =
+            chat_repository::get_active_conversation(&connection, conversation_id)
+                .map_err(storage_error)?;
         if let Some(conversation) = &mut conversation {
             self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
             attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
@@ -175,19 +176,27 @@ impl StorageService {
     ) -> Result<Option<ConversationObserverSnapshot>, String> {
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
-        let mut conversation = chat_repository::get_conversation(&transaction, conversation_id)
-            .map_err(storage_error)?;
+        let mut conversation =
+            chat_repository::get_active_conversation(&transaction, conversation_id)
+                .map_err(storage_error)?;
         let Some(mut conversation) = conversation.take() else {
             transaction.commit().map_err(storage_error)?;
             return Ok(None);
         };
         self.attach_message_attachments(&transaction, std::slice::from_mut(&mut conversation))?;
         attach_message_guidance_timelines(&transaction, std::slice::from_mut(&mut conversation))?;
-        let input_origins =
+        let mut input_origins =
             agent_graph_repository::conversation_message_origins(&transaction, conversation_id)
                 .map_err(|error| error.to_string())?
                 .into_iter()
                 .collect::<BTreeMap<_, _>>();
+        let active_user_ids = conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.id.as_str())
+            .collect::<HashSet<_>>();
+        input_origins.retain(|message_id, _| active_user_ids.contains(message_id.as_str()));
         let expected_input_count = conversation
             .messages
             .iter()
@@ -211,10 +220,16 @@ impl StorageService {
         }))
     }
 
-    /// Loads the complete Conversation together with the opaque revision used for Turn
+    /// Loads the complete persisted Conversation together with the opaque revision used for Turn
     /// admission. Both facts come from one SQLite read transaction, so a later
     /// `save_conversation_and_begin_turn` can reject a stale full snapshot even when a competing
     /// Host has already completed and released its active trace.
+    ///
+    /// Unlike renderer/observer reads, this admission snapshot deliberately does not decorate
+    /// `agent_run_json` from durable Trace, Guidance, or Command Session facts. Those decorations
+    /// are presentation projections and may differ from the raw JSON copied into immutable Agent
+    /// and fork-snapshot messages. Feeding them back into a write would make a valid continuation
+    /// look like an attempted rewrite of immutable history.
     pub fn load_conversation_for_turn(
         &self,
         conversation_id: &str,
@@ -229,8 +244,9 @@ impl StorageService {
             )
             .optional()
             .map_err(storage_error)?;
-        let mut conversation = chat_repository::get_conversation(&transaction, conversation_id)
-            .map_err(storage_error)?;
+        let mut conversation =
+            chat_repository::get_active_persisted_conversation(&transaction, conversation_id)
+                .map_err(storage_error)?;
         if conversation.is_some() != revision.is_some() {
             return Err(
                 "Conversation Turn admission snapshot is internally inconsistent.".to_string(),
@@ -238,7 +254,6 @@ impl StorageService {
         }
         if let Some(conversation) = &mut conversation {
             self.attach_message_attachments(&transaction, std::slice::from_mut(conversation))?;
-            attach_message_guidance_timelines(&transaction, std::slice::from_mut(conversation))?;
         }
         transaction.commit().map_err(storage_error)?;
         Ok((conversation, revision))
@@ -314,10 +329,12 @@ impl StorageService {
                     .into());
             }
             conversation_fork_repository::validate_existing_fork_authority(&connection, &existing)?;
-            let mut conversation =
-                chat_repository::get_conversation(&connection, &existing.target_conversation_id)
-                    .map_err(storage_error)?
-                    .ok_or_else(|| "分叉记录指向的新任务不存在。".to_string())?;
+            let mut conversation = chat_repository::get_active_conversation(
+                &connection,
+                &existing.target_conversation_id,
+            )
+            .map_err(storage_error)?
+            .ok_or_else(|| "分叉记录指向的新任务不存在。".to_string())?;
             self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
             attach_message_guidance_timelines(
                 &connection,
@@ -585,6 +602,15 @@ impl StorageService {
         String,
     > {
         let connection = self.state.connection()?;
+        if conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?
+        .contains(assistant_message_id)
+        {
+            return Ok(None);
+        }
         conversation_history_archive_repository::find_archive_for_trace_item(
             &connection,
             conversation_id,
@@ -603,12 +629,25 @@ impl StorageService {
         String,
     > {
         let connection = self.state.connection()?;
-        conversation_history_archive_repository::find_archive_by_ref(
+        let archive = conversation_history_archive_repository::find_archive_by_ref(
             &connection,
             conversation_id,
             archive_ref,
         )
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+        let Some(archive) = archive else {
+            return Ok(None);
+        };
+        if conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?
+        .contains(&archive.assistant_message_id)
+        {
+            return Ok(None);
+        }
+        Ok(Some(archive))
     }
 
     pub fn find_conversation_history_archive_match_char_offset(
@@ -618,6 +657,24 @@ impl StorageService {
         query: &str,
     ) -> Result<Option<u64>, String> {
         let connection = self.state.connection()?;
+        let Some(archive) = conversation_history_archive_repository::find_archive_by_ref(
+            &connection,
+            conversation_id,
+            archive_ref,
+        )
+        .map_err(storage_error)?
+        else {
+            return Ok(None);
+        };
+        if conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?
+        .contains(&archive.assistant_message_id)
+        {
+            return Ok(None);
+        }
         conversation_history_archive_repository::find_archive_match_char_offset(
             &connection,
             conversation_id,
@@ -639,6 +696,24 @@ impl StorageService {
         String,
     > {
         let connection = self.state.connection()?;
+        let Some(archive) = conversation_history_archive_repository::find_archive_by_ref(
+            &connection,
+            conversation_id,
+            archive_ref,
+        )
+        .map_err(storage_error)?
+        else {
+            return Ok(None);
+        };
+        if conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?
+        .contains(&archive.assistant_message_id)
+        {
+            return Ok(None);
+        }
         conversation_history_archive_repository::read_archive_page(
             &connection,
             conversation_id,
@@ -748,6 +823,85 @@ impl StorageService {
         trace_created_at: i64,
         trace_updated_at: i64,
     ) -> Result<(ChatConversationRecord, crate::AgentPermissions), String> {
+        let (conversation, permissions, outcome) = self.save_conversation_and_begin_turn_internal(
+            conversation,
+            expected_revision,
+            trusted_wake,
+            permission_source,
+            preloaded_agent_message_ids,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            None,
+            None,
+        )?;
+        if !matches!(outcome, super::ConversationTurnRewriteBeginOutcome::Started) {
+            return Err(
+                "ordinary Turn admission unexpectedly replayed an edit request".to_string(),
+            );
+        }
+        Ok((conversation, permissions))
+    }
+
+    /// Atomically records an immutable logical replacement and starts its new root Turn.
+    ///
+    /// The source messages, Trace, Usage, Tool effects, and model-batch receipts are retained.
+    /// Only active Conversation projections hide the source pair after this transaction commits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rewrite_conversation_turn_and_begin_turn(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        rewrite: &conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission,
+        prepared_attachments: &super::PreparedConversationTurnRewriteAttachments,
+    ) -> Result<
+        (
+            ChatConversationRecord,
+            crate::AgentPermissions,
+            super::ConversationTurnRewriteBeginOutcome,
+        ),
+        String,
+    > {
+        self.save_conversation_and_begin_turn_internal(
+            conversation,
+            expected_revision,
+            None,
+            permission_source,
+            preloaded_agent_message_ids,
+            trace,
+            trace_created_at,
+            trace_updated_at,
+            Some(rewrite),
+            Some(prepared_attachments),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_conversation_and_begin_turn_internal(
+        &self,
+        conversation: ChatConversationRecord,
+        expected_revision: Option<i64>,
+        trusted_wake: Option<&crate::TrustedAgentWakeTurnAdmission>,
+        permission_source: crate::AgentTurnPermissionSource,
+        preloaded_agent_message_ids: &[String],
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        trace_updated_at: i64,
+        rewrite: Option<&conversation_turn_rewrite_repository::ConversationTurnRewriteAdmission>,
+        prepared_attachments: Option<&super::PreparedConversationTurnRewriteAttachments>,
+    ) -> Result<
+        (
+            ChatConversationRecord,
+            crate::AgentPermissions,
+            super::ConversationTurnRewriteBeginOutcome,
+        ),
+        String,
+    > {
         let mut connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         let transaction = connection
@@ -807,6 +961,53 @@ impl StorageService {
                 );
             }
         };
+        if let Some(rewrite) = rewrite {
+            if let Some(existing) = conversation_turn_rewrite_repository::get_by_request_id(
+                &transaction,
+                &rewrite.request_id,
+            )
+            .map_err(storage_error)?
+            {
+                if existing.request_fingerprint != rewrite.request_fingerprint
+                    || existing.conversation_id != rewrite.conversation_id
+                    || existing.source_user_message_id != rewrite.source_user_message_id
+                    || existing.source_assistant_message_id != rewrite.source_assistant_message_id
+                    || existing.replacement_user_message_id != rewrite.replacement_user_message_id
+                    || existing.replacement_assistant_message_id
+                        != rewrite.replacement_assistant_message_id
+                {
+                    return Err(
+                        "edit_turn_request_conflict: requestId was already used for another rewrite"
+                            .to_string(),
+                    );
+                }
+                transaction.commit().map_err(storage_error)?;
+                return Ok((
+                    conversation,
+                    effective_permissions,
+                    super::ConversationTurnRewriteBeginOutcome::Replayed(Box::new(existing)),
+                ));
+            }
+            if rewrite.conversation_id != conversation.id
+                || rewrite.replacement_user_message_id
+                    != conversation
+                        .messages
+                        .iter()
+                        .find(|message| message.id == rewrite.replacement_user_message_id)
+                        .map(|message| message.id.as_str())
+                        .unwrap_or_default()
+                || rewrite.replacement_assistant_message_id != trace.assistant_message_id
+                || rewrite.run_id != trace.run_id
+            {
+                return Err(
+                    "edit_turn_identity_mismatch: rewrite does not match the new Turn".to_string(),
+                );
+            }
+            conversation_turn_rewrite_repository::validate_source_is_editable_tail(
+                &transaction,
+                rewrite,
+            )?;
+        }
         let claimed_wake = if let Some(trusted) = trusted_wake {
             let wake = transaction
                 .query_row(
@@ -906,6 +1107,24 @@ impl StorageService {
         }
         chat_repository::save_conversation_in_connection(&transaction, &conversation)
             .map_err(storage_error)?;
+        if let Some(prepared) = prepared_attachments {
+            let rewrite = rewrite.ok_or_else(|| {
+                "prepared rewrite attachments require a rewrite admission".to_string()
+            })?;
+            for attachment in &prepared.records {
+                if attachment.conversation_id != conversation.id
+                    || attachment.message_id != rewrite.replacement_user_message_id
+                    || attachment.project_id != conversation.project_id
+                {
+                    return Err(
+                        "prepared rewrite attachment ownership does not match the new user message"
+                            .to_string(),
+                    );
+                }
+                attachment_repository::insert_attachment(&transaction, attachment)
+                    .map_err(storage_error)?;
+            }
+        }
         conversation_trace_repository::commit_trace_in_connection(
             &transaction,
             trace,
@@ -964,8 +1183,26 @@ impl StorageService {
                 );
             }
         }
+        if let Some(rewrite) = rewrite {
+            conversation_turn_rewrite_repository::insert_in_transaction(&transaction, rewrite)
+                .map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)?;
-        Ok((conversation, effective_permissions))
+        Ok((
+            conversation,
+            effective_permissions,
+            super::ConversationTurnRewriteBeginOutcome::Started,
+        ))
+    }
+
+    pub fn get_conversation_turn_rewrite(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<conversation_turn_rewrite_repository::ConversationTurnRewriteRecord>, String>
+    {
+        let connection = self.state.connection()?;
+        conversation_turn_rewrite_repository::get_by_request_id(&connection, request_id)
+            .map_err(storage_error)
     }
 
     pub fn save_conversation_meta(

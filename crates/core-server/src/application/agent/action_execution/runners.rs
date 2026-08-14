@@ -3069,6 +3069,10 @@ impl AgentService {
                     context_window_tool_projection,
                     cancellation_token: cancellation_token.clone(),
                     steer_input,
+                    pending_action_predecessor_settlement: Some((
+                        record.clone(),
+                        final_pending_status,
+                    )),
                     invalidate_mcp_payload_on_pending_store_failure: false,
                     steering_close_error_context: "无法关闭审批续跑的用户引导通道并持久化剩余引导",
                 },

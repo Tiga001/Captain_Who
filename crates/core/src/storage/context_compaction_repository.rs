@@ -1022,6 +1022,15 @@ fn list_journal_entries(
              WHERE message.conversation_id = ?1
                AND NOT EXISTS (
                    SELECT 1
+                   FROM conversation_turn_rewrites AS rewrite
+                   WHERE rewrite.conversation_id = message.conversation_id
+                     AND (
+                         rewrite.source_user_message_id = message.id
+                         OR rewrite.source_assistant_message_id = message.id
+                     )
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM agent_mailbox_messages AS mailbox
                    INNER JOIN agent_model_batch_receipt_items AS receipt_item
                       ON receipt_item.message_id = mailbox.message_id

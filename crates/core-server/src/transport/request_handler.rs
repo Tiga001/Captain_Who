@@ -19,6 +19,12 @@ pub(crate) fn handle_request(
             request.id,
             request.params,
         ),
+        AGENT_REWRITE_CONVERSATION_TURN_METHOD => handle_agent_rewrite_conversation_turn(
+            agent_service,
+            notification_tx,
+            request.id,
+            request.params,
+        ),
         AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD => {
             handle_agent_preflight_provider_transition(agent_service, request.id, request.params)
         }

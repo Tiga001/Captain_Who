@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 10;
+pub const STORAGE_SCHEMA_VERSION: i32 = 11;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:e7e716668883d424de45b18ac889616aad1bd54cfb1e43e245b2862b6ee64878";
+    "sha256:6028c8d1097b61d6fd9812a07297ce3cfb38d36a0a60be8a607ee403b8a9cb20";
 
 /// Opens the single supported development schema.
 ///
@@ -254,6 +254,11 @@ mod tests {
             "conversations_revision_after_message_delete",
             "conversation_turn_traces",
             "conversation_turn_traces_one_active_turn",
+            "conversation_turn_rewrites",
+            "conversation_turn_rewrites_conversation",
+            "validate_conversation_turn_rewrite_insert",
+            "prevent_conversation_turn_rewrite_update",
+            "prevent_conversation_turn_rewrite_delete",
             "provider_continuations",
             "context_compaction_summaries",
             "conversation_forks",
@@ -497,7 +502,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 3"));
+            .contains("expected schema version 11, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -546,7 +551,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 4"));
+            .contains("expected schema version 11, found 4"));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -588,7 +593,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 5"));
+            .contains("expected schema version 11, found 5"));
         assert_eq!(read_schema_version(&connection).unwrap(), 5);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -639,7 +644,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 6"));
+            .contains("expected schema version 11, found 6"));
         assert_eq!(read_schema_version(&connection).unwrap(), 6);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -690,7 +695,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 7"));
+            .contains("expected schema version 11, found 7"));
         assert_eq!(read_schema_version(&connection).unwrap(), 7);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -733,7 +738,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 8"));
+            .contains("expected schema version 11, found 8"));
         assert_eq!(read_schema_version(&connection).unwrap(), 8);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -778,7 +783,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 10, found 9"));
+            .contains("expected schema version 11, found 9"));
         assert_eq!(read_schema_version(&connection).unwrap(), 9);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -793,6 +798,57 @@ mod tests {
                 .unwrap(),
             (1, None)
         );
+    }
+
+    #[test]
+    fn a_v10_database_requires_reset_without_rewriting_existing_conversation_facts() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v10.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE conversations (
+                         id TEXT PRIMARY KEY,
+                         title TEXT NOT NULL
+                     );
+                     INSERT INTO conversations (id, title)
+                     VALUES ('conversation-v10', 'must remain untouched');
+                     PRAGMA user_version = 10;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("expected schema version 11, found 10"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 10);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT title FROM conversations WHERE id = 'conversation-v10'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "must remain untouched"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE name = 'conversation_turn_rewrites'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()
+            .unwrap()
+            .is_none());
     }
 
     #[test]

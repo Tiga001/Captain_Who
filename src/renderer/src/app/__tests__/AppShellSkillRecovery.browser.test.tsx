@@ -4,6 +4,7 @@ import type {
   AgentCommandSessionSnapshot,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentConversationTurnRewriteInput,
   AgentEvent,
   AgentProviderTransitionNotification,
   AgentProviderTransitionOperation,
@@ -48,6 +49,7 @@ const testState = vi.hoisted(() => ({
   saveComposerDraft: vi.fn(),
   saveConversationMeta: vi.fn(),
   showToast: vi.fn(),
+  rewriteConversationTurn: vi.fn(),
   startConversationTurn: vi.fn(),
   startProviderTransition: vi.fn(),
   steerAgentRun: vi.fn(),
@@ -150,6 +152,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   preflightProviderTransition: testState.preflightProviderTransition,
   rejectAgentAction: vi.fn(),
   readAgentFileDraft: vi.fn(),
+  rewriteConversationTurn: testState.rewriteConversationTurn,
   startConversationTurn: testState.startConversationTurn,
   startProviderTransition: testState.startProviderTransition,
   steerAgentRun: testState.steerAgentRun
@@ -275,6 +278,12 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       </output>
       <output data-testid="agent-run-status">
         {conversation.messages.at(-1)?.agentRun?.status ?? ''}
+      </output>
+      <output data-testid="conversation-message-ids">
+        {conversation.messages.map((message) => message.id).join(',')}
+      </output>
+      <output data-testid="conversation-message-contents">
+        {conversation.messages.map((message) => message.content).join('|')}
       </output>
       <output data-testid="approval-count">
         {conversation.messages.at(-1)?.agentRun?.approvals.length ?? 0}
@@ -466,11 +475,12 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
   )
 }))
 
-const [{ AppShell }, { createComposerDraft }, { defaultUiPreferences }] = await Promise.all([
-  import('../AppShell'),
-  import('../chatMessageFactory'),
-  import('../../features/storage/storageClient')
-])
+const [{ AppShell }, { createComposerDraft, createConversationTitle }, { defaultUiPreferences }] =
+  await Promise.all([
+    import('../AppShell'),
+    import('../chatMessageFactory'),
+    import('../../features/storage/storageClient')
+  ])
 
 const skillSelection: SkillSelection = {
   id: 'workspace:project-a:repository-auditor',
@@ -525,6 +535,64 @@ function successfulTurnOutput(
     activatedSkills: input.skills?.length ? [explicitSkillSummary] : [],
     skillActivationRevision: input.skills?.length ? 'activation-sha256-v1:explicit' : undefined
   }
+}
+
+function commitSuccessfulRewrite(
+  input: AgentConversationTurnRewriteInput,
+  runSequence = 100
+): AgentConversationTurnOutput {
+  const output = successfulTurnOutput(input.turn, runSequence)
+  const conversationId = input.turn.conversationId!
+  const current = testState.persistedConversations.get(conversationId)
+  if (!current) throw new Error('missing rewrite conversation fixture')
+  const sourceUserIndex = current.messages.findIndex(
+    (message) => message.id === input.sourceUserMessageId
+  )
+  const sourceAssistantIndex = current.messages.findIndex(
+    (message) => message.id === input.sourceAssistantMessageId
+  )
+  if (sourceUserIndex < 0 || sourceAssistantIndex !== sourceUserIndex + 1) {
+    throw new Error('invalid rewrite source fixture')
+  }
+  testState.persistedConversations.set(conversationId, {
+    ...current,
+    modelId: input.turn.modelId,
+    title: input.turn.title ?? current.title,
+    messages: [
+      ...current.messages.slice(0, sourceUserIndex),
+      {
+        id: output.userMessage.id,
+        role: 'user',
+        content: output.userMessage.content,
+        createdAt: output.userMessage.createdAt,
+        status: 'sent'
+      },
+      {
+        id: output.assistantMessage.id,
+        role: 'assistant',
+        content: output.assistantMessage.content,
+        createdAt: output.assistantMessage.createdAt,
+        status: 'pending',
+        agentRun: {
+          runId: output.runId,
+          status: 'running',
+          toolDefinitions: [],
+          toolCalls: [],
+          toolResults: [],
+          approvals: [],
+          diffs: [],
+          timeline: []
+        }
+      },
+      ...current.messages.slice(sourceAssistantIndex + 1)
+    ],
+    updatedAt: Math.max(
+      current.updatedAt + 1,
+      output.userMessage.createdAt,
+      output.assistantMessage.createdAt
+    )
+  })
+  return output
 }
 
 function mockSuccessfulTurnStarts() {
@@ -844,6 +912,11 @@ beforeEach(() => {
       })
     })
   testState.showToast.mockReset()
+  testState.rewriteConversationTurn
+    .mockReset()
+    .mockImplementation(async (input: AgentConversationTurnRewriteInput) =>
+      commitSuccessfulRewrite(input)
+    )
   testState.startConversationTurn.mockReset()
   testState.startProviderTransition
     .mockReset()
@@ -1146,7 +1219,7 @@ describe('provider transition guard', () => {
     await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-1')
   })
 
-  it('preflights edited-turn resubmission before deleting or replacing history', async () => {
+  it('rewrites on the current model without compacting or replacing source history first', async () => {
     testState.preflightProviderTransition.mockResolvedValueOnce({
       conversationId: 'conversation-a',
       targetModelId: 'model-1',
@@ -1158,12 +1231,14 @@ describe('provider transition guard', () => {
     const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'edit-last-message' }).click()
-    await expect.poll(() => testState.preflightProviderTransition.mock.calls.length).toBe(1)
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    expect(testState.preflightProviderTransition).not.toHaveBeenCalled()
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
     expect(testState.deleteChatMessages).not.toHaveBeenCalled()
     expect(testState.upsertChatMessages).not.toHaveBeenCalled()
     await expect
       .element(screen.getByTestId('model-transition-confirmation'))
-      .toHaveTextContent('provider_protocol_changed')
+      .not.toHaveTextContent('provider_protocol_changed')
   })
 })
 
@@ -1567,23 +1642,26 @@ describe('conversation archive navigation', () => {
     expect(testState.upsertChatMessages).not.toHaveBeenCalled()
   })
 
-  it('does not replace history when edit transition completes after archive', async () => {
-    const transition =
-      deferred<Extract<AgentProviderTransitionOperation, { status: 'completed' }>>()
-    testState.startProviderTransition.mockReturnValueOnce(transition.promise)
+  it('does not reopen history when an atomic edit response arrives after archive', async () => {
+    const rewrite = deferred<AgentConversationTurnOutput>()
+    testState.rewriteConversationTurn.mockReturnValueOnce(rewrite.promise)
     const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'edit-last-message' }).click()
-    await expect.poll(() => testState.startProviderTransition.mock.calls.length).toBe(1)
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
     await screen.getByRole('button', { name: 'archive-conversation-a' }).click()
     await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
 
-    transition.resolve(completedProviderTransition('model-1'))
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    rewrite.resolve(commitSuccessfulRewrite(input, 99))
     await new Promise((resolve) => window.setTimeout(resolve, 0))
 
     expect(testState.deleteChatMessages).not.toHaveBeenCalled()
     expect(testState.upsertChatMessages).not.toHaveBeenCalled()
     expect(testState.startConversationTurn).not.toHaveBeenCalled()
+    expect(testState.rewriteConversationTurn).toHaveBeenCalledTimes(1)
+    await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
   })
 })
 
@@ -2346,10 +2424,11 @@ describe('unified activated Skill inventory', () => {
     })
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
     await screen.getByRole('button', { name: 'edit-last-message' }).click()
-    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
 
     expect(
-      (testState.startConversationTurn.mock.calls[1]?.[0] as AgentConversationTurnInput).skills
+      (testState.rewriteConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnRewriteInput)
+        .turn.skills
     ).toEqual([skillSelection])
   })
 
@@ -2378,10 +2457,11 @@ describe('unified activated Skill inventory', () => {
     })
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
     await screen.getByRole('button', { name: 'edit-last-message' }).click()
-    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
 
     expect(
-      (testState.startConversationTurn.mock.calls[1]?.[0] as AgentConversationTurnInput).skills
+      (testState.rewriteConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnRewriteInput)
+        .turn.skills
     ).toBeUndefined()
   })
 
@@ -2533,25 +2613,355 @@ describe('activation failure recovery', () => {
 })
 
 describe('edited turn Skill recovery', () => {
-  it.each(['saveConversationMeta', 'deleteChatMessages', 'upsertChatMessages'] as const)(
-    'restores the prior Skill selection when %s fails',
-    async (failureStage) => {
+  it.each(['running', 'waiting_for_approval'] as const)(
+    'rejects edit while the source Turn is %s',
+    async (status) => {
+      const active = storedConversation()
+      const assistant = active.messages.at(-1)
+      if (!assistant?.agentRun) throw new Error('missing active edit fixture')
+      assistant.status = 'pending'
+      assistant.agentRun.status = status
+      testState.persistedConversations.set(active.id, active)
       const screen = await renderSelectedConversation()
-      await expect.element(screen.getByRole('button', { name: 'edit-last-message' })).toBeVisible()
 
-      testState[failureStage].mockRejectedValueOnce(new Error(`${failureStage} failed`))
       await screen.getByRole('button', { name: 'edit-last-message' }).click()
+      await new Promise((resolve) => window.setTimeout(resolve, 0))
 
+      expect(testState.rewriteConversationTurn).not.toHaveBeenCalled()
+      expect(testState.preflightProviderTransition).not.toHaveBeenCalled()
       await expect
-        .poll(() => {
-          const latestDraft = testState.saveComposerDraft.mock.calls.at(-1)?.[1] as
-            ChatComposerDraft | undefined
-          return latestDraft?.skills
-        })
-        .toEqual([skillSelection])
-      await expect.element(screen.getByTestId('draft-skills')).toHaveTextContent(skillSelection.id)
+        .element(screen.getByTestId('conversation-message-ids'))
+        .toHaveTextContent('user-old,assistant-old')
     }
   )
+
+  it('uses one Agent-domain rewrite without sending or copying conversation history', async () => {
+    const longConversation = storedConversation()
+    longConversation.messages = [
+      ...Array.from({ length: 100 }, (_, index) => [
+        {
+          id: `history-user-${index}`,
+          role: 'user' as const,
+          content: `history-user-content-${index}`,
+          createdAt: index * 2 + 10,
+          status: 'sent' as const
+        },
+        {
+          id: `history-assistant-${index}`,
+          role: 'assistant' as const,
+          content: `history-assistant-content-${index}`,
+          createdAt: index * 2 + 11,
+          status: 'sent' as const
+        }
+      ]).flat(),
+      ...longConversation.messages
+    ]
+    testState.persistedConversations.set(longConversation.id, longConversation)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    expect(input.requestId).toMatch(/^conversation-turn-rewrite-request-/)
+    expect(input.sourceUserMessageId).toBe('user-old')
+    expect(input.sourceAssistantMessageId).toBe('assistant-old')
+    expect(input.turn.conversationId).toBe('conversation-a')
+    expect(input.turn.content).toBe('edited')
+    expect(JSON.stringify(input)).not.toContain('history-user-content-0')
+    expect(testState.deleteChatMessages).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+    await expect
+      .element(screen.getByTestId('conversation-message-ids'))
+      .not.toHaveTextContent('user-old')
+  })
+
+  it('keeps the current model and replaces only an automatic title without a Provider transition', async () => {
+    const automaticTitleConversation = storedConversation()
+    automaticTitleConversation.title = createConversationTitle(
+      automaticTitleConversation.messages[0]!.content,
+      'chat.newConversation'
+    )
+    testState.persistedConversations.set(automaticTitleConversation.id, automaticTitleConversation)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'select-model-2' }).click()
+    await expect.element(screen.getByTestId('draft-model-id')).toHaveTextContent('model-2')
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    expect(input.turn.modelId).toBe('model-1')
+    expect(input.turn.title).toBe(createConversationTitle('edited', 'chat.newConversation'))
+    expect(testState.preflightProviderTransition).not.toHaveBeenCalled()
+    expect(testState.startProviderTransition).not.toHaveBeenCalled()
+    await expect
+      .element(screen.getByTestId('title-conversation-a'))
+      .toHaveTextContent(createConversationTitle('edited', 'chat.newConversation'))
+  })
+
+  it('keeps the prior Timeline unchanged until the rewrite is durably accepted', async () => {
+    const rewrite = deferred<AgentConversationTurnOutput>()
+    testState.rewriteConversationTurn.mockReturnValueOnce(rewrite.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    await expect
+      .element(screen.getByTestId('conversation-message-ids'))
+      .toHaveTextContent('user-old,assistant-old')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('original|done')
+
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    rewrite.resolve(commitSuccessfulRewrite(input, 101))
+
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('running')
+  })
+
+  it('keeps the original Timeline and never creates an error pair when rewrite is rejected', async () => {
+    testState.rewriteConversationTurn.mockRejectedValueOnce(new Error('rewrite rejected'))
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+
+    await expect
+      .element(screen.getByTestId('conversation-message-ids'))
+      .toHaveTextContent('user-old,assistant-old')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('original|done')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    expect(testState.deleteChatMessages).not.toHaveBeenCalled()
+    expect(testState.upsertChatMessages).not.toHaveBeenCalled()
+  })
+
+  it('recovers a committed rewrite when the first authoritative reload fails', async () => {
+    const screen = await renderSelectedConversation()
+    const reload = deferred<ChatConversation | null>()
+    testState.loadConversation.mockReturnValueOnce(reload.promise)
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('original|done')
+
+    reload.reject(new Error('transient reload failure'))
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+    expect(testState.loadConversation.mock.calls.length).toBeGreaterThanOrEqual(3)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-100',
+      success: true,
+      status: 'completed',
+      content: 'rewritten answer'
+    })
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('rewritten answer')
+  })
+
+  it('falls back to the committed output pair and preserves event routing when reload stays down', async () => {
+    const screen = await renderSelectedConversation()
+    testState.loadConversation
+      .mockRejectedValueOnce(new Error('reload unavailable 1'))
+      .mockRejectedValueOnce(new Error('reload unavailable 2'))
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+    await expect
+      .element(screen.getByTestId('conversation-message-ids'))
+      .not.toHaveTextContent('user-old')
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-100',
+      success: true,
+      status: 'completed',
+      content: 'fallback answer'
+    })
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('completed')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('fallback answer')
+  })
+
+  it('keeps a terminal rewrite response settled when authoritative reload stays down', async () => {
+    let replacementAssistantId = ''
+    testState.rewriteConversationTurn.mockImplementationOnce(
+      async (input: AgentConversationTurnRewriteInput) => {
+        const output = commitSuccessfulRewrite(input, 106)
+        replacementAssistantId = output.assistantMessageId
+        const conversation = testState.persistedConversations.get(output.conversationId)
+        const assistant = conversation?.messages.find(
+          (message) => message.id === output.assistantMessageId
+        )
+        if (!conversation || !assistant?.agentRun) {
+          throw new Error('missing terminal rewrite fixture')
+        }
+        assistant.content = 'rewrite launch failed'
+        assistant.status = 'error'
+        assistant.agentRun.status = 'failed'
+        assistant.agentRun.completedAt = 30
+        output.assistantMessage = structuredClone(assistant)
+        return output
+      }
+    )
+    const screen = await renderSelectedConversation()
+    testState.loadConversation
+      .mockRejectedValueOnce(new Error('reload unavailable 1'))
+      .mockRejectedValueOnce(new Error('reload unavailable 2'))
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('rewrite launch failed')
+    expect(
+      testState.saveChatMessageState.mock.calls.some(
+        (call) =>
+          (call[1] as ChatConversation['messages'][number]).id === replacementAssistantId &&
+          (call[1] as ChatConversation['messages'][number]).status === 'pending'
+      )
+    ).toBe(false)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-106',
+      success: true,
+      status: 'completed',
+      content: 'must remain ignored'
+    })
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await expect.element(screen.getByTestId('agent-run-status')).toHaveTextContent('failed')
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .not.toHaveTextContent('must remain ignored')
+  })
+
+  it('deduplicates concurrent edit submission before it reaches the Host', async () => {
+    const rewrite = deferred<AgentConversationTurnOutput>()
+    testState.rewriteConversationTurn.mockReturnValueOnce(rewrite.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    rewrite.resolve(commitSuccessfulRewrite(input, 102))
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+    expect(testState.rewriteConversationTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps navigation on another conversation when a background rewrite settles', async () => {
+    const conversationB = {
+      ...storedConversation(),
+      id: 'conversation-b',
+      title: 'Second conversation'
+    }
+    testState.persistedConversations.set(conversationB.id, conversationB)
+    const rewrite = deferred<AgentConversationTurnOutput>()
+    testState.rewriteConversationTurn.mockReturnValueOnce(rewrite.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'select-conversation-b', exact: true }).click()
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-b')
+
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    rewrite.resolve(commitSuccessfulRewrite(input, 103))
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-b')
+
+    await screen.getByRole('button', { name: 'select-conversation-a', exact: true }).click()
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+  })
+
+  it('does not reopen an archived conversation when its committed rewrite response arrives', async () => {
+    const rewrite = deferred<AgentConversationTurnOutput>()
+    testState.rewriteConversationTurn.mockReturnValueOnce(rewrite.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'archive-conversation-a' }).click()
+    await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
+
+    const input = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    rewrite.resolve(commitSuccessfulRewrite(input, 104))
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+
+    await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
+    expect(testState.rewriteConversationTurn).toHaveBeenCalledTimes(1)
+    expect(testState.startConversationTurn).not.toHaveBeenCalled()
+  })
+
+  it('reuses the idempotency key when the same rejected edit is retried', async () => {
+    let firstAttempt: AgentConversationTurnRewriteInput | null = null
+    let committedOutput: AgentConversationTurnOutput | null = null
+    testState.rewriteConversationTurn.mockImplementation(
+      async (input: AgentConversationTurnRewriteInput) => {
+        if (!firstAttempt) {
+          firstAttempt = structuredClone(input)
+          committedOutput = commitSuccessfulRewrite(input, 105)
+          throw new Error('transport interrupted')
+        }
+        if (JSON.stringify(input) !== JSON.stringify(firstAttempt)) {
+          throw new Error('idempotency identity conflict')
+        }
+        if (!committedOutput) throw new Error('missing committed rewrite output')
+        return committedOutput
+      }
+    )
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(1)
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.rewriteConversationTurn.mock.calls.length).toBe(2)
+
+    const first = testState.rewriteConversationTurn.mock
+      .calls[0]?.[0] as AgentConversationTurnRewriteInput
+    const second = testState.rewriteConversationTurn.mock
+      .calls[1]?.[0] as AgentConversationTurnRewriteInput
+    expect(second).toEqual(first)
+    await expect
+      .element(screen.getByTestId('conversation-message-contents'))
+      .toHaveTextContent('edited')
+  })
 })
 
 describe('transient LLM retry lifecycle', () => {

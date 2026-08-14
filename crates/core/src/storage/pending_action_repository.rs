@@ -162,12 +162,19 @@ pub fn list_interrupted_actions(
            OR (
                 -- A pre-dispatch rejection receipt may be committed just before the in-memory
                 -- lifecycle status advances. Only that exact crash window belongs to the generic
-                -- receipt reconciler. `executing` MCP rows have crossed the conservative
-                -- dispatch boundary and must remain owned by MCP startup recovery, which marks
-                -- them OutcomeUnknown rather than trusting a stray target label.
+                -- receipt reconciler.
                 status IN ('pending', 'approved')
                 AND action_type = 'mcp_tool_call'
                 AND target_status = 'rejected'
+              )
+           OR (
+                -- An executing MCP row normally belongs to conservative outcome-unknown startup
+                -- recovery. A terminal target is different: the audited-result transaction has
+                -- already recorded a candidate ToolResult receipt, which the service must prove
+                -- before adopting it. Including the candidate here does not trust the label.
+                status = 'executing'
+                AND action_type = 'mcp_tool_call'
+                AND target_status IN ('completed', 'failed', 'cancelled')
               )
         ORDER BY created_at ASC
         ",

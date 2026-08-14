@@ -14,6 +14,7 @@ import {
   listAgentCommandSessions,
   listPendingAgentActions,
   onAgentEvent,
+  rewriteConversationTurn,
   startConversationTurn
 } from '../features/agent/agentClient'
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
@@ -63,6 +64,8 @@ const MAX_BUFFERED_AGENT_EVENTS_PER_RUN = 128
 const MAX_UNCONFIRMED_STOPPED_RUNS = 128
 const COMMAND_SESSION_HYDRATION_MAX_BYTES = 256 * 1024
 const COMMAND_SESSION_HYDRATION_RETRY_DELAYS_MS = [500, 1500, 4000] as const
+const REWRITE_CONVERSATION_LOAD_ATTEMPTS = 2
+const REWRITE_CONVERSATION_LOAD_TIMEOUT_MS = 750
 const TERMINAL_COMMAND_SESSION_STATUSES = new Set([
   'exited',
   'interrupted',
@@ -89,6 +92,42 @@ function isAgentCommandSessionEvent(event: AgentEvent): event is AgentCommandSes
 
 function isTerminalCommandSessionStatus(status: string) {
   return TERMINAL_COMMAND_SESSION_STATUSES.has(status)
+}
+
+function isSettledRewriteAssistant(message: ChatMessage | undefined): boolean {
+  if (!message || message.role !== 'assistant') return false
+  if (message.status === 'sent' || message.status === 'error') return true
+  return (
+    message.agentRun?.status === 'completed' ||
+    message.agentRun?.status === 'failed' ||
+    message.agentRun?.status === 'cancelled' ||
+    message.agentRun?.status === 'idle'
+  )
+}
+
+function rewriteAssistantFromTurnOutput(
+  output: Awaited<ReturnType<typeof rewriteConversationTurn>>
+): ChatMessage {
+  const message = mergeConversationMessageFromBackend(
+    {
+      id: output.assistantMessage.id,
+      role: 'assistant',
+      content: output.assistantMessage.content,
+      createdAt: output.assistantMessage.createdAt,
+      status: undefined
+    },
+    output.assistantMessage
+  )
+  if (message.status !== 'sent' && message.status !== 'error') return message
+
+  return {
+    ...message,
+    agentRun: ensureAgentRun(
+      undefined,
+      output.runId,
+      message.status === 'sent' ? 'completed' : 'failed'
+    )
+  }
 }
 
 interface CommandSessionRefreshCandidate {
@@ -218,6 +257,33 @@ interface UseAgentRunLifecycleOptions {
   showToast: (message: string) => void
   t: Translate
   uiPreferences: Pick<UiPreferencesSnapshot, 'customPermissions'>
+}
+
+interface RewriteConversationTurnStart {
+  requestId: string
+  sourceAssistantMessageId: string
+  sourceUserMessageId: string
+}
+
+function loadConversationForRewrite(conversationId: string): Promise<ChatConversation | null> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (conversation: ChatConversation | null, error?: unknown) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeoutId)
+      if (error !== undefined) reject(error)
+      else resolve(conversation)
+    }
+    const timeoutId = window.setTimeout(
+      () => finish(null, new Error('Timed out loading the rewritten conversation')),
+      REWRITE_CONVERSATION_LOAD_TIMEOUT_MS
+    )
+    void loadConversation(conversationId).then(
+      (conversation) => finish(conversation),
+      (error) => finish(null, error)
+    )
+  })
 }
 
 export function useAgentRunLifecycle({
@@ -1197,15 +1263,18 @@ export function useAgentRunLifecycle({
       permissionMode: ChatPermissionMode,
       attachments: ChatSubmitOptions['attachments'],
       skills: readonly SkillSelection[],
-      title?: string
-    ) => {
-      updateAssistantMessage(conversationId, assistantMessageId, (message) => ({
-        ...message,
-        agentRun: ensureAgentRun(message.agentRun, null, 'starting')
-      }))
+      title?: string,
+      rewrite?: RewriteConversationTurnStart
+    ): Promise<boolean> => {
+      if (!rewrite) {
+        updateAssistantMessage(conversationId, assistantMessageId, (message) => ({
+          ...message,
+          agentRun: ensureAgentRun(message.agentRun, null, 'starting')
+        }))
+      }
 
       try {
-        const startOutput = await startConversationTurn({
+        const turnInput = {
           assistantMessageId,
           attachments,
           content,
@@ -1218,14 +1287,49 @@ export function useAgentRunLifecycle({
           skills: skills.length > 0 ? [...skills] : undefined,
           title,
           userMessageId
-        })
+        }
+        const startOutput = rewrite
+          ? await rewriteConversationTurn({
+              requestId: rewrite.requestId,
+              sourceAssistantMessageId: rewrite.sourceAssistantMessageId,
+              sourceUserMessageId: rewrite.sourceUserMessageId,
+              turn: turnInput
+            })
+          : await startConversationTurn(turnInput)
+
+        let rewrittenConversation: ChatConversation | null = null
+        if (rewrite) {
+          for (let attempt = 0; attempt < REWRITE_CONVERSATION_LOAD_ATTEMPTS; attempt += 1) {
+            try {
+              const loadedConversation = await loadConversationForRewrite(
+                startOutput.conversationId
+              )
+              if (
+                loadedConversation?.id === conversationId &&
+                loadedConversation.messages.some(
+                  (message) => message.id === startOutput.userMessageId && message.role === 'user'
+                ) &&
+                loadedConversation.messages.some(
+                  (message) =>
+                    message.id === startOutput.assistantMessageId && message.role === 'assistant'
+                )
+              ) {
+                rewrittenConversation = loadedConversation
+                break
+              }
+            } catch {
+              // The rewrite transaction is already committed. A transient projection read must
+              // not turn that known success into a failed edit or strand its running event stream.
+            }
+          }
+        }
 
         if (cancelledPendingMessageIdSet.has(assistantMessageId)) {
           cancelledPendingMessageIdSet.delete(assistantMessageId)
           cancelledRunIdSet.add(startOutput.runId)
           cancelBackendAgentRun(startOutput.runId)
           bufferedAgentEventMap.delete(startOutput.runId)
-          return
+          return false
         }
 
         const stopWasRequested = stopRequestedPendingMessageIdSet.delete(assistantMessageId)
@@ -1233,18 +1337,104 @@ export function useAgentRunLifecycle({
         const resolvedConversationId = startOutput.conversationId
         const resolvedAssistantMessageId = startOutput.assistantMessageId
         let resolvedAssistantMessage: ChatMessage | null = null
+        const authoritativeRewriteAssistant = rewrite
+          ? (rewrittenConversation?.messages.find(
+              (message) =>
+                message.id === startOutput.assistantMessageId && message.role === 'assistant'
+            ) ?? rewriteAssistantFromTurnOutput(startOutput))
+          : undefined
+        const rewriteAlreadySettled = isSettledRewriteAssistant(authoritativeRewriteAssistant)
 
+        const currentConversation = conversationsRef.current.find(
+          (candidate) => candidate.id === conversationId
+        )
+        if (!currentConversation) {
+          if (rewrite) {
+            cancelBackendAgentRun(startOutput.runId)
+            bufferedAgentEventMap.delete(startOutput.runId)
+          }
+          return false
+        }
+        let conversationToMerge = rewrittenConversation ?? currentConversation
+        if (rewrite && !rewrittenConversation) {
+          const rewrittenPairAlreadyPresent =
+            currentConversation.messages.some(
+              (message) => message.id === startOutput.userMessageId && message.role === 'user'
+            ) &&
+            currentConversation.messages.some(
+              (message) =>
+                message.id === startOutput.assistantMessageId && message.role === 'assistant'
+            )
+          if (rewrittenPairAlreadyPresent) {
+            conversationToMerge = currentConversation
+          } else {
+            const sourceUserIndex = currentConversation.messages.findIndex(
+              (message) => message.id === rewrite.sourceUserMessageId && message.role === 'user'
+            )
+            const sourceAssistantIndex = currentConversation.messages.findIndex(
+              (message) =>
+                message.id === rewrite.sourceAssistantMessageId && message.role === 'assistant'
+            )
+            const sourcePairIsPresent =
+              sourceUserIndex >= 0 && sourceAssistantIndex === sourceUserIndex + 1
+            const prefix = sourcePairIsPresent
+              ? currentConversation.messages.slice(0, sourceUserIndex)
+              : currentConversation.messages
+            const suffix = sourcePairIsPresent
+              ? currentConversation.messages.slice(sourceAssistantIndex + 1)
+              : []
+            conversationToMerge = {
+              ...currentConversation,
+              modelId,
+              messages: [
+                ...prefix,
+                mergeConversationMessageFromBackend(
+                  {
+                    id: userMessageId,
+                    role: 'user',
+                    content,
+                    createdAt: startOutput.userMessage.createdAt,
+                    status: 'sent',
+                    attachments
+                  },
+                  startOutput.userMessage
+                ),
+                mergeConversationMessageFromBackend(
+                  {
+                    id: assistantMessageId,
+                    role: 'assistant',
+                    content: THINKING_PLACEHOLDER,
+                    createdAt: startOutput.assistantMessage.createdAt,
+                    status: 'pending'
+                  },
+                  startOutput.assistantMessage
+                ),
+                ...suffix
+              ],
+              updatedAt: Math.max(
+                currentConversation.updatedAt + 1,
+                startOutput.userMessage.createdAt,
+                startOutput.assistantMessage.createdAt
+              ),
+              unreadAt: null
+            }
+          }
+        }
         const nextConversations = conversationsRef.current.map((conversation) =>
           conversation.id === conversationId
             ? {
-                ...conversation,
+                ...conversationToMerge,
                 id: resolvedConversationId,
-                messages: conversation.messages.map((message) => {
+                messages: conversationToMerge.messages.map((message) => {
                   if (message.id === userMessageId) {
                     return mergeConversationMessageFromBackend(message, startOutput.userMessage)
                   }
 
                   if (message.id === assistantMessageId) {
+                    if (rewriteAlreadySettled && authoritativeRewriteAssistant) {
+                      resolvedAssistantMessage = authoritativeRewriteAssistant
+                      return authoritativeRewriteAssistant
+                    }
                     const mergedMessage = mergeConversationMessageFromBackend(
                       message,
                       startOutput.assistantMessage
@@ -1272,7 +1462,7 @@ export function useAgentRunLifecycle({
             : conversation
         )
         setConversations(nextConversations)
-        if (resolvedAssistantMessage) {
+        if (resolvedAssistantMessage && !rewriteAlreadySettled) {
           enqueueChatMessageStateSave(resolvedConversationId, resolvedAssistantMessage)
         }
 
@@ -1285,6 +1475,14 @@ export function useAgentRunLifecycle({
           if (activeConversationIdRef.current === conversationId) {
             activeConversationIdRef.current = resolvedConversationId
           }
+        }
+
+        if (rewriteAlreadySettled) {
+          activeRunBindingMap.delete(startOutput.runId)
+          bufferedAgentEventMap.delete(startOutput.runId)
+          locallyUnconfirmedStoppedRunIdSet.delete(startOutput.runId)
+          retiredAgentRunIdSet.add(startOutput.runId)
+          return true
         }
 
         retiredAgentRunIdSet.delete(startOutput.runId)
@@ -1308,10 +1506,23 @@ export function useAgentRunLifecycle({
             console.error('Failed to cancel agent run')
           })
         }
+        return true
       } catch (error) {
+        if (rewrite) {
+          const recovery = planSkillActivationRecovery(error, skills)
+          reconcileFailedSkillActivation(conversationId, recovery, {
+            modelId,
+            permissionMode,
+            projectId
+          })
+          if (recovery.refreshCatalog) {
+            requestSkillCatalogRefresh(conversationId)
+          }
+          throw error
+        }
         if (cancelledPendingMessageIdSet.has(assistantMessageId)) {
           cancelledPendingMessageIdSet.delete(assistantMessageId)
-          return
+          return false
         }
         if (stopRequestedPendingMessageIdSet.delete(assistantMessageId)) {
           const stoppedAt = Date.now()
@@ -1337,7 +1548,7 @@ export function useAgentRunLifecycle({
             }),
             { touchConversation: true }
           )
-          return
+          return false
         }
 
         const message = error instanceof Error ? error.message : String(error)
@@ -1364,6 +1575,7 @@ export function useAgentRunLifecycle({
           }),
           { touchConversation: true }
         )
+        return false
       }
     },
     [

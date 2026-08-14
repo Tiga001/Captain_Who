@@ -4,6 +4,7 @@ import type {
   AgentFileWriteDiffPage,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentConversationTurnRewriteInput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentProviderTransitionNotification,
@@ -36,6 +37,12 @@ export async function startConversationTurn(
   input: StartConversationTurnInput
 ): Promise<StartConversationTurnOutput> {
   return unwrapHostInvocation(await hostClient.agent.startConversationTurn(input))
+}
+
+export async function rewriteConversationTurn(
+  input: AgentConversationTurnRewriteInput
+): Promise<AgentConversationTurnOutput> {
+  return unwrapHostInvocation(await hostClient.agent.rewriteConversationTurn(input))
 }
 
 export async function getContextWindowSnapshot(

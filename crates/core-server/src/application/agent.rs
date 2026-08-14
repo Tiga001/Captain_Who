@@ -8,8 +8,8 @@ use crate::application::agent_collaboration::{
 use crate::application::agent_support::*;
 pub use crate::application::agent_support::{
     AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
-    AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
-    AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
+    AgentConversationTurnInput, AgentConversationTurnOutput, AgentConversationTurnRewriteInput,
+    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentProviderTransitionGetStatusInput,
     AgentProviderTransitionGetStatusOutput, AgentProviderTransitionOperation,
     AgentProviderTransitionPreflightInput, AgentProviderTransitionPreflightOutput,
     AgentProviderTransitionStartInput, AgentServiceError, PendingActionStatus,

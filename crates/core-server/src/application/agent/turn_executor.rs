@@ -185,6 +185,12 @@ pub(super) struct PreparedRuntimeTurnSegment {
     pub(super) context_window_tool_projection: RunContextToolProjection,
     pub(super) cancellation_token: AgentCancellationToken,
     pub(super) steer_input: AgentSteerInputQueue,
+    /// An approval continuation keeps its predecessor nonterminal until either the continuation
+    /// finishes or a durable successor approval takes over recovery. Successor storage uses this
+    /// identity to atomically insert the recovery anchor and terminalize the predecessor before
+    /// either row becomes visible to process-local readers.
+    pub(super) pending_action_predecessor_settlement:
+        Option<(PendingActionRecord, PendingActionStatus)>,
     /// The initial root segment owns freshly captured MCP approval payloads. A continuation has
     /// already crossed its prior approval boundary and keeps the existing invalidation semantics.
     pub(super) invalidate_mcp_payload_on_pending_store_failure: bool,
@@ -202,6 +208,9 @@ pub(super) enum PreparedTurnRollback {
         user_message_id: String,
         previous: Option<mycopilot_core::storage::models::ChatConversationRecord>,
         previous_world_state_was_empty: bool,
+    },
+    Rewrite {
+        request_id: String,
     },
     AgentWake,
 }
@@ -341,6 +350,15 @@ impl AgentService {
                 *previous_world_state_was_empty,
             ),
             PreparedTurnRollback::AgentWake => Ok(()),
+            PreparedTurnRollback::Rewrite { request_id } => self
+                .settle_prepared_rewrite_failure(
+                    conversation_id,
+                    assistant_message_id,
+                    provisional_run_id,
+                    request_id,
+                    &cause,
+                )
+                .map(|_| ()),
         };
         match result {
             Ok(()) => cause.into(),
@@ -349,6 +367,88 @@ impl AgentService {
                     .into()
             }
         }
+    }
+
+    /// Once the immutable rewrite receipt exists, a pre-runtime fault is an accepted Turn whose
+    /// only safe resolution is an exact failed terminal. Returning the stored response keeps the
+    /// first RPC response and every request-id replay identical; callers then reload the active
+    /// projection and observe the failed replacement instead of resurrecting the hidden source.
+    pub(super) fn settle_prepared_rewrite_failure(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        provisional_run_id: Option<&str>,
+        request_id: &str,
+        cause: &str,
+    ) -> Result<Option<AgentConversationTurnOutput>, String> {
+        let Some(rewrite) = self.storage.get_conversation_turn_rewrite(request_id)? else {
+            return Ok(None);
+        };
+        if rewrite.conversation_id != conversation_id
+            || rewrite.replacement_assistant_message_id != assistant_message_id
+            || provisional_run_id != Some(rewrite.run_id.as_str())
+        {
+            return Err(
+                "rewrite failure settlement identity does not match its receipt".to_string(),
+            );
+        }
+        let current_trace = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)?
+            .ok_or_else(|| "rewrite trace disappeared before failure settlement".to_string())?;
+        if current_trace.conversation_id != conversation_id
+            || current_trace.run_id != rewrite.run_id
+            || current_trace.terminal_status
+                != mycopilot_core::ConversationTurnTraceTerminalStatus::InProgress
+            || !current_trace.items.is_empty()
+        {
+            return Err(
+                "rewrite failure settlement requires the exact empty in-progress trace".to_string(),
+            );
+        }
+        let created_at = self
+            .storage
+            .get_assistant_message_created_at(conversation_id, assistant_message_id)?
+            .ok_or_else(|| "rewrite assistant disappeared before failure settlement".to_string())?;
+        let completed_at = now_ms().max(created_at);
+        let trace = failed_conversation_trace_without_items(
+            &rewrite.run_id,
+            conversation_id,
+            assistant_message_id,
+            cause,
+        );
+        let mut settled = false;
+        for delay_ms in TERMINAL_PERSISTENCE_RETRY_DELAYS_MS {
+            match self.storage.finalize_chat_message_with_conversation_trace(
+                conversation_id,
+                assistant_message_id,
+                cause,
+                Some("error"),
+                "failed",
+                &trace,
+                created_at,
+                completed_at,
+            ) {
+                Ok(()) => {
+                    settled = true;
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(delay_ms)),
+            }
+        }
+        if !settled {
+            self.storage.finalize_chat_message_with_conversation_trace(
+                conversation_id,
+                assistant_message_id,
+                cause,
+                Some("error"),
+                "failed",
+                &trace,
+                created_at,
+                completed_at,
+            )?;
+        }
+        Ok(Some(active_rewrite_turn_output(&self.storage, &rewrite)?))
     }
 
     /// Commits the durable Turn lease and launches one initial Runtime segment. Human-root and
@@ -372,6 +472,27 @@ impl AgentService {
         ) {
             Ok(projection) => RunContextToolProjection::new(projection),
             Err(error) => {
+                if let PreparedTurnRollback::Rewrite { request_id } = &rollback {
+                    let cause = error.to_string();
+                    return match self.settle_prepared_rewrite_failure(
+                        &conversation_id,
+                        &assistant_message_id,
+                        Some(&run_id),
+                        request_id,
+                        &cause,
+                    ) {
+                        Ok(output) => {
+                            self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                            self.release_turn_concurrency_permit(&run_id);
+                            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                            output.ok_or_else(|| AgentServiceError::from(cause))
+                        }
+                        Err(settlement_error) => Err(format!(
+                            "{cause}；同时无法终态化已接受的编辑重发 Turn：{settlement_error}"
+                        )
+                        .into()),
+                    };
+                }
                 self.release_conversation_turn_if_current(&conversation_id, &run_id);
                 self.release_turn_concurrency_permit(&run_id);
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
@@ -389,20 +510,40 @@ impl AgentService {
         };
         self.register_usage_context(&run_id, prepared.usage_context.clone());
         if self.is_agent_input_scope_deleting(&prepared.agent_input) {
+            const CAUSE: &str = "项目或会话正在移除，无法开始新的 agent 运行。";
+            if let PreparedTurnRollback::Rewrite { request_id } = &rollback {
+                return match self.settle_prepared_rewrite_failure(
+                    &conversation_id,
+                    &assistant_message_id,
+                    Some(&run_id),
+                    request_id,
+                    CAUSE,
+                ) {
+                    Ok(output) => {
+                        self.release_conversation_turn_if_current(&conversation_id, &run_id);
+                        self.release_turn_concurrency_permit(&run_id);
+                        self.discard_usage_context(&run_id);
+                        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                        output.ok_or_else(|| AgentServiceError::from(CAUSE.to_string()))
+                    }
+                    Err(settlement_error) => Err(format!(
+                        "{CAUSE}；同时无法终态化已接受的编辑重发 Turn：{settlement_error}"
+                    )
+                    .into()),
+                };
+            }
             self.release_conversation_turn_if_current(&conversation_id, &run_id);
             self.release_turn_concurrency_permit(&run_id);
             self.discard_usage_context(&run_id);
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             return Err(match rollback {
-                PreparedTurnRollback::AgentWake => "项目或会话正在移除，无法开始新的 agent 运行。"
-                    .to_string()
-                    .into(),
+                PreparedTurnRollback::AgentWake => CAUSE.to_string().into(),
                 rollback => self.rollback_prepared_initial_turn(
                     &conversation_id,
                     &assistant_message_id,
                     Some(&run_id),
                     &rollback,
-                    "项目或会话正在移除，无法开始新的 agent 运行。",
+                    CAUSE,
                 ),
             });
         }
@@ -443,6 +584,7 @@ impl AgentService {
             context_window_tool_projection,
             cancellation_token: cancellation_token.clone(),
             steer_input,
+            pending_action_predecessor_settlement: None,
             invalidate_mcp_payload_on_pending_store_failure: true,
             steering_close_error_context: "无法关闭用户引导通道并持久化剩余引导",
         };
@@ -1009,6 +1151,7 @@ impl AgentService {
             context_window_tool_projection,
             cancellation_token,
             steer_input,
+            pending_action_predecessor_settlement,
             invalidate_mcp_payload_on_pending_store_failure,
             steering_close_error_context,
         } = segment;
@@ -1063,15 +1206,29 @@ impl AgentService {
                         .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
                     return;
                 }
-                match emitter_service.store_pending_action(
-                    run_id,
-                    &emitter_conversation_id,
-                    &emitter_assistant_message_id,
-                    action.as_ref().clone(),
-                    checkpoint_input,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => return,
+                let pending_store = if let Some((predecessor, terminal_status)) =
+                    pending_action_predecessor_settlement.as_ref()
+                {
+                    emitter_service.store_pending_action_with_predecessor_settlement(
+                        run_id,
+                        &emitter_conversation_id,
+                        &emitter_assistant_message_id,
+                        action.as_ref().clone(),
+                        checkpoint_input,
+                        predecessor,
+                        *terminal_status,
+                    )
+                } else {
+                    emitter_service.store_pending_action(
+                        run_id,
+                        &emitter_conversation_id,
+                        &emitter_assistant_message_id,
+                        action.as_ref().clone(),
+                        checkpoint_input,
+                    )
+                };
+                let should_publish = match pending_store {
+                    Ok(should_publish) => should_publish,
                     Err(error) => {
                         if invalidate_mcp_payload_on_pending_store_failure {
                             emitter_service.invalidate_mcp_pending_payload(action);
@@ -1082,6 +1239,9 @@ impl AgentService {
                             .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
                         return;
                     }
+                };
+                if !should_publish {
+                    return;
                 }
             }
             if emitter_pending_store_failure

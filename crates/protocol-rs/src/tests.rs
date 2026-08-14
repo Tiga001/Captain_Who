@@ -266,6 +266,10 @@ fn agent_method_names_match_the_cross_language_golden_contract() {
             AGENT_START_CONVERSATION_TURN_METHOD,
         ),
         (
+            "rewriteConversationTurn",
+            AGENT_REWRITE_CONVERSATION_TURN_METHOD,
+        ),
+        (
             "getContextWindowSnapshot",
             AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
         ),

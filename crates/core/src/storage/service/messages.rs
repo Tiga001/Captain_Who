@@ -264,8 +264,18 @@ impl StorageService {
         conversation_id: &str,
     ) -> Result<Vec<ConversationTurnTrace>, String> {
         let connection = self.state.connection()?;
-        conversation_trace_repository::list_traces_for_conversation(&connection, conversation_id)
-            .map_err(storage_error)
+        let mut traces = conversation_trace_repository::list_traces_for_conversation(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        let superseded = conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        traces.retain(|trace| !superseded.contains(&trace.assistant_message_id));
+        Ok(traces)
     }
 
     pub fn get_conversation_model_context_log(
@@ -285,11 +295,18 @@ impl StorageService {
         conversation_id: &str,
     ) -> Result<Vec<ConversationModelContextLog>, String> {
         let connection = self.state.connection()?;
-        conversation_model_context_repository::list_logs_for_conversation(
+        let mut logs = conversation_model_context_repository::list_logs_for_conversation(
             &connection,
             conversation_id,
         )
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+        let superseded = conversation_turn_rewrite_repository::superseded_message_ids(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)?;
+        logs.retain(|log| !superseded.contains(&log.assistant_message_id));
+        Ok(logs)
     }
 
     /// Lists durable in-progress traces for process-startup side-effect reconciliation.

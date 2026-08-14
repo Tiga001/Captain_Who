@@ -30,6 +30,36 @@ describe('Agent IPC bridge command Sessions', () => {
   })
 })
 
+describe('Agent IPC bridge conversation Turn rewrite', () => {
+  it('forwards the immutable source identity and complete replacement Turn on its dedicated channel', async () => {
+    const invoke = vi.fn().mockResolvedValue({ ok: true, value: {} })
+    const ipcRenderer = {
+      invoke,
+      on: vi.fn(),
+      removeListener: vi.fn()
+    } as unknown as Pick<IpcRenderer, 'invoke' | 'on' | 'removeListener'>
+    const bridge = createAgentIpcBridge(ipcRenderer)
+    const input = {
+      requestId: 'rewrite-request-1',
+      sourceUserMessageId: 'user-old',
+      sourceAssistantMessageId: 'assistant-old',
+      turn: {
+        conversationId: 'conversation-1',
+        projectId: 'project-1',
+        modelId: 'generic-model',
+        content: 'corrected message',
+        userMessageId: 'user-new',
+        assistantMessageId: 'assistant-new'
+      }
+    }
+
+    await bridge.rewriteConversationTurn(input)
+
+    expect(invoke).toHaveBeenCalledOnce()
+    expect(invoke).toHaveBeenCalledWith('host:agent.rewriteConversationTurn', input)
+  })
+})
+
 describe('Agent IPC bridge Provider transitions', () => {
   it('uses dedicated preflight, start and reload-status channels', async () => {
     const invoke = vi.fn().mockResolvedValue({ ok: true, value: {} })

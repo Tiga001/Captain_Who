@@ -322,6 +322,47 @@ impl AgentService {
         action: AgentProposedAction,
         agent_input: AgentChatInput,
     ) -> Result<bool, String> {
+        self.store_pending_action_internal(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action,
+            agent_input,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn store_pending_action_with_predecessor_settlement(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        action: AgentProposedAction,
+        agent_input: AgentChatInput,
+        predecessor: &PendingActionRecord,
+        predecessor_terminal_status: PendingActionStatus,
+    ) -> Result<bool, String> {
+        self.store_pending_action_internal(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action,
+            agent_input,
+            Some((predecessor, predecessor_terminal_status)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn store_pending_action_internal(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        action: AgentProposedAction,
+        agent_input: AgentChatInput,
+        predecessor_settlement: Option<(&PendingActionRecord, PendingActionStatus)>,
+    ) -> Result<bool, String> {
         let agent_input = bind_pending_provider_configuration(&self.storage, agent_input)?;
         let deletion_lifecycle = self
             .deletion_lifecycle
@@ -358,6 +399,88 @@ impl AgentService {
         };
         tool_call_for_pending_record(&pending_record)
             .map_err(|_| "Pending action frozen Tool Call identity is inconsistent.".to_string())?;
+
+        if let Some((predecessor, terminal_status)) = predecessor_settlement {
+            let mut pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(existing) = pending_actions.get(&storage_id) {
+                if !same_pending_action_identity(existing, &pending_record) {
+                    return Err(format!(
+                        "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
+                        existing.snapshot.run_id, pending_record.snapshot.run_id
+                    ));
+                }
+            }
+            let predecessor_current =
+                pending_actions
+                    .get(&predecessor.storage_id)
+                    .ok_or_else(|| {
+                        format!("前置待审批操作的内存状态不存在：{}", predecessor.storage_id)
+                    })?;
+            if !same_pending_action_identity_except_status(predecessor_current, predecessor) {
+                return Err("前置待审批操作的冻结身份已经变化。".to_string());
+            }
+            let predecessor_expected_status = predecessor_current.snapshot.status;
+            let predecessor_terminal_agent_input_json = persisted_pending_agent_input_json(
+                &predecessor_current.agent_input,
+                terminal_status,
+            )?;
+            let successor_storage_record = pending_storage_record(&pending_record, now_ms())?;
+            let storage_outcome = match self
+                .storage
+                .store_pending_agent_action_with_predecessor_settlement(
+                    successor_storage_record,
+                    &predecessor.storage_id,
+                    pending_status_label(predecessor_expected_status),
+                    pending_status_label(terminal_status),
+                    &predecessor_terminal_agent_input_json,
+                    now_ms(),
+                ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
+                    return Err(error);
+                }
+            };
+
+            let should_publish = match pending_actions.get(&storage_id) {
+                Some(existing) if same_pending_action_identity(existing, &pending_record) => false,
+                Some(existing) => {
+                    self.invalidate_mcp_pending_payload(&pending_record.snapshot.action);
+                    return Err(format!(
+                        "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
+                        existing.snapshot.run_id, pending_record.snapshot.run_id
+                    ));
+                }
+                None => {
+                    pending_actions.insert(storage_id, pending_record.clone());
+                    true
+                }
+            };
+            pending_actions
+                .get_mut(&predecessor.storage_id)
+                .expect("predecessor was validated under the same pending-action lock")
+                .snapshot
+                .status = terminal_status;
+            drop(pending_actions);
+            if matches!(storage_outcome, PendingActionStoreOutcome::Inserted) {
+                self.record_action_audit(
+                    &pending_record,
+                    None,
+                    "pending",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+            }
+            drop(deletion_lifecycle);
+            return Ok(should_publish);
+        }
 
         {
             let pending_actions = self

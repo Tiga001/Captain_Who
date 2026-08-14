@@ -83,7 +83,7 @@ pub(crate) fn build_child_context_snapshot_plan(
             "child context snapshot has an invalid identity or timestamp".to_string(),
         ));
     }
-    let source = chat_repository::get_conversation(connection, source_conversation_id)
+    let source = chat_repository::get_active_conversation(connection, source_conversation_id)
         .map_err(database_error)?
         .ok_or_else(|| ConversationForkError::Other("source conversation does not exist".into()))?;
 

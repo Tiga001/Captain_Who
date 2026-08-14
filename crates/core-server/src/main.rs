@@ -98,9 +98,9 @@ use adapters::skills_dispatcher::{
     mutation_admission_error_response, SkillMutationTarget, SkillsDispatcher,
 };
 use application::agent::{
-    AgentConversationTurnInput, AgentProviderTransitionGetStatusInput,
-    AgentProviderTransitionPreflightInput, AgentProviderTransitionStartInput, AgentService,
-    AgentServiceError,
+    AgentConversationTurnInput, AgentConversationTurnRewriteInput,
+    AgentProviderTransitionGetStatusInput, AgentProviderTransitionPreflightInput,
+    AgentProviderTransitionStartInput, AgentService, AgentServiceError,
 };
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 #[cfg(test)]
@@ -163,7 +163,8 @@ use mycopilot_protocol_rs::{
     AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
     AGENT_GET_PROVIDER_TRANSITION_STATUS_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
     AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_PREFLIGHT_PROVIDER_TRANSITION_METHOD,
-    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
+    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
+    AGENT_REWRITE_CONVERSATION_TURN_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
     AGENT_START_PROVIDER_TRANSITION_METHOD, AGENT_STEER_RUN_METHOD, CORE_PING_METHOD,
     CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
     GIT_GET_REVIEW_SUMMARY_METHOD, GIT_GET_TURN_DIFF_SUMMARIES_METHOD,

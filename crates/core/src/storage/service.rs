@@ -24,8 +24,8 @@ use crate::storage::{
     conversation_context_adaptation_repository, conversation_fork_repository,
     conversation_goal_repository, conversation_history_archive_repository,
     conversation_history_repository, conversation_model_context_repository,
-    conversation_trace_repository, file_draft_repository, guidance_repository,
-    image_generation_repository, mcp_approval_envelope_repository,
+    conversation_trace_repository, conversation_turn_rewrite_repository, file_draft_repository,
+    guidance_repository, image_generation_repository, mcp_approval_envelope_repository,
     model_request_observation_repository, now_ms, pending_action_repository,
     preferences_repository, project_repository, provider_continuation_repository,
     provider_transition_repository, skill_enablement_repository, storage_error,
@@ -97,6 +97,20 @@ use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;
 pub struct ConversationObserverSnapshot {
     pub conversation: ChatConversationRecord,
     pub input_origins: BTreeMap<String, crate::ConversationMessageOrigin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationTurnRewriteBeginOutcome {
+    Started,
+    Replayed(Box<conversation_turn_rewrite_repository::ConversationTurnRewriteRecord>),
+}
+
+/// Files are published before SQLite admission and their rows commit with the replacement Turn.
+/// An uncommitted crash leaves only unreferenced files for the existing orphan scanner.
+#[derive(Debug)]
+pub struct PreparedConversationTurnRewriteAttachments {
+    records: Vec<AttachmentRecord>,
+    paths_created_by_this_process: Vec<PathBuf>,
 }
 
 #[cfg(test)]

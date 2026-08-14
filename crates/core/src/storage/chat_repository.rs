@@ -288,6 +288,18 @@ pub fn list_conversations(
     Ok(conversations)
 }
 
+/// Renderer/model-facing Conversation list. Immutable source Turns retained by an edit receipt
+/// remain queryable through the raw repository paths but are absent from this active projection.
+pub fn list_active_conversations(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<ChatConversationRecord>> {
+    let mut conversations = list_conversations(connection)?;
+    for conversation in &mut conversations {
+        retain_active_messages(connection, conversation)?;
+    }
+    Ok(conversations)
+}
+
 pub fn list_conversation_metas(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<ChatConversationMetaRecord>> {
@@ -312,6 +324,62 @@ pub fn get_conversation(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    get_conversation_with_messages(connection, conversation_id, list_messages)
+}
+
+pub fn get_active_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    let mut conversation = get_conversation(connection, conversation_id)?;
+    if let Some(conversation) = &mut conversation {
+        retain_active_messages(connection, conversation)?;
+    }
+    Ok(conversation)
+}
+
+/// Reads exactly the Conversation/message fields stored in SQLite, without renderer-owned
+/// overlays such as authoritative Usage. Write-side CAS/admission callers must use this form so
+/// a derived presentation cannot be mistaken for an attempted rewrite of immutable history.
+pub(crate) fn get_persisted_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    get_conversation_with_messages(connection, conversation_id, list_persisted_messages)
+}
+
+pub(crate) fn get_active_persisted_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    let mut conversation = get_persisted_conversation(connection, conversation_id)?;
+    if let Some(conversation) = &mut conversation {
+        retain_active_messages(connection, conversation)?;
+    }
+    Ok(conversation)
+}
+
+fn retain_active_messages(
+    connection: &Connection,
+    conversation: &mut ChatConversationRecord,
+) -> rusqlite::Result<()> {
+    let superseded = crate::storage::conversation_turn_rewrite_repository::superseded_message_ids(
+        connection,
+        &conversation.id,
+    )?;
+    if !superseded.is_empty() {
+        conversation
+            .messages
+            .retain(|message| !superseded.contains(&message.id));
+    }
+    Ok(())
+}
+
+fn get_conversation_with_messages(
+    connection: &Connection,
+    conversation_id: &str,
+    load_messages: fn(&Connection, &str) -> rusqlite::Result<Vec<ChatMessageRecord>>,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
     let mut conversation = connection
         .query_row(
             "
@@ -324,7 +392,7 @@ pub fn get_conversation(
         )
         .optional()?;
     if let Some(conversation) = &mut conversation {
-        conversation.messages = list_messages(connection, &conversation.id)?;
+        conversation.messages = load_messages(connection, &conversation.id)?;
     }
     Ok(conversation)
 }
@@ -589,6 +657,14 @@ pub(crate) fn save_conversation_in_connection(
             }
         }
         removed_message_ids.retain(|id| !retained_graph_projections.contains(id));
+    }
+    if !removed_message_ids.is_empty() {
+        let superseded =
+            crate::storage::conversation_turn_rewrite_repository::superseded_message_ids(
+                connection,
+                &conversation.id,
+            )?;
+        removed_message_ids.retain(|id| !superseded.contains(id));
     }
     let compaction_rewind =
         context_compaction_repository::prepare_message_deletion_compaction_rewind(
@@ -3137,6 +3213,34 @@ fn list_messages(
         })?
         .collect();
 
+    messages
+}
+
+fn list_persisted_messages(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<ChatMessageRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT id, role, content, created_at, status, agent_run_json, ui_state_json
+         FROM messages
+         WHERE conversation_id = ?1
+         ORDER BY position ASC, created_at ASC",
+    )?;
+
+    let messages = statement
+        .query_map(params![conversation_id], |row| {
+            Ok(ChatMessageRecord {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                status: row.get(4)?,
+                attachments: Vec::new(),
+                agent_run_json: row.get(5)?,
+                ui_state_json: row.get(6)?,
+            })
+        })?
+        .collect();
     messages
 }
 

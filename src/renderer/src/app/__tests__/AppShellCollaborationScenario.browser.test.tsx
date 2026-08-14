@@ -253,6 +253,7 @@ vi.mock('../../features/agent/agentClient', () => ({
   preflightProviderTransition: vi.fn(),
   readAgentFileDraft: vi.fn(),
   rejectAgentAction: vi.fn(),
+  rewriteConversationTurn: vi.fn(),
   startConversationTurn: vi.fn(),
   startProviderTransition: vi.fn(),
   steerAgentRun: vi.fn()

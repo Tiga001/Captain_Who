@@ -65,7 +65,7 @@ pub struct SkillsListResponse {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivatedSkillSummaryDto {
     pub id: String,

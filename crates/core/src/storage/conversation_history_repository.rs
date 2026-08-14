@@ -111,7 +111,16 @@ pub fn search_records(
             snippet(conversation_history_fts, 15, '', '', '…', 64),
             length(content)
          FROM conversation_history_fts
-         WHERE conversation_id = ?",
+         WHERE conversation_id = ?
+           AND NOT EXISTS (
+               SELECT 1 FROM conversation_turn_rewrites AS rewrite
+               WHERE rewrite.conversation_id = conversation_history_fts.conversation_id
+                 AND (
+                     rewrite.source_user_message_id = conversation_history_fts.message_id
+                     OR rewrite.source_assistant_message_id = conversation_history_fts.message_id
+                     OR rewrite.source_assistant_message_id = conversation_history_fts.assistant_message_id
+                 )
+           )",
     );
     let mut values = Vec::<rusqlite::types::Value>::new();
     values.push(conversation_id.to_string().into());
@@ -259,7 +268,15 @@ pub fn read_record(
             .query_row(
                 "SELECT id, role, content, status, created_at, position
                  FROM messages
-                 WHERE conversation_id = ?1 AND id = ?2",
+                 WHERE conversation_id = ?1 AND id = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                       WHERE rewrite.conversation_id = messages.conversation_id
+                         AND (
+                             rewrite.source_user_message_id = messages.id
+                             OR rewrite.source_assistant_message_id = messages.id
+                         )
+                   )",
                 params![conversation_id, message_id],
                 |row| {
                     let id = row.get::<_, String>(0)?;
@@ -299,7 +316,12 @@ pub fn read_record(
                    ON t.assistant_message_id = i.assistant_message_id
                  WHERE t.conversation_id = ?1
                    AND i.assistant_message_id = ?2
-                   AND i.sequence = ?3",
+                   AND i.sequence = ?3
+                   AND NOT EXISTS (
+                       SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                       WHERE rewrite.conversation_id = t.conversation_id
+                         AND rewrite.source_assistant_message_id = i.assistant_message_id
+                   )",
                 params![conversation_id, assistant_message_id, sequence],
                 |row| {
                     let item_json = row.get::<_, String>(0)?;
@@ -340,7 +362,12 @@ pub fn read_record(
                         content_type, content_hash, uncompressed_bytes, uncompressed_chars,
                         truncated_at_source, archived_completely, created_at
                  FROM conversation_history_blobs
-                 WHERE conversation_id = ?1 AND archive_ref = ?2",
+                 WHERE conversation_id = ?1 AND archive_ref = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                       WHERE rewrite.conversation_id = conversation_history_blobs.conversation_id
+                         AND rewrite.source_assistant_message_id = conversation_history_blobs.assistant_message_id
+                   )",
                 params![conversation_id, archive_ref],
                 |row| {
                     let created_at = row.get::<_, i64>(11)?;
@@ -453,7 +480,12 @@ pub fn get_tool_exchange(
                     ON trace.assistant_message_id = item.assistant_message_id
                  WHERE trace.conversation_id = ?1
                    AND item.assistant_message_id = ?2
-                   AND item.sequence = ?3",
+                   AND item.sequence = ?3
+                   AND NOT EXISTS (
+                       SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                       WHERE rewrite.conversation_id = trace.conversation_id
+                         AND rewrite.source_assistant_message_id = item.assistant_message_id
+                   )",
                 params![conversation_id, assistant_message_id, sequence],
                 |row| row.get::<_, Option<String>>(0),
             )
@@ -464,7 +496,12 @@ pub fn get_tool_exchange(
             .query_row(
                 "SELECT assistant_message_id, call_id
                  FROM conversation_history_blobs
-                 WHERE conversation_id = ?1 AND archive_ref = ?2",
+                 WHERE conversation_id = ?1 AND archive_ref = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                       WHERE rewrite.conversation_id = conversation_history_blobs.conversation_id
+                         AND rewrite.source_assistant_message_id = conversation_history_blobs.assistant_message_id
+                   )",
                 params![conversation_id, archive_ref],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
@@ -483,6 +520,11 @@ pub fn get_tool_exchange(
                      WHERE trace.conversation_id = ?1
                        AND json_extract(item.item_json, '$.callId') = ?2
                        AND (?3 IS NULL OR trace.run_id = ?3)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                           WHERE rewrite.conversation_id = trace.conversation_id
+                             AND rewrite.source_assistant_message_id = item.assistant_message_id
+                       )
                      ORDER BY trace.created_at DESC, item.sequence DESC
                      LIMIT 1",
                     params![conversation_id, call_id, run_id],
@@ -503,6 +545,11 @@ pub fn get_tool_exchange(
              WHERE trace.conversation_id = ?1
                AND item.assistant_message_id = ?2
                AND json_extract(item.item_json, '$.callId') = ?3
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                   WHERE rewrite.conversation_id = trace.conversation_id
+                     AND rewrite.source_assistant_message_id = item.assistant_message_id
+               )
              ORDER BY item.sequence ASC",
         )?;
         let refs = statement
@@ -537,7 +584,16 @@ fn reference_order(
         .query_row(
             "SELECT position, within_message_order
              FROM conversation_history_fts
-             WHERE conversation_id = ?1 AND ref_key = ?2",
+             WHERE conversation_id = ?1 AND ref_key = ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_turn_rewrites AS rewrite
+                   WHERE rewrite.conversation_id = conversation_history_fts.conversation_id
+                     AND (
+                         rewrite.source_user_message_id = conversation_history_fts.message_id
+                         OR rewrite.source_assistant_message_id = conversation_history_fts.message_id
+                         OR rewrite.source_assistant_message_id = conversation_history_fts.assistant_message_id
+                     )
+               )",
             params![conversation_id, ref_key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -558,7 +614,16 @@ fn query_timeline(
             archive_ref, tool, status, run_id, created_at,
             substr(content, 1, 321), length(content)
          FROM conversation_history_fts
-         WHERE conversation_id = ? AND record_type != 'archive'",
+         WHERE conversation_id = ? AND record_type != 'archive'
+           AND NOT EXISTS (
+               SELECT 1 FROM conversation_turn_rewrites AS rewrite
+               WHERE rewrite.conversation_id = conversation_history_fts.conversation_id
+                 AND (
+                     rewrite.source_user_message_id = conversation_history_fts.message_id
+                     OR rewrite.source_assistant_message_id = conversation_history_fts.message_id
+                     OR rewrite.source_assistant_message_id = conversation_history_fts.assistant_message_id
+                 )
+           )",
     );
     let mut values = vec![rusqlite::types::Value::from(conversation_id.to_string())];
     if let Some((position, within)) = start {

@@ -46,6 +46,7 @@ export const HOST_CHANNELS = {
     providerTransition: 'host:agent.providerTransition',
     startProviderTransition: 'host:agent.startProviderTransition',
     startConversationTurn: 'host:agent.startConversationTurn',
+    rewriteConversationTurn: 'host:agent.rewriteConversationTurn',
     steerRun: 'host:agent.steerRun'
   },
   attachments: {

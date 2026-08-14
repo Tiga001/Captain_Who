@@ -185,6 +185,169 @@ pub(super) fn orphan_scan_relative_path(attachment_root: &Path, path: &Path) -> 
 }
 
 impl StorageService {
+    pub fn prepare_conversation_turn_rewrite_attachments(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        project_id: Option<&str>,
+        attachments: &[AgentInputAttachment],
+        created_at: i64,
+    ) -> Result<PreparedConversationTurnRewriteAttachments, String> {
+        if attachments.is_empty() {
+            return Ok(PreparedConversationTurnRewriteAttachments {
+                records: Vec::new(),
+                paths_created_by_this_process: Vec::new(),
+            });
+        }
+        fs::create_dir_all(&self.attachment_root)
+            .map_err(|error| format!("创建附件库目录失败：{error}"))?;
+        let connection = self.state.connection()?;
+        ensure_conversation_exists(&connection, conversation_id)?;
+        ensure_project_reference_exists(&connection, project_id)?;
+        for attachment in attachments {
+            if attachment_repository::get_attachment(&connection, &attachment.id)
+                .map_err(storage_error)?
+                .is_some()
+            {
+                return Err(format!("编辑重发附件 id 已存在：{}", attachment.id));
+            }
+        }
+        drop(connection);
+        let mut staged = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
+            let bytes = input_attachment_bytes(attachment)?;
+            let storage_rel_path = attachment_storage_rel_path(
+                conversation_id,
+                message_id,
+                &attachment.id,
+                &attachment.name,
+            );
+            let storage_path = self.attachment_root.join(&storage_rel_path);
+            staged.push((
+                AttachmentRecord {
+                    id: attachment.id.clone(),
+                    conversation_id: conversation_id.to_string(),
+                    message_id: message_id.to_string(),
+                    project_id: project_id.map(ToString::to_string),
+                    kind: input_attachment_kind_label(attachment.kind).to_string(),
+                    original_name: attachment.name.clone(),
+                    mime_type: attachment.mime_type.clone(),
+                    size_bytes: bytes.len() as u64,
+                    storage_rel_path: slash_path(&storage_rel_path),
+                    created_at,
+                },
+                bytes,
+                storage_path,
+            ));
+        }
+        let records = staged
+            .iter()
+            .map(|(record, _, _)| record.clone())
+            .collect::<Vec<_>>();
+        let mut created_paths = Vec::with_capacity(staged.len());
+        for (_, bytes, storage_path) in &staged {
+            let Some(parent) = storage_path.parent() else {
+                self.discard_prepared_conversation_turn_rewrite_attachments(
+                    PreparedConversationTurnRewriteAttachments {
+                        records,
+                        paths_created_by_this_process: created_paths,
+                    },
+                );
+                return Err("附件存储路径无效。".to_string());
+            };
+            if let Err(error) = fs::create_dir_all(parent) {
+                self.discard_prepared_conversation_turn_rewrite_attachments(
+                    PreparedConversationTurnRewriteAttachments {
+                        records,
+                        paths_created_by_this_process: created_paths,
+                    },
+                );
+                return Err(format!("创建附件目录失败：{error}"));
+            }
+            let created = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(storage_path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+                        let _ = fs::remove_file(storage_path);
+                        self.discard_prepared_conversation_turn_rewrite_attachments(
+                            PreparedConversationTurnRewriteAttachments {
+                                records,
+                                paths_created_by_this_process: created_paths,
+                            },
+                        );
+                        return Err(format!("写入编辑重发附件失败：{error}"));
+                    }
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing = match fs::read(storage_path) {
+                        Ok(existing) => existing,
+                        Err(read_error) => {
+                            self.discard_prepared_conversation_turn_rewrite_attachments(
+                                PreparedConversationTurnRewriteAttachments {
+                                    records,
+                                    paths_created_by_this_process: created_paths,
+                                },
+                            );
+                            return Err(format!("读取并发编辑重发附件失败：{read_error}"));
+                        }
+                    };
+                    if existing != *bytes {
+                        self.discard_prepared_conversation_turn_rewrite_attachments(
+                            PreparedConversationTurnRewriteAttachments {
+                                records,
+                                paths_created_by_this_process: created_paths,
+                            },
+                        );
+                        return Err("编辑重发附件的确定性路径发生内容冲突。".to_string());
+                    }
+                    false
+                }
+                Err(error) => {
+                    self.discard_prepared_conversation_turn_rewrite_attachments(
+                        PreparedConversationTurnRewriteAttachments {
+                            records,
+                            paths_created_by_this_process: created_paths,
+                        },
+                    );
+                    return Err(format!("写入编辑重发附件失败：{error}"));
+                }
+            };
+            if created {
+                created_paths.push(storage_path.clone());
+            }
+        }
+        Ok(PreparedConversationTurnRewriteAttachments {
+            records,
+            paths_created_by_this_process: created_paths,
+        })
+    }
+
+    pub fn discard_prepared_conversation_turn_rewrite_attachments(
+        &self,
+        prepared: PreparedConversationTurnRewriteAttachments,
+    ) {
+        let connection = self.state.connection().ok();
+        for path in prepared.paths_created_by_this_process {
+            let committed = prepared.records.iter().any(|record| {
+                self.attachment_root.join(&record.storage_rel_path) == path
+                    && connection.as_ref().is_some_and(|connection| {
+                        attachment_repository::get_attachment(connection, &record.id)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+            });
+            if !committed {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
     /// Resolves only the durable Conversation owner for an attachment. Host authorization uses
     /// this narrow lookup before any legacy attachment-content read crosses the RPC boundary.
     pub fn attachment_conversation_id(

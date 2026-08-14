@@ -62,6 +62,8 @@ export function createAgentIpcBridge(ipcRenderer: AgentIpcRenderer): AgentHostAp
       ipcRenderer.invoke(HOST_CHANNELS.agent.getProviderTransitionStatus, input),
     startConversationTurn: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.startConversationTurn, input),
+    rewriteConversationTurn: (input) =>
+      ipcRenderer.invoke(HOST_CHANNELS.agent.rewriteConversationTurn, input),
     getContextWindowSnapshot: (input) =>
       ipcRenderer.invoke(HOST_CHANNELS.agent.getContextWindowSnapshot, input),
     listCommandSessions: (input) =>

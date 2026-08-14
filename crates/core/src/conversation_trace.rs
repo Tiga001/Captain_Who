@@ -9,7 +9,7 @@
 use crate::conversation_trace_projection::{
     is_repeat_failure_eligible, project_attachment_text, project_narration, project_terminal_error,
     project_tool_call, project_tool_result, project_user_guidance, sanitize_runtime_text,
-    sanitize_runtime_value,
+    sanitize_runtime_value, DurableTraceProjectionLimits,
 };
 use crate::llm::{validate_provider_tool_call_id, LlmMessage};
 use crate::protocol::{
@@ -2145,13 +2145,22 @@ impl ConversationTraceRecorder {
         {
             return Err("Agent mailbox delivery identity is invalid".to_string());
         }
-        let (expected_envelope, envelope_truncated) = project_agent_mailbox_model_envelope(
+        let (model_content, model_truncated) = project_agent_mailbox_model_envelope(
             sender_agent_id,
             sender_task_name,
             sender_task_path,
             kind,
             content,
         )?;
+        let (trace_content, trace_truncated) = project_agent_mailbox_envelope_with_budget(
+            sender_agent_id,
+            sender_task_name,
+            sender_task_path,
+            kind,
+            content,
+            DurableTraceProjectionLimits::USER_GUIDANCE_CHARS,
+        )?;
+        let truncated = model_truncated || trace_truncated;
         if let Some(existing) = self.items.iter().find(|item| {
             matches!(
                 item,
@@ -2172,7 +2181,7 @@ impl ConversationTraceRecorder {
                     kind: existing_kind,
                     content: existing_content,
                     created_at: existing_created_at,
-                    ..
+                    truncated: existing_truncated,
                 } if *sequence == expected_sequence
                     && existing_receipt == receipt_id
                     && existing_message == message_id
@@ -2180,8 +2189,9 @@ impl ConversationTraceRecorder {
                     && existing_task_name == sender_task_name
                     && existing_task_path == sender_task_path
                     && *existing_kind == kind
-                    && existing_content == &expected_envelope
-                    && *existing_created_at == created_at =>
+                    && existing_content == &trace_content
+                    && *existing_created_at == created_at
+                    && *existing_truncated == truncated =>
                 {
                     Ok(None)
                 }
@@ -2202,8 +2212,6 @@ impl ConversationTraceRecorder {
                 "Agent mailbox delivery cannot split an unresolved tool exchange".to_string(),
             );
         }
-        let (content, sanitizer_truncated) = sanitize_text(&expected_envelope);
-        let truncated = envelope_truncated || sanitizer_truncated;
         self.items
             .push(ConversationTurnTraceItem::AgentMailboxDelivery {
                 sequence: expected_sequence,
@@ -2213,18 +2221,18 @@ impl ConversationTraceRecorder {
                 sender_task_name: sender_task_name.to_string(),
                 sender_task_path: sender_task_path.to_string(),
                 kind,
-                content: content.clone(),
+                content: trace_content,
                 created_at,
                 truncated,
             });
         self.record_model_message(
             expected_sequence,
             0,
-            &LlmMessage::text(crate::llm::LlmMessageRole::User, content.clone()),
+            &LlmMessage::text(crate::llm::LlmMessageRole::User, model_content.clone()),
         )?;
         self.next_sequence = self.next_sequence.saturating_add(1);
         self.truncated |= truncated;
-        Ok(Some(content))
+        Ok(Some(model_content))
     }
 
     pub(crate) fn next_sequence(&self) -> u64 {
@@ -3064,20 +3072,37 @@ fn sanitize_optional_text(value: Option<&str>) -> (Option<String>, bool) {
         .unwrap_or((None, false))
 }
 
-/// Canonical model-visible wrapper for a Host-authenticated collaboration fact. Keeping this in
-/// the shared trace layer guarantees the live Context, durable model log, and history replay use
-/// byte-identical identity framing while the Mailbox retains the original payload unchanged.
+/// Maximum size of the canonical model-visible wrapper for a Host-authenticated collaboration
+/// fact. The durable trace stores the same envelope shape at the smaller history budget while the
+/// Mailbox retains the original payload unchanged.
 pub(crate) const AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES: usize = 32 * 1_024;
 
-/// Produces the one canonical model-visible representation used by the live Runtime, durable
-/// trace, checkpoint/resume and history replay. The Mailbox payload remains untouched; only this
-/// projection is deterministically bounded.
+/// Produces the canonical model-visible representation used by the live Runtime, durable model
+/// log and checkpoint/resume. The durable trace uses the same encoder with its history budget.
 pub(crate) fn project_agent_mailbox_model_envelope(
     sender_agent_id: &str,
     sender_task_name: &str,
     sender_task_path: &str,
     kind: crate::AgentMailboxKind,
     payload: &str,
+) -> Result<(String, bool), String> {
+    project_agent_mailbox_envelope_with_budget(
+        sender_agent_id,
+        sender_task_name,
+        sender_task_path,
+        kind,
+        payload,
+        AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES,
+    )
+}
+
+fn project_agent_mailbox_envelope_with_budget(
+    sender_agent_id: &str,
+    sender_task_name: &str,
+    sender_task_path: &str,
+    kind: crate::AgentMailboxKind,
+    payload: &str,
+    maximum_bytes: usize,
 ) -> Result<(String, bool), String> {
     const SUFFIX: &str = "\n...[agent mailbox payload truncated]";
     let encode = |payload: &str, truncated: bool| {
@@ -3095,7 +3120,7 @@ pub(crate) fn project_agent_mailbox_model_envelope(
         .map_err(|error| format!("cannot encode Agent collaboration envelope: {error}"))
     };
     let full = encode(payload, false)?;
-    if full.len() <= AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES {
+    if full.len() <= maximum_bytes {
         return Ok((full, false));
     }
     let boundaries = std::iter::once(0)
@@ -3110,7 +3135,7 @@ pub(crate) fn project_agent_mailbox_model_envelope(
         let boundary = boundaries[middle];
         let projected = format!("{}{}", &payload[..boundary], SUFFIX);
         let encoded = encode(&projected, true)?;
-        if encoded.len() <= AGENT_MAILBOX_MODEL_ENVELOPE_MAX_BYTES {
+        if encoded.len() <= maximum_bytes {
             best = encoded;
             low = middle.saturating_add(1);
         } else if middle == 0 {
@@ -4667,5 +4692,56 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("...[agent mailbox payload truncated]"));
+    }
+
+    #[test]
+    fn large_collaboration_delivery_precommit_is_an_exact_terminal_trace_prefix() {
+        let mut recorder = ConversationTraceRecorder::default();
+        let model_content = recorder
+            .record_agent_mailbox_delivery(
+                0,
+                "receipt-large",
+                "message-large",
+                "agent-child",
+                "Child",
+                "/root/child",
+                crate::AgentMailboxKind::Result,
+                &"evidence ".repeat(3_000),
+                1,
+            )
+            .unwrap()
+            .unwrap();
+        let precommitted =
+            recorder
+                .snapshot()
+                .in_progress_trace("run", "conversation", "assistant");
+        let terminal = recorder.finish(
+            "run",
+            "conversation",
+            "assistant",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+
+        let ConversationTurnTraceItem::AgentMailboxDelivery {
+            content: trace_content,
+            truncated,
+            ..
+        } = &precommitted.items[0]
+        else {
+            panic!("expected Agent mailbox delivery");
+        };
+        assert!(model_content.len() > trace_content.len());
+        assert!(*truncated);
+        assert_eq!(
+            serde_json::from_str::<Value>(trace_content).unwrap()["payloadTruncated"],
+            true
+        );
+        assert_eq!(
+            recorder.snapshot().model_context_items[0].content,
+            model_content
+        );
+        assert_eq!(precommitted.items, terminal.items);
+        assert!(precommitted.truncated);
     }
 }

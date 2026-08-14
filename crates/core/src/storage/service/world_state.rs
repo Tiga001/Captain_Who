@@ -30,8 +30,25 @@ impl StorageService {
         conversation_id: &str,
     ) -> Result<Vec<world_state_repository::ConversationWorldStateJournalEntry>, String> {
         let connection = self.state.connection()?;
-        world_state_repository::list_active_journal_entries(&connection, conversation_id)
-            .map_err(|error| error.to_string())
+        let mut entries =
+            world_state_repository::list_active_journal_entries(&connection, conversation_id)
+                .map_err(|error| error.to_string())?;
+        let replacements = conversation_turn_rewrite_repository::replacement_message_ids_by_source(
+            &connection,
+            conversation_id,
+        )
+        .map_err(|error| error.to_string())?;
+        for entry in &mut entries {
+            if let Some(anchor) = entry.effective_before_message_id.as_deref() {
+                entry.effective_before_message_id = Some(
+                    conversation_turn_rewrite_repository::resolve_active_message_id(
+                        &replacements,
+                        anchor,
+                    )?,
+                );
+            }
+        }
+        Ok(entries)
     }
 
     pub fn get_conversation_world_state_head(
