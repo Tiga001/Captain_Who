@@ -195,6 +195,7 @@ describe('MCP lifecycle Renderer projection', () => {
     const generic = applyAgentEventToChatMessage(before, {
       type: 'tool_call',
       runId: RUN_ID,
+      traceSequence: 1,
       call: {
         id: CALL_ID,
         tool: 'model-visible-name-without-an-mcp-prefix',
@@ -331,6 +332,7 @@ describe('MCP lifecycle Renderer projection', () => {
     const withCall = applyAgentEventToChatMessage(approved, {
       type: 'tool_call',
       runId: RUN_ID,
+      traceSequence: 2,
       call: {
         id: CALL_ID,
         tool: 'model-visible-name-without-an-mcp-prefix',
@@ -492,6 +494,7 @@ describe('MCP lifecycle Renderer projection', () => {
     const generic = applyAgentEventToChatMessage(message(), {
       type: 'tool_call',
       runId: RUN_ID,
+      traceSequence: 0,
       call: {
         id: 'ordinary-tool-call',
         tool: 'mcp__spoofed__name',
@@ -505,9 +508,52 @@ describe('MCP lifecycle Renderer projection', () => {
     expect(generic.agentRun?.timeline).toContainEqual({
       id: 'tool-call-ordinary-tool-call',
       type: 'tool_call',
-      callId: 'ordinary-tool-call'
+      callId: 'ordinary-tool-call',
+      traceSequence: 0
     })
     expect(generic.agentRun?.mcpInvocations).toEqual([])
+  })
+
+  it('preserves the durable Tool trace sequence through approval projections', () => {
+    const announced = applyAgentEventToChatMessage(message(), {
+      type: 'tool_call',
+      runId: RUN_ID,
+      traceSequence: 9,
+      call: {
+        id: 'write-call',
+        tool: 'write_file',
+        args: { phase: 'finish', draftId: 'draft-1' },
+        approvalStatus: 'required',
+        reason: null
+      }
+    })
+    const waiting = applyAgentEventToChatMessage(announced, {
+      type: 'approval_required',
+      runId: RUN_ID,
+      action: {
+        type: 'file_write',
+        fileWrite: {
+          id: 'write-call',
+          draftId: 'draft-1',
+          mode: 'rewrite',
+          filePath: 'src/main.ts',
+          baseRevision: null,
+          summary: null,
+          additions: 1,
+          deletions: 0,
+          lineCount: 1,
+          byteCount: 12,
+          approvalStatus: 'required'
+        }
+      }
+    })
+
+    expect(waiting.agentRun?.timeline).toContainEqual({
+      id: 'tool-call-write-call',
+      type: 'tool_call',
+      callId: 'write-call',
+      traceSequence: 9
+    })
   })
 
   it('marks lifecycle events as durable conversation changes', () => {

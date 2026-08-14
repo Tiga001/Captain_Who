@@ -298,6 +298,8 @@ impl ContinuitySelector {
                 if matches!(
                     &**item,
                     ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                        | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                        | ConversationTurnTraceItem::RuntimeError { .. }
                 ) {
                     // Session lifecycle remains available in durable Trace/Exact History but is
                     // operational audit metadata, not semantic continuity evidence.
@@ -374,7 +376,9 @@ impl ContinuitySelector {
                         }
                         push_bounded(&mut self.recent, reference, MAX_RECENT_REFS);
                     }
-                    ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
+                    ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                    | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                    | ConversationTurnTraceItem::RuntimeError { .. } => {}
                 }
             }
         }

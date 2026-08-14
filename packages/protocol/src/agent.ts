@@ -387,6 +387,21 @@ export type ConversationTurnTraceItem =
       archiveProjectionTruncated?: boolean
       createdAt: number
     }
+  | {
+      type: 'context_compaction_lifecycle'
+      sequence: number
+      phase: 'started' | 'finished'
+      operationId: string
+      outcome?: AgentContextCompactionEventOutcome
+    }
+  | {
+      type: 'runtime_error'
+      sequence: number
+      message: string
+      recoverable: boolean
+      code?: string
+      truncated: boolean
+    }
 
 export interface ConversationTurnTrace {
   schemaVersion: number
@@ -1744,7 +1759,12 @@ export type AgentEvent =
   | { type: 'message_delta'; runId: string; streamId?: string; delta: string }
   | { type: 'message_stream_started'; runId: string; streamId: string; attempt: number }
   | { type: 'message_stream_reset'; runId: string; streamId: string; reason: string }
-  | { type: 'message_stream_committed'; runId: string; streamId: string }
+  | {
+      type: 'message_stream_committed'
+      runId: string
+      streamId: string
+      traceSequence: number | null
+    }
   | {
       type: 'llm_retry'
       runId: string
@@ -1807,7 +1827,7 @@ export type AgentEvent =
       message: string
       createdAt: number
     }
-  | { type: 'tool_call'; runId: string; call: AgentToolCall }
+  | { type: 'tool_call'; runId: string; traceSequence: number; call: AgentToolCall }
   | { type: 'tool_result'; runId: string; result: AgentToolResult }
   | {
       type: 'mcp_tool_invocation_state_changed'
@@ -1829,12 +1849,18 @@ export type AgentEvent =
       conversationId?: string
       snapshot: AgentContextWindowSnapshot
     }
-  | { type: 'context_compaction_started'; runId: string; operationId: string }
+  | {
+      type: 'context_compaction_started'
+      runId: string
+      operationId: string
+      traceSequence: number
+    }
   | {
       type: 'context_compaction_finished'
       runId: string
       operationId: string
       outcome: AgentContextCompactionEventOutcome
+      traceSequence: number
     }
   | { type: 'approval_required'; runId: string; action: AgentProposedAction }
   | { type: 'diff'; runId: string; diff: AgentDiffProposal }
@@ -1894,6 +1920,7 @@ export type AgentEvent =
   | {
       type: 'error'
       runId?: string
+      traceSequence: number | null
       message: string
       recoverable: boolean
       code?: string

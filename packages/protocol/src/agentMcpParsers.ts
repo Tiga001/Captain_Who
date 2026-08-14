@@ -61,6 +61,123 @@ const LLM_RETRY_CATEGORIES = [
  */
 export function parseAgentEventForHost(value: unknown): AgentEvent {
   const record = expectRecord(value, 'Agent event')
+  if (record.type === 'tool_call') {
+    const context = 'Agent ToolCall event'
+    expectOnlyKeys(record, ['type', 'runId', 'traceSequence', 'call'] as const, context)
+    const call = expectRecord(record.call, `${context}.call`)
+    expectOnlyKeys(
+      call,
+      ['id', 'tool', 'args', 'approvalStatus', 'reason'] as const,
+      `${context}.call`
+    )
+    if (!Object.hasOwn(call, 'reason')) {
+      throw invalidProtocolValue(`${context}.call`, 'reason is required')
+    }
+    return {
+      type: 'tool_call',
+      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+      traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
+      call: {
+        id: expectModelToolCallId(call.id, `${context}.call.id`),
+        tool: expectBoundedNonEmptyString(call.tool, `${context}.call.tool`, 256),
+        args: call.args,
+        approvalStatus: expectEnum(
+          call.approvalStatus,
+          ['not_required', 'required', 'approved', 'rejected'] as const,
+          `${context}.call.approvalStatus`
+        ),
+        reason:
+          call.reason === null
+            ? null
+            : expectDisplayText(call.reason, `${context}.call.reason`, 4096)
+      }
+    }
+  }
+  if (record.type === 'message_stream_committed') {
+    const context = 'Agent message stream committed event'
+    expectOnlyKeys(record, ['type', 'runId', 'streamId', 'traceSequence'] as const, context)
+    return {
+      type: 'message_stream_committed',
+      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+      streamId: expectBoundedNonEmptyString(record.streamId, `${context}.streamId`, 2048),
+      traceSequence:
+        record.traceSequence === null
+          ? null
+          : expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
+    }
+  }
+  if (record.type === 'context_compaction_started') {
+    const context = 'Agent context compaction started event'
+    expectOnlyKeys(record, ['type', 'runId', 'operationId', 'traceSequence'] as const, context)
+    return {
+      type: 'context_compaction_started',
+      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+      operationId: expectOpaqueRunId(record.operationId, `${context}.operationId`),
+      traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
+    }
+  }
+  if (record.type === 'context_compaction_finished') {
+    const context = 'Agent context compaction finished event'
+    expectOnlyKeys(
+      record,
+      ['type', 'runId', 'operationId', 'outcome', 'traceSequence'] as const,
+      context
+    )
+    return {
+      type: 'context_compaction_finished',
+      runId: expectOpaqueRunId(record.runId, `${context}.runId`),
+      operationId: expectOpaqueRunId(record.operationId, `${context}.operationId`),
+      outcome: expectEnum(
+        record.outcome,
+        ['applied', 'skipped', 'failed', 'cancelled'] as const,
+        `${context}.outcome`
+      ),
+      traceSequence: expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0)
+    }
+  }
+  if (record.type === 'error') {
+    const context = 'Agent error event'
+    expectOnlyKeys(
+      record,
+      ['type', 'runId', 'traceSequence', 'message', 'recoverable', 'code', 'details'] as const,
+      context
+    )
+    const runId =
+      record.runId === null || record.runId === undefined
+        ? undefined
+        : expectOpaqueRunId(record.runId, `${context}.runId`)
+    const code =
+      record.code === undefined
+        ? undefined
+        : expectBoundedNonEmptyString(record.code, `${context}.code`, 128)
+    if (record.details !== undefined) {
+      let encoded: string
+      try {
+        encoded = JSON.stringify(record.details)
+      } catch {
+        throw invalidProtocolValue(`${context}.details`, 'must be JSON encodable')
+      }
+      if (new TextEncoder().encode(encoded).byteLength > MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES) {
+        throw invalidProtocolValue(`${context}.details`, 'exceeded the Renderer-safe byte limit')
+      }
+    }
+    return {
+      type: 'error',
+      ...(runId === undefined ? {} : { runId }),
+      traceSequence:
+        record.traceSequence === null
+          ? null
+          : expectSafeInteger(record.traceSequence, `${context}.traceSequence`, 0),
+      message: expectBoundedString(
+        record.message,
+        `${context}.message`,
+        MAX_RENDERER_SAFE_AGENT_CONTENT_BYTES
+      ),
+      recoverable: expectBoolean(record.recoverable, `${context}.recoverable`),
+      ...(code === undefined ? {} : { code }),
+      ...(record.details === undefined ? {} : { details: record.details })
+    }
+  }
   if (record.type === 'llm_retry') {
     return parseAgentLlmRetryEvent(record)
   }

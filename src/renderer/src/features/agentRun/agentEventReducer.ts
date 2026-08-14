@@ -960,7 +960,15 @@ export function removeGuidanceFromChatMessage(
   }
 }
 
-function appendToolCallToTimeline(run: ChatAgentRunView, callId: string): ChatAgentTimelineItem[] {
+function appendToolCallToTimeline(
+  run: ChatAgentRunView,
+  callId: string,
+  traceSequence?: number
+): ChatAgentTimelineItem[] {
+  const existingTraceSequence = run.timeline.find(
+    (item) => item.type === 'tool_call' && item.callId === callId
+  )?.traceSequence
+  const stableTraceSequence = traceSequence ?? existingTraceSequence
   return appendTimelineItem(
     {
       ...run,
@@ -969,7 +977,8 @@ function appendToolCallToTimeline(run: ChatAgentRunView, callId: string): ChatAg
     {
       id: `tool-call-${callId}`,
       type: 'tool_call',
-      callId
+      callId,
+      ...(stableTraceSequence === undefined ? {} : { traceSequence: stableTraceSequence })
     }
   )
 }
@@ -980,7 +989,8 @@ function contextCompactionTimelineId(operationId: string) {
 
 function startContextCompaction(
   run: ChatAgentRunView,
-  operationId: string
+  operationId: string,
+  traceSequence: number
 ): ChatAgentTimelineItem[] {
   const id = contextCompactionTimelineId(operationId)
   if (run.timeline.some((item) => item.id === id)) return run.timeline
@@ -989,20 +999,23 @@ function startContextCompaction(
     id,
     type: 'context_compaction',
     operationId,
-    status: 'running'
+    status: 'running',
+    traceSequence
   })
 }
 
 function finishContextCompaction(
   run: ChatAgentRunView,
   operationId: string,
-  status: Extract<ChatAgentTimelineItem, { type: 'context_compaction' }>['status']
+  status: Extract<ChatAgentTimelineItem, { type: 'context_compaction' }>['status'],
+  traceSequence: number
 ): ChatAgentTimelineItem[] {
   return appendTimelineItem(run, {
     id: contextCompactionTimelineId(operationId),
     type: 'context_compaction',
     operationId,
-    status
+    status,
+    traceSequence
   })
 }
 
@@ -1170,12 +1183,21 @@ export function applyAgentEventToChatMessage(
   if (agentEvent.type === 'message_stream_committed') {
     const nextCheckpoints = { ...currentRun.messageStreamCheckpoints }
     delete nextCheckpoints[agentEvent.streamId]
+    const timeline =
+      agentEvent.traceSequence === null
+        ? currentRun.timeline
+        : currentRun.timeline.map((item) =>
+            item.type === 'message' && item.streamId === agentEvent.streamId
+              ? { ...item, traceSequence: agentEvent.traceSequence ?? undefined }
+              : item
+          )
     return {
       ...message,
       agentRun: {
         ...currentRun,
         llmRetry: undefined,
-        messageStreamCheckpoints: nextCheckpoints
+        messageStreamCheckpoints: nextCheckpoints,
+        timeline
       }
     }
   }
@@ -1225,7 +1247,11 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'running',
-        timeline: startContextCompaction(currentRun, agentEvent.operationId)
+        timeline: startContextCompaction(
+          currentRun,
+          agentEvent.operationId,
+          agentEvent.traceSequence
+        )
       }
     }
   }
@@ -1235,7 +1261,12 @@ export function applyAgentEventToChatMessage(
       ...message,
       agentRun: {
         ...currentRun,
-        timeline: finishContextCompaction(currentRun, agentEvent.operationId, agentEvent.outcome)
+        timeline: finishContextCompaction(
+          currentRun,
+          agentEvent.operationId,
+          agentEvent.outcome,
+          agentEvent.traceSequence
+        )
       }
     }
   }
@@ -1332,7 +1363,11 @@ export function applyAgentEventToChatMessage(
         toolCalls: upsertById(currentRun.toolCalls, agentEvent.call, (call) => call.id),
         webSearchActivities: upsertWebSearchActivityFromCall(currentRun, agentEvent.call),
         readActivities: upsertReadActivityFromCall(currentRun, agentEvent.call),
-        timeline: appendToolCallToTimeline(runWithCleanTimeline, agentEvent.call.id)
+        timeline: appendToolCallToTimeline(
+          runWithCleanTimeline,
+          agentEvent.call.id,
+          agentEvent.traceSequence
+        )
       }
     }
   }
@@ -1685,9 +1720,13 @@ export function applyAgentEventToChatMessage(
         error: agentEvent.message,
         llmRetry: undefined,
         timeline: appendTimelineItem(currentRun, {
-          id: `error-${currentRun.timeline.length + 1}`,
+          id:
+            agentEvent.traceSequence === null
+              ? `error-${currentRun.timeline.length + 1}`
+              : `trace-error-${agentEvent.traceSequence}`,
           type: 'error',
-          message: agentEvent.message
+          message: agentEvent.message,
+          ...(agentEvent.traceSequence === null ? {} : { traceSequence: agentEvent.traceSequence })
         })
       },
       nextStatus

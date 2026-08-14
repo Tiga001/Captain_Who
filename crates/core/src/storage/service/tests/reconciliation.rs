@@ -79,7 +79,9 @@ fn current_model_context_for_trace(
                 tool_calls: Vec::new(),
                 is_error: !success,
             }),
-            ConversationTurnTraceItem::CommandSessionLifecycle { .. } => None,
+            ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+            | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+            | ConversationTurnTraceItem::RuntimeError { .. } => None,
         })
         .collect()
 }
@@ -1117,6 +1119,7 @@ fn startup_reconciliation_finishes_committed_mcp_rejection_without_replay() {
     assert_eq!(run["mcpInvocations"][0]["state"], "rejected");
     assert_eq!(run["mcpInvocations"][0]["outcome"], "rejected");
     assert_eq!(run["timeline"][0]["type"], "mcp_tool_call");
+    assert_eq!(run["timeline"][0]["traceSequence"], 0);
 
     assert!(service
         .reconcile_interrupted_pending_agent_actions(43)

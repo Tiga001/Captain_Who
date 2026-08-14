@@ -1284,38 +1284,43 @@ function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undefined {
   }
   if (
     value.type === 'message' &&
-    hasExactKeys(value, ['id', 'type', 'content'], ['streamId']) &&
+    hasExactKeys(value, ['id', 'type', 'content'], ['streamId', 'traceSequence']) &&
     isBoundedString(value.content, 4 * 1024 * 1024, true) &&
-    isOptionalBoundedString(value, 'streamId', 1024)
+    isOptionalBoundedString(value, 'streamId', 1024) &&
+    isOptionalSafeInteger(value, 'traceSequence')
   ) {
     return value as unknown as ChatAgentTimelineItem
   }
   if (
     value.type === 'tool_call' &&
-    hasExactKeys(value, ['id', 'type', 'callId']) &&
-    isBoundedString(value.callId, 1024)
+    hasExactKeys(value, ['id', 'type', 'callId'], ['traceSequence']) &&
+    isBoundedString(value.callId, 1024) &&
+    isOptionalSafeInteger(value, 'traceSequence')
   ) {
     return value as unknown as ChatAgentTimelineItem
   }
   if (
     value.type === 'mcp_tool_call' &&
-    hasExactKeys(value, ['id', 'type', 'invocationId']) &&
-    isBoundedString(value.invocationId, 1024)
+    hasExactKeys(value, ['id', 'type', 'invocationId'], ['traceSequence']) &&
+    isBoundedString(value.invocationId, 1024) &&
+    isOptionalSafeInteger(value, 'traceSequence')
   ) {
     return value as unknown as ChatAgentTimelineItem
   }
   if (
     value.type === 'context_compaction' &&
-    hasExactKeys(value, ['id', 'type', 'operationId', 'status']) &&
+    hasExactKeys(value, ['id', 'type', 'operationId', 'status'], ['traceSequence']) &&
     isBoundedString(value.operationId, 1024) &&
-    ['running', 'applied', 'skipped', 'failed', 'cancelled'].includes(value.status as string)
+    ['running', 'applied', 'skipped', 'failed', 'cancelled'].includes(value.status as string) &&
+    isOptionalSafeInteger(value, 'traceSequence')
   ) {
     return value as unknown as ChatAgentTimelineItem
   }
   if (
     value.type === 'error' &&
-    hasExactKeys(value, ['id', 'type', 'message']) &&
-    isBoundedString(value.message, 128 * 1024, true)
+    hasExactKeys(value, ['id', 'type', 'message'], ['traceSequence']) &&
+    isBoundedString(value.message, 128 * 1024, true) &&
+    isOptionalSafeInteger(value, 'traceSequence')
   ) {
     return value as unknown as ChatAgentTimelineItem
   }
@@ -1324,7 +1329,7 @@ function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undefined {
     hasExactKeys(
       value,
       ['id', 'type', 'clientMessageId', 'content', 'attachments', 'status', 'createdAt'],
-      ['guidanceId', 'rejectionCode', 'error', 'recoverable', 'sequence']
+      ['guidanceId', 'rejectionCode', 'error', 'recoverable', 'sequence', 'traceSequence']
     ) &&
     isBoundedString(value.clientMessageId, 1024) &&
     isBoundedString(value.content, 4 * 1024 * 1024, true) &&
@@ -1335,7 +1340,8 @@ function parseTimelineItem(value: unknown): ChatAgentTimelineItem | undefined {
     isOptionalBoundedString(value, 'rejectionCode', 1024) &&
     isOptionalBoundedString(value, 'error', 128 * 1024, true) &&
     (!hasOwn(value, 'recoverable') || typeof value.recoverable === 'boolean') &&
-    isOptionalSafeInteger(value, 'sequence')
+    isOptionalSafeInteger(value, 'sequence') &&
+    isOptionalSafeInteger(value, 'traceSequence')
   ) {
     return value as unknown as ChatAgentTimelineItem
   }

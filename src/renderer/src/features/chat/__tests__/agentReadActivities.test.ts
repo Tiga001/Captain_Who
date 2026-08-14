@@ -32,6 +32,7 @@ function reduceReadImageResult(result: AgentToolResult) {
   const called = applyAgentEventToChatMessage(assistantMessage(), {
     type: 'tool_call',
     runId: 'run-1',
+    traceSequence: 0,
     call
   })
   return applyAgentEventToChatMessage(called, {

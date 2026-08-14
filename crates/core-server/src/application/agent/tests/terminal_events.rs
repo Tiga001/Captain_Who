@@ -2428,6 +2428,7 @@ fn terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit() {
     assert!(gate
         .route(AgentEvent::Error {
             run_id: Some("run-terminal-error-gate".to_string()),
+            trace_sequence: None,
             message: "terminal model failure".to_string(),
             recoverable: false,
             code: Some("terminal_model_failure".to_string()),
@@ -2437,6 +2438,7 @@ fn terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit() {
     assert!(matches!(
         gate.route(AgentEvent::Error {
             run_id: Some("run-terminal-error-gate".to_string()),
+            trace_sequence: None,
             message: "retryable persistence failure".to_string(),
             recoverable: true,
             code: Some("persistence_failure".to_string()),
@@ -2456,6 +2458,108 @@ fn terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit() {
             ..
         }
     )));
+}
+
+#[test]
+fn runtime_terminal_error_keeps_its_durable_trace_sequence_across_commit_and_reload() {
+    let fixture = tempdir().unwrap();
+    let database_path = fixture.path().join("runtime-error-sequence.sqlite");
+    let storage = Arc::new(StorageService::open(&database_path).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let conversation_id = "conversation-runtime-error-sequence";
+    let assistant_message_id = "assistant-runtime-error-sequence";
+    let run_id = "run-runtime-error-sequence";
+    let message = "tool iteration limit reached";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("test-model".to_string()),
+            title: "Runtime error trace sequence".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: mycopilot_core::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::Failed,
+        terminal_error: Some(message.to_string()),
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::RuntimeError {
+            sequence: 0,
+            message: message.to_string(),
+            recoverable: false,
+            code: Some("iteration_limit".to_string()),
+            truncated: false,
+        }],
+    };
+    let gate = AgentTerminalEventGate::default();
+    assert!(gate
+        .route(AgentEvent::Error {
+            run_id: Some(run_id.to_string()),
+            trace_sequence: Some(0),
+            message: message.to_string(),
+            recoverable: false,
+            code: Some("iteration_limit".to_string()),
+            details: None,
+        })
+        .is_none());
+
+    service
+        .persist_assistant_error(conversation_id, assistant_message_id, message, None, &trace)
+        .unwrap();
+    let released = gate
+        .take_error_after_persistence()
+        .expect("durable Runtime error should be released after commit");
+    assert!(matches!(
+        released,
+        AgentEvent::Error {
+            trace_sequence: Some(0),
+            recoverable: false,
+            ..
+        }
+    ));
+    assert!(gate.take_error_after_persistence().is_none());
+    drop(service);
+    drop(storage);
+
+    let reopened = StorageService::open(&database_path).unwrap();
+    let conversation = reopened
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap();
+    let run: Value = serde_json::from_str(
+        conversation.messages[0]
+            .agent_run_json
+            .as_deref()
+            .expect("failed trace should rebuild the observer run"),
+    )
+    .unwrap();
+    assert_eq!(
+        run["timeline"],
+        json!([{
+            "id": "trace-error-0",
+            "type": "error",
+            "message": message,
+            "traceSequence": 0
+        }])
+    );
 }
 
 #[test]

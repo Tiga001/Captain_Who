@@ -1,6 +1,6 @@
 .collaboration-timeline {
   display: grid;
-  gap: 8px;
+  gap: 6px;
   margin: 10px 0 14px;
   min-width: 0;
   padding: 0 4px;
@@ -20,46 +20,62 @@
   display: flex;
   flex-wrap: wrap;
   font-size: var(--mc-font-size-chat-activity);
-  gap: 6px;
+  gap: 4px 5px;
+  line-height: var(--mc-line-height-relaxed);
+  max-width: 100%;
   min-width: 0;
 }
 
 .collaboration-timeline__chips {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
+  /* Let the status participate in the same wrapping flow as every chip. A narrow row can wrap
+     naturally without forcing status text onto a detached full-width line. */
+  display: contents;
 }
 
 .collaboration-timeline__chip {
   align-items: center;
-  background: color-mix(in srgb, var(--mc-color-text-accent) 9%, transparent);
-  border: 1px solid
-    color-mix(in srgb, var(--mc-color-text-accent) 24%, var(--mc-color-border-subtle));
+  background: color-mix(in srgb, var(--mc-color-surface-muted) 76%, transparent);
+  border: 1px solid var(--mc-color-border-hairline);
   border-radius: 999px;
-  color: var(--mc-color-text-primary);
+  color: var(--mc-color-text-secondary);
   cursor: pointer;
   display: inline-flex;
   font: inherit;
-  gap: 5px;
-  max-width: min(240px, 100%);
+  gap: 4px;
+  max-width: min(220px, 100%);
+  min-height: 24px;
   min-width: 0;
-  padding: 3px 8px;
+  padding: 2px 7px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 .collaboration-timeline__chip:hover {
-  background: color-mix(in srgb, var(--mc-color-text-accent) 15%, transparent);
+  background: var(--mc-color-state-hover);
+  border-color: var(--mc-color-border-default);
+  color: var(--mc-color-text-primary);
 }
 
 .collaboration-timeline__chip:focus-visible {
+  background: var(--mc-color-state-hover);
+  border-color: var(--mc-color-border-default);
+  color: var(--mc-color-text-primary);
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
 }
 
 .collaboration-timeline__chip svg {
+  color: var(--mc-color-icon-muted);
   flex: 0 0 auto;
   height: 13px;
   width: 13px;
+}
+
+.collaboration-timeline__chip:hover svg,
+.collaboration-timeline__chip:focus-visible svg {
+  color: currentColor;
 }
 
 .collaboration-timeline__chip span {
@@ -68,37 +84,27 @@
   white-space: nowrap;
 }
 
-.collaboration-timeline__status[data-tone='started'],
-.collaboration-timeline__status[data-tone='updated'] {
-  color: var(--mc-color-text-accent);
+.collaboration-timeline__status {
+  color: var(--mc-color-text-secondary);
+  white-space: nowrap;
 }
 
 .collaboration-timeline__status[data-tone='waiting_approval'] {
-  color: var(--mc-color-text-accent);
-}
-
-.collaboration-timeline__status[data-tone='completed'] {
-  color: var(--mc-color-status-success-text);
+  color: var(--mc-color-text-primary);
 }
 
 .collaboration-timeline__status[data-tone='failed'] {
   color: var(--mc-color-text-danger);
 }
 
-.collaboration-timeline__status[data-tone='interrupted'] {
-  color: var(--mc-color-text-muted);
+@media (max-width: 520px) {
+  .collaboration-timeline__activity {
+    align-items: center;
+  }
 }
 
-@media (max-width: 520px) {
-  .collaboration-timeline {
-    padding-inline: 0;
-  }
-
-  .collaboration-timeline__activity {
-    align-items: flex-start;
-  }
-
-  .collaboration-timeline__chips {
-    flex-basis: 100%;
+@media (prefers-reduced-motion: reduce) {
+  .collaboration-timeline__chip {
+    transition: none;
   }
 }

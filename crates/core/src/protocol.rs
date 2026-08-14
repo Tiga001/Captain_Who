@@ -2732,6 +2732,8 @@ pub enum AgentEvent {
     MessageStreamCommitted {
         run_id: String,
         stream_id: String,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        trace_sequence: Option<u64>,
     },
     LlmRetry {
         run_id: String,
@@ -2800,6 +2802,7 @@ pub enum AgentEvent {
     /// `McpToolInvocationStateChanged`; they are never duplicated here.
     ToolCall {
         run_id: String,
+        trace_sequence: u64,
         call: AgentToolCall,
     },
     /// Generic built-in or Runtime Extension Tool result.
@@ -2837,11 +2840,13 @@ pub enum AgentEvent {
     ContextCompactionStarted {
         run_id: String,
         operation_id: String,
+        trace_sequence: u64,
     },
     ContextCompactionFinished {
         run_id: String,
         operation_id: String,
         outcome: AgentContextCompactionEventOutcome,
+        trace_sequence: u64,
     },
     ApprovalRequired {
         run_id: String,
@@ -2908,6 +2913,8 @@ pub enum AgentEvent {
     },
     Error {
         run_id: Option<String>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        trace_sequence: Option<u64>,
         message: String,
         recoverable: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2931,7 +2938,7 @@ pub enum AgentEvent {
     },
 }
 
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentContextCompactionEventOutcome {
     Applied,
@@ -3127,8 +3134,14 @@ mod tests {
             stream_id: Some("stream-contract-v1".to_string()),
             delta: "hello".to_string(),
         };
+        let message_stream_committed = AgentEvent::MessageStreamCommitted {
+            run_id: "run-contract-v1".to_string(),
+            stream_id: "stream-contract-v1".to_string(),
+            trace_sequence: Some(3),
+        };
         let tool_call = AgentEvent::ToolCall {
             run_id: "run-contract-v1".to_string(),
+            trace_sequence: 4,
             call: AgentToolCall {
                 id: "call-contract-v1".to_string(),
                 tool: "read_file".to_string(),
@@ -3207,6 +3220,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(message_delta).unwrap(),
             events["messageDelta"]
+        );
+        assert_eq!(
+            serde_json::to_value(message_stream_committed).unwrap(),
+            events["messageStreamCommitted"]
         );
         assert_eq!(serde_json::to_value(tool_call).unwrap(), events["toolCall"]);
         assert_eq!(
@@ -3734,20 +3751,63 @@ mod tests {
         let started = serde_json::to_value(AgentEvent::ContextCompactionStarted {
             run_id: "run-1".to_string(),
             operation_id: "compaction-1".to_string(),
+            trace_sequence: 7,
         })
         .unwrap();
         let finished = serde_json::to_value(AgentEvent::ContextCompactionFinished {
             run_id: "run-1".to_string(),
             operation_id: "compaction-1".to_string(),
             outcome: AgentContextCompactionEventOutcome::Applied,
+            trace_sequence: 7,
         })
         .unwrap();
 
         assert_eq!(started["type"], "context_compaction_started");
         assert_eq!(started["operationId"], "compaction-1");
+        assert_eq!(started["traceSequence"], 7);
         assert_eq!(finished["type"], "context_compaction_finished");
         assert_eq!(finished["operationId"], started["operationId"]);
         assert_eq!(finished["outcome"], "applied");
+        assert_eq!(finished["traceSequence"], started["traceSequence"]);
+    }
+
+    #[test]
+    fn sequenced_presentation_events_serialize_required_trace_fields() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../packages/protocol/fixtures/agent-contract-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["events"]["toolCall"]["traceSequence"], 4);
+        assert_eq!(
+            fixture["events"]["messageStreamCommitted"]["traceSequence"],
+            3
+        );
+
+        let stream_without_narration = serde_json::to_value(AgentEvent::MessageStreamCommitted {
+            run_id: "run-1".to_string(),
+            stream_id: "stream-1".to_string(),
+            trace_sequence: None,
+        })
+        .unwrap();
+        let unanchored_error = serde_json::to_value(AgentEvent::Error {
+            run_id: Some("run-1".to_string()),
+            trace_sequence: None,
+            message: "failed".to_string(),
+            recoverable: false,
+            code: None,
+            details: None,
+        })
+        .unwrap();
+        assert!(stream_without_narration
+            .as_object()
+            .unwrap()
+            .contains_key("traceSequence"));
+        assert!(stream_without_narration["traceSequence"].is_null());
+        assert!(unanchored_error
+            .as_object()
+            .unwrap()
+            .contains_key("traceSequence"));
+        assert!(unanchored_error["traceSequence"].is_null());
     }
 
     #[test]

@@ -39,9 +39,16 @@ const events: Record<string, AgentEvent> = {
     streamId: 'stream-contract-v1',
     delta: 'hello'
   },
+  messageStreamCommitted: {
+    type: 'message_stream_committed',
+    runId: 'run-contract-v1',
+    streamId: 'stream-contract-v1',
+    traceSequence: 3
+  },
   toolCall: {
     type: 'tool_call',
     runId: 'run-contract-v1',
+    traceSequence: 4,
     call: {
       id: 'call-contract-v1',
       tool: 'read_file',

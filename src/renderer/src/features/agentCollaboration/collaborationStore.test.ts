@@ -67,9 +67,10 @@ function activityEvent(
     ...event(rootConversationId, sequence, outerAgentId),
     kind,
     activity: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       agentId,
       rootAnchorMessageId: null,
+      rootTraceBoundarySequence: null,
       semantic,
       taskNameSnapshot
     }

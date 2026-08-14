@@ -13,6 +13,7 @@ export interface CollaborationTimelineActivity {
   agentId: string
   occurredAt: number
   rootAnchorMessageId: string | null
+  rootTraceBoundarySequence: number | null
   runId: string | null
   semantic: CollaborationActivitySemantic
   sequence: number
@@ -23,6 +24,7 @@ export interface CollaborationTimelineActivity {
 export interface CollaborationTimelineActivityGroup {
   activities: readonly CollaborationTimelineActivity[]
   rootAnchorMessageId: string | null
+  rootTraceBoundarySequence: number | null
   semantic: CollaborationActivitySemantic
 }
 
@@ -43,7 +45,8 @@ function canMerge(
   if (!previous) return false
   if (
     group.semantic !== activity.semantic ||
-    group.rootAnchorMessageId !== activity.rootAnchorMessageId
+    group.rootAnchorMessageId !== activity.rootAnchorMessageId ||
+    group.rootTraceBoundarySequence !== activity.rootTraceBoundarySequence
   ) {
     return false
   }
@@ -90,6 +93,7 @@ export function groupCollaborationTimelineActivities(
     groups.push({
       activities: [activity],
       rootAnchorMessageId: activity.rootAnchorMessageId,
+      rootTraceBoundarySequence: activity.rootTraceBoundarySequence,
       semantic: activity.semantic
     })
   }

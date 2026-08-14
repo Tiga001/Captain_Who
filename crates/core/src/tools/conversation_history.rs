@@ -1257,7 +1257,9 @@ fn build_history_turns(
             for item in &trace.items {
                 match item {
                     ConversationTurnTraceItem::AssistantNarration { .. }
-                    | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
+                    | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                    | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                    | ConversationTurnTraceItem::RuntimeError { .. } => {}
                     ConversationTurnTraceItem::UserGuidance {
                         content,
                         attachments: guidance_attachments,

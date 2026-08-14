@@ -110,6 +110,92 @@ const resultSizeSummary = {
   omittedEncodedBytes: 128
 } as const
 
+describe('durable presentation trace ordering contract', () => {
+  it('strictly parses required Tool, narration, compaction, and Runtime error sequence fields', () => {
+    const toolCall = {
+      type: 'tool_call',
+      runId: 'run-trace',
+      traceSequence: 4,
+      call: {
+        id: callId,
+        tool: 'read_file',
+        args: { path: 'README.md' },
+        approvalStatus: 'not_required',
+        reason: null
+      }
+    }
+    expect(parseAgentEventForHost(toolCall)).toEqual(toolCall)
+    expect(
+      parseAgentEventForHost({
+        type: 'message_stream_committed',
+        runId: 'run-trace',
+        streamId: 'stream-trace',
+        traceSequence: null
+      })
+    ).toMatchObject({ type: 'message_stream_committed', traceSequence: null })
+    expect(
+      parseAgentEventForHost({
+        type: 'context_compaction_started',
+        runId: 'run-trace',
+        operationId: 'compact-1',
+        traceSequence: 5
+      })
+    ).toMatchObject({ type: 'context_compaction_started', traceSequence: 5 })
+    expect(
+      parseAgentEventForHost({
+        type: 'context_compaction_finished',
+        runId: 'run-trace',
+        operationId: 'compact-1',
+        outcome: 'applied',
+        traceSequence: 5
+      })
+    ).toMatchObject({ type: 'context_compaction_finished', traceSequence: 5 })
+    expect(
+      parseAgentEventForHost({
+        type: 'error',
+        runId: 'run-trace',
+        traceSequence: 6,
+        message: 'stopped',
+        recoverable: false
+      })
+    ).toMatchObject({ type: 'error', traceSequence: 6 })
+
+    for (const event of [
+      toolCall,
+      {
+        type: 'message_stream_committed',
+        runId: 'run-trace',
+        streamId: 'stream-trace',
+        traceSequence: 3
+      },
+      {
+        type: 'context_compaction_started',
+        runId: 'run-trace',
+        operationId: 'compact-1',
+        traceSequence: 5
+      },
+      {
+        type: 'context_compaction_finished',
+        runId: 'run-trace',
+        operationId: 'compact-1',
+        outcome: 'applied',
+        traceSequence: 5
+      },
+      {
+        type: 'error',
+        runId: 'run-trace',
+        traceSequence: null,
+        message: 'stopped',
+        recoverable: false
+      }
+    ]) {
+      const missing = { ...event } as Record<string, unknown>
+      delete missing.traceSequence
+      expect(() => parseAgentEventForHost(missing)).toThrow(/traceSequence/)
+    }
+  })
+})
+
 describe('current LLM retry Host contract', () => {
   it('keeps the complete structured retry metadata', () => {
     const parsed = parseAgentEventForHost({

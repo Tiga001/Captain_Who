@@ -1414,6 +1414,13 @@ fn project_guidance_timeline(
         .remove("timeline")
         .and_then(|value| value.as_array().cloned())
         .ok_or_else(|| "current AgentRun timeline must be an array".to_string())?;
+    let terminal_trace_error = trace.and_then(|trace| {
+        trace
+            .terminal_status
+            .is_terminal()
+            .then_some(trace.terminal_error.as_deref())
+            .flatten()
+    });
     let presentation_only_items = existing_timeline
         .into_iter()
         .filter(|item| {
@@ -1424,6 +1431,15 @@ fn project_guidance_timeline(
                 (Some("tool_call"), Some(id)) => id.starts_with("tool-call-"),
                 (Some("user_guidance"), Some(id)) => id.starts_with("user-guidance-"),
                 (Some("mcp_tool_call"), Some(id)) => id.starts_with("mcp-invocation-"),
+                (Some("context_compaction"), Some(id)) => id.starts_with("context-compaction-"),
+                (Some("error"), Some(id)) => {
+                    id.starts_with("trace-error-")
+                        || id == "terminal-error"
+                        || terminal_trace_error.is_some_and(|terminal_error| {
+                            item.get("message").and_then(serde_json::Value::as_str)
+                                == Some(terminal_error)
+                        })
+                }
                 _ => false,
             };
             !backend_owned
@@ -1462,6 +1478,7 @@ fn project_guidance_timeline(
         .collect::<HashSet<_>>();
 
     if let Some(trace) = trace {
+        let mut emitted_terminal_error = false;
         run.insert("runId".to_string(), trace.run_id.clone().into());
         match trace.terminal_status {
             crate::ConversationTurnTraceTerminalStatus::InProgress => {}
@@ -1489,6 +1506,7 @@ fn project_guidance_timeline(
                     "id": format!("trace-message-{sequence}"),
                     "type": "message",
                     "content": content,
+                    "traceSequence": sequence,
                 })),
                 ConversationTurnTraceItem::UserGuidance {
                     sequence,
@@ -1510,6 +1528,7 @@ fn project_guidance_timeline(
                     "sequence": sequence,
                 })),
                 ConversationTurnTraceItem::ToolCall {
+                    sequence,
                     call_id,
                     tool,
                     operation,
@@ -1522,6 +1541,7 @@ fn project_guidance_timeline(
                                 "id": format!("mcp-invocation-{invocation_id}"),
                                 "type": "mcp_tool_call",
                                 "invocationId": invocation_id,
+                                "traceSequence": sequence,
                             }));
                         }
                     } else {
@@ -1538,6 +1558,7 @@ fn project_guidance_timeline(
                             "id": format!("tool-call-{call_id}"),
                             "type": "tool_call",
                             "callId": call_id,
+                            "traceSequence": sequence,
                         }));
                     }
                 }
@@ -1586,9 +1607,65 @@ fn project_guidance_timeline(
                         tool_results.push(projected);
                     }
                 }
+                ConversationTurnTraceItem::ContextCompactionLifecycle {
+                    sequence,
+                    phase,
+                    operation_id,
+                    outcome,
+                } => match phase {
+                    crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Started => {
+                        timeline.push(serde_json::json!({
+                            "id": format!("context-compaction-{operation_id}"),
+                            "type": "context_compaction",
+                            "operationId": operation_id,
+                            "status": "running",
+                            "traceSequence": sequence,
+                        }));
+                    }
+                    crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Finished => {
+                        let status = match outcome.expect("validated compaction finish has outcome") {
+                            crate::protocol::AgentContextCompactionEventOutcome::Applied => "applied",
+                            crate::protocol::AgentContextCompactionEventOutcome::Skipped => "skipped",
+                            crate::protocol::AgentContextCompactionEventOutcome::Failed => "failed",
+                            crate::protocol::AgentContextCompactionEventOutcome::Cancelled => "cancelled",
+                        };
+                        if let Some(existing) = timeline.iter_mut().find(|item| {
+                            item.get("type").and_then(serde_json::Value::as_str)
+                                == Some("context_compaction")
+                                && item.get("operationId").and_then(serde_json::Value::as_str)
+                                    == Some(operation_id.as_str())
+                        }) {
+                            existing["status"] = status.into();
+                        }
+                    }
+                },
+                ConversationTurnTraceItem::RuntimeError {
+                    sequence, message, ..
+                } => {
+                    emitted_terminal_error |= trace.terminal_error.as_deref() == Some(message);
+                    timeline.push(serde_json::json!({
+                        "id": format!("trace-error-{sequence}"),
+                        "type": "error",
+                        "message": message,
+                        "traceSequence": sequence,
+                    }));
+                }
                 ConversationTurnTraceItem::AgentMailboxDelivery { .. }
                 | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
             }
+        }
+        if let Some(terminal_error) = trace
+            .terminal_status
+            .is_terminal()
+            .then_some(trace.terminal_error.as_deref())
+            .flatten()
+            .filter(|_| !emitted_terminal_error)
+        {
+            timeline.push(serde_json::json!({
+                "id": "terminal-error",
+                "type": "error",
+                "message": terminal_error,
+            }));
         }
     }
 

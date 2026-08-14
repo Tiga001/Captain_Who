@@ -2471,7 +2471,8 @@ CREATE TABLE conversation_turn_trace_items (
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
             item_kind TEXT NOT NULL CHECK (item_kind IN (
                 'assistant_narration', 'user_guidance', 'tool_call', 'tool_result',
-                'command_session_lifecycle', 'agent_mailbox_delivery'
+                'command_session_lifecycle', 'agent_mailbox_delivery',
+                'context_compaction_lifecycle', 'runtime_error'
             )),
             item_json TEXT NOT NULL CHECK (json_valid(item_json)),
             PRIMARY KEY (assistant_message_id, sequence),
@@ -3618,7 +3619,7 @@ CREATE TABLE agent_collaboration_events (
             )),
             resource_revision INTEGER NOT NULL CHECK (resource_revision > 0),
             activity_schema_version INTEGER CHECK (
-                activity_schema_version IS NULL OR activity_schema_version = 1
+                activity_schema_version IS NULL OR activity_schema_version = 2
             ),
             activity_semantic TEXT CHECK (
                 activity_semantic IS NULL OR activity_semantic IN (
@@ -3635,6 +3636,10 @@ CREATE TABLE agent_collaboration_events (
                 activity_root_anchor_message_id IS NULL
                 OR length(CAST(activity_root_anchor_message_id AS BLOB)) BETWEEN 1 AND 2048
             ),
+            activity_root_trace_boundary_sequence INTEGER CHECK (
+                activity_root_trace_boundary_sequence IS NULL
+                OR activity_root_trace_boundary_sequence >= 0
+            ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             UNIQUE(root_agent_id, root_sequence),
             CHECK (workspace_id IS project_id),
@@ -3643,11 +3648,18 @@ CREATE TABLE agent_collaboration_events (
                     AND activity_semantic IS NULL
                     AND activity_agent_id IS NULL
                     AND activity_task_name_snapshot IS NULL
-                    AND activity_root_anchor_message_id IS NULL)
-                OR (activity_schema_version = 1
+                    AND activity_root_anchor_message_id IS NULL
+                    AND activity_root_trace_boundary_sequence IS NULL)
+                OR (activity_schema_version = 2
                     AND activity_semantic IS NOT NULL
                     AND activity_agent_id IS NOT NULL
                     AND activity_task_name_snapshot IS NOT NULL)
+            ),
+            CHECK (
+                (activity_root_anchor_message_id IS NULL
+                    AND activity_root_trace_boundary_sequence IS NULL)
+                OR (activity_root_anchor_message_id IS NOT NULL
+                    AND activity_root_trace_boundary_sequence IS NOT NULL)
             ),
             CHECK (
                 activity_semantic IS NULL
@@ -3703,12 +3715,34 @@ CREATE TRIGGER validate_agent_collaboration_event_identity_insert
                   AND activity_subject.task_name = NEW.activity_task_name_snapshot
             )
         ) OR (
-            NEW.activity_root_anchor_message_id IS NOT NULL
-            AND NOT EXISTS (
-                SELECT 1 FROM messages AS anchor
-                WHERE anchor.id = NEW.activity_root_anchor_message_id
-                  AND anchor.conversation_id = NEW.root_conversation_id
-                  AND anchor.role = 'assistant'
+            NEW.activity_semantic IS NOT NULL
+            AND NOT (
+                (
+                    NEW.activity_root_anchor_message_id IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM conversation_turn_traces AS active_root_trace
+                        WHERE active_root_trace.conversation_id = NEW.root_conversation_id
+                          AND active_root_trace.terminal_status = 'in_progress'
+                    )
+                ) OR (
+                    NEW.activity_root_anchor_message_id IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM messages AS anchor
+                        JOIN conversation_turn_traces AS root_trace
+                          ON root_trace.assistant_message_id = anchor.id
+                         AND root_trace.conversation_id = NEW.root_conversation_id
+                         AND root_trace.terminal_status = 'in_progress'
+                        WHERE anchor.id = NEW.activity_root_anchor_message_id
+                          AND anchor.conversation_id = NEW.root_conversation_id
+                          AND anchor.role = 'assistant'
+                          AND NEW.activity_root_trace_boundary_sequence = COALESCE((
+                              SELECT MAX(trace_item.sequence) + 1
+                              FROM conversation_turn_trace_items AS trace_item
+                              WHERE trace_item.assistant_message_id = root_trace.assistant_message_id
+                          ), 0)
+                    )
+                )
             )
         )
         BEGIN
@@ -3829,7 +3863,7 @@ CREATE TRIGGER emit_agent_mailbox_enqueued_collaboration_event
                 root_conversation_id, agent_id, conversation_id, turn_id, run_id, message_id,
                 kind, resource_revision, activity_schema_version, activity_semantic,
                 activity_agent_id, activity_task_name_snapshot,
-                activity_root_anchor_message_id, created_at
+                activity_root_anchor_message_id, activity_root_trace_boundary_sequence, created_at
             ) SELECT
                 'collab-event:' || lower(hex(randomblob(16))), 2, NEW.root_agent_id,
                 sequence_state.next_sequence - 1, recipient.project_id, recipient.project_id,
@@ -3837,7 +3871,7 @@ CREATE TRIGGER emit_agent_mailbox_enqueued_collaboration_event
                 NULL, NULL, NEW.message_id, 'mailbox_enqueued', NEW.sequence,
                 CASE
                     WHEN NEW.kind = 'message' AND sender.parent_agent_id = recipient.agent_id
-                    THEN 1 ELSE NULL
+                    THEN 2 ELSE NULL
                 END,
                 CASE
                     WHEN NEW.kind = 'message' AND sender.parent_agent_id = recipient.agent_id
@@ -3851,11 +3885,28 @@ CREATE TRIGGER emit_agent_mailbox_enqueued_collaboration_event
                     WHEN NEW.kind = 'message' AND sender.parent_agent_id = recipient.agent_id
                     THEN sender.task_name ELSE NULL
                 END,
-                NULL, NEW.created_at
+                CASE
+                    WHEN NEW.kind = 'message' AND sender.parent_agent_id = recipient.agent_id
+                    THEN root_trace.assistant_message_id ELSE NULL
+                END,
+                CASE
+                    WHEN NEW.kind = 'message' AND sender.parent_agent_id = recipient.agent_id
+                     AND root_trace.assistant_message_id IS NOT NULL
+                    THEN COALESCE((
+                        SELECT MAX(trace_item.sequence) + 1
+                        FROM conversation_turn_trace_items AS trace_item
+                        WHERE trace_item.assistant_message_id = root_trace.assistant_message_id
+                    ), 0)
+                    ELSE NULL
+                END,
+                NEW.created_at
             FROM agent_nodes AS recipient
             JOIN agent_nodes AS sender
               ON sender.agent_id = NEW.sender_agent_id
              AND sender.root_agent_id = NEW.root_agent_id
+            LEFT JOIN conversation_turn_traces AS root_trace
+              ON root_trace.conversation_id = recipient.root_conversation_id
+             AND root_trace.terminal_status = 'in_progress'
             JOIN agent_collaboration_event_sequences AS sequence_state
               ON sequence_state.root_agent_id = NEW.root_agent_id
             WHERE recipient.agent_id = NEW.recipient_agent_id;
@@ -3891,23 +3942,38 @@ CREATE TRIGGER emit_agent_wake_created_collaboration_event
                 root_conversation_id, agent_id, conversation_id, turn_id, run_id, message_id,
                 kind, resource_revision, activity_schema_version, activity_semantic,
                 activity_agent_id, activity_task_name_snapshot,
-                activity_root_anchor_message_id, created_at
+                activity_root_anchor_message_id, activity_root_trace_boundary_sequence, created_at
             ) SELECT
                 'collab-event:' || lower(hex(randomblob(16))), 2, NEW.root_agent_id,
                 sequence_state.next_sequence - 1, target.project_id, target.project_id,
                 target.root_conversation_id, target.agent_id, target.conversation_id,
                 NEW.assistant_message_id, NEW.run_id, NEW.source_agent_message_id,
                 'wake_created', NEW.status_revision,
-                CASE WHEN source.kind IN ('task', 'followup') THEN 1 ELSE NULL END,
+                CASE WHEN source.kind IN ('task', 'followup') THEN 2 ELSE NULL END,
                 CASE WHEN source.kind IN ('task', 'followup') THEN 'started' ELSE NULL END,
                 CASE WHEN source.kind IN ('task', 'followup') THEN target.agent_id ELSE NULL END,
                 CASE WHEN source.kind IN ('task', 'followup') THEN target.task_name ELSE NULL END,
-                NULL, NEW.created_at
+                CASE WHEN source.kind IN ('task', 'followup')
+                     THEN root_trace.assistant_message_id ELSE NULL END,
+                CASE
+                    WHEN source.kind IN ('task', 'followup')
+                     AND root_trace.assistant_message_id IS NOT NULL
+                    THEN COALESCE((
+                        SELECT MAX(trace_item.sequence) + 1
+                        FROM conversation_turn_trace_items AS trace_item
+                        WHERE trace_item.assistant_message_id = root_trace.assistant_message_id
+                    ), 0)
+                    ELSE NULL
+                END,
+                NEW.created_at
             FROM agent_nodes AS target
             LEFT JOIN agent_mailbox_messages AS source
               ON source.message_id = NEW.source_agent_message_id
              AND source.root_agent_id = NEW.root_agent_id
              AND source.recipient_agent_id = NEW.agent_id
+            LEFT JOIN conversation_turn_traces AS root_trace
+              ON root_trace.conversation_id = target.root_conversation_id
+             AND root_trace.terminal_status = 'in_progress'
             JOIN agent_collaboration_event_sequences AS sequence_state
               ON sequence_state.root_agent_id = NEW.root_agent_id
             WHERE target.agent_id = NEW.agent_id;
@@ -3926,7 +3992,7 @@ CREATE TRIGGER emit_agent_wake_updated_collaboration_event
                 root_conversation_id, agent_id, conversation_id, turn_id, run_id, message_id,
                 kind, resource_revision, activity_schema_version, activity_semantic,
                 activity_agent_id, activity_task_name_snapshot,
-                activity_root_anchor_message_id, created_at
+                activity_root_anchor_message_id, activity_root_trace_boundary_sequence, created_at
             ) SELECT
                 'collab-event:' || lower(hex(randomblob(16))), 2, NEW.root_agent_id,
                 sequence_state.next_sequence - 1, target.project_id, target.project_id,
@@ -3940,7 +4006,7 @@ CREATE TRIGGER emit_agent_wake_updated_collaboration_event
                         OR (NEW.status IN ('completed', 'failed')
                             AND NEW.result_message_id IS NOT NULL)
                      )
-                    THEN 1 ELSE NULL
+                    THEN 2 ELSE NULL
                 END,
                 CASE
                     WHEN NEW.status IS NOT OLD.status AND NEW.status = 'completed'
@@ -3972,9 +4038,35 @@ CREATE TRIGGER emit_agent_wake_updated_collaboration_event
                      )
                     THEN target.task_name ELSE NULL
                 END,
-                NULL,
+                CASE
+                    WHEN NEW.status IS NOT OLD.status
+                     AND (
+                        NEW.status IN ('interrupted', 'cancelled')
+                        OR (NEW.status IN ('completed', 'failed')
+                            AND NEW.result_message_id IS NOT NULL)
+                     )
+                    THEN root_trace.assistant_message_id ELSE NULL
+                END,
+                CASE
+                    WHEN NEW.status IS NOT OLD.status
+                     AND (
+                        NEW.status IN ('interrupted', 'cancelled')
+                        OR (NEW.status IN ('completed', 'failed')
+                            AND NEW.result_message_id IS NOT NULL)
+                     )
+                     AND root_trace.assistant_message_id IS NOT NULL
+                    THEN COALESCE((
+                        SELECT MAX(trace_item.sequence) + 1
+                        FROM conversation_turn_trace_items AS trace_item
+                        WHERE trace_item.assistant_message_id = root_trace.assistant_message_id
+                    ), 0)
+                    ELSE NULL
+                END,
                 COALESCE(NEW.completed_at, NEW.started_at, NEW.claimed_at, NEW.created_at)
             FROM agent_nodes AS target
+            LEFT JOIN conversation_turn_traces AS root_trace
+              ON root_trace.conversation_id = target.root_conversation_id
+             AND root_trace.terminal_status = 'in_progress'
             JOIN agent_collaboration_event_sequences AS sequence_state
               ON sequence_state.root_agent_id = NEW.root_agent_id
             WHERE target.agent_id = NEW.agent_id;
@@ -4047,15 +4139,29 @@ CREATE TRIGGER emit_agent_approval_projected_collaboration_event
                 root_conversation_id, agent_id, conversation_id, turn_id, run_id, message_id,
                 kind, resource_revision, activity_schema_version, activity_semantic,
                 activity_agent_id, activity_task_name_snapshot,
-                activity_root_anchor_message_id, created_at
+                activity_root_anchor_message_id, activity_root_trace_boundary_sequence, created_at
             ) SELECT
                 'collab-event:' || lower(hex(randomblob(16))), 2, node.root_agent_id,
                 sequence_state.next_sequence - 1, node.project_id, node.project_id,
                 node.root_conversation_id, node.agent_id, node.conversation_id,
                 NEW.assistant_message_id, NEW.run_id, NEW.assistant_message_id,
                 'approval_projected', CASE WHEN NEW.updated_at > 0 THEN NEW.updated_at ELSE 1 END,
-                1, 'waiting_approval', node.agent_id, node.task_name, NULL, NEW.created_at
+                2, 'waiting_approval', node.agent_id, node.task_name,
+                root_trace.assistant_message_id,
+                CASE
+                    WHEN root_trace.assistant_message_id IS NOT NULL
+                    THEN COALESCE((
+                        SELECT MAX(trace_item.sequence) + 1
+                        FROM conversation_turn_trace_items AS trace_item
+                        WHERE trace_item.assistant_message_id = root_trace.assistant_message_id
+                    ), 0)
+                    ELSE NULL
+                END,
+                NEW.created_at
             FROM agent_nodes AS node
+            LEFT JOIN conversation_turn_traces AS root_trace
+              ON root_trace.conversation_id = node.root_conversation_id
+             AND root_trace.terminal_status = 'in_progress'
             JOIN agent_collaboration_event_sequences AS sequence_state
               ON sequence_state.root_agent_id = node.root_agent_id
             WHERE node.conversation_id = NEW.conversation_id;

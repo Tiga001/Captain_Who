@@ -224,7 +224,9 @@ fn model_context_for_closed_trace(
                 tool_calls: Vec::new(),
                 is_error: false,
             }),
-            ConversationTurnTraceItem::CommandSessionLifecycle { .. } => None,
+            ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+            | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+            | ConversationTurnTraceItem::RuntimeError { .. } => None,
         })
         .collect()
 }
@@ -289,21 +291,32 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
     assert_eq!(run["status"], "cancelled");
     assert_eq!(run["state"]["status"], "cancelled");
     assert!(run["state"]["activeRunId"].is_null());
+    let timeline = run["timeline"].as_array().unwrap();
+    assert_eq!(timeline.len(), 3);
     assert_eq!(
-        run["timeline"],
-        serde_json::json!([
-            {
-                "id": "trace-message-0",
-                "type": "message",
-                "content": "I will inspect the file."
-            },
-            {
-                "id": "tool-call-call-run-cancelled-orphan",
-                "type": "tool_call",
-                "callId": "call-run-cancelled-orphan"
-            }
-        ])
+        timeline[0],
+        serde_json::json!({
+            "id": "trace-message-0",
+            "type": "message",
+            "content": "I will inspect the file.",
+            "traceSequence": 0
+        })
     );
+    assert_eq!(
+        timeline[1],
+        serde_json::json!({
+            "id": "tool-call-call-run-cancelled-orphan",
+            "type": "tool_call",
+            "callId": "call-run-cancelled-orphan",
+            "traceSequence": 1
+        })
+    );
+    assert_eq!(timeline[2]["id"], "terminal-error");
+    assert_eq!(timeline[2]["type"], "error");
+    assert!(timeline[2].get("traceSequence").is_none());
+    assert!(timeline[2]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("cancelled before")));
 
     let usage_state: (String, Option<String>, Option<i64>) = service
         .state
@@ -359,6 +372,366 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
             .unwrap(),
         0,
         "startup reconciliation must be idempotent"
+    );
+}
+
+#[test]
+fn reload_rebuilds_compaction_and_runtime_error_in_the_durable_trace_order() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-runtime-presentation-reload";
+    let assistant_message_id = "assistant-runtime-presentation-reload";
+    let run_id = "run-runtime-presentation-reload";
+    let live_run = serde_json::json!({
+        "runId": run_id,
+        "status": "failed",
+        "startedAt": 2,
+        "completedAt": 8,
+        "toolDefinitions": [],
+        "toolCalls": [],
+        "toolResults": [],
+        "approvals": [],
+        "diffs": [],
+        "fileDrafts": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "mcpInvocations": [],
+        "timeline": [
+            {
+                "id": "context-compaction-compact-1",
+                "type": "context_compaction",
+                "operationId": "compact-1",
+                "status": "running",
+                "traceSequence": 1
+            },
+            {
+                "id": "error-2",
+                "type": "error",
+                "message": "iteration limit reached"
+            }
+        ],
+        "messageStreamCheckpoints": {},
+        "state": {
+            "status": "failed",
+            "activeRunId": null,
+            "lastError": "iteration limit reached",
+            "updatedAt": 8
+        }
+    });
+    service
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "runtime presentation reload".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-runtime-presentation-reload".to_string(),
+                    role: "user".to_string(),
+                    content: "continue".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: assistant_message_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: "iteration limit reached".to_string(),
+                    created_at: 2,
+                    status: Some("error".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some(live_run.to_string()),
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 8,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::Failed,
+        terminal_error: Some("iteration limit reached".to_string()),
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 0,
+                content: "Working on it.".to_string(),
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence: 1,
+                phase:
+                    crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Started,
+                operation_id: "compact-1".to_string(),
+                outcome: None,
+            },
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence: 2,
+                phase:
+                    crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Finished,
+                operation_id: "compact-1".to_string(),
+                outcome: Some(crate::protocol::AgentContextCompactionEventOutcome::Applied),
+            },
+            ConversationTurnTraceItem::RuntimeError {
+                sequence: 3,
+                message: "iteration limit reached".to_string(),
+                recoverable: false,
+                code: Some("tool_iteration_limit".to_string()),
+                truncated: false,
+            },
+        ],
+    };
+    service
+        .replace_conversation_turn_trace(&trace, 2, 8)
+        .unwrap();
+    drop(service);
+
+    let reopened = fixture.service();
+    let stored = reopened
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(stored.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        run["timeline"],
+        serde_json::json!([
+            {
+                "id": "trace-message-0",
+                "type": "message",
+                "content": "Working on it.",
+                "traceSequence": 0
+            },
+            {
+                "id": "context-compaction-compact-1",
+                "type": "context_compaction",
+                "operationId": "compact-1",
+                "status": "applied",
+                "traceSequence": 1
+            },
+            {
+                "id": "trace-error-3",
+                "type": "error",
+                "message": "iteration limit reached",
+                "traceSequence": 3
+            }
+        ])
+    );
+}
+
+#[test]
+fn reload_keeps_a_host_terminal_error_unanchored_without_inventing_a_trace_sequence() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-host-error-reload";
+    let assistant_message_id = "assistant-host-error-reload";
+    let run_id = "run-host-error-reload";
+    service
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "host error reload".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-host-error-reload".to_string(),
+                    role: "user".to_string(),
+                    content: "continue".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: assistant_message_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: "host persistence failed".to_string(),
+                    created_at: 2,
+                    status: Some("error".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some(
+                        serde_json::json!({
+                            "runId": run_id,
+                            "status": "failed",
+                            "startedAt": 2,
+                            "completedAt": 8,
+                            "toolDefinitions": [],
+                            "toolCalls": [],
+                            "toolResults": [],
+                            "approvals": [],
+                            "diffs": [],
+                            "fileDrafts": [],
+                            "webSearchActivities": [],
+                            "readActivities": [],
+                            "mcpInvocations": [],
+                            "timeline": [
+                                {
+                                    "id": "trace-message-0",
+                                    "type": "message",
+                                    "content": "Working.",
+                                    "traceSequence": 0
+                                },
+                                {
+                                    "id": "error-2",
+                                    "type": "error",
+                                    "message": "host persistence failed"
+                                }
+                            ],
+                            "messageStreamCheckpoints": {},
+                            "state": {
+                                "status": "failed",
+                                "activeRunId": null,
+                                "lastError": "host persistence failed",
+                                "updatedAt": 8
+                            }
+                        })
+                        .to_string(),
+                    ),
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 8,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    service
+        .replace_conversation_turn_trace(
+            &ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: run_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::Failed,
+                terminal_error: Some("host persistence failed".to_string()),
+                truncated: false,
+                items: vec![ConversationTurnTraceItem::AssistantNarration {
+                    sequence: 0,
+                    content: "Working.".to_string(),
+                    truncated: false,
+                }],
+            },
+            2,
+            8,
+        )
+        .unwrap();
+    drop(service);
+
+    let reopened = fixture.service();
+    let stored = reopened
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(stored.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    let timeline = run["timeline"].as_array().unwrap();
+    assert_eq!(timeline.len(), 2);
+    assert_eq!(timeline[0]["traceSequence"], 0);
+    assert_eq!(timeline[1]["id"], "terminal-error");
+    assert_eq!(timeline[1]["message"], "host persistence failed");
+    assert!(timeline[1].get("traceSequence").is_none());
+}
+
+#[test]
+fn startup_reconciliation_settles_a_crashed_context_compaction_before_reload() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-crashed-compaction";
+    let assistant_message_id = "assistant-crashed-compaction";
+    let run_id = "run-crashed-compaction";
+    save_run_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        "running",
+        "pending",
+    );
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ContextCompactionLifecycle {
+            sequence: 0,
+            phase: crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Started,
+            operation_id: "compact-crashed".to_string(),
+            outcome: None,
+        }],
+    };
+    assert!(service
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(&trace, &[], 10, 20)
+        .unwrap());
+
+    assert_eq!(
+        service
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), 100)
+            .unwrap(),
+        1
+    );
+    drop(service);
+
+    let reopened = fixture.service();
+    let recovered = reopened
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    recovered.validate().unwrap();
+    assert_eq!(
+        recovered.terminal_status,
+        crate::ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert!(matches!(
+        recovered.items.as_slice(),
+        [
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence: 0,
+                phase: crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Started,
+                operation_id,
+                outcome: None,
+            },
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence: 1,
+                phase: crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Finished,
+                operation_id: finished_operation_id,
+                outcome: Some(crate::protocol::AgentContextCompactionEventOutcome::Failed),
+            }
+        ] if operation_id == "compact-crashed" && finished_operation_id == operation_id
+    ));
+    let stored = reopened
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(stored.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        run["timeline"],
+        serde_json::json!([{
+            "id": "context-compaction-compact-crashed",
+            "type": "context_compaction",
+            "operationId": "compact-crashed",
+            "status": "failed",
+            "traceSequence": 0
+        }, {
+            "id": "terminal-error",
+            "type": "error",
+            "message": "The application exited before the agent run's conversation trace was finalized."
+        }])
     );
 }
 

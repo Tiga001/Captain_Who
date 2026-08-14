@@ -372,12 +372,14 @@ export function getReadKindForCall(run: ChatAgentRunView, call: AgentToolCall) {
 
 export function groupTimelineItems(
   run: ChatAgentRunView,
-  timeline: ChatAgentTimelineItem[]
+  timeline: ChatAgentTimelineItem[],
+  options: { includeSkillLoadGroup?: boolean } = {}
 ): RenderableTimelineItem[] {
   const activatedSkills = getActivatedSkills(run)
-  const initialItems: RenderableTimelineItem[] = activatedSkills.length
-    ? [{ id: `skill-load-${run.runId ?? 'pending'}`, type: 'skill_load_group' }]
-    : []
+  const initialItems: RenderableTimelineItem[] =
+    options.includeSkillLoadGroup !== false && activatedSkills.length
+      ? [{ id: `skill-load-${run.runId ?? 'pending'}`, type: 'skill_load_group' }]
+      : []
 
   return timeline.reduce<RenderableTimelineItem[]>((items, item) => {
     // Whitespace-only stream messages are invisible in the timeline, so they must not split

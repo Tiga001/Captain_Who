@@ -168,7 +168,7 @@ export interface ChatMcpToolInvocationView {
   outputTruncated: boolean
 }
 
-export type ChatAgentTimelineItem =
+export type ChatAgentTimelineItem = (
   | { id: string; type: 'message'; content: string; streamId?: string }
   | ChatGuidanceTimelineItem
   | { id: string; type: 'tool_call'; callId: string }
@@ -180,6 +180,10 @@ export type ChatAgentTimelineItem =
       status: 'running' | AgentContextCompactionEventOutcome
     }
   | { id: string; type: 'error'; message: string }
+) & {
+  /** Durable Conversation trace order. Live-only presentation items may omit it. */
+  traceSequence?: number
+}
 
 export interface ChatAgentRunView {
   runId: string | null

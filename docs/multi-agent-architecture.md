@@ -630,6 +630,17 @@ root-local sequence 合并，两个并行子 Agent/不同 root 不会串线。
 | Wake 持久进入 `interrupted`，或 queued/claimed-before-admission 被管理中断写为 `cancelled`                              | `interrupted`          | 两者都是用户语义上的中断，不依赖内存 cancel 通知                     |
 | 除 direct child → parent 外的普通 send（含 parent → child / sibling）、result、Mailbox claim/ack、Wake lease、list/wait | `null`                 | 仍写必要 invalidation event，但根聊天无 activity                     |
 
+Activity snapshot `schemaVersion=2` 还冻结可空的精确根 Timeline 放置点：
+`rootAnchorMessageId + rootTraceBoundarySequence` 必须同时存在或同时为 `null`。领域 trigger 执行时若根
+Conversation 恰有唯一 active trace，就写该 root assistant message，并把 boundary 固定为当时已提交
+trace item 的 `MAX(sequence)+1`；界面语义是插在首个 `traceSequence >= boundary` 的 backend-owned
+Timeline item 之前。根空闲、根 Turn 已终结或没有可信 trace 时两字段保持 `null`，按 event
+`occurredAt/rootSequence` 稳定回退，不借 child 的 `turnId/runId` 猜根位置。重启时 narration、generic
+Tool、MCP、context-compaction lifecycle 与 Runtime error marker 都从 append-only durable trace 重建，
+并保留同一 `traceSequence`；compaction 的 start/finish 是两个持久事实但复用 start sequence 的单一展示行，
+启动恢复会在终态化前补齐崩溃遗留的 finish。Host 在 Runtime marker 落库前产生的 terminal error 明确保留
+`traceSequence=null`，不会伪造 trace-owned ID/sequence 或因 reload 冒充已锚定事件。
+
 Core 进程启动时先冻结当前 durable global cursor，再发一次严格的全局
 `agent.collaboration.resync(core_started)`，随后只从该 cursor 之后订阅 outbox。这样现存 Main/renderer
 不会把重启前后窗口误当成“已经同步”；cursor 冻结后提交的 mutation 仍由 event replay 覆盖。模型设置
@@ -652,7 +663,7 @@ projection，不保存 Conversation 消息或 reducer。notification 是失效�
 跨进程协作基础 DTO 仍为 `schemaVersion=1`，带必填 nullable activity 的 event envelope 独立升至
 `schemaVersion=2`。第 4 轮冻结的 canonical storage 是 v7；第 5 轮为根 Agent Conversation 的
 provenance-aware fork authority 升至 v8；持久权限快照和语义 activity projection 将当前基线升至
-v9。v8 及更早开发库继续采用既有 reset-required、原库不改写策略。
+v10。v9 及更早开发库继续采用既有 reset-required、原库不改写策略。
 
 ### 第 5 轮：前端复用与完整用户体验
 

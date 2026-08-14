@@ -201,6 +201,7 @@ pub(super) fn emit_manual_command_settlement_error(
 ) {
     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
         run_id: Some(run_id.to_string()),
+        trace_sequence: None,
         message: error.message,
         recoverable: true,
         code: Some(error.code.to_string()),
@@ -247,6 +248,7 @@ pub(super) fn emit_manual_file_effect_settlement_error(
 ) {
     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
         run_id: Some(run_id.to_string()),
+        trace_sequence: None,
         message: error.message,
         recoverable: true,
         code: Some(error.code.to_string()),

@@ -14,15 +14,15 @@ use crate::conversation_trace_projection::{
 use crate::llm::{validate_provider_tool_call_id, LlmMessage};
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandSessionStatus, AgentContextCheckpointToolCall,
-    AgentInputAttachment, AgentInputAttachmentKind, AgentMcpServerScope, AgentProposedAction,
-    AgentProviderToolCallIdentity, AgentRunCheckpoint, AgentToolCall, AgentToolIdentity,
-    AgentToolResult,
+    AgentContextCompactionEventOutcome, AgentInputAttachment, AgentInputAttachmentKind,
+    AgentMcpServerScope, AgentProposedAction, AgentProviderToolCallIdentity, AgentRunCheckpoint,
+    AgentToolCall, AgentToolIdentity, AgentToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 3;
+pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +68,17 @@ pub enum ConversationTraceToolResultStatus {
 pub enum ConversationCommandSessionLifecyclePhase {
     Started,
     Terminal,
+}
+
+/// Durable phase of a Runtime-owned context compaction presentation row.
+///
+/// Both phases are append-only audit facts. The Renderer displays one row at the `Started`
+/// sequence and uses the later `Finished` item only to settle that row after restart.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationContextCompactionLifecyclePhase {
+    Started,
+    Finished,
 }
 
 /// Sequence-free lifecycle payload supplied by the managed command owner when it appends audit.
@@ -326,7 +337,9 @@ fn validate_model_item_against_trace(
                 && item.tool_call_id.as_deref() == Some(call_id.as_str())
                 && item.tool_calls.is_empty()
         }
-        ConversationTurnTraceItem::CommandSessionLifecycle { .. } => false,
+        ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+        | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+        | ConversationTurnTraceItem::RuntimeError { .. } => false,
     };
     valid.then_some(()).ok_or_else(|| {
         "model context item identity does not match its durable trace item".to_string()
@@ -425,6 +438,25 @@ pub enum ConversationTurnTraceItem {
         archive: ConversationHistoryArchiveTraceMetadata,
         created_at: i64,
     },
+    /// Runtime-owned context compaction lifecycle. It is intentionally invisible to model
+    /// context but remains in the same durable sequence domain as narration and Tool activity.
+    ContextCompactionLifecycle {
+        sequence: u64,
+        phase: ConversationContextCompactionLifecyclePhase,
+        operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<AgentContextCompactionEventOutcome>,
+    },
+    /// Bounded Runtime error presentation. Host/transport errors without an active Runtime trace
+    /// remain unanchored and are never synthesized into this audit record.
+    RuntimeError {
+        sequence: u64,
+        message: String,
+        recoverable: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        truncated: bool,
+    },
 }
 
 /// Exact-history metadata is flattened into a tool-result trace item so the canonical trace can
@@ -479,7 +511,9 @@ impl ConversationTurnTraceItem {
             | Self::AgentMailboxDelivery { sequence, .. }
             | Self::ToolCall { sequence, .. }
             | Self::ToolResult { sequence, .. }
-            | Self::CommandSessionLifecycle { sequence, .. } => *sequence,
+            | Self::CommandSessionLifecycle { sequence, .. }
+            | Self::ContextCompactionLifecycle { sequence, .. }
+            | Self::RuntimeError { sequence, .. } => *sequence,
         }
     }
 
@@ -491,13 +525,20 @@ impl ConversationTurnTraceItem {
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::CommandSessionLifecycle { .. } => "command_session_lifecycle",
+            Self::ContextCompactionLifecycle { .. } => "context_compaction_lifecycle",
+            Self::RuntimeError { .. } => "runtime_error",
         }
     }
 
     /// Whether this audit item has a provider-neutral model-context representation.
     #[must_use]
     pub fn is_model_visible(&self) -> bool {
-        !matches!(self, Self::CommandSessionLifecycle { .. })
+        !matches!(
+            self,
+            Self::CommandSessionLifecycle { .. }
+                | Self::ContextCompactionLifecycle { .. }
+                | Self::RuntimeError { .. }
+        )
     }
 
     pub fn is_safe_compaction_boundary(&self) -> bool {
@@ -557,6 +598,7 @@ impl ConversationTurnTrace {
         let mut call_ids = BTreeSet::new();
         let mut command_call_ids = BTreeSet::new();
         let mut command_sessions = BTreeMap::<&str, (&str, bool)>::new();
+        let mut context_compactions = BTreeMap::<&str, bool>::new();
         for item in &self.items {
             let sequence = item.sequence();
             if previous_sequence.is_some_and(|previous| sequence <= previous) {
@@ -806,12 +848,90 @@ impl ConversationTurnTrace {
                     }
                     archive.validate()?;
                 }
+                ConversationTurnTraceItem::ContextCompactionLifecycle {
+                    phase,
+                    operation_id,
+                    outcome,
+                    ..
+                } => {
+                    if pending_call.is_some() {
+                        return Err(
+                            "conversation trace context compaction cannot split a tool exchange"
+                                .to_string(),
+                        );
+                    }
+                    if operation_id.trim().is_empty()
+                        || operation_id.len() > 2_048
+                        || operation_id.chars().any(char::is_control)
+                    {
+                        return Err(
+                            "conversation trace context compaction identity is invalid".to_string()
+                        );
+                    }
+                    match phase {
+                        ConversationContextCompactionLifecyclePhase::Started => {
+                            if outcome.is_some()
+                                || context_compactions
+                                    .insert(operation_id.as_str(), false)
+                                    .is_some()
+                            {
+                                return Err(
+                                    "conversation trace context compaction start is invalid"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        ConversationContextCompactionLifecyclePhase::Finished => {
+                            let Some(finished) = context_compactions.get_mut(operation_id.as_str())
+                            else {
+                                return Err(
+                                    "conversation trace context compaction finish is missing its start"
+                                        .to_string(),
+                                );
+                            };
+                            if *finished || outcome.is_none() {
+                                return Err(
+                                    "conversation trace context compaction finish is invalid"
+                                        .to_string(),
+                                );
+                            }
+                            *finished = true;
+                        }
+                    }
+                }
+                ConversationTurnTraceItem::RuntimeError { message, code, .. } => {
+                    if pending_call.is_some() {
+                        return Err(
+                            "conversation trace Runtime error cannot split a tool exchange"
+                                .to_string(),
+                        );
+                    }
+                    if message.trim().is_empty() {
+                        return Err("conversation trace Runtime error cannot be empty".to_string());
+                    }
+                    ensure_no_binary_text("Runtime error", message)?;
+                    if let Some(code) = code {
+                        if code.trim().is_empty() || code.len() > 128 {
+                            return Err(
+                                "conversation trace Runtime error code is invalid".to_string()
+                            );
+                        }
+                        ensure_no_binary_text("Runtime error code", code)?;
+                    }
+                }
             }
         }
         if pending_call.is_some()
             && self.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
         {
             return Err("conversation trace ends with an unresolved tool call".to_string());
+        }
+        if self.terminal_status.is_terminal()
+            && context_compactions.values().any(|finished| !finished)
+        {
+            return Err(
+                "terminal conversation trace contains an unfinished context compaction".to_string(),
+            );
         }
         Ok(())
     }
@@ -1771,6 +1891,122 @@ impl ConversationTraceRecorder {
         Ok(Some(sequence))
     }
 
+    pub(crate) fn record_context_compaction_started(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<u64, String> {
+        if operation_id.trim().is_empty()
+            || operation_id.len() > 2_048
+            || operation_id.chars().any(char::is_control)
+        {
+            return Err("context compaction trace identity is invalid".to_string());
+        }
+        if let Some(sequence) = self.items.iter().find_map(|item| match item {
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence,
+                phase: ConversationContextCompactionLifecyclePhase::Started,
+                operation_id: existing,
+                ..
+            } if existing == operation_id => Some(*sequence),
+            _ => None,
+        }) {
+            return Ok(sequence);
+        }
+        if matches!(
+            self.items.last(),
+            Some(ConversationTurnTraceItem::ToolCall { .. })
+        ) {
+            return Err("context compaction cannot split an unresolved tool exchange".to_string());
+        }
+        let sequence = self.take_sequence();
+        self.items
+            .push(ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence,
+                phase: ConversationContextCompactionLifecyclePhase::Started,
+                operation_id: operation_id.to_string(),
+                outcome: None,
+            });
+        Ok(sequence)
+    }
+
+    pub(crate) fn record_context_compaction_finished(
+        &mut self,
+        operation_id: &str,
+        outcome: AgentContextCompactionEventOutcome,
+    ) -> Result<u64, String> {
+        let Some(start_sequence) = self.items.iter().find_map(|item| match item {
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence,
+                phase: ConversationContextCompactionLifecyclePhase::Started,
+                operation_id: existing,
+                ..
+            } if existing == operation_id => Some(*sequence),
+            _ => None,
+        }) else {
+            return Err("context compaction finish is missing its durable start".to_string());
+        };
+        if let Some(existing_outcome) = self.items.iter().find_map(|item| match item {
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                phase: ConversationContextCompactionLifecyclePhase::Finished,
+                operation_id: existing,
+                outcome,
+                ..
+            } if existing == operation_id => *outcome,
+            _ => None,
+        }) {
+            return (existing_outcome == outcome)
+                .then_some(start_sequence)
+                .ok_or_else(|| "context compaction outcome conflicts with its trace".to_string());
+        }
+        let sequence = self.take_sequence();
+        self.items
+            .push(ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence,
+                phase: ConversationContextCompactionLifecyclePhase::Finished,
+                operation_id: operation_id.to_string(),
+                outcome: Some(outcome),
+            });
+        Ok(start_sequence)
+    }
+
+    pub(crate) fn record_runtime_error(
+        &mut self,
+        message: &str,
+        recoverable: bool,
+        code: Option<&str>,
+    ) -> Result<u64, String> {
+        if message.trim().is_empty() {
+            return Err("Runtime error trace message cannot be empty".to_string());
+        }
+        if code.is_some_and(|code| {
+            code.trim().is_empty() || code.len() > 128 || code.chars().any(char::is_control)
+        }) {
+            return Err("Runtime error trace code is invalid".to_string());
+        }
+        if matches!(
+            self.items.last(),
+            Some(ConversationTurnTraceItem::ToolCall { .. })
+        ) {
+            return Err("Runtime error cannot split an unresolved tool exchange".to_string());
+        }
+        let (message, message_truncated) = project_terminal_error(message);
+        let (code, code_truncated) = code
+            .map(sanitize_text)
+            .map(|(value, truncated)| (Some(value), truncated))
+            .unwrap_or((None, false));
+        let truncated = message_truncated || code_truncated;
+        let sequence = self.take_sequence();
+        self.items.push(ConversationTurnTraceItem::RuntimeError {
+            sequence,
+            message,
+            recoverable,
+            code,
+            truncated,
+        });
+        self.truncated |= truncated;
+        Ok(sequence)
+    }
+
     pub(crate) fn record_model_message(
         &mut self,
         sequence: u64,
@@ -2179,6 +2415,7 @@ impl ConversationTraceRecorder {
     ) -> ConversationTurnTrace {
         let mut recorder = self.clone();
         recorder.close_unresolved(terminal_status, terminal_error);
+        recorder.close_unresolved_context_compactions(terminal_status);
         let recorder_truncated = recorder.truncated;
         let (items, projected_truncated) = if recorder.items_are_durable {
             (recorder.items, false)
@@ -2280,6 +2517,64 @@ impl ConversationTraceRecorder {
             }
         );
         self.items.push(item);
+    }
+
+    fn close_unresolved_context_compactions(
+        &mut self,
+        terminal_status: ConversationTurnTraceTerminalStatus,
+    ) {
+        if !terminal_status.is_terminal() {
+            return;
+        }
+        let mut operations = Vec::<(String, bool)>::new();
+        for item in &self.items {
+            let ConversationTurnTraceItem::ContextCompactionLifecycle {
+                phase,
+                operation_id,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            match phase {
+                ConversationContextCompactionLifecyclePhase::Started => {
+                    operations.push((operation_id.clone(), false));
+                }
+                ConversationContextCompactionLifecyclePhase::Finished => {
+                    if let Some((_, finished)) = operations
+                        .iter_mut()
+                        .find(|(candidate, _)| candidate == operation_id)
+                    {
+                        *finished = true;
+                    }
+                }
+            }
+        }
+        let outcome = match terminal_status {
+            ConversationTurnTraceTerminalStatus::Cancelled => {
+                AgentContextCompactionEventOutcome::Cancelled
+            }
+            ConversationTurnTraceTerminalStatus::Failed => {
+                AgentContextCompactionEventOutcome::Failed
+            }
+            ConversationTurnTraceTerminalStatus::Completed => {
+                AgentContextCompactionEventOutcome::Skipped
+            }
+            ConversationTurnTraceTerminalStatus::InProgress => return,
+        };
+        for (operation_id, finished) in operations {
+            if finished {
+                continue;
+            }
+            let sequence = self.take_sequence();
+            self.items
+                .push(ConversationTurnTraceItem::ContextCompactionLifecycle {
+                    sequence,
+                    phase: ConversationContextCompactionLifecyclePhase::Finished,
+                    operation_id,
+                    outcome: Some(outcome),
+                });
+        }
     }
 
     fn take_sequence(&mut self) -> u64 {
@@ -2573,6 +2868,40 @@ fn project_durable_trace_items(
                 archive: archive.clone(),
                 created_at: *created_at,
             },
+            ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence,
+                phase,
+                operation_id,
+                outcome,
+            } => ConversationTurnTraceItem::ContextCompactionLifecycle {
+                sequence: *sequence,
+                phase: *phase,
+                operation_id: operation_id.clone(),
+                outcome: *outcome,
+            },
+            ConversationTurnTraceItem::RuntimeError {
+                sequence,
+                message,
+                recoverable,
+                code,
+                truncated,
+            } => {
+                let (message, message_truncated) = project_terminal_error(message);
+                let (code, code_truncated) = code
+                    .as_deref()
+                    .map(sanitize_runtime_text)
+                    .map(|(value, truncated)| (Some(value), truncated))
+                    .unwrap_or((None, false));
+                let item_truncated = *truncated || message_truncated || code_truncated;
+                trace_truncated |= item_truncated;
+                ConversationTurnTraceItem::RuntimeError {
+                    sequence: *sequence,
+                    message,
+                    recoverable: *recoverable,
+                    code,
+                    truncated: item_truncated,
+                }
+            }
         };
         projected.push(projected_item);
     }
@@ -2941,6 +3270,110 @@ mod tests {
         );
         assert!(trace.append_command_session_lifecycle(conflict).is_err());
         assert_eq!(trace.items.len(), 4);
+    }
+
+    #[test]
+    fn context_compaction_and_runtime_error_are_append_only_non_model_trace_markers() {
+        let mut recorder = ConversationTraceRecorder::default();
+        assert_eq!(
+            recorder.record_narration("Before compaction.").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            recorder
+                .record_context_compaction_started("compact-1")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            recorder
+                .record_context_compaction_started("compact-1")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            recorder
+                .record_context_compaction_finished(
+                    "compact-1",
+                    AgentContextCompactionEventOutcome::Applied,
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            recorder
+                .record_context_compaction_finished(
+                    "compact-1",
+                    AgentContextCompactionEventOutcome::Applied,
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            recorder
+                .record_runtime_error("iteration limit reached", false, Some("iteration_limit"))
+                .unwrap(),
+            3
+        );
+
+        let trace = recorder.finish(
+            "run-markers",
+            "conversation-markers",
+            "assistant-markers",
+            ConversationTurnTraceTerminalStatus::Failed,
+            Some("iteration limit reached"),
+        );
+        trace.validate().unwrap();
+        assert_eq!(
+            trace
+                .items
+                .iter()
+                .map(ConversationTurnTraceItem::sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(trace.model_context_item_count(), 1);
+        assert!(trace.items[1..].iter().all(|item| !item.is_model_visible()));
+    }
+
+    #[test]
+    fn terminal_projection_closes_a_crashed_context_compaction_once() {
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder
+            .record_context_compaction_started("compact-crashed")
+            .unwrap();
+        let snapshot = recorder.snapshot();
+        let projection = terminal_conversation_trace_from_snapshot(
+            snapshot,
+            "run-crashed-compaction",
+            "conversation-crashed-compaction",
+            "assistant-crashed-compaction",
+            ConversationTurnTraceTerminalStatus::Failed,
+            "application exited",
+        )
+        .unwrap();
+        projection.trace.validate().unwrap();
+        assert!(matches!(
+            projection.trace.items.as_slice(),
+            [
+                ConversationTurnTraceItem::ContextCompactionLifecycle {
+                    sequence: 0,
+                    phase: ConversationContextCompactionLifecyclePhase::Started,
+                    operation_id,
+                    outcome: None,
+                },
+                ConversationTurnTraceItem::ContextCompactionLifecycle {
+                    sequence: 1,
+                    phase: ConversationContextCompactionLifecyclePhase::Finished,
+                    operation_id: finished_operation_id,
+                    outcome: Some(AgentContextCompactionEventOutcome::Failed),
+                }
+            ] if operation_id == "compact-crashed" && finished_operation_id == operation_id
+        ));
+
+        let mut dangling = projection.trace.clone();
+        dangling.items.pop();
+        assert!(dangling.validate().is_err());
     }
 
     #[test]

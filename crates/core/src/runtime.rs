@@ -812,8 +812,15 @@ impl AgentRuntime {
                     && !empty_model_action_repair_pending
                 {
                     let message = "工具调用次数超过限制，已停止继续执行。".to_string();
+                    let trace_sequence = conversation_trace
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .record_runtime_error(&message, false, None)
+                        .map_err(AgentError::new)?;
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     event_stream.emit(AgentEvent::Error {
                         run_id: Some(run_id.clone()),
+                        trace_sequence: Some(trace_sequence),
                         message: message.clone(),
                         recoverable: false,
                         code: None,
@@ -978,10 +985,20 @@ impl AgentRuntime {
                                         )
                                         .await?;
                                     if let Some(attempt) = attempt {
+                                        let compaction_trace_sequence = conversation_trace
+                                            .lock()
+                                            .unwrap_or_else(|error| error.into_inner())
+                                            .record_context_compaction_started(&operation_id)
+                                            .map_err(AgentError::new)?;
+                                        publish_trace_snapshot(
+                                            &conversation_trace,
+                                            trace_observer.as_ref(),
+                                        )?;
                                         event_stream.emit_transient(
                                             AgentEvent::ContextCompactionStarted {
                                                 run_id: run_id.clone(),
                                                 operation_id: operation_id.clone(),
+                                                trace_sequence: compaction_trace_sequence,
                                             },
                                         );
                                         let execution =
@@ -998,11 +1015,28 @@ impl AgentRuntime {
                                             }
                                             Err(_) => AgentContextCompactionEventOutcome::Failed,
                                         };
+                                        let settled_trace_sequence = conversation_trace
+                                            .lock()
+                                            .unwrap_or_else(|error| error.into_inner())
+                                            .record_context_compaction_finished(
+                                                &operation_id,
+                                                outcome,
+                                            )
+                                            .map_err(AgentError::new)?;
+                                        debug_assert_eq!(
+                                            settled_trace_sequence,
+                                            compaction_trace_sequence
+                                        );
+                                        publish_trace_snapshot(
+                                            &conversation_trace,
+                                            trace_observer.as_ref(),
+                                        )?;
                                         event_stream.emit_transient(
                                             AgentEvent::ContextCompactionFinished {
                                                 run_id: run_id.clone(),
                                                 operation_id,
                                                 outcome,
+                                                trace_sequence: settled_trace_sequence,
                                             },
                                         );
                                         match execution {
@@ -1386,21 +1420,25 @@ impl AgentRuntime {
                         deferred_for_skill_activation,
                         &mut committed_tool_input_preview,
                     );
-                    if !tool_requests.is_empty()
+                    let committed_narration_sequence = if !tool_requests.is_empty()
                         && !user_text_blocked
                         && !response_content.trim().is_empty()
                     {
-                        conversation_trace
+                        let sequence = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
                             .record_narration(&response_content)
                             .map_err(AgentError::new)?;
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
-                    }
+                        sequence
+                    } else {
+                        None
+                    };
                     if let Some(stream_id) = committed_message_stream_id.take() {
                         event_stream.emit(AgentEvent::MessageStreamCommitted {
                             run_id: run_id.clone(),
                             stream_id,
+                            trace_sequence: committed_narration_sequence,
                         });
                     }
                     if cancellation_token.is_cancelled() {
@@ -1456,8 +1494,15 @@ impl AgentRuntime {
 
                     if model_request_index >= self.max_tool_iterations {
                         let message = "工具调用次数超过限制，已停止继续执行。".to_string();
+                        let trace_sequence = conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .record_runtime_error(&message, false, None)
+                            .map_err(AgentError::new)?;
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                         event_stream.emit(AgentEvent::Error {
                             run_id: Some(run_id.clone()),
+                            trace_sequence: Some(trace_sequence),
                             message: message.clone(),
                             recoverable: false,
                             code: None,
@@ -2046,6 +2091,8 @@ impl AgentRuntime {
                         let event_call = tool_registry.event_call_projection(&call);
                         event_stream.emit(AgentEvent::ToolCall {
                             run_id: run_id.clone(),
+                            trace_sequence: call_sequence
+                                .expect("a ToolCall always has a durable trace sequence"),
                             call: event_call,
                         });
                     }
@@ -3602,6 +3649,8 @@ fn settle_terminal_grouped_tool_batch(
         if !announced && !is_mcp_tool {
             staged_events.push(AgentEvent::ToolCall {
                 run_id: run_id.to_string(),
+                trace_sequence: call_sequence
+                    .expect("a settled ToolCall always has a durable trace sequence"),
                 call: tool_registry.event_call_projection(&call),
             });
         }

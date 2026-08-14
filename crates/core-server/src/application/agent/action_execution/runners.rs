@@ -114,6 +114,7 @@ fn emit_mcp_lifecycle_event(
         Err(_) => {
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id.to_string()),
+                trace_sequence: None,
                 message: "The MCP invocation lifecycle could not be projected safely.".to_string(),
                 recoverable: false,
                 code: Some("mcp.lifecycle_projection_failed".to_string()),
@@ -1223,6 +1224,7 @@ impl AgentService {
             self.unregister_cancellation_if_current(&run_id, &cancellation);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id),
+                trace_sequence: None,
                 message: "The MCP Tool result could not be durably recorded. Its external outcome must be treated as unknown until restart reconciliation completes.".to_string(),
                 recoverable: false,
                 code: Some("mcp_result_persistence_failed".to_string()),
@@ -1908,6 +1910,7 @@ impl AgentService {
                                 let _ = notifications.send(agent_event_notification(
                                     AgentEvent::Error {
                                         run_id: Some(run_id),
+                                        trace_sequence: None,
                                         message: "命令已在持久交接前取消，但无法确认进程已经终止；不会伪造终态回执。".to_string(),
                                         recoverable: true,
                                         code: Some(
@@ -1948,6 +1951,7 @@ impl AgentService {
                                 let _ = notifications.send(agent_event_notification(
                                     AgentEvent::Error {
                                         run_id: Some(run_id),
+                                        trace_sequence: None,
                                         message: "命令的持久交接回执确认未提交，且无法确认进程已经终止；不会伪造已结算状态。".to_string(),
                                         recoverable: true,
                                         code: Some(
@@ -1973,6 +1977,7 @@ impl AgentService {
                         self.unregister_cancellation_if_current(&run_id, &run_cancellation_token);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id),
+                            trace_sequence: None,
                             message: "命令 Session 的持久交接结果无法权威确认；已停止续跑，且不会伪造已结算状态。".to_string(),
                             recoverable: true,
                             code: Some("command_session_handoff_indeterminate".to_string()),
@@ -1994,6 +1999,7 @@ impl AgentService {
                         self.unregister_cancellation_if_current(&run_id, &run_cancellation_token);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id),
+                            trace_sequence: None,
                             message: "命令 Session 所有权交接失败；已停止续跑。".to_string(),
                             recoverable: true,
                             code: Some("command_session_handoff_failed".to_string()),
@@ -2330,6 +2336,7 @@ impl AgentService {
                 self.unregister_cancellation(&run_id);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id),
+                    trace_sequence: None,
                     message: format!(
                         "无法原子持久化已取消命令的 assistant 终态与会话轨迹：{error}"
                     ),
@@ -2471,6 +2478,7 @@ impl AgentService {
             self.discard_usage_context(run_id);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id.clone()),
+                trace_sequence: None,
                 message: PERSISTENCE_ERROR.to_string(),
                 recoverable: false,
                 code: Some("cancelled_run_persistence_failed".to_string()),
@@ -2526,6 +2534,7 @@ impl AgentService {
             self.unregister_cancellation_if_current(run_id, cancellation_token);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id.clone()),
+                trace_sequence: None,
                 message: "审批续跑缺少 Conversation Turn 持久化身份。".to_string(),
                 recoverable: true,
                 code: Some("conversation_turn_identity_missing".to_string()),
@@ -2596,6 +2605,7 @@ impl AgentService {
             Err(error) => {
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id.clone()),
+                    trace_sequence: None,
                     message: format!("无法构造审批续跑的失败终态：{error}"),
                     recoverable: true,
                     code: Some("conversation_trace_persistence_failed".to_string()),
@@ -2667,6 +2677,7 @@ impl AgentService {
             drop(usage_contexts);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id.clone()),
+                trace_sequence: None,
                 message: format!(
                     "无法原子持久化 pending、assistant、轨迹与 Usage 的失败终态：{error}"
                 ),
@@ -2693,6 +2704,7 @@ impl AgentService {
         self.discard_exact_running_context_window_snapshot(run_id);
         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
             run_id: Some(run_id.clone()),
+            trace_sequence: None,
             message: terminal_message.clone(),
             recoverable: false,
             code: Some(failure_code.to_string()),
@@ -2733,6 +2745,7 @@ impl AgentService {
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id),
+                trace_sequence: None,
                 message: "审批续跑的 Collaboration identity 与冻结 checkpoint 不一致。".to_string(),
                 recoverable: true,
                 code: Some("collaboration_identity_mismatch".to_string()),
@@ -2750,6 +2763,7 @@ impl AgentService {
                     self.unregister_cancellation_if_current(&run_id, &cancellation_token);
                     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                         run_id: Some(run_id),
+                        trace_sequence: None,
                         message: format!(
                             "子 Agent 审批续跑的 Host 协作身份已失效，已拒绝执行：{error}"
                         ),
@@ -2792,6 +2806,7 @@ impl AgentService {
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id),
+                    trace_sequence: None,
                     message: "审批续跑缺少 Conversation Turn 持久化身份。".to_string(),
                     recoverable: true,
                     code: Some("conversation_turn_identity_missing".to_string()),
@@ -2809,6 +2824,7 @@ impl AgentService {
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id),
+                trace_sequence: None,
                 message: format!("审批续跑无法取得 Conversation Turn：{error}"),
                 recoverable: true,
                 code: Some("conversation_turn_ownership_conflict".to_string()),
@@ -2821,6 +2837,7 @@ impl AgentService {
             self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id),
+                trace_sequence: None,
                 message: format!("审批续跑暂时无法取得进程级 Agent Turn 并发许可：{error}"),
                 recoverable: true,
                 code: Some("agent_turn_concurrency_limit".to_string()),
@@ -2990,6 +3007,7 @@ impl AgentService {
                         self.discard_usage_context(&run_id);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id.clone()),
+                            trace_sequence: None,
                             message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
                             recoverable: true,
                             code: Some("conversation_trace_persistence_failed".to_string()),
@@ -3091,6 +3109,7 @@ impl AgentService {
                     if let Err(error) = &persisted {
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id.clone()),
+                            trace_sequence: None,
                             message: format!(
                                 "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
                             ),
@@ -3142,6 +3161,7 @@ impl AgentService {
                     }
                     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                         run_id: Some(run_id.clone()),
+                        trace_sequence: None,
                         message: message.clone(),
                         recoverable: false,
                         code,

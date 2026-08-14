@@ -205,11 +205,12 @@
         "kind": "wake_created",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "started",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000001000
       },
@@ -265,11 +266,12 @@
         "kind": "wake_created",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "started",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000001000
       },
@@ -307,11 +309,12 @@
         "kind": "mailbox_enqueued",
         "resourceRevision": 3,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "updated",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000001500
       },
@@ -349,11 +352,12 @@
         "kind": "wake_created",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "started",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000001800
       },
@@ -373,11 +377,12 @@
         "kind": "approval_projected",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "waiting_approval",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000002000
       },
@@ -397,11 +402,12 @@
         "kind": "approval_projected",
         "resourceRevision": 1,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "waiting_approval",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000002001
       },
@@ -421,11 +427,12 @@
         "kind": "wake_updated",
         "resourceRevision": 3,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "interrupted",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000002500
       },
@@ -445,11 +452,12 @@
         "kind": "wake_updated",
         "resourceRevision": 3,
         "activity": {
-          "schemaVersion": 1,
+          "schemaVersion": 2,
           "semantic": "completed",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null
+          "rootAnchorMessageId": null,
+          "rootTraceBoundarySequence": null
         },
         "occurredAt": 1720000003000
       }

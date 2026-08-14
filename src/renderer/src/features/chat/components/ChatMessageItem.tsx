@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ChevronDown,
@@ -13,7 +13,7 @@ import {
 import type { AgentProposedAction, AgentUsage, GitTurnDiffSummary } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
-import type { ChatAgentRunView, ChatMessage } from '../chatTypes'
+import type { ChatAgentRunView, ChatAgentTimelineItem, ChatMessage } from '../chatTypes'
 import type { ChatGuidanceTimelineItem } from '../chatTypes'
 import { getUniqueWebSearchSources } from '../agentWebSearch'
 import { stripAttachmentSummary } from '../chatAttachments'
@@ -75,12 +75,18 @@ import { SearchToolActivityGroup } from './toolActivities/SearchToolActivity'
 import { WebSearchToolActivityGroup } from './toolActivities/WebSearchToolActivity'
 import { AssistantSources } from './toolActivities/WebSearchSources'
 import { SkillLoadActivity, SkillResourceActivityGroup } from './toolActivities/SkillToolActivity'
+import {
+  CollaborationTimelineActivityList,
+  normalizeCollaborationTimelineActivities,
+  type CollaborationTimelineActivity
+} from '../../agentCollaboration/CollaborationTimelineActivity'
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
 
 interface ChatMessageItemProps {
   agentLabelsById?: Readonly<Record<string, string>>
+  collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   conversationId?: string
   editSelectedModelAvailable?: boolean
   editSelectedModelSupportsImage?: boolean
@@ -97,6 +103,7 @@ interface ChatMessageItemProps {
   onCancel?: (messageId: string, action: AgentProposedAction) => void
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
+  onOpenCollaborationAgent?: (agentId: string) => void
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
   onTimelineCollapsedChange?: (messageId: string, collapsed: boolean) => void
@@ -483,23 +490,27 @@ function AgentTimelineItemView({
 }
 
 function AgentRunView({
+  collaborationTimelineActivities = [],
   conversationId,
   message,
   mode,
   onReviewLastTurn,
   onTimelineCollapsedChange,
   onUiStateChange,
+  onOpenCollaborationAgent,
   observerRootConversationId,
   projectId,
   timelineCollapsedOverride,
   turnDiffSummary
 }: {
+  collaborationTimelineActivities?: readonly CollaborationTimelineActivity[]
   conversationId?: string
   message: ChatMessage
   mode: 'interactive' | 'observer'
   onReviewLastTurn?: (filePath?: string) => void
   onTimelineCollapsedChange?: (messageId: string, collapsed: boolean) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
+  onOpenCollaborationAgent?: (agentId: string) => void
   observerRootConversationId?: string
   projectId?: string | null
   timelineCollapsedOverride?: boolean
@@ -509,23 +520,163 @@ function AgentRunView({
   const run = message.agentRun
   const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
   const finalAnswerContent = getAssistantFinalContent(message)
-  const timelineWithoutFinalAnswer = useMemo(() => {
-    if (!run || !isRunSettled(run) || !hasDisplayableContent(finalAnswerContent)) return timeline
+  const finalAnswerTimelineItemIndex = useMemo(() => {
+    if (!run || !isRunSettled(run) || !hasDisplayableContent(finalAnswerContent)) return -1
 
     const normalizedFinalAnswer = finalAnswerContent.trim()
-    const finalMessageIndex = timeline.findLastIndex(
+    return timeline.findLastIndex(
       (item) => item.type === 'message' && item.content.trim() === normalizedFinalAnswer
     )
-    if (finalMessageIndex < 0) return timeline
-    return timeline.filter((_, index) => index !== finalMessageIndex)
   }, [finalAnswerContent, run, timeline])
+  const timelineWithoutFinalAnswer = useMemo(
+    () =>
+      finalAnswerTimelineItemIndex >= 0
+        ? timeline.filter((_, index) => index !== finalAnswerTimelineItemIndex)
+        : timeline,
+    [finalAnswerTimelineItemIndex, timeline]
+  )
+  const normalizedCollaborationActivities = useMemo(
+    () => normalizeCollaborationTimelineActivities(collaborationTimelineActivities),
+    [collaborationTimelineActivities]
+  )
+  const [liveActivityAnchors, setLiveActivityAnchors] = useState<{
+    runId: string | null
+    byActivityId: Record<string, string | null>
+  }>({ runId: run?.runId ?? null, byActivityId: {} })
+
+  // A durable reload carries exact trace sequences. Before that reload, freeze the raw Timeline
+  // tail present when an activity first arrives, so later narration or Tools cannot push it to the
+  // end of the current run. useLayoutEffect applies the placement before paint.
+  useLayoutEffect(() => {
+    const nextRunId = run?.runId ?? null
+    setLiveActivityAnchors((current) => {
+      const currentAnchors = current.runId === nextRunId ? current.byActivityId : {}
+      let nextAnchors = currentAnchors
+      for (const activity of normalizedCollaborationActivities) {
+        if (activity.rootTraceBoundarySequence === null) continue
+        if (Object.prototype.hasOwnProperty.call(nextAnchors, activity.activityId)) continue
+        if (nextAnchors === currentAnchors) nextAnchors = { ...currentAnchors }
+        nextAnchors[activity.activityId] = timeline.at(-1)?.id ?? null
+      }
+      if (current.runId === nextRunId && nextAnchors === currentAnchors) return current
+      return { runId: nextRunId, byActivityId: nextAnchors }
+    })
+  }, [normalizedCollaborationActivities, run?.runId, timeline])
+
+  const displayTimelineBlocks = useMemo(() => {
+    type TimelineBlock =
+      | { id: string; kind: 'timeline'; items: RenderableTimelineItem[] }
+      | { id: string; kind: 'final-answer' }
+      | {
+          id: string
+          kind: 'collaboration'
+          activities: readonly CollaborationTimelineActivity[]
+        }
+
+    const blocks: TimelineBlock[] = []
+    if (!run) return blocks
+
+    const syntheticItems = groupTimelineItems(run, [], { includeSkillLoadGroup: true })
+    if (syntheticItems.length > 0) {
+      blocks.push({ id: 'timeline-synthetic', kind: 'timeline', items: syntheticItems })
+    }
+
+    const placements = new Map<number, CollaborationTimelineActivity[]>()
+    for (const activity of normalizedCollaborationActivities) {
+      const boundary = activity.rootTraceBoundarySequence
+      let insertionIndex = timeline.length
+      if (boundary !== null) {
+        const timelineSequence = (item: ChatAgentTimelineItem) =>
+          item.traceSequence ?? (item.type === 'user_guidance' ? item.sequence : undefined)
+        const lastCommittedBeforeBoundary = timeline.findLastIndex((item) => {
+          const sequence = timelineSequence(item)
+          return sequence !== undefined && sequence < boundary
+        })
+        const firstCommittedAtOrAfterBoundary = timeline.findIndex((item) => {
+          const sequence = timelineSequence(item)
+          return sequence !== undefined && sequence >= boundary
+        })
+        const hasLiveAnchor = Object.prototype.hasOwnProperty.call(
+          liveActivityAnchors.byActivityId,
+          activity.activityId
+        )
+        const durableLowerBound = lastCommittedBeforeBoundary + 1
+        const liveAnchor = hasLiveAnchor
+          ? liveActivityAnchors.byActivityId[activity.activityId]
+          : undefined
+        const liveLowerBound =
+          liveAnchor === undefined
+            ? 0
+            : liveAnchor === null
+              ? 0
+              : timeline.findIndex((item) => item.id === liveAnchor) + 1
+        if (firstCommittedAtOrAfterBoundary >= 0) {
+          // The durable trace item at/after the boundary is an exact upper bound. Unnumbered
+          // presentation items that were already visible when the activity arrived remain before
+          // it, but can never move it past that durable boundary.
+          insertionIndex = Math.min(
+            Math.max(durableLowerBound, liveLowerBound),
+            firstCommittedAtOrAfterBoundary
+          )
+        } else if (lastCommittedBeforeBoundary >= 0 || hasLiveAnchor) {
+          // With no later durable marker yet, preserve both the committed prefix and all
+          // presentation items already shown at arrival. Later live items stay after the row.
+          insertionIndex = Math.max(durableLowerBound, liveLowerBound)
+        }
+      }
+      const slot = placements.get(insertionIndex) ?? []
+      slot.push(activity)
+      placements.set(insertionIndex, slot)
+    }
+
+    let segmentStart = 0
+    const appendTimelineSegment = (end: number) => {
+      if (end <= segmentStart) return
+      const grouped = groupTimelineItems(run, timeline.slice(segmentStart, end), {
+        includeSkillLoadGroup: false
+      })
+      if (grouped.length > 0) {
+        blocks.push({
+          id: `timeline-${segmentStart}-${end}`,
+          kind: 'timeline',
+          items: grouped
+        })
+      }
+      segmentStart = end
+    }
+
+    for (let index = 0; index <= timeline.length; index += 1) {
+      const activities = placements.get(index)
+      if (activities?.length) {
+        appendTimelineSegment(index)
+        blocks.push({
+          id: `collaboration-${activities.map((activity) => activity.activityId).join(':')}`,
+          kind: 'collaboration',
+          activities
+        })
+      }
+      if (index === finalAnswerTimelineItemIndex) {
+        appendTimelineSegment(index)
+        blocks.push({ id: 'final-answer', kind: 'final-answer' })
+        segmentStart = index + 1
+      }
+    }
+    appendTimelineSegment(timeline.length)
+    return blocks
+  }, [
+    finalAnswerTimelineItemIndex,
+    liveActivityAnchors.byActivityId,
+    normalizedCollaborationActivities,
+    run,
+    timeline
+  ])
   const finalAnswerRepresentedByTimeline = useMemo(
     () => isContentFullyRepresentedByTimeline(finalAnswerContent, timelineWithoutFinalAnswer),
     [finalAnswerContent, timelineWithoutFinalAnswer]
   )
   const displayTimeline = useMemo(
-    () => (run ? groupTimelineItems(run, timelineWithoutFinalAnswer) : []),
-    [run, timelineWithoutFinalAnswer]
+    () => displayTimelineBlocks.flatMap((block) => (block.kind === 'timeline' ? block.items : [])),
+    [displayTimelineBlocks]
   )
   const runId = run?.runId
   const runIsSettled = !run || isRunSettled(run)
@@ -612,9 +763,19 @@ function AgentRunView({
     }
   }, [llmRetryLabel, message.createdAt, now, run, t, timeline, waitingForCommandCompletion])
   if (!run) {
-    return hasDisplayableContent(message.content) ? (
-      <ChatMarkdown className="chat-agent-text" content={message.content} />
-    ) : null
+    return (
+      <>
+        {hasDisplayableContent(message.content) ? (
+          <ChatMarkdown className="chat-agent-text" content={message.content} />
+        ) : null}
+        {onOpenCollaborationAgent && (
+          <CollaborationTimelineActivityList
+            activities={normalizedCollaborationActivities}
+            onOpenAgent={onOpenCollaborationAgent}
+          />
+        )}
+      </>
+    )
   }
 
   const hasGuidance = timeline.some((item) => item.type === 'user_guidance')
@@ -658,18 +819,39 @@ function AgentRunView({
           })
         }}
       />
-      {showTimeline &&
-        displayTimeline.map((item) => (
-          <AgentTimelineItemView
-            conversationId={conversationId}
-            item={item}
-            key={item.id}
-            observerRootConversationId={observerRootConversationId}
-            projectId={projectId}
-            run={run}
-          />
-        ))}
-      {showFinalContent && (
+      {displayTimelineBlocks.map((block) => {
+        if (block.kind === 'final-answer') {
+          return showFinalContent ? (
+            <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} key={block.id} />
+          ) : null
+        }
+        if (block.kind === 'collaboration') {
+          if (!onOpenCollaborationAgent) return null
+          return (
+            <CollaborationTimelineActivityList
+              activities={block.activities}
+              key={block.id}
+              onOpenAgent={onOpenCollaborationAgent}
+            />
+          )
+        }
+        if (!showTimeline) return null
+        return (
+          <Fragment key={block.id}>
+            {block.items.map((item) => (
+              <AgentTimelineItemView
+                conversationId={conversationId}
+                item={item}
+                key={item.id}
+                observerRootConversationId={observerRootConversationId}
+                projectId={projectId}
+                run={run}
+              />
+            ))}
+          </Fragment>
+        )
+      })}
+      {showFinalContent && finalAnswerTimelineItemIndex < 0 && (
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
       )}
       {isRunSettled(run) && (
@@ -717,12 +899,14 @@ function AgentRunView({
 }
 
 function MessageContent({
+  collaborationTimelineActivities,
   conversationId,
   message,
   mode = 'interactive',
   onReviewLastTurn,
   onTimelineCollapsedChange,
   onUiStateChange,
+  onOpenCollaborationAgent,
   observerRootConversationId,
   projectId,
   timelineCollapsedOverride,
@@ -731,12 +915,14 @@ function MessageContent({
   if (message.role === 'assistant') {
     return (
       <AgentRunView
+        collaborationTimelineActivities={collaborationTimelineActivities}
         conversationId={conversationId}
         message={message}
         mode={mode}
         onReviewLastTurn={onReviewLastTurn}
         onTimelineCollapsedChange={onTimelineCollapsedChange}
         onUiStateChange={onUiStateChange}
+        onOpenCollaborationAgent={onOpenCollaborationAgent}
         observerRootConversationId={observerRootConversationId}
         projectId={projectId}
         timelineCollapsedOverride={timelineCollapsedOverride}
@@ -981,6 +1167,7 @@ function MessageInputOrigin({
 
 export function ChatMessageItem({
   agentLabelsById,
+  collaborationTimelineActivities,
   conversationId,
   editSelectedModelAvailable = true,
   editSelectedModelSupportsImage = true,
@@ -991,6 +1178,7 @@ export function ChatMessageItem({
   onCancel,
   onEditSubmit,
   onContinueInNewTask,
+  onOpenCollaborationAgent,
   onReject,
   onReviewLastTurn,
   onTimelineCollapsedChange,
@@ -1069,6 +1257,7 @@ export function ChatMessageItem({
       ) : showBody ? (
         <div className="chat-message__body">
           <MessageContent
+            collaborationTimelineActivities={collaborationTimelineActivities}
             conversationId={conversationId}
             message={message}
             mode={mode}
@@ -1078,6 +1267,7 @@ export function ChatMessageItem({
             onReviewLastTurn={onReviewLastTurn}
             onTimelineCollapsedChange={onTimelineCollapsedChange}
             onUiStateChange={onUiStateChange}
+            onOpenCollaborationAgent={onOpenCollaborationAgent}
             observerRootConversationId={observerRootConversationId}
             projectId={projectId}
             showTokenUsageDetails={showTokenUsageDetails}

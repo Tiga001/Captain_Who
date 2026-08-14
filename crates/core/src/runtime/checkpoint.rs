@@ -1283,7 +1283,9 @@ fn validate_conversation_trace_tool_call_ids(
             ConversationTurnTraceItem::AssistantNarration { .. }
             | ConversationTurnTraceItem::UserGuidance { .. }
             | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
-            | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
+            | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+            | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+            | ConversationTurnTraceItem::RuntimeError { .. } => {}
         }
     }
     Ok(())

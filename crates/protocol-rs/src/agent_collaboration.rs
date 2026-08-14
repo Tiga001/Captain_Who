@@ -2,7 +2,7 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 pub const AGENT_COLLABORATION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION: u32 = 2;
-pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -229,7 +229,10 @@ pub struct CollaborationActivitySnapshotDto {
     pub semantic: CollaborationActivitySemanticDto,
     pub agent_id: String,
     pub task_name_snapshot: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub root_anchor_message_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub root_trace_boundary_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -304,6 +307,13 @@ impl<'de> Deserialize<'de> for CollaborationEventEnvelopeDto {
             if activity.schema_version != AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION {
                 return Err(D::Error::custom(
                     "unsupported collaboration activity schema",
+                ));
+            }
+            if activity.root_anchor_message_id.is_some()
+                != activity.root_trace_boundary_sequence.is_some()
+            {
+                return Err(D::Error::custom(
+                    "collaboration activity root placement fields must be paired",
                 ));
             }
             let valid_kind = matches!(

@@ -20,7 +20,7 @@ import {
 
 export const AGENT_COLLABORATION_SCHEMA_VERSION = 1 as const
 export const AGENT_COLLABORATION_EVENT_SCHEMA_VERSION = 2 as const
-export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 1 as const
+export const AGENT_COLLABORATION_ACTIVITY_SCHEMA_VERSION = 2 as const
 
 export const AGENT_COLLABORATION_GET_TREE_METHOD = 'agent.collaboration.getTree'
 export const AGENT_COLLABORATION_GET_AGENT_METHOD = 'agent.collaboration.getAgent'
@@ -198,6 +198,8 @@ export interface CollaborationActivitySnapshot {
   taskNameSnapshot: string
   /** Trusted assistant message in the root Conversation, or null when no such identity exists. */
   rootAnchorMessageId: string | null
+  /** Insert before the first backend-owned root Timeline item at or after this trace sequence. */
+  rootTraceBoundarySequence: number | null
 }
 
 export interface CollaborationEventEnvelope {
@@ -912,7 +914,14 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
           const snapshot = record(item.activity, 'CollaborationActivitySnapshot')
           exact(
             snapshot,
-            ['schemaVersion', 'semantic', 'agentId', 'taskNameSnapshot', 'rootAnchorMessageId'],
+            [
+              'schemaVersion',
+              'semantic',
+              'agentId',
+              'taskNameSnapshot',
+              'rootAnchorMessageId',
+              'rootTraceBoundarySequence'
+            ],
             'CollaborationActivitySnapshot'
           )
           return {
@@ -938,9 +947,25 @@ export function parseCollaborationEventEnvelope(value: unknown): CollaborationEv
             rootAnchorMessageId: nullableText(
               snapshot.rootAnchorMessageId,
               'CollaborationActivitySnapshot.rootAnchorMessageId'
-            )
+            ),
+            rootTraceBoundarySequence:
+              snapshot.rootTraceBoundarySequence === null
+                ? null
+                : integer(
+                    snapshot.rootTraceBoundarySequence,
+                    'CollaborationActivitySnapshot.rootTraceBoundarySequence',
+                    0
+                  )
           } satisfies CollaborationActivitySnapshot
         })()
+  if (
+    activity !== null &&
+    (activity.rootAnchorMessageId === null) !== (activity.rootTraceBoundarySequence === null)
+  ) {
+    throw new Error(
+      'Invalid CollaborationActivitySnapshot: root placement fields must be both present or both null'
+    )
+  }
   const parsed: CollaborationEventEnvelope = {
     schemaVersion: eventSchema(item.schemaVersion, 'CollaborationEventEnvelope'),
     eventId: text(item.eventId, 'eventId'),
@@ -1128,9 +1153,14 @@ function parseObserverAgentEvent(value: unknown): AgentEvent {
         content: boundedObserverText(item.content, `${type}.content`, OBSERVER_EVENT_MAX_TEXT_BYTES)
       }
     case 'tool_call':
-      exactObserverEvent(item, ['type', 'runId', 'call'], type)
+      exactObserverEvent(item, ['type', 'runId', 'traceSequence', 'call'], type)
       if (!Object.hasOwn(item, 'call')) throw new Error(`Missing ${type}.call`)
-      return { type, runId, call: parseObserverToolCall(item.call) }
+      return {
+        type,
+        runId,
+        traceSequence: integer(item.traceSequence, `${type}.traceSequence`, 0),
+        call: parseObserverToolCall(item.call)
+      }
     case 'tool_result':
       exactObserverEvent(item, ['type', 'runId', 'result'], type)
       if (!Object.hasOwn(item, 'result')) throw new Error(`Missing ${type}.result`)
@@ -1164,11 +1194,19 @@ function parseObserverAgentEvent(value: unknown): AgentEvent {
       if (!Object.hasOwn(item, 'draft')) throw new Error(`Missing ${type}.draft`)
       return { type, runId, draft: parseObserverFileDraft(item.draft) }
     case 'error':
-      exactObserverEvent(item, ['type', 'runId', 'message', 'recoverable', 'code', 'details'], type)
+      exactObserverEvent(
+        item,
+        ['type', 'runId', 'traceSequence', 'message', 'recoverable', 'code', 'details'],
+        type
+      )
       if (typeof item.recoverable !== 'boolean') throw new Error(`Invalid ${type}.recoverable`)
       return {
         type,
         runId,
+        traceSequence:
+          item.traceSequence === null
+            ? null
+            : integer(item.traceSequence, `${type}.traceSequence`, 0),
         message: boundedObserverText(
           item.message,
           `${type}.message`,
@@ -1236,7 +1274,12 @@ function parseObserverStructuralEvent(
   runId: string,
   item: Record<string, unknown>
 ): AgentEvent {
-  if (type === 'message_stream_reset' || type === 'llm_retry') {
+  if (
+    type === 'message_stream_reset' ||
+    type === 'llm_retry' ||
+    type === 'context_compaction_started' ||
+    type === 'context_compaction_finished'
+  ) {
     const parsed = parseAgentEventForHost(item)
     if (parsed.type !== type) throw new Error(`Invalid Agent observer event type ${type}`)
     return parsed
@@ -1255,8 +1298,14 @@ function parseObserverStructuralEvent(
     }
   }
   if (type === 'message_stream_committed') {
-    exactObserverEvent(item, ['type', 'runId', 'streamId'], type)
-    return { type, runId, streamId: text(item.streamId, `${type}.streamId`, 2048) }
+    exactObserverEvent(item, ['type', 'runId', 'streamId', 'traceSequence'], type)
+    return {
+      type,
+      runId,
+      streamId: text(item.streamId, `${type}.streamId`, 2048),
+      traceSequence:
+        item.traceSequence === null ? null : integer(item.traceSequence, `${type}.traceSequence`, 0)
+    }
   }
   throw new Error(`Invalid Agent observer event type ${type}`)
 }

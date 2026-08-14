@@ -218,7 +218,9 @@ impl ConversationTraceRenderer {
                             .with_group(group),
                     ));
                 }
-                ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {
+                ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                | ConversationTurnTraceItem::RuntimeError { .. } => {
                     // Host lifecycle audit is intentionally invisible to model context. Only an
                     // explicit command_session Tool result exposes later output to the model.
                 }
@@ -581,7 +583,9 @@ mod tests {
                 },
                 ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
-                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => unreachable!(),
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                | ConversationTurnTraceItem::RuntimeError { .. } => unreachable!(),
             })
             .collect::<Vec<_>>();
         ConversationTraceRenderer::render_with_model_context(&trace, &model_context_items).unwrap();
@@ -943,7 +947,9 @@ mod tests {
                 ConversationTurnTraceItem::AssistantNarration { .. }
                 | ConversationTurnTraceItem::UserGuidance { .. }
                 | ConversationTurnTraceItem::AgentMailboxDelivery { .. }
-                | ConversationTurnTraceItem::CommandSessionLifecycle { .. } => {}
+                | ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                | ConversationTurnTraceItem::RuntimeError { .. } => {}
             }
         }
 

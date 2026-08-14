@@ -453,6 +453,7 @@ impl AgentService {
                         service.discard_usage_context(&worker_run_id);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(worker_run_id.clone()),
+                            trace_sequence: None,
                             message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
                             recoverable: true,
                             code: Some("conversation_trace_persistence_failed".to_string()),
@@ -474,7 +475,6 @@ impl AgentService {
                     durable_terminal
                 }
                 Err(error) => {
-                    terminal_event_gate.discard();
                     let usage = error.usage().cloned();
                     let code = error.code().map(ToString::to_string);
                     let details = error.details().cloned();
@@ -510,8 +510,10 @@ impl AgentService {
                             &message,
                         );
                     } else if let Err(error) = &persisted {
+                        terminal_event_gate.discard();
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(worker_run_id.clone()),
+                            trace_sequence: None,
                             message: format!(
                                 "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
                             ),
@@ -525,18 +527,22 @@ impl AgentService {
                             .context
                             .as_ref()
                             .and_then(|context| context.collaboration_identity.as_ref());
+                        let terminal_error_event = terminal_event_gate
+                            .take_error_after_persistence()
+                            .unwrap_or_else(|| AgentEvent::Error {
+                                run_id: Some(worker_run_id.clone()),
+                                trace_sequence: None,
+                                message: message.clone(),
+                                recoverable: false,
+                                code,
+                                details,
+                            });
                         emit_agent_event_notifications(
                             &notifications,
                             collaboration_identity,
                             &worker_run_id,
                             &worker_assistant_message_id,
-                            AgentEvent::Error {
-                                run_id: Some(worker_run_id.clone()),
-                                message: message.clone(),
-                                recoverable: false,
-                                code,
-                                details,
-                            },
+                            terminal_error_event,
                         );
                         emit_agent_event_notifications(
                             &notifications,

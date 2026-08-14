@@ -11,7 +11,8 @@ const EVENT_SELECT: &str = "
            root_agent_id, root_conversation_id, agent_id, conversation_id,
            turn_id, run_id, message_id, kind, resource_revision,
            activity_schema_version, activity_semantic, activity_agent_id,
-           activity_task_name_snapshot, activity_root_anchor_message_id, created_at
+           activity_task_name_snapshot, activity_root_anchor_message_id,
+           activity_root_trace_boundary_sequence, created_at
     FROM agent_collaboration_events";
 
 pub fn list_root_events(
@@ -135,7 +136,8 @@ fn query_events<P: rusqlite::Params>(
                 row.get::<_, Option<String>>(17)?,
                 row.get::<_, Option<String>>(18)?,
                 row.get::<_, Option<String>>(19)?,
-                row.get::<_, i64>(20)?,
+                row.get::<_, Option<i64>>(20)?,
+                row.get::<_, i64>(21)?,
             ))
         })
         .map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
@@ -162,6 +164,7 @@ fn query_events<P: rusqlite::Params>(
             activity_agent_id,
             activity_task_name_snapshot,
             activity_root_anchor_message_id,
+            activity_root_trace_boundary_sequence,
             created_at,
         ) = row.map_err(|_| AgentCollaborationEventError::StorageUnavailable)?;
         let schema_version = u32::try_from(schema_version)
@@ -191,6 +194,7 @@ fn query_events<P: rusqlite::Params>(
                 activity_agent_id,
                 activity_task_name_snapshot,
                 activity_root_anchor_message_id,
+                activity_root_trace_boundary_sequence,
             )?,
             created_at: nonnegative(created_at)?,
         });
@@ -204,27 +208,38 @@ fn parse_activity(
     agent_id: Option<String>,
     task_name_snapshot: Option<String>,
     root_anchor_message_id: Option<String>,
+    root_trace_boundary_sequence: Option<i64>,
 ) -> Result<Option<AgentCollaborationActivitySnapshot>, AgentCollaborationEventError> {
-    let (schema_version, semantic, agent_id, task_name_snapshot, root_anchor_message_id) = match (
+    let (
         schema_version,
         semantic,
         agent_id,
         task_name_snapshot,
         root_anchor_message_id,
+        root_trace_boundary_sequence,
+    ) = match (
+        schema_version,
+        semantic,
+        agent_id,
+        task_name_snapshot,
+        root_anchor_message_id,
+        root_trace_boundary_sequence,
     ) {
-        (None, None, None, None, None) => return Ok(None),
+        (None, None, None, None, None, None) => return Ok(None),
         (
             Some(schema_version),
             Some(semantic),
             Some(agent_id),
             Some(task_name_snapshot),
             root_anchor_message_id,
+            root_trace_boundary_sequence,
         ) => (
             schema_version,
             semantic,
             agent_id,
             task_name_snapshot,
             root_anchor_message_id,
+            root_trace_boundary_sequence,
         ),
         _ => return Err(AgentCollaborationEventError::CorruptRecord),
     };
@@ -238,12 +253,21 @@ fn parse_activity(
     if let Some(anchor) = root_anchor_message_id.as_deref() {
         validate_persisted_text(anchor, 2_048)?;
     }
+    if root_anchor_message_id.is_some() != root_trace_boundary_sequence.is_some() {
+        return Err(AgentCollaborationEventError::CorruptRecord);
+    }
+    let root_trace_boundary_sequence = root_trace_boundary_sequence
+        .map(|sequence| {
+            u64::try_from(sequence).map_err(|_| AgentCollaborationEventError::CorruptRecord)
+        })
+        .transpose()?;
     Ok(Some(AgentCollaborationActivitySnapshot {
         schema_version,
         semantic: AgentCollaborationActivitySemantic::parse(&semantic)?,
         agent_id,
         task_name_snapshot,
         root_anchor_message_id,
+        root_trace_boundary_sequence,
     }))
 }
 
@@ -290,9 +314,9 @@ mod tests {
     use super::*;
     use crate::storage::{agent_graph_repository, migrations};
     use crate::{
-        AgentMailboxKind, AgentModelSelectionSnapshot, CreateAgentNodeInput,
+        AgentMailboxKind, AgentModelSelectionSnapshot, AgentWakeStatus, CreateAgentNodeInput,
         EnqueueAgentMessageInput, EnqueueAgentWakeInput, EnsureRootAgentInput,
-        SendAgentMessageRequest,
+        FinishAgentWakeWithResultInput, SendAgentMessageRequest,
     };
 
     fn conversation(connection: &Connection, id: &str) {
@@ -343,15 +367,14 @@ mod tests {
             .unwrap();
     }
 
-    fn tree() -> Connection {
-        let mut connection = Connection::open_in_memory().unwrap();
-        migrations::run_migrations(&connection).unwrap();
-        project(&connection, "project-a");
-        project_conversation(&connection, "conversation-root", "project-a");
-        project_conversation(&connection, "conversation-child", "project-a");
-        root(&mut connection, "agent-root", "conversation-root");
+    fn populate_tree(connection: &mut Connection) {
+        migrations::run_migrations(connection).unwrap();
+        project(connection, "project-a");
+        project_conversation(connection, "conversation-root", "project-a");
+        project_conversation(connection, "conversation-child", "project-a");
+        root(connection, "agent-root", "conversation-root");
         agent_graph_repository::create_agent_node(
-            &mut connection,
+            connection,
             &CreateAgentNodeInput {
                 agent_id: "agent-child".to_string(),
                 root_agent_id: "agent-root".to_string(),
@@ -374,9 +397,58 @@ mod tests {
             2,
         )
         .unwrap();
+    }
+
+    fn tree() -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        populate_tree(&mut connection);
         connection
     }
 
+    fn insert_trace_item(connection: &Connection, assistant_message_id: &str, sequence: u64) {
+        connection
+            .execute(
+                "INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (?1, ?2, 'assistant_narration', ?3)",
+                params![
+                    assistant_message_id,
+                    i64::try_from(sequence).unwrap(),
+                    serde_json::json!({
+                        "type": "assistant_narration",
+                        "sequence": sequence,
+                        "content": format!("narration-{sequence}"),
+                        "truncated": false,
+                    })
+                    .to_string(),
+                ],
+            )
+            .unwrap();
+    }
+
+    fn insert_trace_marker(
+        connection: &Connection,
+        assistant_message_id: &str,
+        sequence: u64,
+        item_kind: &str,
+        item: serde_json::Value,
+    ) {
+        connection
+            .execute(
+                "INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    assistant_message_id,
+                    i64::try_from(sequence).unwrap(),
+                    item_kind,
+                    item.to_string(),
+                ],
+            )
+            .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn insert_activity_event(
         connection: &mut Connection,
         event_id: &str,
@@ -385,6 +457,7 @@ mod tests {
         activity_agent_id: &str,
         task_name_snapshot: &str,
         root_anchor_message_id: Option<&str>,
+        root_trace_boundary_sequence: Option<i64>,
     ) -> rusqlite::Result<()> {
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -398,13 +471,14 @@ mod tests {
                  workspace_id, project_id, root_conversation_id,
                  agent_id, conversation_id, kind, resource_revision,
                  activity_schema_version, activity_semantic, activity_agent_id,
-                 activity_task_name_snapshot, activity_root_anchor_message_id, created_at
+                 activity_task_name_snapshot, activity_root_anchor_message_id,
+                 activity_root_trace_boundary_sequence, created_at
              ) VALUES (
                  ?1, 2, 'agent-root',
                  (SELECT next_sequence - 1 FROM agent_collaboration_event_sequences
                   WHERE root_agent_id = 'agent-root'),
                  'project-a', 'project-a', 'conversation-root', ?2, ?3,
-                 'wake_created', 1, 1, 'started', ?4, ?5, ?6, 20
+                 'wake_created', 1, 2, 'started', ?4, ?5, ?6, ?7, 20
              )",
             params![
                 event_id,
@@ -413,6 +487,7 @@ mod tests {
                 activity_agent_id,
                 task_name_snapshot,
                 root_anchor_message_id,
+                root_trace_boundary_sequence,
             ],
         )?;
         transaction.commit()
@@ -509,6 +584,37 @@ mod tests {
             )
             .unwrap();
 
+        connection
+            .execute_batch(
+                "INSERT INTO conversation_turn_traces (
+                     assistant_message_id, conversation_id, run_id, schema_version,
+                     terminal_status, terminal_error, truncated, created_at, updated_at,
+                     completed_at
+                 ) VALUES (
+                     'root-assistant', 'conversation-root', 'run-root', 1,
+                     'in_progress', NULL, 0, 10, 10, NULL
+                 );
+                 INSERT INTO conversation_turn_trace_items (
+                     assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (
+                     'root-assistant', 0, 'assistant_narration',
+                     '{\"type\":\"assistant_narration\",\"sequence\":0,\"content\":\"root\",\"truncated\":false}'
+                 );",
+            )
+            .unwrap();
+
+        assert!(insert_activity_event(
+            &mut connection,
+            "activity-active-root-without-placement",
+            "agent-child",
+            "conversation-child",
+            "agent-child",
+            "review",
+            None,
+            None,
+        )
+        .is_err());
+
         for (event_id, anchor) in [
             ("activity-user-anchor", Some("root-user")),
             ("activity-child-anchor", Some("child-assistant")),
@@ -522,6 +628,7 @@ mod tests {
                 "agent-child",
                 "review",
                 anchor,
+                Some(1),
             )
             .is_err());
         }
@@ -533,6 +640,7 @@ mod tests {
             "agent-root",
             "root",
             None,
+            None,
         )
         .is_err());
         assert!(insert_activity_event(
@@ -543,8 +651,32 @@ mod tests {
             "agent-child",
             "not-review",
             None,
+            None,
         )
         .is_err());
+
+        for (event_id, anchor, boundary) in [
+            (
+                "activity-anchor-without-boundary",
+                Some("root-assistant"),
+                None,
+            ),
+            ("activity-boundary-without-anchor", None, Some(1)),
+            ("activity-stale-boundary", Some("root-assistant"), Some(0)),
+            ("activity-future-boundary", Some("root-assistant"), Some(2)),
+        ] {
+            assert!(insert_activity_event(
+                &mut connection,
+                event_id,
+                "agent-child",
+                "conversation-child",
+                "agent-child",
+                "review",
+                anchor,
+                boundary,
+            )
+            .is_err());
+        }
 
         insert_activity_event(
             &mut connection,
@@ -554,6 +686,7 @@ mod tests {
             "agent-child",
             "review",
             Some("root-assistant"),
+            Some(1),
         )
         .unwrap();
         let event = list_root_events(&connection, "agent-root", 0, 32)
@@ -568,6 +701,442 @@ mod tests {
                 .and_then(|activity| activity.root_anchor_message_id.as_deref()),
             Some("root-assistant")
         );
+        assert_eq!(
+            event
+                .activity
+                .as_ref()
+                .and_then(|activity| activity.root_trace_boundary_sequence),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn semantic_triggers_freeze_the_active_root_trace_boundary_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("activity-boundary.sqlite");
+        let mut connection = Connection::open(&database_path).unwrap();
+        populate_tree(&mut connection);
+        connection
+            .execute_batch(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'root-boundary-assistant', 'conversation-root', 'assistant', '',
+                     'pending', 10, 0
+                 );
+                 INSERT INTO conversation_turn_traces (
+                     assistant_message_id, conversation_id, run_id, schema_version,
+                     terminal_status, terminal_error, truncated, created_at, updated_at,
+                     completed_at
+                 ) VALUES (
+                     'root-boundary-assistant', 'conversation-root', 'root-boundary-run', 1,
+                     'in_progress', NULL, 0, 10, 10, NULL
+                 );",
+            )
+            .unwrap();
+        insert_trace_item(&connection, "root-boundary-assistant", 0);
+        let after_root_trace = latest_root_sequence(&connection, "agent-root").unwrap();
+
+        let task = agent_graph_repository::enqueue_agent_message(
+            &mut connection,
+            &EnqueueAgentMessageInput {
+                message_id: "boundary-task".to_string(),
+                root_agent_id: "agent-root".to_string(),
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "boundary-task-request".to_string(),
+                kind: AgentMailboxKind::Task,
+                content: "review".to_string(),
+                projection_message_id: "boundary-task-projection".to_string(),
+            },
+            11,
+        )
+        .unwrap()
+        .record()
+        .clone();
+        agent_graph_repository::enqueue_agent_wake(
+            &mut connection,
+            &EnqueueAgentWakeInput {
+                wake_id: "boundary-wake".to_string(),
+                root_agent_id: "agent-root".to_string(),
+                agent_id: "agent-child".to_string(),
+                requester_agent_id: "agent-root".to_string(),
+                request_id: "boundary-wake-request".to_string(),
+                source_agent_message_id: Some(task.message_id),
+            },
+            12,
+        )
+        .unwrap();
+
+        insert_trace_item(&connection, "root-boundary-assistant", 1);
+        agent_graph_repository::send_agent_message(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-child".to_string(),
+                recipient_agent_id: "agent-root".to_string(),
+                request_id: "boundary-child-update".to_string(),
+                content: "still working".to_string(),
+            },
+            13,
+        )
+        .unwrap();
+
+        insert_trace_item(&connection, "root-boundary-assistant", 2);
+        connection
+            .execute_batch(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'boundary-child-assistant', 'conversation-child', 'assistant', '',
+                     'pending', 14, 0
+                 );
+                 INSERT INTO conversation_turn_traces (
+                     assistant_message_id, conversation_id, run_id, schema_version,
+                     terminal_status, terminal_error, truncated, created_at, updated_at,
+                     completed_at
+                 ) VALUES (
+                     'boundary-child-assistant', 'conversation-child', 'boundary-child-run', 1,
+                     'in_progress', NULL, 0, 14, 14, NULL
+                 );
+                 INSERT INTO agent_pending_actions (
+                     action_id, run_id, conversation_id, assistant_message_id, action_type,
+                     tool_name, tool_call_id, status, target_status, action_json,
+                     agent_input_json, created_at, updated_at
+                 ) VALUES (
+                     'boundary-approval', 'boundary-child-run', 'conversation-child',
+                     'boundary-child-assistant', 'tool_call', 'read_file', 'boundary-call',
+                     'pending', NULL, '{}', '{}', 15, 15
+                 );",
+            )
+            .unwrap();
+
+        insert_trace_marker(
+            &connection,
+            "root-boundary-assistant",
+            3,
+            "context_compaction_lifecycle",
+            serde_json::json!({
+                "type": "context_compaction_lifecycle",
+                "sequence": 3,
+                "phase": "started",
+                "operationId": "root-compact",
+                "outcome": null,
+            }),
+        );
+        connection
+            .execute(
+                "UPDATE agent_wake_requests
+                 SET status = 'cancelled', status_revision = 2, completed_at = 16
+                 WHERE wake_id = 'boundary-wake'",
+                [],
+            )
+            .unwrap();
+        insert_trace_marker(
+            &connection,
+            "root-boundary-assistant",
+            4,
+            "context_compaction_lifecycle",
+            serde_json::json!({
+                "type": "context_compaction_lifecycle",
+                "sequence": 4,
+                "phase": "finished",
+                "operationId": "root-compact",
+                "outcome": "applied",
+            }),
+        );
+        let active_followup = agent_graph_repository::follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "boundary-active-followup".to_string(),
+                content: "continue while the root Turn is active".to_string(),
+            },
+            17,
+        )
+        .unwrap();
+        let active_followup_wake = active_followup.deferred_wake.unwrap();
+        connection
+            .execute(
+                "UPDATE agent_wake_requests
+                 SET status = 'cancelled', status_revision = status_revision + 1,
+                     completed_at = 18
+                 WHERE wake_id = ?1",
+                [&active_followup_wake.wake_id],
+            )
+            .unwrap();
+
+        connection
+            .execute(
+                "UPDATE conversation_turn_traces
+                 SET terminal_status = 'completed', updated_at = 19, completed_at = 19
+                 WHERE assistant_message_id = 'root-boundary-assistant'",
+                [],
+            )
+            .unwrap();
+        agent_graph_repository::follow_up_agent(
+            &mut connection,
+            &SendAgentMessageRequest {
+                sender_agent_id: "agent-root".to_string(),
+                recipient_agent_id: "agent-child".to_string(),
+                request_id: "boundary-followup".to_string(),
+                content: "continue after the root Turn".to_string(),
+            },
+            20,
+        )
+        .unwrap();
+
+        let expected = list_root_events(&connection, "agent-root", after_root_trace, 64)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| {
+                event.activity.map(|activity| {
+                    (
+                        activity.semantic,
+                        activity.root_anchor_message_id,
+                        activity.root_trace_boundary_sequence,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected,
+            vec![
+                (
+                    AgentCollaborationActivitySemantic::Started,
+                    Some("root-boundary-assistant".to_string()),
+                    Some(1),
+                ),
+                (
+                    AgentCollaborationActivitySemantic::Updated,
+                    Some("root-boundary-assistant".to_string()),
+                    Some(2),
+                ),
+                (
+                    AgentCollaborationActivitySemantic::WaitingApproval,
+                    Some("root-boundary-assistant".to_string()),
+                    Some(3),
+                ),
+                (
+                    AgentCollaborationActivitySemantic::Interrupted,
+                    Some("root-boundary-assistant".to_string()),
+                    Some(4),
+                ),
+                (
+                    AgentCollaborationActivitySemantic::Started,
+                    Some("root-boundary-assistant".to_string()),
+                    Some(5),
+                ),
+                (
+                    AgentCollaborationActivitySemantic::Interrupted,
+                    Some("root-boundary-assistant".to_string()),
+                    Some(5),
+                ),
+                (AgentCollaborationActivitySemantic::Started, None, None),
+            ]
+        );
+
+        drop(connection);
+        let reopened = Connection::open(&database_path).unwrap();
+        migrations::run_migrations(&reopened).unwrap();
+        let recovered = list_root_events(&reopened, "agent-root", after_root_trace, 64)
+            .unwrap()
+            .into_iter()
+            .filter_map(|event| {
+                event.activity.map(|activity| {
+                    (
+                        activity.semantic,
+                        activity.root_anchor_message_id,
+                        activity.root_trace_boundary_sequence,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(recovered, expected);
+    }
+
+    #[test]
+    fn terminal_result_transactions_emit_exact_active_root_boundaries_without_updated_noise() {
+        let mut connection = tree();
+        connection
+            .execute_batch(
+                "INSERT INTO messages (
+                     id, conversation_id, role, content, status, created_at, position
+                 ) VALUES (
+                     'root-terminal-assistant', 'conversation-root', 'assistant', '',
+                     'pending', 10, 0
+                 );
+                 INSERT INTO conversation_turn_traces (
+                     assistant_message_id, conversation_id, run_id, schema_version,
+                     terminal_status, terminal_error, truncated, created_at, updated_at,
+                     completed_at
+                 ) VALUES (
+                     'root-terminal-assistant', 'conversation-root', 'root-terminal-run', 1,
+                     'in_progress', NULL, 0, 10, 10, NULL
+                 );",
+            )
+            .unwrap();
+        insert_trace_item(&connection, "root-terminal-assistant", 0);
+        let after_root_trace = latest_root_sequence(&connection, "agent-root").unwrap();
+
+        for (wake_id, request_id, created_at) in [
+            ("terminal-completed-wake", "terminal-completed-request", 11),
+            ("terminal-failed-wake", "terminal-failed-request", 15),
+        ] {
+            agent_graph_repository::enqueue_agent_wake(
+                &mut connection,
+                &EnqueueAgentWakeInput {
+                    wake_id: wake_id.to_string(),
+                    root_agent_id: "agent-root".to_string(),
+                    agent_id: "agent-child".to_string(),
+                    requester_agent_id: "agent-root".to_string(),
+                    request_id: request_id.to_string(),
+                    source_agent_message_id: None,
+                },
+                created_at,
+            )
+            .unwrap();
+        }
+
+        let completed_claim = agent_graph_repository::claim_next_agent_wake(
+            &mut connection,
+            "agent-child",
+            "terminal-completed-claim",
+            12,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(completed_claim.wake_id, "terminal-completed-wake");
+        agent_graph_repository::transition_agent_wake(
+            &mut connection,
+            &completed_claim.wake_id,
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Running,
+            Some("terminal-completed-claim"),
+            13,
+        )
+        .unwrap();
+        agent_graph_repository::finish_agent_wake_with_result(
+            &mut connection,
+            &FinishAgentWakeWithResultInput {
+                wake_id: completed_claim.wake_id,
+                expected_status: AgentWakeStatus::Running,
+                claim_token: "terminal-completed-claim".to_string(),
+                terminal_status: AgentWakeStatus::Completed,
+                terminal_error: None,
+                result_message: EnqueueAgentMessageInput {
+                    message_id: "terminal-completed-result".to_string(),
+                    root_agent_id: "agent-root".to_string(),
+                    sender_agent_id: "agent-child".to_string(),
+                    recipient_agent_id: "agent-root".to_string(),
+                    request_id: "terminal-completed-result-request".to_string(),
+                    kind: AgentMailboxKind::Result,
+                    content: "completed".to_string(),
+                    projection_message_id: "terminal-completed-projection".to_string(),
+                },
+            },
+            14,
+        )
+        .unwrap();
+
+        insert_trace_marker(
+            &connection,
+            "root-terminal-assistant",
+            1,
+            "runtime_error",
+            serde_json::json!({
+                "type": "runtime_error",
+                "sequence": 1,
+                "message": "root marker",
+                "recoverable": true,
+                "code": null,
+                "truncated": false,
+            }),
+        );
+        let failed_claim = agent_graph_repository::claim_next_agent_wake(
+            &mut connection,
+            "agent-child",
+            "terminal-failed-claim",
+            16,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(failed_claim.wake_id, "terminal-failed-wake");
+        agent_graph_repository::transition_agent_wake(
+            &mut connection,
+            &failed_claim.wake_id,
+            AgentWakeStatus::Claimed,
+            AgentWakeStatus::Running,
+            Some("terminal-failed-claim"),
+            17,
+        )
+        .unwrap();
+        agent_graph_repository::finish_agent_wake_with_result(
+            &mut connection,
+            &FinishAgentWakeWithResultInput {
+                wake_id: failed_claim.wake_id,
+                expected_status: AgentWakeStatus::Running,
+                claim_token: "terminal-failed-claim".to_string(),
+                terminal_status: AgentWakeStatus::Failed,
+                terminal_error: Some("provider failed".to_string()),
+                result_message: EnqueueAgentMessageInput {
+                    message_id: "terminal-failed-result".to_string(),
+                    root_agent_id: "agent-root".to_string(),
+                    sender_agent_id: "agent-child".to_string(),
+                    recipient_agent_id: "agent-root".to_string(),
+                    request_id: "terminal-failed-result-request".to_string(),
+                    kind: AgentMailboxKind::Result,
+                    content: "failed".to_string(),
+                    projection_message_id: "terminal-failed-projection".to_string(),
+                },
+            },
+            18,
+        )
+        .unwrap();
+
+        let events = list_root_events(&connection, "agent-root", after_root_trace, 64).unwrap();
+        let terminal_activities = events
+            .iter()
+            .filter_map(|event| {
+                event.activity.as_ref().map(|activity| {
+                    (
+                        event.kind,
+                        activity.semantic,
+                        activity.root_anchor_message_id.as_deref(),
+                        activity.root_trace_boundary_sequence,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminal_activities,
+            vec![
+                (
+                    AgentCollaborationEventKind::WakeUpdated,
+                    AgentCollaborationActivitySemantic::Completed,
+                    Some("root-terminal-assistant"),
+                    Some(1),
+                ),
+                (
+                    AgentCollaborationEventKind::WakeUpdated,
+                    AgentCollaborationActivitySemantic::Failed,
+                    Some("root-terminal-assistant"),
+                    Some(2),
+                ),
+            ]
+        );
+        let result_events = events
+            .iter()
+            .filter(|event| {
+                event.kind == AgentCollaborationEventKind::MailboxEnqueued
+                    && matches!(
+                        event.message_id.as_deref(),
+                        Some("terminal-completed-result" | "terminal-failed-result")
+                    )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(result_events.len(), 2);
+        assert!(result_events.iter().all(|event| event.activity.is_none()));
     }
 
     #[test]
@@ -809,6 +1378,7 @@ mod tests {
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
                 root_anchor_message_id: None,
+                root_trace_boundary_sequence: None,
             })
         );
         assert_eq!(
@@ -819,6 +1389,7 @@ mod tests {
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
                 root_anchor_message_id: None,
+                root_trace_boundary_sequence: None,
             })
         );
         assert_eq!(
@@ -836,6 +1407,7 @@ mod tests {
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
                 root_anchor_message_id: None,
+                root_trace_boundary_sequence: None,
             })
         );
         assert_eq!(
@@ -846,6 +1418,7 @@ mod tests {
                 agent_id: "agent-child".to_string(),
                 task_name_snapshot: "review".to_string(),
                 root_anchor_message_id: None,
+                root_trace_boundary_sequence: None,
             })
         );
         assert!(events
@@ -934,6 +1507,7 @@ mod tests {
                 "agent-child",
                 "review",
                 None,
+                None,
             )
             .unwrap();
         }
@@ -974,6 +1548,7 @@ mod tests {
             "conversation-child",
             "agent-child",
             "review",
+            None,
             None,
         )
         .is_err());

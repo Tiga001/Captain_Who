@@ -4553,7 +4553,9 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
                     tool_calls: Vec::new(),
                     is_error: !success,
                 },
-                ConversationTurnTraceItem::CommandSessionLifecycle { .. } => return None,
+                ConversationTurnTraceItem::CommandSessionLifecycle { .. }
+                | ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+                | ConversationTurnTraceItem::RuntimeError { .. } => return None,
             };
             Some(projected)
         })
@@ -5722,14 +5724,13 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let generate_count = Arc::new(AtomicUsize::new(0));
     let commit_count = Arc::new(AtomicUsize::new(0));
     let trace_publish_count = Arc::new(AtomicUsize::new(0));
-    let post_compaction_empty_trace_publish_count = Arc::new(AtomicUsize::new(0));
+    let trace_snapshots = Arc::new(Mutex::new(Vec::new()));
     let prepare_counter = prepare_count.clone();
     let generate_counter = generate_count.clone();
     let commit_counter = commit_count.clone();
     let commit_count_for_trace = commit_count.clone();
     let trace_publish_counter = trace_publish_count.clone();
-    let post_compaction_empty_trace_publish_counter =
-        post_compaction_empty_trace_publish_count.clone();
+    let trace_snapshots_for_observer = trace_snapshots.clone();
     let compacted_baseline_for_commit = compacted_baseline.clone();
     let compacted_baseline_for_trace = compacted_baseline.clone();
     let durable_prefix_for_prepare = durable_prefix.clone();
@@ -5850,9 +5851,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     });
     let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
         trace_publish_counter.fetch_add(1, Ordering::SeqCst);
-        if commit_count_for_trace.load(Ordering::SeqCst) > 0 && snapshot.items.is_empty() {
-            post_compaction_empty_trace_publish_counter.fetch_add(1, Ordering::SeqCst);
-        }
+        trace_snapshots_for_observer.lock().unwrap().push(snapshot);
         let baseline = if commit_count_for_trace.load(Ordering::SeqCst) == 0 {
             uncompacted_baseline.clone()
         } else {
@@ -5891,14 +5890,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
     assert_eq!(generate_count.load(Ordering::SeqCst), 1);
     assert_eq!(commit_count.load(Ordering::SeqCst), 1);
-    // One empty trace publication must happen after commit and before the next tool call. Without
-    // it, the first response promotes the stale pre-compaction baseline and the second request
-    // immediately tries to compact the old history again.
-    assert_eq!(
-        post_compaction_empty_trace_publish_count.load(Ordering::SeqCst),
-        1
-    );
-    assert_eq!(trace_publish_count.load(Ordering::SeqCst), 6);
+    assert_eq!(trace_publish_count.load(Ordering::SeqCst), 8);
     let usage = output.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(20));
@@ -5934,12 +5926,18 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         })
         .collect::<Vec<_>>();
     assert_eq!(compaction_events.len(), 2);
-    let AgentEvent::ContextCompactionStarted { operation_id, .. } = compaction_events[0] else {
+    let AgentEvent::ContextCompactionStarted {
+        operation_id,
+        trace_sequence,
+        ..
+    } = compaction_events[0]
+    else {
         panic!("first compaction event should start the operation");
     };
     let AgentEvent::ContextCompactionFinished {
         operation_id: finished_operation_id,
         outcome,
+        trace_sequence: finished_trace_sequence,
         ..
     } = compaction_events[1]
     else {
@@ -5947,6 +5945,34 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     };
     assert_eq!(finished_operation_id, operation_id);
     assert_eq!(*outcome, AgentContextCompactionEventOutcome::Applied);
+    assert_eq!(finished_trace_sequence, trace_sequence);
+    let snapshots = trace_snapshots.lock().unwrap();
+    let settled_snapshot = snapshots
+        .iter()
+        .rev()
+        .find(|snapshot| {
+            snapshot.items.iter().any(|item| matches!(
+                item,
+                ConversationTurnTraceItem::ContextCompactionLifecycle {
+                    phase: crate::conversation_trace::ConversationContextCompactionLifecyclePhase::Finished,
+                    ..
+                }
+            ))
+        })
+        .expect("compaction settlement must be published durably before its live event");
+    let compaction_items = settled_snapshot
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ConversationTurnTraceItem::ContextCompactionLifecycle { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(compaction_items.len(), 2);
+    assert_eq!(compaction_items[0].sequence(), *trace_sequence);
+    assert!(compaction_items[1].sequence() > compaction_items[0].sequence());
 }
 
 #[tokio::test]

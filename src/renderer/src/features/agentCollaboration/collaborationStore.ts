@@ -268,6 +268,7 @@ export class CollaborationStore {
             agentId: event.activity.agentId,
             occurredAt: event.occurredAt,
             rootAnchorMessageId: event.activity.rootAnchorMessageId,
+            rootTraceBoundarySequence: event.activity.rootTraceBoundarySequence,
             runId: event.runId,
             semantic: event.activity.semantic,
             sequence: event.sequence,

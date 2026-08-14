@@ -39,6 +39,29 @@ impl AgentTerminalEventGate {
         events
     }
 
+    /// Releases the Runtime-owned terminal error only after its durable trace committed.
+    ///
+    /// Host failures do not pass through the Runtime emitter and therefore return `None`; their
+    /// caller must emit an explicitly unanchored fallback instead of inventing a trace sequence.
+    pub(super) fn take_error_after_persistence(&self) -> Option<AgentEvent> {
+        std::mem::take(
+            &mut *self
+                .deferred
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
+        .into_iter()
+        .find(|event| {
+            matches!(
+                event,
+                AgentEvent::Error {
+                    recoverable: false,
+                    ..
+                }
+            )
+        })
+    }
+
     pub(super) fn discard(&self) {
         self.deferred
             .lock()
@@ -104,6 +127,7 @@ pub(super) fn emit_pending_transition_error(
 ) {
     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
         run_id: Some(run_id.to_string()),
+        trace_sequence: None,
         message: format!(
             "待审批操作无法可靠迁移为 `{}`；已抑制终态事件：{error}",
             pending_status_label(status)

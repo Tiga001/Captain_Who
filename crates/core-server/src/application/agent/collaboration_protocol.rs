@@ -610,6 +610,7 @@ pub(crate) fn event_dto(record: AgentCollaborationEventRecord) -> CollaborationE
                 agent_id: activity.agent_id,
                 task_name_snapshot: activity.task_name_snapshot,
                 root_anchor_message_id: activity.root_anchor_message_id,
+                root_trace_boundary_sequence: activity.root_trace_boundary_sequence,
             }),
         occurred_at: record.created_at,
     }

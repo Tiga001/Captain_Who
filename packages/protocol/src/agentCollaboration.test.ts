@@ -313,6 +313,58 @@ describe('agent collaboration protocol', () => {
       parseAgentObserverEventEnvelope({
         ...envelope,
         event: {
+          type: 'tool_call',
+          runId: 'run-child',
+          traceSequence: 4,
+          call: {
+            id: 'call-1',
+            tool: 'read_file',
+            args: {},
+            approvalStatus: 'approved',
+            reason: null
+          }
+        }
+      }).event
+    ).toMatchObject({ type: 'tool_call', traceSequence: 4 })
+    expect(
+      parseAgentObserverEventEnvelope({
+        ...envelope,
+        event: {
+          type: 'context_compaction_started',
+          runId: 'run-child',
+          operationId: 'compact-1',
+          traceSequence: 5
+        }
+      }).event
+    ).toMatchObject({ type: 'context_compaction_started', traceSequence: 5 })
+    expect(
+      parseAgentObserverEventEnvelope({
+        ...envelope,
+        event: {
+          type: 'context_compaction_finished',
+          runId: 'run-child',
+          operationId: 'compact-1',
+          outcome: 'applied',
+          traceSequence: 5
+        }
+      }).event
+    ).toMatchObject({ type: 'context_compaction_finished', traceSequence: 5 })
+    expect(
+      parseAgentObserverEventEnvelope({
+        ...envelope,
+        event: {
+          type: 'error',
+          runId: 'run-child',
+          traceSequence: null,
+          message: 'stopped',
+          recoverable: false
+        }
+      }).event
+    ).toMatchObject({ type: 'error', traceSequence: null })
+    expect(
+      parseAgentObserverEventEnvelope({
+        ...envelope,
+        event: {
           type: 'file_draft_updated',
           runId: 'run-child',
           draft: {
@@ -520,6 +572,31 @@ describe('agent collaboration protocol', () => {
     const missingActivity = structuredClone(fixture.event) as Record<string, unknown>
     delete missingActivity.activity
     expect(() => parseCollaborationEventEnvelope(missingActivity)).toThrow(/Missing.*activity/)
+    const missingBoundary = structuredClone(fixture.event) as {
+      activity: Record<string, unknown>
+    }
+    delete missingBoundary.activity.rootTraceBoundarySequence
+    expect(() => parseCollaborationEventEnvelope(missingBoundary)).toThrow(
+      /rootTraceBoundarySequence/
+    )
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...(fixture.event as object),
+        activity: {
+          ...(fixture.event as { activity: object }).activity,
+          rootAnchorMessageId: 'assistant-root'
+        }
+      })
+    ).toThrow(/placement fields/)
+    expect(() =>
+      parseCollaborationEventEnvelope({
+        ...(fixture.event as object),
+        activity: {
+          ...(fixture.event as { activity: object }).activity,
+          rootTraceBoundarySequence: 3
+        }
+      })
+    ).toThrow(/placement fields/)
     expect(() =>
       parseCollaborationEventEnvelope({
         ...(fixture.event as object),

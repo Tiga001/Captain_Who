@@ -233,15 +233,15 @@ export const ChatMessageList = memo(function ChatMessageList({
     [conversation.messages]
   )
   const collaborationTimeline = useMemo(() => {
+    const anchoredMessage = new Map<string, CollaborationTimelineActivity[]>()
     const beforeMessage = new Map<string, CollaborationTimelineActivity[]>()
-    const afterMessage = new Map<string, CollaborationTimelineActivity[]>()
     const tail: CollaborationTimelineActivity[] = []
     const normalized = normalizeCollaborationTimelineActivities(collaborationTimelineActivities)
     for (const activity of normalized) {
       if (activity.rootAnchorMessageId && messageIds.has(activity.rootAnchorMessageId)) {
-        const slot = afterMessage.get(activity.rootAnchorMessageId) ?? []
+        const slot = anchoredMessage.get(activity.rootAnchorMessageId) ?? []
         slot.push(activity)
-        afterMessage.set(activity.rootAnchorMessageId, slot)
+        anchoredMessage.set(activity.rootAnchorMessageId, slot)
         continue
       }
       const nextMessage = conversation.messages.find(
@@ -255,7 +255,7 @@ export const ChatMessageList = memo(function ChatMessageList({
       slot.push(activity)
       beforeMessage.set(nextMessage.id, slot)
     }
-    return { afterMessage, beforeMessage, tail }
+    return { anchoredMessage, beforeMessage, tail }
   }, [collaborationTimelineActivities, conversation.messages, messageIds])
   const [observerTimelineCollapsed, setObserverTimelineCollapsed] = useState<
     Readonly<Record<string, boolean>>
@@ -277,6 +277,11 @@ export const ChatMessageList = memo(function ChatMessageList({
           )}
           <ChatMessageItem
             agentLabelsById={agentLabelsById}
+            collaborationTimelineActivities={
+              collaborationAgentNavigation
+                ? (collaborationTimeline.anchoredMessage.get(message.id) ?? [])
+                : []
+            }
             conversationId={conversation.id}
             isLastAssistantMessage={message.id === lastAssistantMessageId}
             message={message}
@@ -299,6 +304,7 @@ export const ChatMessageList = memo(function ChatMessageList({
                     })
                 : undefined
             }
+            onOpenCollaborationAgent={collaborationAgentNavigation}
             onReject={mode === 'interactive' ? onRejectAgentAction : undefined}
             onReviewLastTurn={mode === 'interactive' ? onReviewLastTurn : undefined}
             onTimelineCollapsedChange={
@@ -320,12 +326,6 @@ export const ChatMessageList = memo(function ChatMessageList({
             }
             turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
           />
-          {collaborationAgentNavigation && (
-            <CollaborationTimelineActivityList
-              activities={collaborationTimeline.afterMessage.get(message.id) ?? []}
-              onOpenAgent={collaborationAgentNavigation}
-            />
-          )}
           {continuationOrigin?.boundaryMessageId === message.id && (
             <ConversationContinuationDivider
               onOpen={
