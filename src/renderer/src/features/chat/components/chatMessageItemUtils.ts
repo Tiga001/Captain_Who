@@ -10,6 +10,7 @@ import type {
   ChatMessage,
   ChatReadActivityKind
 } from '../chatTypes'
+import type { CollaborationTimelineActivity } from '../../agentCollaboration/collaborationTimelineModel'
 import type { ApplyPatchToolActivityGroupItem } from './toolActivities/ApplyPatchToolActivity'
 import type { ConversationHistoryActivityItem } from './toolActivities/ConversationHistoryToolActivity'
 import type { FileWriteToolActivityGroupItem } from './toolActivities/FileWriteToolActivity'
@@ -359,6 +360,19 @@ export function hasCollapsibleTimelineContent(
   return (
     getActivatedSkills(run).length > 0 ||
     timeline.some((item) => item.type !== 'message' && isTimelineItemRenderable(run, item))
+  )
+}
+
+export function hasTrustedAnchoredCollaborationActivity(
+  activities: readonly Pick<
+    CollaborationTimelineActivity,
+    'rootAnchorMessageId' | 'rootTraceBoundarySequence'
+  >[],
+  rootMessageId: string
+) {
+  return activities.some(
+    (activity) =>
+      activity.rootAnchorMessageId === rootMessageId && activity.rootTraceBoundarySequence !== null
   )
 }
 

@@ -121,6 +121,9 @@ vi.mock('../../host/hostClient', () => ({
       getWindowState: vi.fn().mockResolvedValue({ isFullScreen: false, isMaximized: false }),
       onWindowStateChange: vi.fn(() => () => undefined)
     },
+    git: {
+      getTurnDiffSummaries: vi.fn().mockResolvedValue({ summaries: [] })
+    },
     agent: {
       getCollaborationTree: vi.fn(
         async ({ rootConversationId }: { rootConversationId: string }) => ({
@@ -333,7 +336,27 @@ function rootConversation(conversationId: string, loaded = true): ChatConversati
             role: 'assistant',
             content: 'Working with child agents.',
             createdAt: 2,
-            status: 'sent'
+            status: 'sent',
+            uiState: { timelineCollapsed: false },
+            agentRun: {
+              runId: `run-${conversationId}`,
+              status: 'completed',
+              startedAt: 2,
+              completedAt: 3,
+              toolDefinitions: [],
+              toolCalls: [],
+              toolResults: [],
+              approvals: [],
+              diffs: [],
+              timeline: [
+                {
+                  id: `trace-${conversationId}-delegation`,
+                  type: 'message',
+                  content: 'Delegating to child agents.',
+                  traceSequence: 0
+                }
+              ]
+            }
           }
         ]
       : [],
@@ -413,6 +436,7 @@ describe('AppShell deterministic collaboration scenario', () => {
     await expect
       .poll(() => screen.container.querySelectorAll('.collaboration-timeline__chip').length)
       .toBeGreaterThanOrEqual(2)
+    expect(screen.container.querySelector('[data-semantic="waiting_approval"]')).toBeNull()
     expect(screen.container.querySelectorAll('[data-approval-id]')).toHaveLength(2)
     await captureStableScreenshot(
       screen.container.querySelector('.main-panel__surface') ?? screen.container,
@@ -660,13 +684,22 @@ describe('AppShell deterministic collaboration scenario', () => {
     emitCollaborationEvent(
       parseCollaborationEventEnvelope(scenarioFixture.settledEventPage.events.at(-1))
     )
+    await first.getByRole('button', { name: 'Subagents' }).click()
     await expect
       .poll(() =>
-        first.container.querySelector(
-          '.collaboration-timeline__activity[data-semantic="completed"] [data-agent-id="agent-review"]'
-        )
+        first
+          .getByRole('button', { name: 'Open security_review' })
+          .element()
+          .getAttribute('data-status')
       )
-      .not.toBeNull()
+      .toBe('latest_completed')
+    expect(first.container.querySelector('[data-semantic="completed"]')).toBeNull()
+    expect(first.container.querySelector('[data-semantic="interrupted"]')).toBeNull()
+    expect(
+      first.container.querySelector(
+        '.collaboration-timeline__activity[data-semantic="started"] [data-agent-id="agent-review"]'
+      )
+    ).not.toBeNull()
     await first.unmount()
 
     const reloaded = await render(<AppShell />)
@@ -674,9 +707,12 @@ describe('AppShell deterministic collaboration scenario', () => {
     await expect.element(reloaded.getByTestId('collaboration-timeline')).toBeVisible()
     expect(
       reloaded.container.querySelector(
-        '.collaboration-timeline__activity[data-semantic="interrupted"] [data-agent-id="agent-compatibility"]'
+        '.collaboration-timeline__activity[data-semantic="started"] [data-agent-id="agent-compatibility"]'
       )
     ).not.toBeNull()
+    expect(reloaded.container.querySelector('[data-semantic="completed"]')).toBeNull()
+    expect(reloaded.container.querySelector('[data-semantic="interrupted"]')).toBeNull()
+    expect(reloaded.container.querySelector('[data-semantic="waiting_approval"]')).toBeNull()
     await reloaded.getByRole('button', { name: 'Subagents' }).click()
     expect(
       reloaded

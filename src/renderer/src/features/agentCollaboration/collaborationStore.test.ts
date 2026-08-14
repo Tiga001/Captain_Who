@@ -52,7 +52,8 @@ function activityEvent(
   sequence: number,
   agentId: string,
   semantic: NonNullable<CollaborationEventEnvelope['activity']>['semantic'],
-  taskNameSnapshot = agentId
+  taskNameSnapshot = agentId,
+  anchored = true
 ): CollaborationEventEnvelope {
   const outerAgentId = semantic === 'updated' ? `root:${rootConversationId}` : agentId
   const kind =
@@ -69,8 +70,8 @@ function activityEvent(
     activity: {
       schemaVersion: 2,
       agentId,
-      rootAnchorMessageId: null,
-      rootTraceBoundarySequence: null,
+      rootAnchorMessageId: anchored ? 'root-assistant-1' : null,
+      rootTraceBoundarySequence: anchored ? sequence : null,
       semantic,
       taskNameSnapshot
     }
@@ -603,6 +604,47 @@ describe('CollaborationStore', () => {
     expect(store.getSnapshot().activities).toHaveLength(MAX_COLLABORATION_TIMELINE_ACTIVITIES)
     expect(store.getSnapshot().activities[0]?.sequence).toBe(18)
     expect(store.getSnapshot().activities.at(-1)?.sequence).toBe(total)
+  })
+
+  it('does not let post-terminal unanchored events evict the frozen anchored window', async () => {
+    const anchored = Array.from({ length: MAX_COLLABORATION_TIMELINE_ACTIVITIES }, (_, index) =>
+      activityEvent('root-conversation', index + 1, 'agent-a', 'started')
+    )
+    const unanchored = Array.from({ length: 17 }, (_, index) =>
+      activityEvent(
+        'root-conversation',
+        MAX_COLLABORATION_TIMELINE_ACTIVITIES + index + 1,
+        'agent-a',
+        'completed',
+        'agent-a',
+        false
+      )
+    )
+    const durable = [...anchored, ...unanchored]
+    const authoritative = {
+      ...tree('root-conversation', durable.length),
+      agents: [childSummary('agent-a', 'conversation-agent-a')]
+    }
+    const source: CollaborationDataSource = {
+      getTree: vi.fn(async () => authoritative),
+      listEvents: vi.fn(async ({ afterSequence, limit }) => {
+        const events = durable.slice(afterSequence, afterSequence + limit)
+        return page('root-conversation', events, afterSequence + events.length < durable.length)
+      }),
+      subscribe: () => () => undefined,
+      subscribeResync: () => () => undefined
+    }
+    const store = new CollaborationStore('root-conversation', source)
+    store.start()
+    await vi.waitFor(() => expect(store.getSnapshot().loading).toBe(false))
+
+    expect(store.getSnapshot().tree?.lastSequence).toBe(durable.length)
+    expect(store.getSnapshot().agentInvalidationSequences['agent-a']).toBe(durable.length)
+    expect(store.getSnapshot().activities).toHaveLength(MAX_COLLABORATION_TIMELINE_ACTIVITIES)
+    expect(store.getSnapshot().activities[0]?.sequence).toBe(1)
+    expect(store.getSnapshot().activities.at(-1)?.sequence).toBe(
+      MAX_COLLABORATION_TIMELINE_ACTIVITIES
+    )
   })
 })
 

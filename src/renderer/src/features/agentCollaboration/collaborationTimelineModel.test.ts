@@ -77,48 +77,38 @@ describe('collaboration Timeline model', () => {
     expect(groups).toHaveLength(2)
   })
 
-  it('honors exact anchors and clamps timestamp fallback between adjacent durable anchors', () => {
-    const messages = [
-      { id: 'message-1', createdAt: 1_000 },
-      { id: 'message-2', createdAt: 5_000 },
-      { id: 'message-3', createdAt: 9_000 }
-    ]
+  it('projects only paired durable anchors that resolve in the current Conversation', () => {
+    const messages = [{ id: 'message-1' }, { id: 'message-2' }, { id: 'message-3' }]
     const projection = projectCollaborationTimelineActivities(
       [
-        activity('before-anchor', 'agent-a', 1, 99_000, 'started'),
+        activity('post-terminal-unanchored', 'agent-a', 1, 99_000, 'started'),
         activity('anchored-middle', 'agent-b', 2, 5_100, 'started', 'message-2', 7),
-        activity('after-anchor', 'agent-c', 3, 100, 'updated'),
-        activity('anchored-last', 'agent-d', 4, 9_100, 'completed', 'message-3', 8)
+        activity('unknown-message-anchor', 'agent-c', 3, 100, 'updated', 'other-root-message', 8),
+        activity('anchored-last', 'agent-d', 4, 9_100, 'completed', 'message-3', 9)
       ],
       messages
     )
 
-    expect(
-      projection.beforeMessage.get('message-2')?.map((candidate) => candidate.activityId)
-    ).toEqual(['before-anchor'])
     expect(projection.anchoredMessage.get('message-2')?.[0]?.activityId).toBe('anchored-middle')
-    expect(
-      projection.beforeMessage.get('message-3')?.map((candidate) => candidate.activityId)
-    ).toEqual(['after-anchor'])
     expect(projection.anchoredMessage.get('message-3')?.[0]?.activityId).toBe('anchored-last')
+    expect(projection.anchoredMessage.has('other-root-message')).toBe(false)
+    expect(projection.beforeMessage.size).toBe(0)
     expect(projection.tail).toEqual([])
   })
 
-  it('never lets clock skew reverse consecutive unanchored root events', () => {
+  it('keeps the anchored pre-terminal snapshot frozen when a later durable event is unanchored', () => {
     const projection = projectCollaborationTimelineActivities(
       [
-        activity('sequence-first', 'agent-a', 1, 8_000, 'started'),
-        activity('sequence-second', 'agent-b', 2, 100, 'updated')
+        activity('started-before-terminal', 'agent-a', 1, 8_000, 'started', 'message-1', 2),
+        activity('completed-after-terminal', 'agent-a', 2, 100, 'completed')
       ],
-      [
-        { id: 'message-1', createdAt: 1_000 },
-        { id: 'message-2', createdAt: 5_000 },
-        { id: 'message-3', createdAt: 9_000 }
-      ]
+      [{ id: 'message-1' }]
     )
 
     expect(
-      projection.beforeMessage.get('message-3')?.map((candidate) => candidate.activityId)
-    ).toEqual(['sequence-first', 'sequence-second'])
+      projection.anchoredMessage.get('message-1')?.map((candidate) => candidate.activityId)
+    ).toEqual(['started-before-terminal'])
+    expect(projection.beforeMessage.size).toBe(0)
+    expect(projection.tail).toEqual([])
   })
 })

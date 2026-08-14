@@ -58,17 +58,25 @@ keeps its live overlay and refuses the potentially stale response until a target
 explicit reload can obtain a durable snapshot.
 
 The durable boundary in this round is the Agent tree, Conversation history, approval projection,
-template records, and root-local collaboration event log. Root chat renders the log's typed,
-backend-authored semantic activity (`started`, `updated`, `waiting_approval`, and terminal states)
-inside the one Conversation timeline. It never reconstructs activity from model prose, Tool JSON,
+template records, and root-local collaboration event log. Root chat renders a typed,
+backend-authored semantic activity (`started`, `updated`, `waiting_approval`, or a terminal state)
+inside the one Conversation timeline only when its paired durable root Assistant-message and trace
+boundary resolve in that Conversation. The SQLite write path captures that pair only while the root
+Turn remains durably `in_progress`; activity committed after the parent Turn settles is unanchored
+and cannot append to or rewrite the frozen root Timeline. Notification timing does not change that
+decision, so a pre-terminal anchored event remains eligible even when its notification arrives
+late. Unanchored facts still advance the durable cursor, tree refresh, and per-Agent invalidation
+used by Agent Center and observer detail, but do not consume the collaboration store's bounded
+anchored chat-history window. Child approval visibility and actions use the independent root-side
+approval projection. Root chat never reconstructs activity from timestamps, model prose, Tool JSON,
 Mailbox details, or the latest Agent summary. Reload and gap recovery replay the monotonic log from
-sequence zero; the Renderer retains the latest 2,048 semantic items as a documented UI-history
-window while still advancing across every non-display invalidation event. The observer envelope is
-only a low-latency overlay and is not persisted; durable Conversation snapshots and the
-collaboration event log remain recovery truth after gaps, Core restart, and window reload. Both
-live and restored child chat use the one Conversation reducer rather than a second token/chat
-store. The right-sidebar navigation stack and local disclosure/scroll UI state are renderer state
-and are not presented as persisted collaboration facts.
+sequence zero; the Renderer retains the latest 2,048 paired anchored semantic items as a documented
+UI-history window while still advancing across every non-display or unanchored invalidation event.
+The observer envelope is only a low-latency overlay and is not persisted; durable Conversation
+snapshots and the collaboration event log remain recovery truth after gaps, Core restart, and window
+reload. Both live and restored child chat use the one Conversation reducer rather than a second
+token/chat store. The right-sidebar navigation stack and local disclosure/scroll UI state are
+renderer state and are not presented as persisted collaboration facts.
 
 An interactive root that has been materialized as an Agent still uses the existing Conversation
 fork service. Its collaboration-owned fork mode commits the target Conversation, an independent

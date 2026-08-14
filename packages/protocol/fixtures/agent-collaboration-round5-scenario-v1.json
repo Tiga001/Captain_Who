@@ -209,8 +209,8 @@
           "semantic": "started",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "rootAnchorMessageId": "assistant-conversation-root",
+          "rootTraceBoundarySequence": 1
         },
         "occurredAt": 1720000001000
       },
@@ -270,8 +270,8 @@
           "semantic": "started",
           "agentId": "agent-compatibility",
           "taskNameSnapshot": "compatibility_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "rootAnchorMessageId": "assistant-conversation-root",
+          "rootTraceBoundarySequence": 1
         },
         "occurredAt": 1720000001000
       },
@@ -313,8 +313,8 @@
           "semantic": "updated",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "rootAnchorMessageId": "assistant-conversation-root",
+          "rootTraceBoundarySequence": 1
         },
         "occurredAt": 1720000001500
       },
@@ -356,8 +356,8 @@
           "semantic": "started",
           "agentId": "agent-review",
           "taskNameSnapshot": "security_review",
-          "rootAnchorMessageId": null,
-          "rootTraceBoundarySequence": null
+          "rootAnchorMessageId": "assistant-conversation-root",
+          "rootTraceBoundarySequence": 1
         },
         "occurredAt": 1720000001800
       },

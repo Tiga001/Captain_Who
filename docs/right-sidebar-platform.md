@@ -54,10 +54,16 @@ The module is bound to the active root Conversation, not merely to the project/w
 and per-Agent validated invalidation sequence to the Agent Center, root-chat semantic
 activity/approval projections, and observer refreshes. The store replays the durable event log from
 sequence zero after reload, resync, or a detected gap, validates every sequence, and atomically
-publishes a bounded latest-2,048 semantic activity window. Root chat merges those typed events into
-the shared Conversation timeline by durable anchor when present and otherwise by
-`occurredAt`/sequence; it never derives status from the Agent Center's current-state rows. A
-hydration revision additionally invalidates every observer
+publishes a bounded latest-2,048 semantic activity window. Root chat merges a typed event into the
+shared Conversation timeline only when its paired durable root Assistant-message/trace-boundary
+anchor resolves in that Conversation. The SQLite semantic triggers capture that anchor only while
+the root Turn is durably `in_progress`, so notification arrival time is irrelevant: an anchored
+event delivered after settlement remains visible, while genuinely post-terminal activity is
+unanchored and stays out of the frozen chat Timeline. Those facts still advance the durable cursor,
+tree refresh, and per-Agent invalidation used by Agent Center and observer detail, but cannot consume
+the bounded anchored chat-history window. Child approvals continue through their independent
+root-side approval projection. Root chat never derives status from the Agent Center's current-state
+rows. A hydration revision additionally invalidates every observer
 after a gap, restart resync, or window reload. An observer change is
 identity-scoped so a late response for Agent A cannot appear under Agent B; same-Agent invalidation
 refreshes may retain the last authorized snapshot rather than flashing unrelated or empty content.

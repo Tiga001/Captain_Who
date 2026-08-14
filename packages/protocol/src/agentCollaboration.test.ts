@@ -128,6 +128,28 @@ describe('agent collaboration protocol', () => {
       [14, 'wake_updated', 'agent-compatibility', 'interrupted'],
       [15, 'wake_updated', 'agent-review', 'completed']
     ])
+    expect(
+      eventPage.events.flatMap((event) =>
+        event.activity
+          ? [
+              [
+                event.sequence,
+                event.activity.rootAnchorMessageId,
+                event.activity.rootTraceBoundarySequence
+              ]
+            ]
+          : []
+      )
+    ).toEqual([
+      [4, 'assistant-conversation-root', 1],
+      [7, 'assistant-conversation-root', 1],
+      [9, 'assistant-conversation-root', 1],
+      [11, 'assistant-conversation-root', 1],
+      [12, null, null],
+      [13, null, null],
+      [14, null, null],
+      [15, null, null]
+    ])
     expect(eventPage.events.find((event) => event.sequence === 8)).toMatchObject({
       kind: 'mailbox_enqueued',
       messageId: 'mailbox-send-review',

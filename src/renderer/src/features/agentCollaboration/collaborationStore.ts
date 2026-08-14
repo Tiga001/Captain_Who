@@ -8,7 +8,11 @@ export const MAX_COLLABORATION_TIMELINE_ACTIVITIES = 2_048
 class CollaborationEventGapError extends Error {}
 
 export interface CollaborationStoreSnapshot {
-  /** Bounded semantic projection rebuilt from the durable root event log after restart/resync. */
+  /**
+   * Bounded, paired durable activity anchors rebuilt for root-chat history. Unanchored semantic
+   * facts still advance the log cursor and per-Agent invalidation state, but cannot consume this
+   * window or alter a frozen root Timeline.
+   */
   activities: readonly CollaborationTimelineActivity[]
   /** Latest validated durable invalidation sequence for each Agent in this root tree. */
   agentInvalidationSequences: Readonly<Record<string, number>>
@@ -262,7 +266,11 @@ export class CollaborationStore {
         }
         cursor = event.sequence
         invalidationSequences[event.agentId] = event.sequence
-        if (event.activity) {
+        if (
+          event.activity &&
+          event.activity.rootAnchorMessageId !== null &&
+          event.activity.rootTraceBoundarySequence !== null
+        ) {
           activities.push({
             activityId: event.eventId,
             agentId: event.activity.agentId,

@@ -137,6 +137,14 @@ function conversation(): ChatConversation {
   }
 }
 
+function expandedConversation(): ChatConversation {
+  const expanded = conversation()
+  const assistant = expanded.messages[1]
+  if (!assistant) throw new Error('missing root Assistant fixture')
+  assistant.uiState = { timelineCollapsed: false }
+  return expanded
+}
+
 function activity(
   activityId: string,
   semantic: CollaborationTimelineActivity['semantic'],
@@ -158,7 +166,7 @@ function activity(
   }
 }
 
-it('merges typed durable activity into the one message timeline without a bottom summary panel', async () => {
+it('merges only trusted anchored activity into the message timeline', async () => {
   const onOpenAgent = vi.fn()
   const screen = await render(
     <ChatMessageList
@@ -166,7 +174,7 @@ it('merges typed durable activity into the one message timeline without a bottom
         activity('event-unanchored', 'updated', 2, 3_000, null),
         activity('event-anchored', 'started', 2, 2_100, 'root-assistant-1')
       ]}
-      conversation={conversation()}
+      conversation={expandedConversation()}
       editableLastUserMessageId={null}
       editSelectedModelAvailable
       editSelectedModelSupportsImage
@@ -176,7 +184,6 @@ it('merges typed durable activity into the one message timeline without a bottom
   )
 
   const assistant = screen.container.querySelector('[data-message-id="root-assistant-1"]')
-  const nextUser = screen.container.querySelector('[data-message-id="root-user-2"]')
   const started = screen.container.querySelector('[data-semantic="started"]')
   const updated = screen.container.querySelector('[data-semantic="updated"]')
   expect(assistant?.contains(started)).toBe(true)
@@ -188,7 +195,7 @@ it('merges typed durable activity into the one message timeline without a bottom
   expect(started!.compareDocumentPosition(after).valueOf() & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
     Node.DOCUMENT_POSITION_FOLLOWING
   )
-  expect(updated?.parentElement?.nextElementSibling).toBe(nextUser)
+  expect(updated).toBeNull()
   expect(screen.container.querySelector('[data-testid="collaboration-activity"]')).toBeNull()
 
   expect(
@@ -196,14 +203,18 @@ it('merges typed durable activity into the one message timeline without a bottom
   ).toBeVisible()
 })
 
-it('keeps unanchored events in durable sequence when their wall clocks move backwards', async () => {
+it('does not append or rewrite inline state when post-terminal activity arrives unanchored', async () => {
+  const startedBeforeTerminal = activity(
+    'started-before-terminal',
+    'started',
+    1,
+    2_100,
+    'root-assistant-1'
+  )
   const screen = await render(
     <ChatMessageList
-      collaborationTimelineActivities={[
-        activity('sequence-first', 'started', 1, 4_500, null),
-        activity('sequence-second', 'updated', 2, 500, null)
-      ]}
-      conversation={conversation()}
+      collaborationTimelineActivities={[startedBeforeTerminal]}
+      conversation={expandedConversation()}
       editableLastUserMessageId={null}
       editSelectedModelAvailable
       editSelectedModelSupportsImage
@@ -212,22 +223,34 @@ it('keeps unanchored events in durable sequence when their wall clocks move back
     />
   )
 
-  const started = screen.container.querySelector<HTMLElement>('[data-semantic="started"]')
-  const updated = screen.container.querySelector<HTMLElement>('[data-semantic="updated"]')
-  const nextUser = screen.container.querySelector<HTMLElement>('[data-message-id="root-user-2"]')
-  expect(started).not.toBeNull()
-  expect(updated).not.toBeNull()
-  expect(nextUser).not.toBeNull()
-  expect(started!.compareDocumentPosition(updated!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
-    Node.DOCUMENT_POSITION_FOLLOWING
+  expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="completed"]')).toHaveLength(0)
+
+  await screen.rerender(
+    <ChatMessageList
+      collaborationTimelineActivities={[
+        startedBeforeTerminal,
+        activity('completed-after-terminal', 'completed', 2, 4_500, null)
+      ]}
+      conversation={expandedConversation()}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      onOpenCollaborationAgent={vi.fn()}
+      showTokenUsageDetails={false}
+    />
   )
-  expect(updated!.parentElement?.nextElementSibling).toBe(nextUser)
+
+  expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="completed"]')).toHaveLength(0)
 })
 
 it('keeps root collaboration activity out of the child observer capability mode', async () => {
   const screen = await render(
     <ChatMessageList
-      collaborationTimelineActivities={[activity('event-root-only', 'started', 1, 2_500, null)]}
+      collaborationTimelineActivities={[
+        activity('event-root-only', 'started', 1, 2_500, 'root-assistant-1')
+      ]}
       conversation={conversation()}
       editableLastUserMessageId={null}
       editSelectedModelAvailable={false}
@@ -362,8 +385,8 @@ it('keeps an unnumbered presentation item visible before the activity from its a
   )
 })
 
-it('keeps an activity after the durable final answer when its boundary follows that trace item', async () => {
-  const settled = structuredClone(conversation())
+it('renders a causally pre-terminal anchored event even when its notification arrives late', async () => {
+  const settled = structuredClone(expandedConversation())
   const run = settled.messages[1]?.agentRun
   if (!run) throw new Error('missing root run fixture')
   run.timeline.push({
@@ -375,8 +398,21 @@ it('keeps an activity after the durable final answer when its boundary follows t
 
   const screen = await render(
     <ChatMessageList
+      collaborationTimelineActivities={[]}
+      conversation={settled}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      onOpenCollaborationAgent={vi.fn()}
+      showTokenUsageDetails={false}
+    />
+  )
+
+  expect(screen.container.querySelector('[data-semantic="updated"]')).toBeNull()
+  await screen.rerender(
+    <ChatMessageList
       collaborationTimelineActivities={[
-        activity('event-after-final-answer', 'updated', 4, 4_100, 'root-assistant-1')
+        activity('event-before-terminal-delivered-late', 'updated', 4, 4_100, 'root-assistant-1')
       ]}
       conversation={settled}
       editableLastUserMessageId={null}
@@ -396,7 +432,7 @@ it('keeps an activity after the durable final answer when its boundary follows t
   expect(screen.getByText('I finished the root response.').elements()).toHaveLength(1)
 })
 
-it('folds anchored activity with the execution timeline and keeps unanchored activity outside', async () => {
+it('folds anchored activity with the execution timeline and omits unanchored activity', async () => {
   const grouped = structuredClone(conversation())
   const run = grouped.messages[1]?.agentRun
   if (!run) throw new Error('missing root run fixture')
@@ -464,7 +500,7 @@ it('folds anchored activity with the execution timeline and keeps unanchored act
   )
 
   expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(0)
-  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(0)
   expect(screen.container.querySelectorAll('.agent-activity--read')).toHaveLength(0)
 
   const disclosure = screen.container.querySelector<HTMLButtonElement>('.agent-run__elapsed-button')
@@ -501,7 +537,7 @@ it('folds anchored activity with the execution timeline and keeps unanchored act
     Node.DOCUMENT_POSITION_FOLLOWING
   )
   expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(1)
-  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(0)
 
   const collapsedAgain = structuredClone(expanded)
   const collapsedAgainMessage = collapsedAgain.messages[1]
@@ -520,12 +556,12 @@ it('folds anchored activity with the execution timeline and keeps unanchored act
     />
   )
   expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(0)
-  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(0)
   expect(screen.container.querySelectorAll('.agent-activity--read')).toHaveLength(0)
 })
 
 it('coalesces consecutive same-status Harness activity across hidden trace boundaries', async () => {
-  const grouped = structuredClone(conversation())
+  const grouped = structuredClone(expandedConversation())
   const run = grouped.messages[1]?.agentRun
   if (!run) throw new Error('missing root run fixture')
   run.toolCalls = ['agent-a', 'agent-b', 'agent-c'].map((agentId) => ({
@@ -589,7 +625,7 @@ it('coalesces consecutive same-status Harness activity across hidden trace bound
 })
 
 it('keeps different statuses compact but never merges across visible narration', async () => {
-  const grouped = structuredClone(conversation())
+  const grouped = structuredClone(expandedConversation())
   const run = grouped.messages[1]?.agentRun
   if (!run) throw new Error('missing root run fixture')
   run.timeline = [
@@ -676,7 +712,7 @@ it('renders inline activity inside the real interactive ConversationSurface desi
           skills: [],
           updatedAt: 5_000
         }}
-        conversation={conversation()}
+        conversation={expandedConversation()}
         editSelectedModelAvailable
         editSelectedModelSupportsImage
         mode="interactive"

@@ -49,6 +49,7 @@ import {
   hasCollapsibleTimelineContent,
   hasDisplayableContent,
   hasRecentFileWriteActivity,
+  hasTrustedAnchoredCollaborationActivity,
   isContentFullyRepresentedByTimeline,
   isRunSettled,
   isTokenLimitFinishReason,
@@ -699,8 +700,16 @@ function AgentRunView({
   const waitingForCommandCompletion = Boolean(run && isWaitingForCommandCompletion(run))
   const hasTimeline = displayTimeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
+  // Only the paired durable message/boundary anchor makes collaboration part of this root run.
+  // Observer and timestamp-fallback activity must not manufacture a disclosure for this message.
+  const hasCollapsibleRootCollaborationActivity =
+    mode === 'interactive' &&
+    Boolean(onOpenCollaborationAgent) &&
+    hasTrustedAnchoredCollaborationActivity(normalizedCollaborationActivities, message.id)
   const canToggleTimeline = Boolean(
-    run && isRunSettled(run) && hasCollapsibleTimelineContent(run, timeline)
+    run &&
+    isRunSettled(run) &&
+    (hasCollapsibleTimelineContent(run, timeline) || hasCollapsibleRootCollaborationActivity)
   )
   const [now, setNow] = useState(() => Date.now())
 

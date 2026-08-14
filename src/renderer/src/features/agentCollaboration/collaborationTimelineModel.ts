@@ -24,7 +24,6 @@ export interface CollaborationTimelineActivityGroup {
 }
 
 export interface CollaborationTimelineMessageReference {
-  createdAt: number
   id: string
 }
 
@@ -113,90 +112,35 @@ export function groupCollaborationTimelineActivities(
   return groups
 }
 
-function timestampMessageSlot(
-  activity: CollaborationTimelineActivity,
-  messages: readonly CollaborationTimelineMessageReference[]
-): number {
-  const nextMessageIndex = messages.findIndex((message) => message.createdAt > activity.occurredAt)
-  return nextMessageIndex < 0 ? messages.length : nextMessageIndex
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(Math.max(value, minimum), maximum)
-}
-
 /**
  * Assigns root events to the shared Conversation timeline.
  *
- * A valid anchor always wins and is later placed at its trace boundary by ChatMessageItem. Events
- * without a usable anchor use their timestamp only to choose a coarse message slot. That fallback
- * slot is clamped between adjacent durable anchors and never moves backwards relative to an
- * earlier unanchored event, preserving root-local sequence through clock skew.
+ * The backend captures the root Assistant message and trace boundary in the same transaction as
+ * an activity only while that root Turn is still in progress. An activity committed after the
+ * parent Turn settles is deliberately durable but unanchored: it continues to invalidate Agent
+ * Center/detail state and must not append to or rewrite the frozen root chat Timeline.
+ *
+ * Consequently there is no timestamp or notification-arrival fallback here. A paired durable
+ * anchor that resolves to a message in this exact Conversation is the only inline authority. A
+ * notification delivered after settlement still renders when its event was causally committed
+ * before settlement and therefore carries that durable anchor.
  */
 export function projectCollaborationTimelineActivities(
   input: readonly CollaborationTimelineActivity[],
   messages: readonly CollaborationTimelineMessageReference[]
 ): CollaborationTimelineMessageProjection {
   const normalized = normalizeCollaborationTimelineActivities(input)
-  const messageIndexById = new Map(messages.map((message, index) => [message.id, index]))
-  const trustedAnchorMessageIndex = normalized.map((activity) => {
-    if (activity.rootAnchorMessageId === null || activity.rootTraceBoundarySequence === null) {
-      return null
-    }
-    return messageIndexById.get(activity.rootAnchorMessageId) ?? null
-  })
-  const previousAnchorIndex: Array<number | null> = []
-  const nextAnchorIndex: Array<number | null> = []
-
-  let previous: number | null = null
-  for (let index = 0; index < normalized.length; index += 1) {
-    previousAnchorIndex[index] = previous
-    if (trustedAnchorMessageIndex[index] !== null) previous = trustedAnchorMessageIndex[index]
-  }
-  let next: number | null = null
-  for (let index = normalized.length - 1; index >= 0; index -= 1) {
-    nextAnchorIndex[index] = next
-    if (trustedAnchorMessageIndex[index] !== null) next = trustedAnchorMessageIndex[index]
-  }
-
+  const messageIds = new Set(messages.map((message) => message.id))
   const anchoredMessage = new Map<string, CollaborationTimelineActivity[]>()
-  const beforeMessage = new Map<string, CollaborationTimelineActivity[]>()
-  const tail: CollaborationTimelineActivity[] = []
-  let previousFallbackSlot = 0
-
-  for (let index = 0; index < normalized.length; index += 1) {
-    const activity = normalized[index]
-    const trustedMessageIndex = trustedAnchorMessageIndex[index]
-    if (trustedMessageIndex !== null && activity.rootAnchorMessageId !== null) {
-      const slot = anchoredMessage.get(activity.rootAnchorMessageId) ?? []
-      slot.push(activity)
-      anchoredMessage.set(activity.rootAnchorMessageId, slot)
+  for (const activity of normalized) {
+    const anchor = activity.rootAnchorMessageId
+    if (anchor === null || activity.rootTraceBoundarySequence === null || !messageIds.has(anchor)) {
       continue
     }
-
-    const priorAnchor = previousAnchorIndex[index]
-    const followingAnchor = nextAnchorIndex[index]
-    const lowerBound = Math.max(previousFallbackSlot, priorAnchor === null ? 0 : priorAnchor + 1)
-    const upperBound = followingAnchor === null ? messages.length : followingAnchor
-    const timestampSlot = timestampMessageSlot(activity, messages)
-    // Contradictory anchors (for example two reverse-ordered trusted message identities) cannot be
-    // repaired in the Renderer. Preserve exact anchors and keep this fallback monotonic instead of
-    // fabricating an in-message trace boundary.
-    const targetSlot =
-      lowerBound <= upperBound
-        ? clamp(timestampSlot, lowerBound, upperBound)
-        : Math.max(previousFallbackSlot, timestampSlot)
-    previousFallbackSlot = targetSlot
-
-    const nextMessage = messages[targetSlot]
-    if (!nextMessage) {
-      tail.push(activity)
-      continue
-    }
-    const slot = beforeMessage.get(nextMessage.id) ?? []
+    const slot = anchoredMessage.get(anchor) ?? []
     slot.push(activity)
-    beforeMessage.set(nextMessage.id, slot)
+    anchoredMessage.set(anchor, slot)
   }
 
-  return { anchoredMessage, beforeMessage, tail }
+  return { anchoredMessage, beforeMessage: new Map(), tail: [] }
 }
