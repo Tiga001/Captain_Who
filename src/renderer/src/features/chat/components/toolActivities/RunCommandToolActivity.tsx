@@ -322,7 +322,7 @@ export function RunCommandToolActivity({
         />
       )
     }
-    if (status === 'failed' || status === 'timed_out') {
+    if (status === 'timed_out') {
       return (
         <span
           aria-hidden="true"
@@ -340,7 +340,7 @@ export function RunCommandToolActivity({
     if (status === 'starting') return t('agent.command.starting')
     if (status === 'running') return t('agent.command.running')
     if (status === 'completed') return t('agent.command.completed')
-    if (status === 'failed') return t('agent.command.failed')
+    if (status === 'failed') return t('agent.command.completed')
     if (status === 'interrupted') return t('agent.command.interrupted')
     if (status === 'timed_out') return t('agent.command.timedOutLabel')
     return getToolCallLabel(call, result, t, { cancelled, settledStatus })
@@ -353,9 +353,7 @@ export function RunCommandToolActivity({
       hasDetails={hasDetails}
       icon={SquareTerminal}
       iconBadge={iconBadge}
-      iconBadgeTone={
-        rejected ? 'blocked' : status === 'failed' || status === 'timed_out' ? 'danger' : undefined
-      }
+      iconBadgeTone={rejected ? 'blocked' : status === 'timed_out' ? 'danger' : undefined}
       isPending={isPending}
       label={label}
       revealDetailsOnOpen

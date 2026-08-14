@@ -300,7 +300,9 @@ describe('RunCommandToolActivity', () => {
       />
     )
 
-    expect(screen.container.querySelector('summary')?.textContent).toContain('命令失败')
+    expect(screen.container.querySelector('summary')?.textContent).toContain('已运行命令 运行测试')
+    expect(screen.container.querySelector('summary')?.textContent).not.toContain('命令失败')
+    expect(screen.container.querySelector('.agent-activity__icon-mark--bang')).toBeNull()
     expect(screen.container.querySelector('.run-command-shell__status')).toHaveAttribute(
       'data-status',
       'failed'
