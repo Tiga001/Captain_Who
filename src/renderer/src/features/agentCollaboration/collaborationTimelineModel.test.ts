@@ -46,7 +46,7 @@ describe('collaboration Timeline model', () => {
     ])
   })
 
-  it('coalesces only equal adjacent semantics and keeps the latest snapshot per Agent', () => {
+  it('coalesces equal adjacent semantics across hidden boundaries in one anchored Assistant run', () => {
     const groups = groupCollaborationTimelineActivities([
       activity('start-a-old', 'agent-a', 1, 1_000, 'started', 'assistant-1', 3),
       activity('start-b', 'agent-b', 2, 1_100, 'started', 'assistant-1', 3),
@@ -56,14 +56,25 @@ describe('collaboration Timeline model', () => {
       activity('start-d', 'agent-d', 6, 1_500, 'started', 'assistant-1', 4)
     ])
 
-    expect(groups).toHaveLength(4)
+    expect(groups).toHaveLength(3)
     expect(groups[0]?.activities.map((candidate) => candidate.activityId)).toEqual([
       'start-a-new',
       'start-b'
     ])
     expect(groups[1]?.semantic).toBe('updated')
-    expect(groups[2]?.activities.map((candidate) => candidate.agentId)).toEqual(['agent-c'])
-    expect(groups[3]?.rootTraceBoundarySequence).toBe(4)
+    expect(groups[2]?.activities.map((candidate) => candidate.agentId)).toEqual([
+      'agent-c',
+      'agent-d'
+    ])
+  })
+
+  it('does not merge unanchored activities across distinct trace boundaries', () => {
+    const groups = groupCollaborationTimelineActivities([
+      activity('unanchored-a', 'agent-a', 1, 1_000, 'started', null, 3),
+      activity('unanchored-b', 'agent-b', 2, 1_100, 'started', null, 4)
+    ])
+
+    expect(groups).toHaveLength(2)
   })
 
   it('honors exact anchors and clamps timestamp fallback between adjacent durable anchors', () => {

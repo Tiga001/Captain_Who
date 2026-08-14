@@ -112,6 +112,7 @@ export const enUSTranslations = {
   'conversation.unpinConversation': 'Unpin chat',
   'conversation.renameConversation': 'Rename chat',
   'conversation.archiveConversation': 'Archive chat',
+  'conversation.archiveFailed': 'Could not archive the chat. Please try again.',
   'conversation.markUnread': 'Mark as unread',
   'conversation.renameTitle': 'Rename chat',
   'conversation.renameDescription': 'Keep it short and easy to recognize',

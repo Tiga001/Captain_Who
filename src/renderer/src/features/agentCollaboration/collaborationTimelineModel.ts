@@ -49,10 +49,13 @@ function canMerge(
   group: CollaborationTimelineActivityGroup,
   activity: CollaborationTimelineActivity
 ): boolean {
+  const sharesAnchoredAssistantRun =
+    group.rootAnchorMessageId !== null && group.rootAnchorMessageId === activity.rootAnchorMessageId
   return (
     group.semantic === activity.semantic &&
     group.rootAnchorMessageId === activity.rootAnchorMessageId &&
-    group.rootTraceBoundarySequence === activity.rootTraceBoundarySequence
+    (sharesAnchoredAssistantRun ||
+      group.rootTraceBoundarySequence === activity.rootTraceBoundarySequence)
   )
 }
 
@@ -75,8 +78,11 @@ export function normalizeCollaborationTimelineActivities(
 }
 
 /**
- * Coalesces only adjacent semantic rows. Repeated activity for the same Agent inside one
- * continuous row replaces that Agent's older snapshot while retaining the stable visual order.
+ * Coalesces only adjacent semantic rows. Activities anchored to the same Assistant message may
+ * cross hidden trace boundaries: the caller has already split the list at every visible Timeline
+ * item, so those boundaries must not turn consecutive Harness events into separate full rows.
+ * Unanchored events retain the stricter boundary rule. Repeated activity for the same Agent inside
+ * one continuous row replaces that Agent's older snapshot while retaining the stable visual order.
  */
 export function groupCollaborationTimelineActivities(
   input: readonly CollaborationTimelineActivity[]

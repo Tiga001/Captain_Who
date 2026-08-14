@@ -112,6 +112,7 @@ export const zhCNTranslations = {
   'conversation.unpinConversation': '取消置顶对话',
   'conversation.renameConversation': '重命名对话',
   'conversation.archiveConversation': '归档对话',
+  'conversation.archiveFailed': '无法归档对话，请重试。',
   'conversation.markUnread': '标记为未读',
   'conversation.renameTitle': '重命名对话',
   'conversation.renameDescription': '保持简短且易于识别',

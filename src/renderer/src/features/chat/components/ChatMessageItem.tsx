@@ -630,6 +630,23 @@ function AgentRunView({
     }
 
     let segmentStart = 0
+    const appendCollaborationBlock = (activities: readonly CollaborationTimelineActivity[]) => {
+      const previous = blocks.at(-1)
+      if (previous?.kind === 'collaboration') {
+        const mergedActivities = [...previous.activities, ...activities]
+        blocks[blocks.length - 1] = {
+          id: `collaboration-${mergedActivities.map((activity) => activity.activityId).join(':')}`,
+          kind: 'collaboration',
+          activities: mergedActivities
+        }
+        return
+      }
+      blocks.push({
+        id: `collaboration-${activities.map((activity) => activity.activityId).join(':')}`,
+        kind: 'collaboration',
+        activities
+      })
+    }
     const appendTimelineSegment = (end: number) => {
       if (end <= segmentStart) return
       const grouped = groupTimelineItems(run, timeline.slice(segmentStart, end), {
@@ -649,11 +666,10 @@ function AgentRunView({
       const activities = placements.get(index)
       if (activities?.length) {
         appendTimelineSegment(index)
-        blocks.push({
-          id: `collaboration-${activities.map((activity) => activity.activityId).join(':')}`,
-          kind: 'collaboration',
-          activities
-        })
+        // Hidden Harness calls still occupy durable trace boundaries. If no user-visible Timeline
+        // item was produced between two placements, keep their semantic activities in one compact
+        // list. A visible Tool, narration, or final answer creates a real block and stops merging.
+        appendCollaborationBlock(activities)
       }
       if (index === finalAnswerTimelineItemIndex) {
         appendTimelineSegment(index)
@@ -826,7 +842,7 @@ function AgentRunView({
           ) : null
         }
         if (block.kind === 'collaboration') {
-          if (!onOpenCollaborationAgent) return null
+          if (!onOpenCollaborationAgent || (canToggleTimeline && timelineCollapsed)) return null
           return (
             <CollaborationTimelineActivityList
               activities={block.activities}

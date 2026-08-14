@@ -432,6 +432,7 @@ function mapConversationMetaFromStorage(
 function mapConversationMetaToStorage(
   conversation: ChatConversation
 ): StorageChatConversationMetaRecord {
+  const pendingArchive = conversation.pendingArchivedAt
   return {
     id: conversation.id,
     projectId: conversation.projectId ?? null,
@@ -440,8 +441,8 @@ function mapConversationMetaToStorage(
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     pinnedAt: conversation.pinnedAt ?? null,
-    archivedAt: conversation.archivedAt ?? null,
-    unreadAt: conversation.unreadAt ?? null
+    archivedAt: pendingArchive ?? conversation.archivedAt ?? null,
+    unreadAt: pendingArchive === undefined ? (conversation.unreadAt ?? null) : null
   }
 }
 

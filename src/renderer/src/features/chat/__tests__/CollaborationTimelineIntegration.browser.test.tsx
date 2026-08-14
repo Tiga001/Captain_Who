@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import { expect, it, vi } from 'vitest'
-import { page } from 'vitest/browser'
+import { page, userEvent } from 'vitest/browser'
 import { render } from 'vitest-browser-react'
 import { frontendConfig, getFrontendCssVariables } from '../../../config/frontendConfig'
 import { classicLightTheme } from '../../../config/themes/classic'
@@ -396,7 +396,7 @@ it('keeps an activity after the durable final answer when its boundary follows t
   expect(screen.getByText('I finished the root response.').elements()).toHaveLength(1)
 })
 
-it('keeps activity visible while collapsed and prevents tool groups from merging across it', async () => {
+it('folds anchored activity with the execution timeline and keeps unanchored activity outside', async () => {
   const grouped = structuredClone(conversation())
   const run = grouped.messages[1]?.agentRun
   if (!run) throw new Error('missing root run fixture')
@@ -446,7 +446,10 @@ it('keeps activity visible while collapsed and prevents tool groups from merging
   ]
 
   const onMessageUiStateChange = vi.fn()
-  const activities = [activity('event-between-read-tools', 'started', 1, 2_100, 'root-assistant-1')]
+  const activities = [
+    activity('event-between-read-tools', 'started', 1, 2_100, 'root-assistant-1'),
+    activity('event-unanchored-followup', 'updated', 2, 4_500, null)
+  ]
   const screen = await render(
     <ChatMessageList
       collaborationTimelineActivities={activities}
@@ -460,7 +463,8 @@ it('keeps activity visible while collapsed and prevents tool groups from merging
     />
   )
 
-  expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(0)
+  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(1)
   expect(screen.container.querySelectorAll('.agent-activity--read')).toHaveLength(0)
 
   const disclosure = screen.container.querySelector<HTMLButtonElement>('.agent-run__elapsed-button')
@@ -497,6 +501,153 @@ it('keeps activity visible while collapsed and prevents tool groups from merging
     Node.DOCUMENT_POSITION_FOLLOWING
   )
   expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(1)
+
+  const collapsedAgain = structuredClone(expanded)
+  const collapsedAgainMessage = collapsedAgain.messages[1]
+  if (!collapsedAgainMessage) throw new Error('missing collapsed root message fixture')
+  collapsedAgainMessage.uiState = { timelineCollapsed: true }
+  await screen.rerender(
+    <ChatMessageList
+      collaborationTimelineActivities={activities}
+      conversation={collapsedAgain}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      onMessageUiStateChange={onMessageUiStateChange}
+      onOpenCollaborationAgent={vi.fn()}
+      showTokenUsageDetails={false}
+    />
+  )
+  expect(screen.container.querySelectorAll('[data-semantic="started"]')).toHaveLength(0)
+  expect(screen.container.querySelectorAll('[data-semantic="updated"]')).toHaveLength(1)
+  expect(screen.container.querySelectorAll('.agent-activity--read')).toHaveLength(0)
+})
+
+it('coalesces consecutive same-status Harness activity across hidden trace boundaries', async () => {
+  const grouped = structuredClone(conversation())
+  const run = grouped.messages[1]?.agentRun
+  if (!run) throw new Error('missing root run fixture')
+  run.toolCalls = ['agent-a', 'agent-b', 'agent-c'].map((agentId) => ({
+    id: `spawn-${agentId}`,
+    tool: 'spawn_agent' as const,
+    args: { task_name: agentId, message: `Delegate to ${agentId}.` },
+    approvalStatus: 'not_required' as const,
+    reason: null
+  }))
+  run.timeline = [
+    {
+      id: 'trace-before-spawns',
+      type: 'message',
+      content: 'I will create three sub-agents.',
+      traceSequence: 0
+    },
+    ...['agent-a', 'agent-b', 'agent-c'].map((agentId, index) => ({
+      id: `trace-spawn-${agentId}`,
+      type: 'tool_call' as const,
+      callId: `spawn-${agentId}`,
+      traceSequence: index + 1
+    })),
+    {
+      id: 'trace-after-spawns',
+      type: 'message',
+      content: 'All three are working.',
+      traceSequence: 4
+    }
+  ]
+  const onOpenAgent = vi.fn()
+  const activities = ['agent-a', 'agent-b', 'agent-c'].map((agentId, index) => ({
+    ...activity(`event-${agentId}`, 'started', index + 1, 2_100 + index, 'root-assistant-1'),
+    agentId,
+    rootTraceBoundarySequence: index + 2,
+    taskNameSnapshot: `Worker ${index + 1}`
+  }))
+
+  const screen = await render(
+    <ChatMessageList
+      collaborationTimelineActivities={activities}
+      conversation={grouped}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      onOpenCollaborationAgent={onOpenAgent}
+      showTokenUsageDetails={false}
+    />
+  )
+
+  const rows = screen.container.querySelectorAll<HTMLElement>('.collaboration-timeline__activity')
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.querySelectorAll('.collaboration-timeline__chip')).toHaveLength(3)
+  expect(screen.getByText('Started working').elements()).toHaveLength(1)
+  expect(getComputedStyle(rows[0]!.parentElement!).marginBlockStart).toBe('0px')
+  await userEvent.click(
+    screen.getByRole('button', {
+      name: 'View sub-agent Worker 2: Started working'
+    })
+  )
+  expect(onOpenAgent).toHaveBeenCalledWith('agent-b')
+})
+
+it('keeps different statuses compact but never merges across visible narration', async () => {
+  const grouped = structuredClone(conversation())
+  const run = grouped.messages[1]?.agentRun
+  if (!run) throw new Error('missing root run fixture')
+  run.timeline = [
+    {
+      id: 'hidden-spawn-a',
+      type: 'tool_call',
+      callId: 'spawn-reviewer',
+      traceSequence: 0
+    },
+    {
+      id: 'visible-narration',
+      type: 'message',
+      content: 'A visible update separates the events.',
+      traceSequence: 2
+    },
+    {
+      id: 'hidden-spawn-b',
+      type: 'tool_call',
+      callId: 'spawn-reviewer',
+      traceSequence: 4
+    }
+  ]
+  const activities = [
+    activity('event-start-before-text', 'started', 1, 2_100, 'root-assistant-1'),
+    activity('event-update-before-text', 'updated', 2, 2_200, 'root-assistant-1'),
+    activity('event-start-after-text', 'started', 5, 2_300, 'root-assistant-1')
+  ]
+
+  const screen = await render(
+    <ChatMessageList
+      collaborationTimelineActivities={activities}
+      conversation={grouped}
+      editableLastUserMessageId={null}
+      editSelectedModelAvailable
+      editSelectedModelSupportsImage
+      onOpenCollaborationAgent={vi.fn()}
+      showTokenUsageDetails={false}
+    />
+  )
+
+  const lists = screen.container.querySelectorAll<HTMLElement>('.collaboration-timeline')
+  const started = screen.container.querySelectorAll<HTMLElement>('[data-semantic="started"]')
+  const updated = screen.container.querySelector<HTMLElement>('[data-semantic="updated"]')
+  const narration = screen.getByText('A visible update separates the events.').element()
+  expect(lists).toHaveLength(2)
+  expect(started).toHaveLength(2)
+  expect(updated).not.toBeNull()
+  expect(getComputedStyle(lists[0]!).marginBlockStart).toBe('0px')
+  expect(getComputedStyle(lists[0]!).rowGap).toBe('6px')
+  expect(started[0]!.compareDocumentPosition(updated!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(updated!.compareDocumentPosition(narration) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
+  expect(narration.compareDocumentPosition(started[1]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+    Node.DOCUMENT_POSITION_FOLLOWING
+  )
 })
 
 it('renders inline activity inside the real interactive ConversationSurface design context', async () => {

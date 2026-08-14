@@ -327,6 +327,8 @@ export interface ChatConversation {
   updatedAt: number
   pinnedAt?: number | null
   archivedAt?: number | null
+  /** Renderer-only write fence; storage maps it to archivedAt, but navigation waits for readback. */
+  pendingArchivedAt?: number
   unreadAt?: number | null
   continuationOrigin?: ChatConversationContinuationOrigin | null
 }

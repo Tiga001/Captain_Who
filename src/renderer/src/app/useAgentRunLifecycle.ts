@@ -365,7 +365,9 @@ export function useAgentRunLifecycle({
             messageToSave = updater(message)
             return messageToSave
           }),
-          updatedAt: options.touchConversation ? timestamp : conversation.updatedAt
+          updatedAt: options.touchConversation
+            ? Math.max(timestamp, conversation.updatedAt + 1)
+            : conversation.updatedAt
         }
 
         conversationMetaToSave = nextConversation
@@ -933,7 +935,9 @@ export function useAgentRunLifecycle({
           const nextConversations = conversationsRef.current.map((conversation) => {
             if (
               conversation.id !== conversationId ||
-              activeConversationIdRef.current === conversationId
+              activeConversationIdRef.current === conversationId ||
+              (conversation.archivedAt !== null && conversation.archivedAt !== undefined) ||
+              conversation.pendingArchivedAt !== undefined
             ) {
               return conversation
             }

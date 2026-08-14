@@ -8,6 +8,14 @@
   width: 100%;
 }
 
+/* Inside one Assistant run the parent grid already owns spacing to narration and visible Tools.
+   Keeping a second vertical margin here made rows split by hidden Harness boundaries look much
+   farther apart than rows already sharing a semantic list. */
+.agent-run > .collaboration-timeline {
+  margin-block: 0;
+  padding-inline: 0;
+}
+
 /* The shared message column intentionally has generous turn spacing. Inline semantic activity is
    part of that turn, so collapse only its two surrounding flex gaps without changing chat rows. */
 .chat-conversation-page__messages > .collaboration-timeline {

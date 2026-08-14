@@ -510,6 +510,7 @@ export function AppShell() {
                 updatedAt: conversation.updatedAt,
                 pinnedAt: conversation.pinnedAt,
                 archivedAt: conversation.archivedAt,
+                pendingArchivedAt: conversation.pendingArchivedAt,
                 unreadAt: conversation.unreadAt,
                 messagesLoaded: true
               }
@@ -780,12 +781,20 @@ export function AppShell() {
       message: string,
       options: ChatSubmitOptions,
       behavior: { activate: boolean; preserveComposerContent: boolean }
-    ) => {
+    ): boolean => {
       const targetConversation = targetConversationId
         ? (conversationsRef.current.find(
             (conversation) => conversation.id === targetConversationId
           ) ?? null)
         : null
+      if (
+        targetConversationId !== null &&
+        (!targetConversation ||
+          targetConversation.archivedAt ||
+          targetConversation.pendingArchivedAt !== undefined)
+      ) {
+        return false
+      }
       const now = targetConversation
         ? Math.max(Date.now(), targetConversation.updatedAt + 1)
         : Date.now()
@@ -870,6 +879,7 @@ export function AppShell() {
         options.skills,
         targetConversation ? undefined : title
       )
+      return true
     },
     [
       enqueueChatMessagesUpsert,
@@ -921,6 +931,16 @@ export function AppShell() {
         operation.conversationId
       )
       if (!pendingSubmission) return
+      const latestConversation = conversationsRef.current.find(
+        (conversation) => conversation.id === operation.conversationId
+      )
+      if (latestConversation?.archivedAt || latestConversation?.pendingArchivedAt !== undefined) {
+        // A completed transition may update the archived task's model snapshot, but must not turn
+        // a queued/composer intent into a new hidden Turn. The draft/queue remains user-visible
+        // when the task is restored.
+        pendingProviderTransitionSubmissionsRef.current.delete(operation.conversationId)
+        return
+      }
       pendingProviderTransitionSubmissionsRef.current.delete(operation.conversationId)
 
       if (pendingSubmission.kind === 'queued_message') {
@@ -983,11 +1003,17 @@ export function AppShell() {
         })
         return true
       }
+      const activeConversation = conversationsRef.current.find(
+        (conversation) => conversation.id === conversationId
+      )
+      if (activeConversation?.archivedAt || activeConversation?.pendingArchivedAt !== undefined) {
+        return false
+      }
 
       await waitForConversationSaves(conversationId)
       const outcome = await requestProviderTransition(conversationId, options.modelId)
       if (outcome.status === 'completed') {
-        submitMessageToConversation(
+        return submitMessageToConversation(
           conversationId,
           message,
           { ...options, modelId: outcome.operation.modelId },
@@ -996,7 +1022,6 @@ export function AppShell() {
             preserveComposerContent: false
           }
         )
-        return true
       }
       if (outcome.status === 'confirmation_required' || outcome.status === 'running') {
         pendingProviderTransitionSubmissionsRef.current.set(conversationId, {
@@ -1015,6 +1040,7 @@ export function AppShell() {
       const conversation = conversationsRef.current.find(
         (candidate) => candidate.id === conversationId
       )
+      if (conversation?.archivedAt || conversation?.pendingArchivedAt !== undefined) return
       const latestAssistant = [...(conversation?.messages ?? [])]
         .reverse()
         .find((message) => message.role === 'assistant')
@@ -1031,6 +1057,15 @@ export function AppShell() {
       if (!draft || !queuedMessage || queuedMessage.status === 'submitting') return
 
       await waitForConversationSaves(conversationId)
+      const conversationAfterSave = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
+      if (
+        conversationAfterSave?.archivedAt ||
+        conversationAfterSave?.pendingArchivedAt !== undefined
+      ) {
+        return
+      }
       const transitionOutcome = await requestProviderTransition(
         conversationId,
         queuedMessage.modelId
@@ -1046,6 +1081,16 @@ export function AppShell() {
         return
       }
       if (transitionOutcome.status !== 'completed') return
+
+      const conversationAfterTransition = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
+      if (
+        conversationAfterTransition?.archivedAt ||
+        conversationAfterTransition?.pendingArchivedAt !== undefined
+      ) {
+        return
+      }
 
       const currentQueuedMessage = draftsRef.current[conversationId]?.queuedMessages[0]
       if (!currentQueuedMessage || currentQueuedMessage.id !== queuedMessage.id) return
@@ -1144,7 +1189,18 @@ export function AppShell() {
         )
       }
 
-      const now = Date.now()
+      const conversationAfterTransition = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
+      if (
+        !conversationAfterTransition ||
+        conversationAfterTransition.archivedAt ||
+        conversationAfterTransition.pendingArchivedAt !== undefined
+      ) {
+        throw new Error(t('chat.editMessageUnavailable'))
+      }
+
+      const now = Math.max(Date.now(), latestConversation.updatedAt + 1)
       const modelId = transitionOutcome.operation.modelId
       const permissionMode = activeDraft.permissionMode
       const editedSkillSelections =
@@ -1261,7 +1317,25 @@ export function AppShell() {
     ]
   )
 
+  const handleActiveConversationArchived = useCallback(
+    (conversation: ChatConversation) => {
+      // Archiving changes navigation only. Existing Run/provider bindings remain alive so a task
+      // already in flight can durably settle in the background without being cancelled or retired.
+      setRightSidebarAgentNavigationRequest(null)
+      activeConversationIdRef.current = null
+      setActiveConversationId(null)
+      setScrollTargetMessageId(null)
+      setActiveConversationInitialScrollTop(null)
+      updateDraft(
+        NEW_CONVERSATION_DRAFT_ID,
+        createComposerDraft({ projectId: conversation.projectId })
+      )
+    },
+    [updateDraft]
+  )
+
   const {
+    archiveConversation,
     archiveConversations,
     continueInNewTask,
     openContinuationOrigin,
@@ -1276,11 +1350,13 @@ export function AppShell() {
     hydrateConversation,
     messages: {
       activeCommandSession: t('chat.continueInNewTaskActiveCommand'),
+      archiveFailed: t('conversation.archiveFailed'),
       continueInNewTaskFailed: t('chat.continueInNewTaskFailed'),
       originArchived: t('chat.continuationOriginArchived'),
       originMissing: t('chat.continuationOriginMissing'),
       originOpenFailed: t('chat.continuationOriginOpenFailed')
     },
+    onActiveConversationArchived: handleActiveConversationArchived,
     setActiveConversationId,
     setActiveConversationInitialScrollTop,
     setConversationScrollToBottomSignal,
@@ -1288,7 +1364,8 @@ export function AppShell() {
     setDraftsWithRef,
     setScrollTargetMessageId,
     setSettingsOpen,
-    showToast
+    showToast,
+    waitForConversationSaves
   })
 
   const activeProviderTransitionConversationId = activeConversation?.id
@@ -1561,23 +1638,21 @@ export function AppShell() {
             uiPreferences={uiPreferences}
             onArchiveAllProjectConversations={() => {
               const projectIds = new Set(projects.map((project) => project.id))
-              archiveConversations(
+              void archiveConversations(
                 (conversation) =>
                   Boolean(conversation.projectId) && projectIds.has(conversation.projectId!)
               )
             }}
             onArchiveAllRootConversations={() => {
               const projectIds = new Set(projects.map((project) => project.id))
-              archiveConversations(
+              void archiveConversations(
                 (conversation) => !conversation.projectId || !projectIds.has(conversation.projectId)
               )
             }}
-            onArchiveConversation={(conversationId) =>
-              patchConversation(conversationId, { archivedAt: Date.now() })
-            }
-            onArchiveProjectConversations={(projectId) =>
-              archiveConversations((conversation) => conversation.projectId === projectId)
-            }
+            onArchiveConversation={(conversationId) => void archiveConversation(conversationId)}
+            onArchiveProjectConversations={(projectId) => {
+              void archiveConversations((conversation) => conversation.projectId === projectId)
+            }}
             onMarkConversationUnread={(conversationId) =>
               patchConversation(conversationId, { unreadAt: Date.now() })
             }
