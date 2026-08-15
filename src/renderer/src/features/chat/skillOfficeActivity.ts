@@ -510,7 +510,13 @@ function collectObservedArtifacts(
   result: AgentToolResult
 ): void {
   if (!isSuccessfulCommandResult(result)) return
-  const observation = getArtifactObservation(result)
+  collectArtifactObservation(entries, getArtifactObservation(result))
+}
+
+function collectArtifactObservation(
+  entries: Map<string, OfficeArtifactEntry>,
+  observation: Record<string, unknown> | undefined
+): void {
   const observationStatus = stringValue(observation, 'status')
   if (!observation || observationStatus === 'failed') return
 
@@ -659,6 +665,10 @@ export function getOfficeArtifactEntries(run: ChatAgentRunView): OfficeArtifactE
       collectManagedCommandDocuments(entries, call, result)
     }
     if (call.tool === 'run_command') {
+      const session = run.commandSessions?.[call.id]
+      if (session?.status === 'exited' && session.exitCode === 0) {
+        collectArtifactObservation(entries, asRecord(session.artifactObservation))
+      }
       collectManagedCommandDocumentsFromOutputs(entries, run.commandSessions?.[call.id]?.outputs)
     }
   })

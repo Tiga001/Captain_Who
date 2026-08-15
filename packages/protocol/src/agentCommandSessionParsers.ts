@@ -1,4 +1,12 @@
 import type {
+  AgentCommandArtifactChange,
+  AgentCommandArtifactMetadata,
+  AgentCommandArtifactObservation,
+  AgentCommandArtifactObservationCoverage,
+  AgentCommandArtifactSnapshotCoverage,
+  AgentCommandArtifactValidation,
+  AgentCommandArtifactObservationWarning,
+  AgentCommandExpectedArtifactOutcome,
   AgentCommandSessionGetInput,
   AgentCommandSessionGetOutput,
   AgentCommandSessionListInput,
@@ -11,6 +19,7 @@ import type {
   AgentEvent
 } from './agent'
 import {
+  AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
   AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS,
   AGENT_COMMAND_SESSION_SCHEMA_VERSION
 } from './agent'
@@ -40,6 +49,11 @@ const MAX_LISTED_SESSIONS = 512
 const MAX_PUBLISHED_OUTPUTS = 32
 const MAX_PUBLISHED_OUTPUT_NAME_BYTES = 1024
 const MAX_PUBLISHED_OUTPUT_BYTES = 128 * 1024 * 1024
+const MAX_ARTIFACT_CHANGES = 256
+const MAX_ARTIFACT_EXPECTED_OUTPUTS = 32
+const MAX_ARTIFACT_WARNINGS = 64
+const MAX_ARTIFACT_PATH_BYTES = 16 * 1024
+const MAX_ARTIFACT_TEXT_BYTES = 16 * 1024
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 
 const SESSION_STATUSES = [
@@ -138,7 +152,8 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
         'endedAt',
         'latestSequence',
         'outputTruncated',
-        'outputs'
+        'outputs',
+        'artifactObservation'
       ] as const,
       'command_exited event'
     )
@@ -171,7 +186,15 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
       ),
       ...(record.outputs === undefined
         ? {}
-        : { outputs: parsePublishedOutputs(record.outputs, 'command_exited event.outputs') })
+        : { outputs: parsePublishedOutputs(record.outputs, 'command_exited event.outputs') }),
+      ...(record.artifactObservation === undefined
+        ? {}
+        : {
+            artifactObservation: parseAgentCommandArtifactObservation(
+              record.artifactObservation,
+              'command_exited event.artifactObservation'
+            )
+          })
     }
   }
 
@@ -188,7 +211,8 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
       'endedAt',
       'latestSequence',
       'outputTruncated',
-      'outputs'
+      'outputs',
+      'artifactObservation'
     ] as const,
     'command_interrupted event'
   )
@@ -207,7 +231,15 @@ export function parseAgentCommandSessionEvent(value: unknown): AgentEvent {
     ),
     ...(record.outputs === undefined
       ? {}
-      : { outputs: parsePublishedOutputs(record.outputs, 'command_interrupted event.outputs') })
+      : { outputs: parsePublishedOutputs(record.outputs, 'command_interrupted event.outputs') }),
+    ...(record.artifactObservation === undefined
+      ? {}
+      : {
+          artifactObservation: parseAgentCommandArtifactObservation(
+            record.artifactObservation,
+            'command_interrupted event.artifactObservation'
+          )
+        })
   }
 }
 
@@ -288,6 +320,7 @@ export function parseAgentCommandSessionSnapshot(value: unknown): AgentCommandSe
       'latestSequence',
       'outputTruncated',
       'outputs',
+      'artifactObservation',
       'archiveRef'
     ] as const,
     context
@@ -319,6 +352,16 @@ export function parseAgentCommandSessionSnapshot(value: unknown): AgentCommandSe
   if (!statusIsTerminal(status) && outputs && outputs.length > 0) {
     throw invalidProtocolValue(context, 'published outputs are valid only for terminal status')
   }
+  const artifactObservation =
+    record.artifactObservation === undefined
+      ? undefined
+      : parseAgentCommandArtifactObservation(
+          record.artifactObservation,
+          `${context}.artifactObservation`
+        )
+  if (!statusIsTerminal(status) && artifactObservation !== undefined) {
+    throw invalidProtocolValue(context, 'artifact observation is valid only for terminal status')
+  }
 
   return {
     schemaVersion: AGENT_COMMAND_SESSION_SCHEMA_VERSION,
@@ -340,9 +383,92 @@ export function parseAgentCommandSessionSnapshot(value: unknown): AgentCommandSe
     latestSequence: expectSafeInteger(record.latestSequence, `${context}.latestSequence`, 0),
     outputTruncated: expectBoolean(record.outputTruncated, `${context}.outputTruncated`),
     ...(outputs === undefined ? {} : { outputs }),
+    ...(artifactObservation === undefined ? {} : { artifactObservation }),
     ...(record.archiveRef === undefined
       ? {}
       : { archiveRef: boundedId(record.archiveRef, `${context}.archiveRef`) })
+  }
+}
+
+/** Strictly parses the bounded artifact receipt shared by terminal command results and Sessions. */
+export function parseAgentCommandArtifactObservation(
+  value: unknown,
+  context = 'Agent command artifact observation'
+): AgentCommandArtifactObservation {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'status',
+      'partial',
+      'stopReasons',
+      'scanned',
+      'returned',
+      'omitted',
+      'coverage',
+      'changes',
+      'changesTruncated',
+      'changesOmitted',
+      'expectedOutputs',
+      'warnings'
+    ] as const,
+    context
+  )
+  if (record.schemaVersion !== AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION) {
+    throw invalidProtocolValue(
+      context,
+      `unsupported schema version ${String(record.schemaVersion)}`
+    )
+  }
+  const status = expectEnum(
+    record.status,
+    ['complete', 'partial', 'failed'] as const,
+    `${context}.status`
+  )
+  const partial = expectBoolean(record.partial, `${context}.partial`)
+  if ((status === 'complete') === partial) {
+    throw invalidProtocolValue(context, 'partial must be false only for complete observations')
+  }
+  const stopReasons = parseBoundedStrings(
+    record.stopReasons,
+    `${context}.stopReasons`,
+    MAX_ARTIFACT_WARNINGS
+  )
+  const rawChanges = boundedArray(record.changes, `${context}.changes`, MAX_ARTIFACT_CHANGES)
+  const changes = rawChanges.map((change, index) =>
+    parseArtifactChange(change, `${context}.changes[${index}]`)
+  )
+  const rawExpectedOutputs = boundedArray(
+    record.expectedOutputs,
+    `${context}.expectedOutputs`,
+    MAX_ARTIFACT_EXPECTED_OUTPUTS
+  )
+  const expectedOutputs = rawExpectedOutputs.map((output, index) =>
+    parseExpectedArtifactOutcome(output, `${context}.expectedOutputs[${index}]`)
+  )
+  const rawWarnings = boundedArray(record.warnings, `${context}.warnings`, MAX_ARTIFACT_WARNINGS)
+  const warnings = rawWarnings.map((warning, index) =>
+    parseArtifactWarning(warning, `${context}.warnings[${index}]`)
+  )
+  const returned = expectSafeInteger(record.returned, `${context}.returned`, 0)
+  if (returned !== changes.length) {
+    throw invalidProtocolValue(context, 'returned must equal the number of reported changes')
+  }
+  return {
+    schemaVersion: AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    status,
+    partial,
+    stopReasons,
+    scanned: expectSafeInteger(record.scanned, `${context}.scanned`, 0),
+    returned,
+    omitted: expectSafeInteger(record.omitted, `${context}.omitted`, 0),
+    coverage: parseArtifactCoverage(record.coverage, `${context}.coverage`),
+    changes,
+    changesTruncated: expectBoolean(record.changesTruncated, `${context}.changesTruncated`),
+    changesOmitted: expectSafeInteger(record.changesOmitted, `${context}.changesOmitted`, 0),
+    expectedOutputs,
+    warnings
   }
 }
 
@@ -407,6 +533,268 @@ export function parseAgentCommandSessionTranscript(value: unknown): AgentCommand
     ),
     chunks
   }
+}
+
+function parseArtifactCoverage(
+  value: unknown,
+  context: string
+): AgentCommandArtifactObservationCoverage {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['workspaceIncluded', 'expectedOutputCount', 'additionalRootCount', 'before', 'after'] as const,
+    context
+  )
+  return {
+    workspaceIncluded: expectBoolean(record.workspaceIncluded, `${context}.workspaceIncluded`),
+    expectedOutputCount: expectSafeInteger(
+      record.expectedOutputCount,
+      `${context}.expectedOutputCount`,
+      0
+    ),
+    additionalRootCount: expectSafeInteger(
+      record.additionalRootCount,
+      `${context}.additionalRootCount`,
+      0
+    ),
+    before: parseArtifactSnapshotCoverage(record.before, `${context}.before`),
+    after: parseArtifactSnapshotCoverage(record.after, `${context}.after`)
+  }
+}
+
+function parseArtifactSnapshotCoverage(
+  value: unknown,
+  context: string
+): AgentCommandArtifactSnapshotCoverage {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'rootsScanned',
+      'directoryEntriesScanned',
+      'officeFilesSeen',
+      'filesHashed',
+      'filesUnhashed',
+      'bytesHashed',
+      'symlinksSkipped',
+      'excludedDirectories',
+      'durationMs',
+      'timeBudgetExceeded',
+      'cancelled',
+      'truncated'
+    ] as const,
+    context
+  )
+  return {
+    rootsScanned: expectSafeInteger(record.rootsScanned, `${context}.rootsScanned`, 0),
+    directoryEntriesScanned: expectSafeInteger(
+      record.directoryEntriesScanned,
+      `${context}.directoryEntriesScanned`,
+      0
+    ),
+    officeFilesSeen: expectSafeInteger(record.officeFilesSeen, `${context}.officeFilesSeen`, 0),
+    filesHashed: expectSafeInteger(record.filesHashed, `${context}.filesHashed`, 0),
+    filesUnhashed: expectSafeInteger(record.filesUnhashed, `${context}.filesUnhashed`, 0),
+    bytesHashed: expectSafeInteger(record.bytesHashed, `${context}.bytesHashed`, 0),
+    symlinksSkipped: expectSafeInteger(record.symlinksSkipped, `${context}.symlinksSkipped`, 0),
+    excludedDirectories: expectSafeInteger(
+      record.excludedDirectories,
+      `${context}.excludedDirectories`,
+      0
+    ),
+    durationMs: expectSafeInteger(record.durationMs, `${context}.durationMs`, 0),
+    timeBudgetExceeded: expectBoolean(record.timeBudgetExceeded, `${context}.timeBudgetExceeded`),
+    cancelled: expectBoolean(record.cancelled, `${context}.cancelled`),
+    truncated: expectBoolean(record.truncated, `${context}.truncated`)
+  }
+}
+
+function parseArtifactChange(value: unknown, context: string): AgentCommandArtifactChange {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'kind',
+      'artifactKind',
+      'path',
+      'scope',
+      'previousPath',
+      'previousScope',
+      'before',
+      'after'
+    ] as const,
+    context
+  )
+  const previousPath = optionalArtifactPath(record.previousPath, `${context}.previousPath`)
+  const previousScope =
+    record.previousScope === undefined
+      ? undefined
+      : expectEnum(
+          record.previousScope,
+          ['workspace', 'external'] as const,
+          `${context}.previousScope`
+        )
+  if ((previousPath === undefined) !== (previousScope === undefined)) {
+    throw invalidProtocolValue(context, 'previousPath and previousScope must appear together')
+  }
+  const before = optionalArtifactMetadata(record.before, `${context}.before`)
+  const after = optionalArtifactMetadata(record.after, `${context}.after`)
+  return {
+    kind: expectEnum(
+      record.kind,
+      ['created', 'modified', 'replaced', 'deleted', 'renamed'] as const,
+      `${context}.kind`
+    ),
+    artifactKind: expectEnum(
+      record.artifactKind,
+      ['document', 'spreadsheet', 'presentation'] as const,
+      `${context}.artifactKind`
+    ),
+    path: artifactPath(record.path, `${context}.path`),
+    scope: expectEnum(record.scope, ['workspace', 'external'] as const, `${context}.scope`),
+    ...(previousPath === undefined ? {} : { previousPath }),
+    ...(previousScope === undefined ? {} : { previousScope }),
+    ...(before === undefined ? {} : { before }),
+    ...(after === undefined ? {} : { after })
+  }
+}
+
+function parseExpectedArtifactOutcome(
+  value: unknown,
+  context: string
+): AgentCommandExpectedArtifactOutcome {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['requestedPath', 'outcome', 'path', 'scope', 'artifactKind', 'metadata'] as const,
+    context
+  )
+  const path = optionalArtifactPath(record.path, `${context}.path`)
+  const scope =
+    record.scope === undefined
+      ? undefined
+      : expectEnum(record.scope, ['workspace', 'external'] as const, `${context}.scope`)
+  const artifactKind =
+    record.artifactKind === undefined
+      ? undefined
+      : expectEnum(
+          record.artifactKind,
+          ['document', 'spreadsheet', 'presentation'] as const,
+          `${context}.artifactKind`
+        )
+  const metadata = optionalArtifactMetadata(record.metadata, `${context}.metadata`)
+  return {
+    requestedPath: artifactPath(record.requestedPath, `${context}.requestedPath`),
+    outcome: expectEnum(
+      record.outcome,
+      [
+        'created',
+        'modified',
+        'replaced',
+        'renamed',
+        'unchanged',
+        'missing',
+        'unobserved',
+        'invalid'
+      ] as const,
+      `${context}.outcome`
+    ),
+    ...(path === undefined ? {} : { path }),
+    ...(scope === undefined ? {} : { scope }),
+    ...(artifactKind === undefined ? {} : { artifactKind }),
+    ...(metadata === undefined ? {} : { metadata })
+  }
+}
+
+function optionalArtifactMetadata(
+  value: unknown,
+  context: string
+): AgentCommandArtifactMetadata | undefined {
+  return value === undefined ? undefined : parseArtifactMetadata(value, context)
+}
+
+function parseArtifactMetadata(value: unknown, context: string): AgentCommandArtifactMetadata {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['sizeBytes', 'sha256', 'validation'] as const, context)
+  const sha256 =
+    record.sha256 === undefined ? undefined : boundedString(record.sha256, `${context}.sha256`, 64)
+  if (sha256 !== undefined && !SHA256_PATTERN.test(sha256)) {
+    throw invalidProtocolValue(context, 'expected a lowercase SHA-256 digest')
+  }
+  return {
+    sizeBytes: expectSafeInteger(record.sizeBytes, `${context}.sizeBytes`, 0),
+    ...(sha256 === undefined ? {} : { sha256 }),
+    validation: parseArtifactValidation(record.validation, `${context}.validation`)
+  }
+}
+
+function parseArtifactValidation(value: unknown, context: string): AgentCommandArtifactValidation {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['status', 'code', 'message'] as const, context)
+  const code = optionalArtifactText(record.code, `${context}.code`)
+  const message = optionalArtifactText(record.message, `${context}.message`)
+  return {
+    status: expectEnum(
+      record.status,
+      ['valid', 'invalid', 'not_applicable', 'unchecked'] as const,
+      `${context}.status`
+    ),
+    ...(code === undefined ? {} : { code }),
+    ...(message === undefined ? {} : { message })
+  }
+}
+
+function parseArtifactWarning(
+  value: unknown,
+  context: string
+): AgentCommandArtifactObservationWarning {
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['phase', 'code', 'path', 'message'] as const, context)
+  const path = optionalArtifactPath(record.path, `${context}.path`)
+  return {
+    phase: expectEnum(record.phase, ['setup', 'before', 'after'] as const, `${context}.phase`),
+    code: requiredArtifactText(record.code, `${context}.code`),
+    ...(path === undefined ? {} : { path }),
+    message: requiredArtifactText(record.message, `${context}.message`)
+  }
+}
+
+function boundedArray(value: unknown, context: string, maximum: number): unknown[] {
+  const values = expectArray(value, context)
+  if (values.length > maximum) {
+    throw invalidProtocolValue(context, `exceeded ${maximum} items`)
+  }
+  return values
+}
+
+function parseBoundedStrings(value: unknown, context: string, maximum: number): string[] {
+  return boundedArray(value, context, maximum).map((entry, index) =>
+    requiredArtifactText(entry, `${context}[${index}]`)
+  )
+}
+
+function artifactPath(value: unknown, context: string): string {
+  const path = boundedString(value, context, MAX_ARTIFACT_PATH_BYTES)
+  if (!path.trim() || hasAsciiControlCharacter(path)) {
+    throw invalidProtocolValue(context, 'expected a non-empty path without control characters')
+  }
+  return path
+}
+
+function optionalArtifactPath(value: unknown, context: string): string | undefined {
+  return value === undefined ? undefined : artifactPath(value, context)
+}
+
+function requiredArtifactText(value: unknown, context: string): string {
+  const text = boundedString(value, context, MAX_ARTIFACT_TEXT_BYTES)
+  if (!text.trim() || hasAsciiControlCharacter(text)) {
+    throw invalidProtocolValue(context, 'expected non-empty text without control characters')
+  }
+  return text
+}
+
+function optionalArtifactText(value: unknown, context: string): string | undefined {
+  return value === undefined ? undefined : requiredArtifactText(value, context)
 }
 
 function parseEventIdentity(record: Record<string, unknown>) {

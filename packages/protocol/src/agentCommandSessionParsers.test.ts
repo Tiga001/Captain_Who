@@ -21,7 +21,7 @@ const publishedImage = {
   height: 1600
 } as const
 const snapshot = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   sessionId,
   conversationId: 'conversation-1',
   assistantMessageId: 'assistant-1',
@@ -35,6 +35,66 @@ const snapshot = {
   startedAt: 10,
   latestSequence: 2,
   outputTruncated: false
+} as const
+const emptyArtifactCoverage = {
+  rootsScanned: 1,
+  directoryEntriesScanned: 1,
+  officeFilesSeen: 1,
+  filesHashed: 1,
+  filesUnhashed: 0,
+  bytesHashed: 1024,
+  symlinksSkipped: 0,
+  excludedDirectories: 0,
+  durationMs: 1,
+  timeBudgetExceeded: false,
+  cancelled: false,
+  truncated: false
+} as const
+const artifactObservation = {
+  schemaVersion: 3,
+  status: 'complete',
+  partial: false,
+  stopReasons: [],
+  scanned: 1,
+  returned: 1,
+  omitted: 0,
+  coverage: {
+    workspaceIncluded: true,
+    expectedOutputCount: 1,
+    additionalRootCount: 0,
+    before: { ...emptyArtifactCoverage, officeFilesSeen: 0, filesHashed: 0, bytesHashed: 0 },
+    after: emptyArtifactCoverage
+  },
+  changes: [
+    {
+      kind: 'created',
+      artifactKind: 'presentation',
+      path: 'edited.pptx',
+      scope: 'workspace',
+      after: {
+        sizeBytes: 1024,
+        sha256: 'c'.repeat(64),
+        validation: { status: 'valid' }
+      }
+    }
+  ],
+  changesTruncated: false,
+  changesOmitted: 0,
+  expectedOutputs: [
+    {
+      requestedPath: 'edited.pptx',
+      outcome: 'created',
+      path: 'edited.pptx',
+      scope: 'workspace',
+      artifactKind: 'presentation',
+      metadata: {
+        sizeBytes: 1024,
+        sha256: 'c'.repeat(64),
+        validation: { status: 'valid' }
+      }
+    }
+  ],
+  warnings: []
 } as const
 
 describe('Agent command Session protocol', () => {
@@ -81,9 +141,15 @@ describe('Agent command Session protocol', () => {
         endedAt: 20,
         latestSequence: 2,
         outputTruncated: false,
-        outputs: [publishedImage]
+        outputs: [publishedImage],
+        artifactObservation
       })
-    ).toMatchObject({ type: 'command_exited', exitCode: 0, outputs: [publishedImage] })
+    ).toMatchObject({
+      type: 'command_exited',
+      exitCode: 0,
+      outputs: [publishedImage],
+      artifactObservation
+    })
 
     expect(
       parseAgentCommandSessionEvent({
@@ -120,6 +186,36 @@ describe('Agent command Session protocol', () => {
         }
       })
     ).toMatchObject({ session: { sessionId }, transcript: { latestSequence: 2 } })
+  })
+
+  it('preserves terminal artifact observations and rejects them on active snapshots', () => {
+    const terminal = {
+      ...snapshot,
+      status: 'exited',
+      endedAt: 20,
+      exitCode: 0,
+      artifactObservation
+    } as const
+
+    expect(parseAgentCommandSessionListOutput({ sessions: [terminal] }).sessions[0]).toMatchObject({
+      status: 'exited',
+      artifactObservation
+    })
+    expect(() =>
+      parseAgentCommandSessionListOutput({
+        sessions: [{ ...snapshot, artifactObservation }]
+      })
+    ).toThrow(/terminal status/)
+    expect(() =>
+      parseAgentCommandSessionListOutput({
+        sessions: [
+          {
+            ...terminal,
+            artifactObservation: { ...artifactObservation, unexpected: true }
+          }
+        ]
+      })
+    ).toThrow(/unexpected/)
   })
 
   it('preserves the full 16K-character command product boundary in Session snapshots', () => {

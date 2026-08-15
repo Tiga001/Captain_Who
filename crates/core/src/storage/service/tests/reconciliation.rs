@@ -1607,6 +1607,7 @@ fn seed_approved_command_with_terminal_session(
                 latest_sequence: 0,
                 output_truncated: false,
                 outputs: Vec::new(),
+                artifact_observation: None,
                 archive_ref: None,
             },
             authorization_source: crate::command::CommandAuthorizationSource::ExplicitUser,
@@ -1640,6 +1641,7 @@ fn seed_approved_command_with_terminal_session(
             archive_ref: None,
             terminal_reason: Some("missing input PDF"),
             published_outputs: &[],
+            artifact_observation: None,
             committed_at: 14,
         })
         .unwrap();

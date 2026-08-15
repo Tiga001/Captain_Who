@@ -544,6 +544,7 @@ function mergeCommandSessionView(
     incoming.outputs && incoming.outputs.length > 0
       ? incoming.outputs
       : (existing?.outputs ?? incoming.outputs)
+  const artifactObservation = existing?.artifactObservation ?? incoming.artifactObservation
 
   const merged: ChatCommandSessionView = {
     callId: incoming.callId,
@@ -554,7 +555,8 @@ function mergeCommandSessionView(
     exitCode: existing?.exitCode ?? incoming.exitCode,
     latestSequence: Math.max(existing?.latestSequence ?? 0, incoming.latestSequence),
     outputTruncated: Boolean(existing?.outputTruncated || incoming.outputTruncated),
-    ...(outputs === undefined ? {} : { outputs })
+    ...(outputs === undefined ? {} : { outputs }),
+    ...(artifactObservation === undefined ? {} : { artifactObservation })
   }
   if (
     existing &&
@@ -566,11 +568,21 @@ function mergeCommandSessionView(
     existing.exitCode === merged.exitCode &&
     existing.latestSequence === merged.latestSequence &&
     existing.outputTruncated === merged.outputTruncated &&
-    managedCommandOutputsEqual(existing.outputs, merged.outputs)
+    managedCommandOutputsEqual(existing.outputs, merged.outputs) &&
+    artifactObservationsEqual(existing.artifactObservation, merged.artifactObservation)
   ) {
     return existing
   }
   return merged
+}
+
+function artifactObservationsEqual(
+  left: ChatCommandSessionView['artifactObservation'],
+  right: ChatCommandSessionView['artifactObservation']
+): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 function withCommandSession(
@@ -681,6 +693,7 @@ export function applyAgentCommandSessionSnapshotToChatMessage(
     exitCode: snapshot.exitCode,
     latestSequence: snapshot.latestSequence,
     outputs: parseManagedCommandOutputs(snapshot.outputs),
+    artifactObservation: snapshot.artifactObservation,
     outputTruncated: Boolean(
       snapshot.outputTruncated ||
       transcript?.outputCaptureTruncated ||
@@ -1654,6 +1667,7 @@ export function applyAgentEventToChatMessage(
       exitCode: agentEvent.type === 'command_exited' ? agentEvent.exitCode : undefined,
       latestSequence: agentEvent.latestSequence,
       outputs: parseManagedCommandOutputs(agentEvent.outputs),
+      artifactObservation: agentEvent.artifactObservation,
       outputTruncated: agentEvent.outputTruncated
     })
     return nextRun === currentRun ? message : { ...message, agentRun: nextRun }
@@ -1745,7 +1759,11 @@ export function applyAgentEventToChatMessage(
   const completedAt = isFinishedAgentOutputStatus(nextStatus)
     ? (currentRun.completedAt ?? Date.now())
     : currentRun.completedAt
-  const finalContent = getFinalMessageContent(message.content, agentEvent.content)
+  // A cancelled turn has no canonical final answer. All text emitted before cancellation remains
+  // available in the timeline, but must not leak back out as an assistant answer when collapsed.
+  const terminalEventContent = nextStatus === 'cancelled' ? undefined : agentEvent.content
+  const finalContent =
+    nextStatus === 'cancelled' ? '' : getFinalMessageContent(message.content, terminalEventContent)
   const finalResponseAt =
     finalContent && !currentRun.firstResponseAt
       ? (completedAt ?? Date.now())
@@ -1753,7 +1771,7 @@ export function applyAgentEventToChatMessage(
   const mcpProjection = addMcpApprovalViews(
     {
       ...currentRun,
-      timeline: getFinalTimeline(currentRun, agentEvent.content)
+      timeline: getFinalTimeline(currentRun, terminalEventContent)
     },
     proposedActions
   )
@@ -1765,7 +1783,7 @@ export function applyAgentEventToChatMessage(
       llmRetry: undefined,
       firstResponseAt: finalResponseAt,
       lastResponseAt:
-        agentEvent.content !== undefined
+        terminalEventContent !== undefined
           ? (currentRun.lastResponseAt ?? finalResponseAt)
           : currentRun.lastResponseAt,
       completedAt,
@@ -1801,8 +1819,15 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
   const messageWithEvents = output.events.reduce(applyAgentEventToChatMessage, message)
   const currentRun = ensureAgentRun(messageWithEvents.agentRun, output.runId, output.status)
   const outputFinalContent =
-    output.status === 'completed' || output.content ? output.content : undefined
-  const nextContent = getFinalMessageContent(messageWithEvents.content, outputFinalContent)
+    output.status === 'cancelled'
+      ? undefined
+      : output.status === 'completed' || output.content
+        ? output.content
+        : undefined
+  const nextContent =
+    output.status === 'cancelled'
+      ? ''
+      : getFinalMessageContent(messageWithEvents.content, outputFinalContent)
   const outputCompletedAt = isFinishedAgentOutputStatus(output.status)
     ? (currentRun.completedAt ?? Date.now())
     : currentRun.completedAt

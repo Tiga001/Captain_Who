@@ -3446,7 +3446,7 @@ CREATE TABLE agent_command_sessions (
                 AND substr(session_id, 1, 4) = 'cmd_'
                 AND substr(session_id, 5) NOT GLOB '*[^0-9A-Fa-f]*'
             ),
-            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 2),
             conversation_id TEXT NOT NULL,
             assistant_message_id TEXT NOT NULL,
             origin_run_id TEXT NOT NULL CHECK (
@@ -3496,6 +3496,14 @@ CREATE TABLE agent_command_sessions (
             ),
             output_capture_truncated INTEGER NOT NULL DEFAULT 0 CHECK (
                 output_capture_truncated IN (0, 1)
+            ),
+            artifact_observation_json TEXT CHECK (
+                artifact_observation_json IS NULL
+                OR (
+                    status NOT IN ('starting', 'running')
+                    AND json_valid(artifact_observation_json)
+                    AND length(CAST(artifact_observation_json AS BLOB)) BETWEEN 2 AND 524288
+                )
             ),
             archive_ref TEXT,
             terminal_reason TEXT CHECK (

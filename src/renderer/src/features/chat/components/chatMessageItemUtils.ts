@@ -291,6 +291,11 @@ export function getLastMessageTimelineContent(timeline: ChatAgentTimelineItem[])
 }
 
 export function getAssistantFinalContent(message: ChatMessage) {
+  // Cancellation is an explicit no-final-answer boundary. Older persisted records may still carry
+  // the live delta accumulator in `content`; never reinterpret it (or timeline narration) as a
+  // final answer after the user stopped the run.
+  if (message.agentRun?.status === 'cancelled') return ''
+
   const timelineContent = getLastMessageTimelineContent(message.agentRun?.timeline ?? [])
   // The durable assistant message is the canonical final answer. Timeline messages are execution
   // narration and may be rebuilt from Trace after a reload, where the terminal answer is

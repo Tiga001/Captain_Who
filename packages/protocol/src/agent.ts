@@ -440,7 +440,7 @@ export type AgentFileWriteResultStatus =
 
 export type AgentCommandOutputStream = 'stdout' | 'stderr'
 
-export const AGENT_COMMAND_SESSION_SCHEMA_VERSION = 1
+export const AGENT_COMMAND_SESSION_SCHEMA_VERSION = 2
 
 /** Process Session state is independent from Agent Run and approval state. */
 export type AgentCommandSessionStatus =
@@ -465,6 +465,8 @@ export interface AgentCommandSessionSnapshot {
   latestSequence: number
   outputTruncated: boolean
   outputs?: AgentCommandPublishedOutput[]
+  /** Bounded Host observation attached only after terminal command settlement. */
+  artifactObservation?: AgentCommandArtifactObservation
   archiveRef?: string
 }
 
@@ -1236,6 +1238,8 @@ export interface AgentGitDiffSnapshot {
 
 export type AgentCommandArtifactObservationKind = 'office'
 
+export const AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION = 3
+
 export interface AgentCommandArtifactObservationRequest {
   kinds: AgentCommandArtifactObservationKind[]
   /** Expected Office output files, resolved relative to command cwd. This does not grant access. */
@@ -1943,6 +1947,7 @@ export type AgentEvent =
       latestSequence: number
       outputTruncated: boolean
       outputs?: AgentCommandPublishedOutput[]
+      artifactObservation?: AgentCommandArtifactObservation
     }
   | {
       type: 'command_interrupted'
@@ -1956,6 +1961,7 @@ export type AgentEvent =
       latestSequence: number
       outputTruncated: boolean
       outputs?: AgentCommandPublishedOutput[]
+      artifactObservation?: AgentCommandArtifactObservation
     }
   | {
       type: 'error'

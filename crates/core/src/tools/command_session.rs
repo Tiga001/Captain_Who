@@ -205,6 +205,7 @@ fn validate_host_output(
         AgentCommandSessionStatus::Starting | AgentCommandSessionStatus::Running
     ) && (output.exit_code.is_some()
         || !output.outputs.is_empty()
+        || output.artifact_observation.is_some()
         || output.history_open.is_some())
     {
         return Err(invalid_host_output(
@@ -268,6 +269,18 @@ fn model_result(output: AgentCommandSessionExecutionOutput) -> Value {
             .expect("command_session model result is an object")
             .insert("outputs".to_string(), Value::Array(outputs));
     }
+    if let Some(artifact_observation) = output.artifact_observation {
+        let artifact_observation = serde_json::to_value(artifact_observation)
+            .expect("artifact observation serialization is infallible");
+        if let Some(projected) =
+            super::run_command::project_artifact_observation(&artifact_observation)
+        {
+            result
+                .as_object_mut()
+                .expect("command_session model result is an object")
+                .insert("artifactObservation".to_string(), projected);
+        }
+    }
     if let Some(history_open) = output.history_open {
         let object = result
             .as_object_mut()
@@ -299,6 +312,7 @@ fn trace_result(value: &Value) -> Value {
         "latestSequence",
         "outputTruncated",
         "read",
+        "artifactObservation",
         "historyOpen",
         "continueWith",
     ] {
@@ -313,7 +327,12 @@ fn trace_result(value: &Value) -> Value {
 mod tests {
     use super::*;
     use crate::protocol::{
+        AgentCommandArtifactKind, AgentCommandArtifactObservation,
+        AgentCommandArtifactObservationCoverage, AgentCommandArtifactObservationStatus,
+        AgentCommandArtifactScope, AgentCommandArtifactSnapshotCoverage,
+        AgentCommandExpectedArtifactOutcome, AgentCommandExpectedArtifactOutcomeKind,
         AgentCommandPermission, AgentPermissions, AgentRunContext, AgentToolCall,
+        AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     };
     use crate::runtime::AgentCommandSessionExecutor;
     use std::sync::{Arc, Mutex};
@@ -355,7 +374,39 @@ mod tests {
             truncated_before: false,
             output_truncated: false,
             outputs: Vec::new(),
+            artifact_observation: None,
             history_open: None,
+        }
+    }
+
+    fn presentation_observation() -> AgentCommandArtifactObservation {
+        AgentCommandArtifactObservation {
+            schema_version: AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+            status: AgentCommandArtifactObservationStatus::Complete,
+            partial: false,
+            stop_reasons: Vec::new(),
+            scanned: 1,
+            returned: 0,
+            omitted: 0,
+            coverage: AgentCommandArtifactObservationCoverage {
+                workspace_included: true,
+                expected_output_count: 1,
+                additional_root_count: 0,
+                before: AgentCommandArtifactSnapshotCoverage::default(),
+                after: AgentCommandArtifactSnapshotCoverage::default(),
+            },
+            changes: Vec::new(),
+            changes_truncated: false,
+            changes_omitted: 0,
+            expected_outputs: vec![AgentCommandExpectedArtifactOutcome {
+                requested_path: "edited.pptx".to_string(),
+                outcome: AgentCommandExpectedArtifactOutcomeKind::Created,
+                path: Some("edited.pptx".to_string()),
+                scope: Some(AgentCommandArtifactScope::Workspace),
+                artifact_kind: Some(AgentCommandArtifactKind::Presentation),
+                metadata: None,
+            }],
+            warnings: Vec::new(),
         }
     }
 
@@ -481,6 +532,29 @@ mod tests {
         assert_eq!(value["continueWith"]["args"]["open"], value["historyOpen"]);
 
         terminal.status = AgentCommandSessionStatus::Running;
+        assert!(validate_host_output(&session_id(), &terminal).is_err());
+    }
+
+    #[test]
+    fn terminal_artifact_observation_is_model_visible_and_active_observation_is_rejected() {
+        let mut terminal = output(AgentCommandSessionStatus::Exited, "");
+        terminal.exit_code = Some(0);
+        terminal.artifact_observation = Some(presentation_observation());
+
+        let value = model_result(terminal.clone());
+        assert_eq!(value["artifactObservation"]["status"], "complete");
+        assert_eq!(
+            value["artifactObservation"]["expectedOutputs"][0]["artifactKind"],
+            "presentation"
+        );
+        assert_eq!(
+            value["artifactObservation"]["expectedOutputs"][0]["path"],
+            "edited.pptx"
+        );
+        assert!(value["artifactObservation"].get("coverage").is_none());
+
+        terminal.status = AgentCommandSessionStatus::Running;
+        terminal.exit_code = None;
         assert!(validate_host_output(&session_id(), &terminal).is_err());
     }
 

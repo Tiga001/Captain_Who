@@ -761,6 +761,7 @@ mod tests {
                     latest_sequence: 0,
                     output_truncated: false,
                     outputs: Vec::new(),
+                    artifact_observation: None,
                     archive_ref: None,
                 },
                 authorization_source: CommandAuthorizationSource::ExplicitUser,
@@ -930,6 +931,7 @@ mod tests {
                                 archive_ref: None,
                                 terminal_reason: None,
                                 published_outputs: &[],
+                                artifact_observation: None,
                                 committed_at: 50,
                             },
                         )
@@ -976,6 +978,7 @@ mod tests {
                     archive_ref: None,
                     terminal_reason: Some("conflicting retry"),
                     published_outputs: &[],
+                    artifact_observation: None,
                     committed_at: 51,
                 },)
                 .unwrap(),
@@ -1087,6 +1090,7 @@ mod tests {
                     archive_ref: None,
                     terminal_reason: None,
                     published_outputs: &[],
+                    artifact_observation: None,
                     committed_at: 50,
                 },)
                 .unwrap(),
@@ -1181,6 +1185,7 @@ mod tests {
             archive_ref: Some("history-archive-missing"),
             terminal_reason: None,
             published_outputs: &[],
+            artifact_observation: None,
             committed_at: 50,
         };
         assert!(service

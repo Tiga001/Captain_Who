@@ -810,6 +810,7 @@ fn command_session_archive_route_is_reused_without_preview_rearchive() {
                 latest_sequence: 0,
                 output_truncated: false,
                 outputs: Vec::new(),
+                artifact_observation: None,
                 archive_ref: None,
             },
             authorization_source: CommandAuthorizationSource::ExplicitUser,
@@ -866,6 +867,7 @@ fn command_session_archive_route_is_reused_without_preview_rearchive() {
             archive_ref: Some(&descriptor.archive_ref),
             terminal_reason: None,
             published_outputs: &[],
+            artifact_observation: None,
             committed_at: 5,
         })
         .unwrap();

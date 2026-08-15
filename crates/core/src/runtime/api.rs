@@ -328,6 +328,8 @@ pub struct AgentCommandSessionExecutionOutput {
     pub truncated_before: bool,
     pub output_truncated: bool,
     pub outputs: Vec<crate::command::AgentCommandPublishedOutput>,
+    /// Terminal-only bounded Office file-effect evidence from the authoritative Host Session.
+    pub artifact_observation: Option<crate::protocol::AgentCommandArtifactObservation>,
     /// Opaque, conversation-bound recovery route for the authoritative terminal output Archive.
     /// Running Sessions never expose a route and raw Archive references never cross this boundary.
     pub history_open: Option<String>,

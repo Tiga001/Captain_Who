@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@mycopilot/protocol'
+import type { AgentCommandArtifactObservation, AgentEvent } from '@mycopilot/protocol'
 import { AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS } from '@mycopilot/protocol'
 import { describe, expect, it } from 'vitest'
 import type { ChatAgentRunView, ChatMessage } from '../../features/chat/chatTypes'
@@ -9,6 +9,60 @@ import {
   markMissingAgentCommandSessionOutcomeUnknown,
   shouldTouchConversationForAgentEvent
 } from '../../features/agentRun/agentEventReducer'
+
+const artifactCoverage = {
+  rootsScanned: 1,
+  directoryEntriesScanned: 1,
+  officeFilesSeen: 1,
+  filesHashed: 1,
+  filesUnhashed: 0,
+  bytesHashed: 1024,
+  symlinksSkipped: 0,
+  excludedDirectories: 0,
+  durationMs: 1,
+  timeBudgetExceeded: false,
+  cancelled: false,
+  truncated: false
+}
+
+const artifactObservation: AgentCommandArtifactObservation = {
+  schemaVersion: 3,
+  status: 'complete',
+  partial: false,
+  stopReasons: [],
+  scanned: 1,
+  returned: 1,
+  omitted: 0,
+  coverage: {
+    workspaceIncluded: true,
+    expectedOutputCount: 1,
+    additionalRootCount: 0,
+    before: { ...artifactCoverage, officeFilesSeen: 0, filesHashed: 0, bytesHashed: 0 },
+    after: artifactCoverage
+  },
+  changes: [
+    {
+      kind: 'created',
+      artifactKind: 'presentation',
+      path: 'edited.pptx',
+      scope: 'workspace',
+      after: { sizeBytes: 1024, validation: { status: 'valid' } }
+    }
+  ],
+  changesTruncated: false,
+  changesOmitted: 0,
+  expectedOutputs: [
+    {
+      requestedPath: 'edited.pptx',
+      outcome: 'created',
+      path: 'edited.pptx',
+      scope: 'workspace',
+      artifactKind: 'presentation',
+      metadata: { sizeBytes: 1024, validation: { status: 'valid' } }
+    }
+  ],
+  warnings: []
+}
 
 function message(): ChatMessage {
   const agentRun: ChatAgentRunView = {
@@ -114,6 +168,7 @@ describe('command output runtime projection', () => {
       endedAt: 50,
       latestSequence: 2,
       outputTruncated: false,
+      artifactObservation,
       outputs: [
         {
           name: 'pages/page-1.png',
@@ -130,6 +185,9 @@ describe('command output runtime projection', () => {
     expect(exited.agentRun?.commandSessions?.['command-call']?.status).toBe('exited')
     expect(exited.agentRun?.commandSessions?.['command-call']?.outputs?.[0]?.readPath).toBe(
       `image-artifact://sha256/${'a'.repeat(64)}`
+    )
+    expect(exited.agentRun?.commandSessions?.['command-call']?.artifactObservation).toEqual(
+      artifactObservation
     )
     expect(exited.agentRun?.commandOutputPreviews?.['command-call']?.chunks).toHaveLength(2)
   })
@@ -559,7 +617,7 @@ describe('command output runtime projection', () => {
       }
     }
     const restored = applyAgentCommandSessionSnapshotToChatMessage(waiting, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       sessionId: 'cmd_1234567890abcdef1234567890abcdef',
       conversationId: 'conversation-command-output',
       assistantMessageId: 'assistant-command-output',
@@ -657,7 +715,7 @@ describe('command output runtime projection', () => {
     const restored = applyAgentCommandSessionSnapshotToChatMessage(
       completed,
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         sessionId: 'cmd_1234567890abcdef1234567890abcdef',
         conversationId: 'conversation-command-output',
         assistantMessageId: 'assistant-command-output',
@@ -672,6 +730,7 @@ describe('command output runtime projection', () => {
         exitCode: 0,
         latestSequence: 2,
         outputTruncated: false,
+        artifactObservation,
         outputs: [
           {
             name: 'reports/final.pdf',
@@ -703,10 +762,13 @@ describe('command output runtime projection', () => {
     expect(restored.agentRun?.commandSessions?.['command-call']?.outputs?.[0]?.readPath).toBe(
       `artifact://sha256/${'b'.repeat(64)}`
     )
+    expect(restored.agentRun?.commandSessions?.['command-call']?.artifactObservation).toEqual(
+      artifactObservation
+    )
     expect(restored.agentRun?.commandOutputPreviews?.['command-call']?.chunks).toHaveLength(2)
 
     const stale = applyAgentCommandSessionSnapshotToChatMessage(restored, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       sessionId: 'cmd_1234567890abcdef1234567890abcdef',
       conversationId: 'conversation-command-output',
       assistantMessageId: 'assistant-command-output',

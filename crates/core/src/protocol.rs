@@ -1773,6 +1773,12 @@ pub struct AgentCommandSessionSnapshot {
     /// Presentation-safe immutable receipts for outputs published by this terminal Session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<crate::command::AgentCommandPublishedOutput>,
+    /// Best-effort, bounded Office file-effect evidence captured for this terminal Session.
+    ///
+    /// Active Sessions never expose an observation. Absence on a terminal Session means the
+    /// command did not request Office observation; it must not be interpreted as "no changes".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_observation: Option<AgentCommandArtifactObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archive_ref: Option<String>,
 }
@@ -2891,6 +2897,8 @@ pub enum AgentEvent {
         output_truncated: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         outputs: Vec<crate::command::AgentCommandPublishedOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_observation: Option<AgentCommandArtifactObservation>,
     },
     CommandInterrupted {
         run_id: String,
@@ -2905,6 +2913,8 @@ pub enum AgentEvent {
         output_truncated: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         outputs: Vec<crate::command::AgentCommandPublishedOutput>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_observation: Option<AgentCommandArtifactObservation>,
     },
     Error {
         run_id: Option<String>,
@@ -3189,6 +3199,7 @@ mod tests {
             latest_sequence: 1,
             output_truncated: false,
             outputs: Vec::new(),
+            artifact_observation: None,
         };
         let command_interrupted = AgentEvent::CommandInterrupted {
             run_id: "run-contract-v1".to_string(),
@@ -3201,6 +3212,7 @@ mod tests {
             latest_sequence: 1,
             output_truncated: false,
             outputs: Vec::new(),
+            artifact_observation: None,
         };
         let done = AgentEvent::Done {
             run_id: "run-contract-v1".to_string(),
@@ -3247,7 +3259,7 @@ mod tests {
     #[test]
     fn managed_command_session_projection_is_camel_case_and_process_safe() {
         let snapshot = AgentCommandSessionSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             session_id: "cmd_1234567890abcdef1234567890abcdef".to_string(),
             conversation_id: "conversation-1".to_string(),
             assistant_message_id: "assistant-1".to_string(),
@@ -3264,10 +3276,11 @@ mod tests {
             latest_sequence: 2,
             output_truncated: false,
             outputs: Vec::new(),
+            artifact_observation: None,
             archive_ref: None,
         };
         let value = serde_json::to_value(&snapshot).unwrap();
-        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["schemaVersion"], 2);
         assert_eq!(value["sessionId"], snapshot.session_id);
         assert_eq!(value["originRunId"], "run-1");
         assert_eq!(value["status"], "running");

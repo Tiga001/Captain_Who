@@ -258,7 +258,7 @@ fn project_command_execution(value: &Value) -> Option<Value> {
     (!output.is_empty()).then_some(Value::Object(output))
 }
 
-fn project_artifact_observation(value: &Value) -> Option<Value> {
+pub(super) fn project_artifact_observation(value: &Value) -> Option<Value> {
     let mut output = Map::new();
     for field in [
         "status",

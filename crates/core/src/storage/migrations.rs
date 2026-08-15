@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 14;
+pub const STORAGE_SCHEMA_VERSION: i32 = 15;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:c7ec1de5a7ca3f42e5fab8c7013415127a93146a011c4b20ea94d20bf9b011ff";
+    "sha256:22fddc50d9967c227ea2bacc78131350aea6e48f962a3da6ef066bf0a2109996";
 
 /// Opens the single supported development schema.
 ///

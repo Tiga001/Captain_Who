@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import type { AgentProposedAction } from '@mycopilot/protocol'
+import type { AgentCommandArtifactObservation, AgentProposedAction } from '@mycopilot/protocol'
 import type { ChatMessage } from '../chatTypes'
 
 const storage = vi.hoisted(() => ({
@@ -13,6 +13,60 @@ vi.mock('../../../host/hostClient', () => ({
 
 const { loadConversation, saveChatMessageState } = await import('../../storage/storageClient')
 const { parsePersistedAgentRun } = await import('../../storage/persistedAgentRun')
+
+const artifactCoverage = {
+  rootsScanned: 1,
+  directoryEntriesScanned: 1,
+  officeFilesSeen: 1,
+  filesHashed: 1,
+  filesUnhashed: 0,
+  bytesHashed: 1024,
+  symlinksSkipped: 0,
+  excludedDirectories: 0,
+  durationMs: 1,
+  timeBudgetExceeded: false,
+  cancelled: false,
+  truncated: false
+}
+
+const artifactObservation: AgentCommandArtifactObservation = {
+  schemaVersion: 3,
+  status: 'complete',
+  partial: false,
+  stopReasons: [],
+  scanned: 1,
+  returned: 1,
+  omitted: 0,
+  coverage: {
+    workspaceIncluded: true,
+    expectedOutputCount: 1,
+    additionalRootCount: 0,
+    before: { ...artifactCoverage, officeFilesSeen: 0, filesHashed: 0, bytesHashed: 0 },
+    after: artifactCoverage
+  },
+  changes: [
+    {
+      kind: 'created',
+      artifactKind: 'presentation',
+      path: 'edited.pptx',
+      scope: 'workspace',
+      after: { sizeBytes: 1024, validation: { status: 'valid' } }
+    }
+  ],
+  changesTruncated: false,
+  changesOmitted: 0,
+  expectedOutputs: [
+    {
+      requestedPath: 'edited.pptx',
+      outcome: 'created',
+      path: 'edited.pptx',
+      scope: 'workspace',
+      artifactKind: 'presentation',
+      metadata: { sizeBytes: 1024, validation: { status: 'valid' } }
+    }
+  ],
+  warnings: []
+}
 
 function storedMcpApprovalAction(
   callId: string
@@ -356,6 +410,7 @@ it('persists and reloads only immutable command terminal metadata', async () => 
           exitCode: 0,
           latestSequence: 1,
           outputTruncated: false,
+          artifactObservation,
           outputs: [publishedOutput]
         }
       },
@@ -377,6 +432,7 @@ it('persists and reloads only immutable command terminal metadata', async () => 
       exitCode: 0,
       latestSequence: 1,
       outputTruncated: false,
+      artifactObservation,
       outputs: [publishedOutput]
     }
   })
@@ -408,6 +464,35 @@ it('persists and reloads only immutable command terminal metadata', async () => 
   const restored = await loadConversation('conversation-command-terminal')
   expect(restored?.messages[0].agentRun?.commandSessions).toEqual(storedRun.commandSessions)
   expect(restored?.messages[0].agentRun?.commandOutputPreviews).toBeUndefined()
+})
+
+it('rejects malformed artifact observations in durable command Session state', () => {
+  const base = currentStoredRun({
+    runId: 'run-command-observation',
+    toolCalls: [
+      {
+        id: 'command-call',
+        tool: 'run_command',
+        args: { command: 'node editor.mjs' },
+        approvalStatus: 'approved',
+        reason: null
+      }
+    ],
+    timeline: [{ id: 'tool-call-command-call', type: 'tool_call', callId: 'command-call' }],
+    commandSessions: {
+      'command-call': {
+        callId: 'command-call',
+        status: 'exited',
+        endedAt: 12,
+        exitCode: 0,
+        latestSequence: 1,
+        outputTruncated: false,
+        artifactObservation: { ...artifactObservation, schemaVersion: 999 }
+      }
+    }
+  })
+
+  expect(parsePersistedAgentRun(base)).toBeUndefined()
 })
 
 it('persists settled Skill installation activity across a conversation reload', async () => {

@@ -11,8 +11,10 @@ use mycopilot_core::storage::agent_command_session_repository::{
 };
 use mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit;
 use mycopilot_core::{
-    AgentCommandOutputStream, AgentCommandPermission, AgentCommandSafetyPolicy,
-    AgentCommandSessionAction, AgentCommandSessionExecutionControl,
+    AgentCommandArtifactKind, AgentCommandArtifactObservationKind,
+    AgentCommandArtifactObservationRequest, AgentCommandArtifactValidationStatus,
+    AgentCommandExpectedArtifactOutcomeKind, AgentCommandOutputStream, AgentCommandPermission,
+    AgentCommandSafetyPolicy, AgentCommandSessionAction, AgentCommandSessionExecutionControl,
     AgentCommandSessionExecutionOutput, AgentCommandSessionExecutionRequest,
     AgentCommandSessionExecutor, AgentCommandSessionGetInput, AgentCommandSessionOutputChunk,
     AgentCommandSessionSnapshot, AgentDisplayStatus, AgentModelBatchReceiptRecord,
@@ -23,6 +25,7 @@ use mycopilot_core::{
 use rusqlite::Connection;
 #[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Barrier;
 use std::thread;
@@ -267,7 +270,30 @@ fn start_owned_session_with_tracker(
     tracker: &Arc<FileEffectTracker>,
 ) -> Result<AgentCommandSessionLaunch, String> {
     let command = approved_command(call_id, command_text);
-    let mut file_effect_guard = tracker.register(None, Some(conversation_id), run_id, call_id);
+    start_owned_session_with_request_and_tracker(
+        registry,
+        workspace,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        &command,
+        notifications,
+        tracker,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_owned_session_with_request_and_tracker(
+    registry: &AgentCommandSessionRegistry,
+    workspace: &Path,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    run_id: &str,
+    command: &AgentCommandRequest,
+    notifications: Option<CoreServerNotificationSender>,
+    tracker: &Arc<FileEffectTracker>,
+) -> Result<AgentCommandSessionLaunch, String> {
+    let mut file_effect_guard = tracker.register(None, Some(conversation_id), run_id, &command.id);
     file_effect_guard.mark_effects_started();
     let mut file_effect_guard = Some(file_effect_guard);
     registry.start(StartAgentCommandSession {
@@ -275,11 +301,11 @@ fn start_owned_session_with_tracker(
             conversation_id: conversation_id.to_string(),
             assistant_message_id: assistant_message_id.to_string(),
             origin_run_id: run_id.to_string(),
-            call_id: call_id.to_string(),
+            call_id: command.id.clone(),
             project_id: None,
         },
         workspace_root: Some(workspace),
-        command: &command,
+        command,
         permissions: test_permissions(),
         authorization_source: CommandAuthorizationSource::ExplicitUser,
         approval_provenance: json!({
@@ -359,6 +385,30 @@ fn approved_command(call_id: &str, command: &str) -> AgentCommandRequest {
         inputs: Vec::new(),
         runtime_binding: None,
     }
+}
+
+fn write_minimal_presentation(path: &Path) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("[Content_Types].xml", options).unwrap();
+    archive
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+</Types>"#,
+        )
+        .unwrap();
+    archive.start_file("ppt/presentation.xml", options).unwrap();
+    archive
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#,
+        )
+        .unwrap();
+    archive.finish().unwrap();
 }
 
 fn seed_conversation(storage: &StorageService, conversation_id: &str, assistant_message_id: &str) {
@@ -718,6 +768,113 @@ fn short_command_exits_through_the_same_managed_session_entry() {
         .collect::<Vec<_>>();
     assert!(event_types.iter().any(|kind| kind == "command_started"));
     assert!(event_types.iter().any(|kind| kind == "command_exited"));
+}
+
+#[test]
+fn handed_off_office_artifact_observation_reaches_event_snapshot_and_model_wait() {
+    let fixture = RunningFixture::new("office-artifact-observation");
+    write_minimal_presentation(&fixture.workspace.path().join("source.pptx"));
+    let command_text = "sleep 0.08; cp source.pptx edited.pptx; sleep 0.08";
+    let mut command = approved_command(&fixture.call_id, command_text);
+    command.observe = Some(AgentCommandArtifactObservationRequest {
+        kinds: vec![AgentCommandArtifactObservationKind::Office],
+        expected_outputs: vec!["edited.pptx".to_string()],
+        additional_roots: Vec::new(),
+    });
+    let tracker = Arc::new(FileEffectTracker::default());
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let launch = start_owned_session_with_request_and_tracker(
+        &fixture.registry,
+        fixture.workspace.path(),
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &command,
+        Some(notifications),
+        &tracker,
+    )
+    .unwrap();
+    let AgentCommandSessionLaunch::Running {
+        snapshot,
+        mut handoff_guard,
+        ..
+    } = launch
+    else {
+        panic!("the delayed presentation copy must hand off")
+    };
+    adopt_owned_session(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &fixture.assistant_message_id,
+        &fixture.run_id,
+        &fixture.call_id,
+        &snapshot,
+        command_text,
+        &mut handoff_guard,
+    );
+
+    let record = wait_for_terminal_record(
+        &fixture.storage,
+        &fixture.conversation_id,
+        &snapshot.session_id,
+    );
+    assert_eq!(record.snapshot.status, AgentCommandSessionStatus::Exited);
+    assert_eq!(record.snapshot.exit_code, Some(0));
+    let observation = record
+        .snapshot
+        .artifact_observation
+        .as_ref()
+        .expect("terminal Session snapshot retains the validated Office observation");
+    let expected = observation
+        .expected_outputs
+        .first()
+        .expect("the approved presentation destination remains explicit");
+    assert_eq!(expected.path.as_deref(), Some("edited.pptx"));
+    assert_eq!(
+        expected.outcome,
+        AgentCommandExpectedArtifactOutcomeKind::Created
+    );
+    assert_eq!(
+        expected.artifact_kind,
+        Some(AgentCommandArtifactKind::Presentation)
+    );
+    assert_eq!(
+        expected
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.validation.status),
+        Some(AgentCommandArtifactValidationStatus::Valid)
+    );
+
+    let reopened = StorageService::open(&fixture.database_path).unwrap();
+    let restored = reopened
+        .load_agent_command_session(&fixture.conversation_id, &snapshot.session_id)
+        .unwrap()
+        .expect("terminal Session survives Host reopen");
+    assert_eq!(
+        restored.snapshot.artifact_observation,
+        Some(observation.clone())
+    );
+
+    let model = fixture.poll(&snapshot.session_id, Duration::ZERO);
+    assert_eq!(model.status, AgentCommandSessionStatus::Exited);
+    assert_eq!(model.exit_code, Some(0));
+    assert_eq!(model.artifact_observation, Some(observation.clone()));
+
+    let terminal_event = std::iter::from_fn(|| receiver.try_recv().ok())
+        .find(|event| event["params"]["type"] == "command_exited")
+        .expect("terminal notification");
+    assert_eq!(terminal_event["params"]["status"], "exited");
+    assert_eq!(terminal_event["params"]["exitCode"], 0);
+    assert_eq!(
+        terminal_event["params"]["artifactObservation"]["expectedOutputs"][0]["artifactKind"],
+        "presentation"
+    );
+    assert_eq!(
+        terminal_event["params"]["artifactObservation"]["expectedOutputs"][0]["metadata"]
+            ["validation"]["status"],
+        "valid"
+    );
 }
 
 #[test]
@@ -3300,6 +3457,7 @@ fn persist_wait_only_command(
                 latest_sequence: 0,
                 output_truncated: false,
                 outputs: Vec::new(),
+                artifact_observation: None,
                 archive_ref: None,
             },
             authorization_source: CommandAuthorizationSource::ExplicitUser,
@@ -3363,6 +3521,7 @@ fn settle_wait_only_command(
             archive_ref: None,
             terminal_reason: None,
             published_outputs: &[],
+            artifact_observation: None,
             committed_at,
         })
         .unwrap();
@@ -4263,6 +4422,7 @@ fn every_restart_restores_outcome_unknown_conversation_and_project_fences() {
                 latest_sequence: 0,
                 output_truncated: false,
                 outputs: Vec::new(),
+                artifact_observation: None,
                 archive_ref: None,
             },
             authorization_source: CommandAuthorizationSource::ExplicitUser,

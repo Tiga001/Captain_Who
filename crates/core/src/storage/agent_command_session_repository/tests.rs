@@ -8,6 +8,78 @@ use serde_json::json;
 
 const DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
+fn presentation_observation() -> AgentCommandArtifactObservation {
+    serde_json::from_value(json!({
+        "schemaVersion": AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+        "status": "complete",
+        "partial": false,
+        "stopReasons": [],
+        "scanned": 1,
+        "returned": 1,
+        "omitted": 0,
+        "coverage": {
+            "workspaceIncluded": true,
+            "expectedOutputCount": 1,
+            "additionalRootCount": 0,
+            "before": {
+                "rootsScanned": 1,
+                "directoryEntriesScanned": 1,
+                "officeFilesSeen": 1,
+                "filesHashed": 1,
+                "filesUnhashed": 0,
+                "bytesHashed": 1024,
+                "symlinksSkipped": 0,
+                "excludedDirectories": 0,
+                "durationMs": 1,
+                "timeBudgetExceeded": false,
+                "cancelled": false,
+                "truncated": false
+            },
+            "after": {
+                "rootsScanned": 1,
+                "directoryEntriesScanned": 1,
+                "officeFilesSeen": 1,
+                "filesHashed": 1,
+                "filesUnhashed": 0,
+                "bytesHashed": 2048,
+                "symlinksSkipped": 0,
+                "excludedDirectories": 0,
+                "durationMs": 1,
+                "timeBudgetExceeded": false,
+                "cancelled": false,
+                "truncated": false
+            }
+        },
+        "changes": [{
+            "kind": "modified",
+            "artifactKind": "presentation",
+            "path": "edited.pptx",
+            "scope": "workspace",
+            "after": {
+                "sizeBytes": 2048,
+                "sha256": "a".repeat(64),
+                "validation": { "status": "valid" }
+            }
+        }],
+        "changesTruncated": false,
+        "changesOmitted": 0,
+        "expectedOutputs": [{
+            "requestedPath": "edited.pptx",
+            "outcome": "modified",
+            "path": "edited.pptx",
+            "scope": "workspace",
+            "artifactKind": "presentation",
+            "metadata": {
+                "sizeBytes": 2048,
+                "sha256": "a".repeat(64),
+                "validation": { "status": "valid" }
+            }
+        }],
+        "warnings": []
+    }))
+    .unwrap()
+}
+
 fn test_connection() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     migrations::run_migrations(&connection).unwrap();
@@ -72,6 +144,7 @@ fn create_input(
             latest_sequence: 0,
             output_truncated: false,
             outputs: Vec::new(),
+            artifact_observation: None,
             archive_ref: None,
         },
         authorization_source: CommandAuthorizationSource::ExplicitUser,
@@ -197,6 +270,7 @@ fn output_and_model_cursors_are_independent_and_terminal_cas_is_idempotent() {
         archive_ref: None,
         terminal_reason: None,
         published_outputs: &[],
+        artifact_observation: None,
         committed_at: 20,
     };
     assert_eq!(
@@ -231,6 +305,7 @@ fn terminal_snapshot_restores_published_outputs_after_reopen() {
         width: Some(1_200),
         height: Some(1_600),
     };
+    let observation = presentation_observation();
 
     {
         let mut connection = Connection::open(&database_path).unwrap();
@@ -256,6 +331,7 @@ fn terminal_snapshot_restores_published_outputs_after_reopen() {
                 archive_ref: None,
                 terminal_reason: None,
                 published_outputs: std::slice::from_ref(&output),
+                artifact_observation: Some(&observation),
                 committed_at: 20,
             },
         )
@@ -268,8 +344,13 @@ fn terminal_snapshot_restores_published_outputs_after_reopen() {
         .unwrap()
         .unwrap();
     assert_eq!(restored.snapshot.outputs, vec![output.clone()]);
+    assert_eq!(
+        restored.snapshot.artifact_observation,
+        Some(observation.clone())
+    );
     let listed = list_sessions_for_conversation(&connection, "conversation-1", 8).unwrap();
     assert_eq!(listed[0].snapshot.outputs, vec![output]);
+    assert_eq!(listed[0].snapshot.artifact_observation, Some(observation));
 }
 
 #[test]
@@ -556,6 +637,7 @@ fn archive_reference_is_restricted_to_the_same_conversation_and_message() {
         archive_ref: Some(&foreign_archive.archive_ref),
         terminal_reason: None,
         published_outputs: &[],
+        artifact_observation: None,
         committed_at: 20,
     };
     assert!(commit_terminal(&mut connection, &terminal).is_err());
@@ -732,6 +814,7 @@ fn terminal_retention_prunes_operational_rows_but_preserves_exact_archive() {
                 archive_ref: (index == 0).then_some(descriptor.archive_ref.as_str()),
                 terminal_reason: None,
                 published_outputs: &[],
+                artifact_observation: None,
                 committed_at: 1_000 + i64::try_from(index).unwrap(),
             },
         )

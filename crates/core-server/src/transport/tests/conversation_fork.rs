@@ -136,6 +136,7 @@ fn fork_request_reports_active_command_as_structured_domain_error() {
                 latest_sequence: 0,
                 output_truncated: false,
                 outputs: Vec::new(),
+                artifact_observation: None,
                 archive_ref: None,
             },
             authorization_source: CommandAuthorizationSource::ExplicitUser,

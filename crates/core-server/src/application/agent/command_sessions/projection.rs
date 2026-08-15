@@ -33,6 +33,7 @@ pub(super) fn host_snapshot(
         latest_sequence: snapshot.latest_output_sequence,
         output_truncated: snapshot.output_truncated,
         outputs: Vec::new(),
+        artifact_observation: None,
         archive_ref: None,
     }
 }
@@ -90,6 +91,7 @@ pub(super) fn model_execution_output_from_read(
         truncated_before: read.receipt.truncated_before,
         output_truncated: read.receipt.output_truncated,
         outputs: read.outputs.clone(),
+        artifact_observation: read.artifact_observation.clone(),
         history_open,
     }
 }

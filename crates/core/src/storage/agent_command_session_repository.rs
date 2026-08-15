@@ -12,8 +12,9 @@ use crate::storage::command_session_receipt_payload::{
     decode_command_session_receipt_payload, encode_command_session_receipt_payload,
 };
 use crate::{
-    AgentCommandOutputStream, AgentCommandSessionAction, AgentCommandSessionOutputChunk,
-    AgentCommandSessionSnapshot, AgentCommandSessionStatus, AgentCommandSessionTranscript,
+    AgentCommandArtifactObservation, AgentCommandOutputStream, AgentCommandSessionAction,
+    AgentCommandSessionOutputChunk, AgentCommandSessionSnapshot, AgentCommandSessionStatus,
+    AgentCommandSessionTranscript, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS, AGENT_COMMAND_SESSION_MODEL_OUTPUT_BYTES,
 };
 use rusqlite::types::Type;
@@ -23,12 +24,13 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{Error as IoError, ErrorKind};
 
-pub const AGENT_COMMAND_SESSION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_COMMAND_SESSION_SCHEMA_VERSION: u32 = 2;
 pub const MAX_PERSISTED_COMMAND_TRANSCRIPT_BYTES: usize = 256 * 1024;
 const PERSISTED_COMMAND_TRANSCRIPT_HEAD_BYTES: usize = 64 * 1024;
 const PERSISTED_COMMAND_TRANSCRIPT_HEAD_CHUNKS: usize =
     AGENT_COMMAND_SESSION_MAX_TRANSCRIPT_CHUNKS / 4;
 const MAX_PERSISTED_COMMAND_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_PERSISTED_ARTIFACT_OBSERVATION_BYTES: usize = 512 * 1024;
 pub const MAX_RETAINED_TERMINAL_COMMAND_SESSIONS_PER_CONVERSATION: usize = 128;
 pub const MAX_RETAINED_MODEL_READ_RECEIPTS_PER_SESSION: usize = 64;
 
@@ -105,6 +107,7 @@ pub struct AgentCommandSessionModelRead {
     pub receipt: AgentCommandSessionModelReadReceipt,
     pub chunks: Vec<AgentCommandSessionOutputChunk>,
     pub outputs: Vec<AgentCommandPublishedOutput>,
+    pub artifact_observation: Option<AgentCommandArtifactObservation>,
 }
 
 struct StoredAgentCommandSessionModelReadReceipt {
@@ -138,6 +141,7 @@ pub struct AgentCommandSessionTerminalUpdate<'a> {
     pub archive_ref: Option<&'a str>,
     pub terminal_reason: Option<&'a str>,
     pub published_outputs: &'a [AgentCommandPublishedOutput],
+    pub artifact_observation: Option<&'a AgentCommandArtifactObservation>,
     pub committed_at: i64,
 }
 
@@ -192,11 +196,11 @@ pub fn create_session(
              command_digest, authorization_source, approval_provenance_json,
              permission_provenance_json, status, started_at, ended_at, exit_code,
              latest_sequence, model_read_sequence, transcript_truncated,
-             output_capture_truncated, archive_ref, terminal_reason,
+             output_capture_truncated, artifact_observation_json, archive_ref, terminal_reason,
              created_at, updated_at, settled_at
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-             ?15, NULL, NULL, ?16, 0, ?17, ?18, NULL, NULL, ?19, ?19, NULL
+             ?15, NULL, NULL, ?16, 0, ?17, ?18, NULL, NULL, NULL, ?19, ?19, NULL
          )",
         params![
             &input.snapshot.session_id,
@@ -401,7 +405,8 @@ pub(crate) fn commit_terminal_in_connection(
             && current.snapshot.latest_sequence == input.latest_sequence
             && current.snapshot.archive_ref.as_deref() == input.archive_ref
             && current.terminal_reason.as_deref() == input.terminal_reason
-            && published_outputs == input.published_outputs;
+            && published_outputs == input.published_outputs
+            && current.snapshot.artifact_observation.as_ref() == input.artifact_observation;
         return Ok(if idempotent {
             AgentCommandSessionTransitionOutcome::Idempotent
         } else {
@@ -418,13 +423,17 @@ pub(crate) fn commit_terminal_in_connection(
     let transcript_truncated = current.transcript_truncated || input.transcript_truncated;
     let output_capture_truncated =
         current.output_capture_truncated || input.output_capture_truncated;
+    let artifact_observation_json = input
+        .artifact_observation
+        .map(serialize_artifact_observation)
+        .transpose()?;
     let affected = connection.execute(
         "UPDATE agent_command_sessions
          SET status = ?1, ended_at = ?2, exit_code = ?3,
              latest_sequence = ?4, transcript_truncated = ?5,
-             output_capture_truncated = ?6, archive_ref = ?7,
-             terminal_reason = ?8, updated_at = ?9, settled_at = ?9
-         WHERE conversation_id = ?10 AND session_id = ?11
+             output_capture_truncated = ?6, artifact_observation_json = ?7,
+             archive_ref = ?8, terminal_reason = ?9, updated_at = ?10, settled_at = ?10
+         WHERE conversation_id = ?11 AND session_id = ?12
            AND status IN ('starting', 'running')",
         params![
             status_as_str(input.status),
@@ -433,6 +442,7 @@ pub(crate) fn commit_terminal_in_connection(
             sqlite_integer(input.latest_sequence)?,
             transcript_truncated,
             output_capture_truncated,
+            artifact_observation_json,
             input.archive_ref,
             input.terminal_reason,
             input.committed_at,
@@ -669,11 +679,17 @@ pub fn read_or_create_model_read(
         } else {
             Vec::new()
         };
+        let artifact_observation = if receipt.status.is_terminal() {
+            load_artifact_observation(&transaction, input.session_id)?
+        } else {
+            None
+        };
         transaction.commit()?;
         return Ok(Some(AgentCommandSessionModelRead {
             receipt,
             chunks,
             outputs,
+            artifact_observation,
         }));
     }
 
@@ -748,11 +764,17 @@ pub fn read_or_create_model_read(
     } else {
         Vec::new()
     };
+    let artifact_observation = if receipt.status.is_terminal() {
+        record.snapshot.artifact_observation.clone()
+    } else {
+        None
+    };
     transaction.commit()?;
     Ok(Some(AgentCommandSessionModelRead {
         receipt,
         chunks: transcript.chunks,
         outputs,
+        artifact_observation,
     }))
 }
 
@@ -783,10 +805,16 @@ pub fn load_model_read(
     } else {
         Vec::new()
     };
+    let artifact_observation = if receipt.status.is_terminal() {
+        load_artifact_observation(connection, input.session_id)?
+    } else {
+        None
+    };
     Ok(Some(AgentCommandSessionModelRead {
         receipt,
         chunks,
         outputs,
+        artifact_observation,
     }))
 }
 
@@ -1270,7 +1298,7 @@ fn record_select() -> &'static str {
          command_digest, authorization_source, approval_provenance_json,
          permission_provenance_json, status, started_at, ended_at, exit_code,
          latest_sequence, model_read_sequence, transcript_truncated,
-         output_capture_truncated, archive_ref, terminal_reason,
+         output_capture_truncated, artifact_observation_json, archive_ref, terminal_reason,
          created_at, updated_at, settled_at
      FROM agent_command_sessions"
 }
@@ -1282,6 +1310,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommandSess
     let permission_provenance = deserialize_json(12, row.get::<_, String>(12)?)?;
     let transcript_truncated = row.get::<_, bool>(19)?;
     let output_capture_truncated = row.get::<_, bool>(20)?;
+    let artifact_observation = deserialize_artifact_observation(21, row.get(21)?)?;
     Ok(AgentCommandSessionRecord {
         snapshot: AgentCommandSessionSnapshot {
             schema_version: row.get(1)?,
@@ -1301,7 +1330,8 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommandSess
             latest_sequence: row.get(17)?,
             output_truncated: transcript_truncated || output_capture_truncated,
             outputs: Vec::new(),
-            archive_ref: row.get(21)?,
+            artifact_observation,
+            archive_ref: row.get(22)?,
         },
         authorization_source,
         approval_provenance,
@@ -1309,10 +1339,10 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentCommandSess
         model_read_sequence: row.get(18)?,
         transcript_truncated,
         output_capture_truncated,
-        terminal_reason: row.get(22)?,
-        created_at: row.get(23)?,
-        updated_at: row.get(24)?,
-        settled_at: row.get(25)?,
+        terminal_reason: row.get(23)?,
+        created_at: row.get(24)?,
+        updated_at: row.get(25)?,
+        settled_at: row.get(26)?,
     })
 }
 
@@ -1508,6 +1538,7 @@ fn validate_create(input: &AgentCommandSessionCreate) -> rusqlite::Result<()> {
         || snapshot.exit_code.is_some()
         || snapshot.archive_ref.is_some()
         || !snapshot.outputs.is_empty()
+        || snapshot.artifact_observation.is_some()
         || snapshot.latest_sequence != 0
         || snapshot.command_digest.len() != 71
         || !snapshot.command_digest.starts_with("sha256:")
@@ -1611,6 +1642,14 @@ fn validate_terminal_update(input: &AgentCommandSessionTerminalUpdate<'_>) -> ru
         || (input.status != AgentCommandSessionStatus::Exited && input.exit_code.is_some())
     {
         return Err(invalid_input("command session terminal update is invalid"));
+    }
+    if let Some(observation) = input.artifact_observation {
+        if observation.schema_version != AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION {
+            return Err(invalid_input(
+                "command session artifact observation schema version is invalid",
+            ));
+        }
+        serialize_artifact_observation(observation)?;
     }
     Ok(())
 }
@@ -1729,6 +1768,60 @@ fn deserialize_json(column: usize, value: String) -> rusqlite::Result<Value> {
     serde_json::from_str(&value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
     })
+}
+
+fn serialize_artifact_observation(
+    value: &AgentCommandArtifactObservation,
+) -> rusqlite::Result<String> {
+    let encoded = serde_json::to_string(value)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    if encoded.len() > MAX_PERSISTED_ARTIFACT_OBSERVATION_BYTES {
+        return Err(invalid_input(
+            "command session artifact observation exceeds the durable limit",
+        ));
+    }
+    Ok(encoded)
+}
+
+fn deserialize_artifact_observation(
+    column: usize,
+    value: Option<String>,
+) -> rusqlite::Result<Option<AgentCommandArtifactObservation>> {
+    value
+        .map(|encoded| {
+            if encoded.len() > MAX_PERSISTED_ARTIFACT_OBSERVATION_BYTES {
+                return Err(corrupt_data(
+                    column,
+                    Type::Text,
+                    "command session artifact observation exceeds the durable limit",
+                ));
+            }
+            let observation: AgentCommandArtifactObservation = serde_json::from_str(&encoded)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
+                })?;
+            if observation.schema_version != AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION {
+                return Err(corrupt_data(
+                    column,
+                    Type::Text,
+                    "command session artifact observation schema version is invalid",
+                ));
+            }
+            Ok(observation)
+        })
+        .transpose()
+}
+
+fn load_artifact_observation(
+    connection: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<AgentCommandArtifactObservation>> {
+    let encoded = connection.query_row(
+        "SELECT artifact_observation_json FROM agent_command_sessions WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    deserialize_artifact_observation(0, encoded)
 }
 
 fn sqlite_integer(value: u64) -> rusqlite::Result<i64> {

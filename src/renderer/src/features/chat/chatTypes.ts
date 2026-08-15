@@ -1,4 +1,5 @@
 import type {
+  AgentCommandArtifactObservation,
   AgentCommandOutputStream,
   AgentCommandPublishedOutput,
   AgentCommandSessionStatus,
@@ -132,6 +133,7 @@ export interface ChatCommandSessionView {
   latestSequence: number
   outputTruncated: boolean
   outputs?: AgentCommandPublishedOutput[]
+  artifactObservation?: AgentCommandArtifactObservation
 }
 
 /**

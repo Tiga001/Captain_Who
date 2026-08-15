@@ -2412,6 +2412,7 @@ impl AgentCommandSessionRegistryInner {
             archive_ref: Some(&archive_ref),
             terminal_reason: terminal.snapshot.error.as_deref(),
             published_outputs: &terminal.execution.outputs,
+            artifact_observation: terminal.execution.artifact_observation.as_ref(),
             committed_at: now_ms(),
         };
         match self
@@ -2537,6 +2538,7 @@ impl AgentCommandSessionRegistryInner {
                 latest_sequence: common.7,
                 output_truncated: common.8,
                 outputs: terminal.execution.outputs.clone(),
+                artifact_observation: terminal.execution.artifact_observation.clone(),
             }
         } else {
             AgentEvent::CommandExited {
@@ -2555,6 +2557,7 @@ impl AgentCommandSessionRegistryInner {
                 latest_sequence: common.7,
                 output_truncated: common.8,
                 outputs: terminal.execution.outputs.clone(),
+                artifact_observation: terminal.execution.artifact_observation.clone(),
             }
         };
         let _ = notifications.send(agent_event_notification(event));

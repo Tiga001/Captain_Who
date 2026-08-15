@@ -1,6 +1,10 @@
 // Renderer browser regressions for persisted Skill/Office timeline activity and Office files.
 
-import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import type {
+  AgentCommandArtifactObservation,
+  AgentToolCall,
+  AgentToolResult
+} from '@mycopilot/protocol'
 import type { ChatMessage } from '../../features/chat/chatTypes'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -97,6 +101,66 @@ function assistantMessage(overrides: Partial<ChatMessage['agentRun']> = {}): Cha
   }
 }
 
+function presentationArtifactObservation(path: string): AgentCommandArtifactObservation {
+  const snapshotCoverage = {
+    rootsScanned: 1,
+    directoryEntriesScanned: 1,
+    officeFilesSeen: 1,
+    filesHashed: 1,
+    filesUnhashed: 0,
+    bytesHashed: 4096,
+    symlinksSkipped: 0,
+    excludedDirectories: 0,
+    durationMs: 1,
+    timeBudgetExceeded: false,
+    cancelled: false,
+    truncated: false
+  }
+  const metadata = {
+    sizeBytes: 4096,
+    sha256: 'd'.repeat(64),
+    validation: { status: 'valid' as const }
+  }
+  return {
+    schemaVersion: 3,
+    status: 'complete',
+    partial: false,
+    stopReasons: [],
+    scanned: 1,
+    returned: 1,
+    omitted: 0,
+    coverage: {
+      workspaceIncluded: true,
+      expectedOutputCount: 1,
+      additionalRootCount: 0,
+      before: snapshotCoverage,
+      after: snapshotCoverage
+    },
+    changes: [
+      {
+        kind: 'created',
+        artifactKind: 'presentation',
+        path,
+        scope: 'workspace',
+        after: metadata
+      }
+    ],
+    changesTruncated: false,
+    changesOmitted: 0,
+    expectedOutputs: [
+      {
+        requestedPath: path,
+        outcome: 'created',
+        path,
+        scope: 'workspace',
+        artifactKind: 'presentation',
+        metadata
+      }
+    ],
+    warnings: []
+  }
+}
+
 function imageGenerationCall(id: string, reason: string): AgentToolCall {
   return {
     id,
@@ -146,6 +210,39 @@ function imageGenerationResult(id: string, hash: string): AgentToolResult {
 }
 
 describe('Skill and Office chat timeline', () => {
+  it('does not expose stale narration as a final answer when a cancelled timeline is collapsed', async () => {
+    const message = assistantMessage({
+      status: 'cancelled',
+      toolCalls: [
+        {
+          id: 'cancelled-command',
+          tool: 'run_command',
+          approvalStatus: 'not_required',
+          reason: '执行停止前的检查。',
+          args: { command: 'sleep 30' }
+        }
+      ],
+      timeline: [
+        {
+          id: 'cancelled-narration',
+          type: 'message',
+          content: '这只是停止前的过程说明，不是最终回复。'
+        },
+        { id: 'cancelled-tool', type: 'tool_call', callId: 'cancelled-command' }
+      ]
+    })
+    // Simulate an older persisted record produced before cancellation cleared the live accumulator.
+    message.content = '这只是停止前的过程说明，不是最终回复。'
+    message.uiState = { timelineCollapsed: true }
+
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.textContent).not.toContain('这只是停止前的过程说明，不是最终回复。')
+    expect(screen.container.querySelector('.chat-agent-text')).toBeNull()
+  })
+
   it('renders the durable final answer after a Trace-rebuilt expanded timeline', async () => {
     const message = assistantMessage({
       toolCalls: [
@@ -811,6 +908,63 @@ describe('Skill and Office chat timeline', () => {
     )
     createObjectUrl.mockRestore()
     revokeObjectUrl.mockRestore()
+  })
+
+  it('renders an edited presentation card after the answer when its background Session settles', async () => {
+    const callId = 'edit-presentation'
+    const path = '南京大学介绍_已编辑.pptx'
+    const message = assistantMessage({
+      toolCalls: [
+        {
+          id: callId,
+          tool: 'run_command',
+          approvalStatus: 'approved',
+          reason: '编辑现有演示文稿。',
+          args: { command: 'node scripts/edit_deck.mjs --output 南京大学介绍_已编辑.pptx' }
+        }
+      ],
+      toolResults: [
+        {
+          callId,
+          tool: 'run_command',
+          ok: true,
+          result: {
+            status: 'running',
+            sessionId: 'cmd_1234567890abcdef1234567890abcdef'
+          }
+        }
+      ],
+      commandSessions: {
+        [callId]: {
+          callId,
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'exited',
+          startedAt: 10,
+          endedAt: 20,
+          exitCode: 0,
+          latestSequence: 1,
+          outputTruncated: false,
+          artifactObservation: presentationArtifactObservation(path)
+        }
+      },
+      timeline: [{ id: callId, type: 'tool_call', callId }]
+    })
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    await expect.element(screen.getByText(path, { exact: true })).toBeVisible()
+    const answer = screen.container.querySelector('.chat-agent-text')
+    const artifactList = screen.container.querySelector('.office-artifact-list')
+    expect(answer).not.toBeNull()
+    expect(artifactList).not.toBeNull()
+    if (!answer || !artifactList) {
+      throw new Error('Expected both the final answer and edited presentation card.')
+    }
+    expect(
+      answer.compareDocumentPosition(artifactList) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(screen.container.querySelectorAll('.office-artifact-card')).toHaveLength(1)
   })
 
   it('does not render a success file card for a failed observed command', async () => {

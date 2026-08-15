@@ -5,6 +5,7 @@ import type {
   AgentMcpToolInvocationState,
   AgentProposedAction
 } from '@mycopilot/protocol'
+import { parseAgentCommandArtifactObservation } from '@mycopilot/protocol'
 import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
@@ -1529,7 +1530,7 @@ function parseCommandSessions(
       !hasExactKeys(
         raw,
         ['callId', 'status', 'latestSequence', 'outputTruncated'],
-        ['startedAt', 'endedAt', 'exitCode', 'outputs']
+        ['startedAt', 'endedAt', 'exitCode', 'outputs', 'artifactObservation']
       ) ||
       raw.callId !== callId ||
       typeof raw.status !== 'string' ||
@@ -1556,6 +1557,14 @@ function parseCommandSessions(
     }
     const outputs = parseManagedCommandOutputs(raw.outputs)
     if (hasOwn(raw, 'outputs') && outputs === undefined) return null
+    let artifactObservation: ChatCommandSessionView['artifactObservation']
+    if (hasOwn(raw, 'artifactObservation')) {
+      try {
+        artifactObservation = parseAgentCommandArtifactObservation(raw.artifactObservation)
+      } catch {
+        return null
+      }
+    }
     sessions[callId] = {
       callId,
       status: raw.status as ChatCommandSessionView['status'],
@@ -1564,7 +1573,8 @@ function parseCommandSessions(
       ...(typeof raw.exitCode === 'number' ? { exitCode: raw.exitCode } : {}),
       latestSequence: raw.latestSequence,
       outputTruncated: raw.outputTruncated,
-      ...(outputs && outputs.length > 0 ? { outputs } : {})
+      ...(outputs && outputs.length > 0 ? { outputs } : {}),
+      ...(artifactObservation === undefined ? {} : { artifactObservation })
     }
   }
   return sessions
@@ -1590,7 +1600,10 @@ function projectDurableCommandSessions(
             ...(session.exitCode === undefined ? {} : { exitCode: session.exitCode }),
             latestSequence: session.latestSequence,
             outputTruncated: session.outputTruncated,
-            ...(outputs && outputs.length > 0 ? { outputs } : {})
+            ...(outputs && outputs.length > 0 ? { outputs } : {}),
+            ...(session.artifactObservation === undefined
+              ? {}
+              : { artifactObservation: session.artifactObservation })
           }
         ]
       ]

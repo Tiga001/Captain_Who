@@ -1,4 +1,9 @@
-import type { ActivatedSkillSummary, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import type {
+  ActivatedSkillSummary,
+  AgentCommandArtifactObservation,
+  AgentToolCall,
+  AgentToolResult
+} from '@mycopilot/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import type { ChatAgentRunView } from '../chatTypes'
 import { groupTimelineItems } from '../components/chatMessageItemUtils'
@@ -20,6 +25,60 @@ const spreadsheetSkill: ActivatedSkillSummary = {
   name: 'Spreadsheets',
   revision: 'revision-1',
   source: { kind: 'bundled', id: 'application:spreadsheets' }
+}
+
+const artifactCoverage = {
+  rootsScanned: 1,
+  directoryEntriesScanned: 1,
+  officeFilesSeen: 1,
+  filesHashed: 1,
+  filesUnhashed: 0,
+  bytesHashed: 1024,
+  symlinksSkipped: 0,
+  excludedDirectories: 0,
+  durationMs: 1,
+  timeBudgetExceeded: false,
+  cancelled: false,
+  truncated: false
+}
+
+const editedPresentationObservation: AgentCommandArtifactObservation = {
+  schemaVersion: 3,
+  status: 'complete',
+  partial: false,
+  stopReasons: [],
+  scanned: 1,
+  returned: 1,
+  omitted: 0,
+  coverage: {
+    workspaceIncluded: true,
+    expectedOutputCount: 1,
+    additionalRootCount: 0,
+    before: { ...artifactCoverage, officeFilesSeen: 0, filesHashed: 0, bytesHashed: 0 },
+    after: artifactCoverage
+  },
+  changes: [
+    {
+      kind: 'created',
+      artifactKind: 'presentation',
+      path: 'outputs/edited.pptx',
+      scope: 'workspace',
+      after: { sizeBytes: 1024, validation: { status: 'valid' } }
+    }
+  ],
+  changesTruncated: false,
+  changesOmitted: 0,
+  expectedOutputs: [
+    {
+      requestedPath: 'outputs/edited.pptx',
+      outcome: 'created',
+      path: 'outputs/edited.pptx',
+      scope: 'workspace',
+      artifactKind: 'presentation',
+      metadata: { sizeBytes: 1024, validation: { status: 'valid' } }
+    }
+  ],
+  warnings: []
 }
 
 function toolCall(
@@ -485,6 +544,76 @@ describe('Skill and Office activity derivation', () => {
         scope: 'workspace'
       }
     ])
+  })
+
+  it('creates a presentation card from a successful handed-off Editor Session receipt', () => {
+    const command = toolCall({ id: 'editor-command', tool: 'run_command' })
+    const currentRun = run({
+      toolCalls: [command],
+      toolResults: [
+        toolResult({
+          callId: command.id,
+          tool: command.tool,
+          result: {
+            status: 'running',
+            sessionId: 'cmd_1234567890abcdef1234567890abcdef'
+          }
+        })
+      ],
+      commandSessions: {
+        [command.id]: {
+          callId: command.id,
+          sessionId: 'cmd_1234567890abcdef1234567890abcdef',
+          status: 'exited',
+          endedAt: 20,
+          exitCode: 0,
+          latestSequence: 1,
+          outputTruncated: false,
+          artifactObservation: editedPresentationObservation
+        }
+      }
+    })
+
+    expect(getOfficeArtifactEntries(currentRun)).toEqual([
+      {
+        artifactKind: 'presentation',
+        changeKind: 'created',
+        id: 'workspace:outputs/edited.pptx',
+        path: 'outputs/edited.pptx',
+        scope: 'workspace'
+      }
+    ])
+  })
+
+  it('never creates Session artifact cards without an exited zero status', () => {
+    const command = toolCall({ id: 'editor-command', tool: 'run_command' })
+    for (const [status, exitCode] of [
+      ['running', undefined],
+      ['failed', undefined],
+      ['interrupted', undefined],
+      ['timed_out', undefined],
+      ['outcome_unknown', undefined],
+      ['exited', 1]
+    ] as const) {
+      const currentRun = run({
+        toolCalls: [command],
+        toolResults: [
+          toolResult({ callId: command.id, tool: command.tool, result: { status: 'running' } })
+        ],
+        commandSessions: {
+          [command.id]: {
+            callId: command.id,
+            status,
+            ...(exitCode === undefined ? {} : { exitCode }),
+            latestSequence: 1,
+            outputTruncated: false,
+            artifactObservation: editedPresentationObservation
+          }
+        }
+      })
+
+      expect(getOfficeArtifactEntries(currentRun), `${status}:${String(exitCode)}`).toEqual([])
+    }
   })
 
   it('retains failed observations in agentRun but never turns them into success cards', () => {

@@ -780,7 +780,7 @@ function commandSessionSnapshot(
   overrides: Partial<AgentCommandSessionSnapshot> = {}
 ): AgentCommandSessionSnapshot {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sessionId: 'cmd_1234567890abcdef1234567890abcdef',
     conversationId: 'conversation-a',
     assistantMessageId: 'assistant-command',

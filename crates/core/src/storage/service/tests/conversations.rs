@@ -455,6 +455,7 @@ fn loading_a_backend_owned_turn_joins_terminal_command_session_and_artifact_proj
                 archive_ref: None,
                 terminal_reason: None,
                 published_outputs: &[output],
+                artifact_observation: None,
                 committed_at: 3,
             },
         )
@@ -2334,6 +2335,7 @@ fn fork_commit_rechecks_active_commands_before_writing_any_target_state() {
             archive_ref: None,
             terminal_reason: Some("test settlement"),
             published_outputs: &[],
+            artifact_observation: None,
             committed_at: 42,
         },
     )
@@ -2468,6 +2470,7 @@ fn fork_test_command_session_create(
             latest_sequence: 0,
             output_truncated: false,
             outputs: Vec::new(),
+            artifact_observation: None,
             archive_ref: None,
         },
         authorization_source: crate::command::CommandAuthorizationSource::ExplicitUser,
@@ -2515,6 +2518,7 @@ fn settle_fork_test_command_session(
                 archive_ref: None,
                 terminal_reason: None,
                 published_outputs: &[],
+                artifact_observation: None,
                 committed_at: i64::try_from(timestamp).unwrap(),
             },
         )

@@ -89,4 +89,31 @@ describe('LLM retry Renderer projection', () => {
     })
     expect(lateRetry).toBe(completed)
   })
+
+  it('keeps cancelled model output in the timeline without treating it as a final answer', () => {
+    const streaming = applyAgentEventToChatMessage(runningMessage(), {
+      type: 'message_delta',
+      runId: 'run-retry',
+      streamId: 'stream-cancelled',
+      delta: '这是停止前的过程说明。'
+    })
+    const cancelled = applyAgentEventToChatMessage(streaming, {
+      type: 'done',
+      runId: 'run-retry',
+      success: false,
+      status: 'cancelled',
+      content: '这段内容也不能成为最终回复。'
+    })
+
+    expect(cancelled.content).toBe('')
+    expect(cancelled.agentRun?.status).toBe('cancelled')
+    expect(cancelled.agentRun?.timeline).toEqual([
+      {
+        id: 'message-stream-stream-cancelled',
+        type: 'message',
+        content: '这是停止前的过程说明。',
+        streamId: 'stream-cancelled'
+      }
+    ])
+  })
 })
