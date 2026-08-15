@@ -213,6 +213,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         "- 需要工具时必须使用模型 API 的原生 tool/function calling，不要在正文中手写或模拟 tool_call JSON。".to_string(),
         "- 优先使用最接近事实来源的工具：项目事实用 workspace 工具，附件事实用附件工具，公开互联网事实用 web 工具。".to_string(),
         "- 本次模型请求已经提供的工具可以与 skills_activate 出现在同一响应中，仍按当前冻结 ToolSet、权限和审批规则执行；Skill 完整指令及其新解锁工具只从下一次模型请求生效，不要猜测或调用本次请求尚未提供的工具。".to_string(),
+        "- 内置 image_generation 生成物出现平台添加的“AI生成”等水印时，应将其视为产品配置结果而非素材质量缺陷；模型不能更改该配置，也不得通过裁切、遮挡、覆盖、重绘、修图、二次编辑或反复生成使该水印不可见；若用户不希望保留，只提醒其在“设置 → 配置 → 图片生成 → 添加水印”中手动关闭该选项、保存后重新生成；该规则不适用于第三方素材的版权水印或来源不明标记。".to_string(),
     ];
 
     if has_any_tool(
@@ -700,6 +701,32 @@ mod tests {
         assert!(prompt.contains("只描述生成发生时的视觉投递"));
         assert!(prompt.contains("visualInputDelivery"));
         assert!(prompt.contains("不要自行拼 source 对象"));
+    }
+
+    #[test]
+    fn stable_prompt_explains_product_watermarks_before_dynamic_tool_activation() {
+        let prompt = build_system_prompt(None, &[]);
+
+        assert!(prompt.contains("设置 → 配置 → 图片生成 → 添加水印"));
+        assert!(prompt.contains("而非素材质量缺陷"));
+        assert!(prompt.contains("模型不能更改该配置"));
+        assert!(prompt
+            .contains("不得通过裁切、遮挡、覆盖、重绘、修图、二次编辑或反复生成使该水印不可见"));
+        assert!(prompt.contains("手动关闭该选项、保存后重新生成"));
+        assert!(prompt.contains("不适用于第三方素材的版权水印或来源不明标记"));
+        assert_eq!(
+            prompt.matches("设置 → 配置 → 图片生成 → 添加水印").count(),
+            1
+        );
+
+        let with_dynamic_tool_shape =
+            build_system_prompt(None, &[tool_definition("image_generation")]);
+        assert_eq!(
+            prompt.matches("设置 → 配置 → 图片生成 → 添加水印").count(),
+            with_dynamic_tool_shape
+                .matches("设置 → 配置 → 图片生成 → 添加水印")
+                .count()
+        );
     }
 
     #[test]

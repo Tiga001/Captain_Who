@@ -1341,6 +1341,9 @@ fn runtime_messages_add_backend_system_prompt() {
 
     assert_eq!(messages[0].role().as_str(), "system");
     assert!(messages[0].content().contains("Captain（船长）"));
+    assert!(messages[0]
+        .content()
+        .contains("设置 → 配置 → 图片生成 → 添加水印"));
     assert!(!messages[0].content().contains("/private/path"));
     assert_eq!(messages[1].role().as_str(), "user");
 }

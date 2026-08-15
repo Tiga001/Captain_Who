@@ -529,6 +529,248 @@ fn reload_rebuilds_compaction_and_runtime_error_in_the_durable_trace_order() {
 }
 
 #[test]
+fn reload_replaces_live_timeline_projections_with_one_durable_ordered_trace() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-live-trace-reload";
+    let assistant_message_id = "assistant-live-trace-reload";
+    let run_id = "run-live-trace-reload";
+    let call_id = "call-live-trace-reload";
+    let client_message_id = "client-guidance-live-trace-reload";
+    let final_answer = "The presentation is ready.";
+    let live_run = serde_json::json!({
+        "runId": run_id,
+        "status": "completed",
+        "startedAt": 2,
+        "completedAt": 9,
+        "toolDefinitions": [],
+        "toolCalls": [{
+            "id": call_id,
+            "tool": "read_file",
+            "args": { "path": "brief.txt" },
+            "approvalStatus": "not_required",
+            "reason": null
+        }],
+        "toolResults": [{
+            "callId": call_id,
+            "tool": "read_file",
+            "ok": true,
+            "result": { "path": "brief.txt" }
+        }],
+        "approvals": [],
+        "diffs": [],
+        "fileDrafts": [],
+        "webSearchActivities": [],
+        "readActivities": [],
+        "mcpInvocations": [],
+        "timeline": [
+            {
+                "id": "message-stream-opening",
+                "type": "message",
+                "content": "I will inspect the brief.",
+                "traceSequence": 0
+            },
+            {
+                "id": "live-guidance-insertion",
+                "type": "user_guidance",
+                "guidanceId": "guidance-live-trace-reload",
+                "clientMessageId": client_message_id,
+                "content": "Keep the system watermark.",
+                "attachments": [],
+                "status": "applied",
+                "createdAt": 4,
+                "sequence": 1
+            },
+            {
+                "id": "live-tool-call",
+                "type": "tool_call",
+                "callId": call_id,
+                "traceSequence": 2
+            },
+            {
+                "id": "message-stream-after-guidance",
+                "type": "message",
+                "content": "I kept the watermark and finished the layout.",
+                "traceSequence": 4
+            },
+            {
+                "id": "message-final-answer",
+                "type": "message",
+                "content": final_answer
+            }
+        ],
+        "messageStreamCheckpoints": {},
+        "state": {
+            "status": "completed",
+            "activeRunId": null,
+            "updatedAt": 9
+        }
+    });
+    service
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "live trace reload".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-live-trace-reload".to_string(),
+                    role: "user".to_string(),
+                    content: "Build a presentation.".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: assistant_message_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: final_answer.to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some(live_run.to_string()),
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 9,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    service
+        .replace_conversation_turn_trace(
+            &ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: run_id.to_string(),
+                conversation_id: conversation_id.to_string(),
+                assistant_message_id: assistant_message_id.to_string(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+                terminal_error: None,
+                truncated: false,
+                items: vec![
+                    ConversationTurnTraceItem::AssistantNarration {
+                        sequence: 0,
+                        content: "I will inspect the brief.".to_string(),
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::UserGuidance {
+                        sequence: 1,
+                        guidance_id: "guidance-live-trace-reload".to_string(),
+                        client_message_id: client_message_id.to_string(),
+                        content: "Keep the system watermark.".to_string(),
+                        attachments: Vec::new(),
+                        created_at: 4,
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolCall {
+                        sequence: 2,
+                        call_id: call_id.to_string(),
+                        tool: "read_file".to_string(),
+                        provenance: crate::AgentToolIdentity::Builtin {
+                            tool_name: "read_file".to_string(),
+                        },
+                        operation: serde_json::json!({ "path": "brief.txt" }),
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolResult {
+                        sequence: 3,
+                        call_id: call_id.to_string(),
+                        tool: "read_file".to_string(),
+                        status: crate::ConversationTraceToolResultStatus::Succeeded,
+                        success: true,
+                        observation: serde_json::json!({ "path": "brief.txt" }),
+                        approval_status: crate::AgentApprovalStatus::NotRequired,
+                        error: None,
+                        truncated: false,
+                        archive: Default::default(),
+                    },
+                    ConversationTurnTraceItem::AssistantNarration {
+                        sequence: 4,
+                        content: "I kept the watermark and finished the layout.".to_string(),
+                        truncated: false,
+                    },
+                ],
+            },
+            2,
+            9,
+        )
+        .unwrap();
+
+    let first_load = service.load_conversation(conversation_id).unwrap().unwrap();
+    let assistant = &first_load.messages[1];
+    let first_run: serde_json::Value =
+        serde_json::from_str(assistant.agent_run_json.as_deref().unwrap()).unwrap();
+    let expected_timeline = serde_json::json!([
+        {
+            "id": "trace-message-0",
+            "type": "message",
+            "content": "I will inspect the brief.",
+            "traceSequence": 0
+        },
+        {
+            "id": "user-guidance-client-guidance-live-trace-reload",
+            "type": "user_guidance",
+            "guidanceId": "guidance-live-trace-reload",
+            "clientMessageId": "client-guidance-live-trace-reload",
+            "content": "Keep the system watermark.",
+            "attachments": [],
+            "status": "applied",
+            "createdAt": 4,
+            "sequence": 1,
+            "traceSequence": 1
+        },
+        {
+            "id": "tool-call-call-live-trace-reload",
+            "type": "tool_call",
+            "callId": "call-live-trace-reload",
+            "traceSequence": 2
+        },
+        {
+            "id": "trace-message-4",
+            "type": "message",
+            "content": "I kept the watermark and finished the layout.",
+            "traceSequence": 4
+        },
+        {
+            "id": "message-final-answer",
+            "type": "message",
+            "content": final_answer
+        }
+    ]);
+    assert_eq!(first_run["timeline"], expected_timeline);
+
+    // Renderer state can be written back after a read. A second reload must remain byte-for-byte
+    // equivalent instead of treating the first projection as new live history and duplicating it.
+    service
+        .save_chat_message_state(
+            conversation_id,
+            crate::storage::models::ChatMessageStateRecord {
+                id: assistant_message_id.to_string(),
+                content: assistant.content.clone(),
+                status: assistant.status.clone(),
+                agent_run_json: assistant.agent_run_json.clone(),
+                ui_state_json: assistant.ui_state_json.clone(),
+            },
+        )
+        .unwrap();
+    drop(service);
+
+    let reopened = fixture.service();
+    let second_load = reopened
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap();
+    let second_run: serde_json::Value =
+        serde_json::from_str(second_load.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(second_run["timeline"], expected_timeline);
+}
+
+#[test]
 fn reload_keeps_a_host_terminal_error_unanchored_without_inventing_a_trace_sequence() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

@@ -1,22 +1,8 @@
 import type { AgentDisplayStatusView, AgentSummary } from '@mycopilot/protocol'
-import {
-  Archive,
-  Ban,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  CircleDot,
-  CircleHelp,
-  CircleOff,
-  Clock3,
-  LoaderCircle,
-  Settings2,
-  ShieldAlert,
-  TriangleAlert
-} from 'lucide-react'
-import { useMemo } from 'react'
+import { Bot, ChevronLeft, Settings2 } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
-import type { Translate } from '../../config/translationFormat'
+import { formatTranslation, type Translate } from '../../config/translationFormat'
 import { useRightSidebarRuntimeContext } from '../rightSidebar/RightSidebarRuntimeContext'
 import type { RightSidebarModulePageState } from '../rightSidebar/rightSidebarTypes'
 import './AgentCenterPanel.css'
@@ -27,6 +13,8 @@ interface AgentCenterPanelProps {
 }
 
 const ACTIVE_STATUSES = new Set<AgentDisplayStatusView>(['queued', 'running', 'waiting_approval'])
+const INITIAL_ACTIVE_COUNT = 4
+const INITIAL_ENDED_COUNT = 10
 
 export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProps) {
   const { language, t } = useFrontendConfig()
@@ -55,6 +43,46 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
       : rootConversationId
         ? ({ kind: 'agent-center', rootConversationId, view: 'list' } as const)
         : null
+  const detailAgentId = state?.view === 'detail' ? state.agentId : undefined
+  const [showAllActive, setShowAllActive] = useState(false)
+  const [showAllEnded, setShowAllEnded] = useState(false)
+  const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now())
+  const listElementRef = useRef<HTMLDivElement | null>(null)
+  const listScrollTopRef = useRef(0)
+  const rowElementsRef = useRef(new Map<string, HTMLButtonElement>())
+  const restoreAgentIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    setShowAllActive(false)
+    setShowAllEnded(false)
+    listScrollTopRef.current = 0
+    restoreAgentIdRef.current = null
+    rowElementsRef.current.clear()
+  }, [rootConversationId])
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setRelativeTimeNow(Date.now()), 60_000)
+    return () => window.clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
+    if (!detailAgentId) return
+    const detailAgent = children.find((agent) => agent.agentId === detailAgentId)
+    if (!detailAgent) return
+    if (ACTIVE_STATUSES.has(detailAgent.displayStatus)) setShowAllActive(true)
+    else setShowAllEnded(true)
+  }, [children, detailAgentId])
+
+  useEffect(() => {
+    if (state?.view !== 'list' || restoreAgentIdRef.current === null) return
+    const restoreAgentId = restoreAgentIdRef.current
+    const frame = window.requestAnimationFrame(() => {
+      if (listElementRef.current) listElementRef.current.scrollTop = listScrollTopRef.current
+      rowElementsRef.current.get(restoreAgentId)?.focus()
+      restoreAgentIdRef.current = null
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [state?.view])
 
   if (!rootConversationId || !validTree) {
     return <div className="agent-center__state">{t('agentCenter.unavailable')}</div>
@@ -63,7 +91,6 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
   if (state?.view === 'detail' && state.agentId) {
     const agent = children.find((candidate) => candidate.agentId === state.agentId)
     if (agent) {
-      const parent = validTree.agents.find((candidate) => candidate.agentId === agent.parentAgentId)
       const agentLabelsById = Object.fromEntries(
         validTree.agents.map((candidate) => [candidate.agentId, candidate.taskName])
       )
@@ -73,17 +100,20 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
             <button
               aria-label={t('agentCenter.back')}
               className="agent-center__back"
-              onClick={() => onNavigate({ kind: 'agent-center', rootConversationId, view: 'list' })}
+              onClick={() => {
+                restoreAgentIdRef.current = agent.agentId
+                onNavigate({ kind: 'agent-center', rootConversationId, view: 'list' })
+              }}
               type="button"
             >
               <ChevronLeft aria-hidden="true" />
             </button>
+            <span className="agent-center__avatar agent-center__avatar--detail" aria-hidden="true">
+              <Bot />
+            </span>
             <div className="agent-center__detail-copy">
               <strong title={agent.taskName}>{agent.taskName}</strong>
-              <span>
-                {statusPresentation(agent.displayStatus, t).label}
-                {parent ? ` · ${t('agentCenter.from')} ${parent.taskName}` : ''}
-              </span>
+              <span title={baseModelLabel(agent, t)}>{baseModelLabel(agent, t)}</span>
             </div>
           </header>
           <div className="agent-center__observer" data-agent-id={agent.agentId}>
@@ -109,51 +139,57 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
   const completed = children.filter((agent) => !ACTIVE_STATUSES.has(agent.displayStatus))
 
   return (
-    <div className="agent-center">
-      <header className="agent-center__header">
-        <div>
-          <h2>{t('agentCenter.title')}</h2>
-          <p>{t('agentCenter.description')}</p>
-        </div>
-        {onOpenAgentTemplates ? (
-          <button
-            aria-label={t('agentCenter.manageTemplates')}
-            className="agent-center__templates"
-            onClick={onOpenAgentTemplates}
-            title={t('agentCenter.manageTemplates')}
-            type="button"
-          >
-            <Settings2 aria-hidden="true" />
-          </button>
-        ) : null}
-      </header>
-
+    <div className="agent-center" ref={listElementRef}>
       <AgentGroup
         agents={active}
         emptyLabel={t('agentCenter.noActive')}
-        language={language}
-        onOpen={(agentId) =>
-          onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' })
+        expanded={showAllActive}
+        headerAction={
+          onOpenAgentTemplates ? (
+            <button
+              aria-label={t('agentCenter.manageTemplates')}
+              className="agent-center__templates"
+              onClick={onOpenAgentTemplates}
+              title={t('agentCenter.manageTemplates')}
+              type="button"
+            >
+              <Settings2 aria-hidden="true" />
+            </button>
+          ) : null
         }
+        initialCount={INITIAL_ACTIVE_COUNT}
+        language={language}
+        onExpand={() => setShowAllActive(true)}
+        onOpen={(agentId) => {
+          listScrollTopRef.current = listElementRef.current?.scrollTop ?? 0
+          onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' })
+        }}
+        registerRow={(agentId, element) => {
+          if (element) rowElementsRef.current.set(agentId, element)
+          else rowElementsRef.current.delete(agentId)
+        }}
+        relativeTimeNow={relativeTimeNow}
         title={t('agentCenter.active')}
       />
 
-      <details className="agent-center__completed" open>
-        <summary>
-          <span>{t('agentCenter.completed')}</span>
-          <span>{completed.length}</span>
-        </summary>
-        <AgentRows
-          agents={completed}
-          language={language}
-          onOpen={(agentId) =>
-            onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' })
-          }
-        />
-        {completed.length === 0 ? (
-          <p className="agent-center__empty">{t('agentCenter.noCompleted')}</p>
-        ) : null}
-      </details>
+      <AgentGroup
+        agents={completed}
+        emptyLabel={t('agentCenter.noCompleted')}
+        expanded={showAllEnded}
+        initialCount={INITIAL_ENDED_COUNT}
+        language={language}
+        onExpand={() => setShowAllEnded(true)}
+        onOpen={(agentId) => {
+          listScrollTopRef.current = listElementRef.current?.scrollTop ?? 0
+          onNavigate({ agentId, kind: 'agent-center', rootConversationId, view: 'detail' })
+        }}
+        registerRow={(agentId, element) => {
+          if (element) rowElementsRef.current.set(agentId, element)
+          else rowElementsRef.current.delete(agentId)
+        }}
+        relativeTimeNow={relativeTimeNow}
+        title={t('agentCenter.ended')}
+      />
     </div>
   )
 }
@@ -161,23 +197,53 @@ export function AgentCenterPanel({ onNavigate, pageState }: AgentCenterPanelProp
 function AgentGroup({
   agents,
   emptyLabel,
+  expanded,
+  headerAction,
+  initialCount,
   language,
+  onExpand,
   onOpen,
+  registerRow,
+  relativeTimeNow,
   title
 }: {
   agents: readonly AgentSummary[]
   emptyLabel: string
+  expanded: boolean
+  headerAction?: ReactNode
+  initialCount: number
   language: string
+  onExpand: () => void
   onOpen: (agentId: string) => void
+  registerRow: (agentId: string, element: HTMLButtonElement | null) => void
+  relativeTimeNow: number
   title: string
 }) {
+  const { t } = useFrontendConfig()
+  const visibleAgents = expanded ? agents : agents.slice(0, initialCount)
+  const hiddenCount = agents.length - visibleAgents.length
   return (
     <section className="agent-center__group" aria-label={title}>
-      <h3>
-        <span>{title}</span>
-        <span>{agents.length}</span>
-      </h3>
-      <AgentRows agents={agents} language={language} onOpen={onOpen} />
+      <div className="agent-center__group-heading">
+        <h3>
+          <span>{title}</span>
+          <span aria-hidden="true">·</span>
+          <span>{agents.length}</span>
+        </h3>
+        {headerAction}
+      </div>
+      <AgentRows
+        agents={visibleAgents}
+        language={language}
+        onOpen={onOpen}
+        registerRow={registerRow}
+        relativeTimeNow={relativeTimeNow}
+      />
+      {hiddenCount > 0 ? (
+        <button className="agent-center__show-more" onClick={onExpand} type="button">
+          {formatTranslation(t, 'agentCenter.showMore', { count: hiddenCount })}
+        </button>
+      ) : null}
       {agents.length === 0 ? <p className="agent-center__empty">{emptyLabel}</p> : null}
     </section>
   )
@@ -186,47 +252,50 @@ function AgentGroup({
 function AgentRows({
   agents,
   language,
-  onOpen
+  onOpen,
+  registerRow,
+  relativeTimeNow
 }: {
   agents: readonly AgentSummary[]
   language: string
   onOpen: (agentId: string) => void
+  registerRow: (agentId: string, element: HTMLButtonElement | null) => void
+  relativeTimeNow: number
 }) {
   const { t } = useFrontendConfig()
   return (
     <div className="agent-center__list">
       {agents.map((agent) => {
-        const status = statusPresentation(agent.displayStatus, t)
-        const StatusIcon = status.icon
+        const status = statusLabel(agent.displayStatus, t)
+        const modelLabel = baseModelLabel(agent, t)
         return (
           <button
-            aria-label={`${t('agentCenter.open')} ${agent.taskName}`}
+            aria-label={formatTranslation(t, 'agentCenter.openAgent', {
+              name: agent.taskName,
+              model: modelLabel,
+              status
+            })}
             className="agent-center__row"
+            data-agent-id={agent.agentId}
             data-status={agent.displayStatus}
             key={agent.agentId}
             onClick={() => onOpen(agent.agentId)}
+            ref={(element) => registerRow(agent.agentId, element)}
+            title={`${agent.taskName} · ${modelLabel}`}
             type="button"
           >
-            <span className="agent-center__status" data-tone={status.tone}>
-              <StatusIcon
-                aria-hidden="true"
-                className={agent.displayStatus === 'running' ? 'is-spinning' : undefined}
-              />
+            <span className="agent-center__avatar" aria-hidden="true">
+              <Bot />
             </span>
             <span className="agent-center__row-copy">
               <strong title={agent.taskName}>{agent.taskName}</strong>
-              <span title={agent.taskPath}>{agent.taskPath}</span>
-              <small>
-                <span data-tone={status.tone}>{status.label}</span>
-                <span aria-hidden="true"> · </span>
-                <span>{agent.model?.displayName ?? t('agentCenter.modelUnavailable')}</span>
-                <span aria-hidden="true"> · </span>
-                <time dateTime={safeDateTime(agent.latestActivityAt)}>
-                  {formatRecentActivity(agent.latestActivityAt, language, t)}
-                </time>
-              </small>
+              <span title={modelLabel}>{modelLabel}</span>
             </span>
-            <ChevronRight aria-hidden="true" />
+            <span className="agent-center__row-meta">
+              <time dateTime={safeDateTime(agent.latestActivityAt)}>
+                {formatRecentActivity(agent.latestActivityAt, relativeTimeNow, language, t)}
+              </time>
+            </span>
           </button>
         )
       })}
@@ -234,46 +303,44 @@ function AgentRows({
   )
 }
 
-function statusPresentation(status: AgentDisplayStatusView, t: Translate) {
+function statusLabel(status: AgentDisplayStatusView, t: Translate): string {
   switch (status) {
     case 'queued':
-      return { icon: Clock3, label: t('agentCenter.status.queued'), tone: 'active' } as const
+      return t('agentCenter.status.queued')
     case 'running':
-      return { icon: LoaderCircle, label: t('agentCenter.status.running'), tone: 'active' } as const
+      return t('agentCenter.status.running')
     case 'waiting_approval':
-      return {
-        icon: ShieldAlert,
-        label: t('agentCenter.status.waitingApproval'),
-        tone: 'warning'
-      } as const
+      return t('agentCenter.status.waitingApproval')
     case 'latest_completed':
-      return {
-        icon: CheckCircle2,
-        label: t('agentCenter.status.completed'),
-        tone: 'success'
-      } as const
+      return t('agentCenter.status.completed')
     case 'latest_failed':
-      return { icon: TriangleAlert, label: t('agentCenter.status.failed'), tone: 'danger' } as const
+      return t('agentCenter.status.failed')
     case 'latest_interrupted':
-      return { icon: Ban, label: t('agentCenter.status.interrupted'), tone: 'muted' } as const
+      return t('agentCenter.status.interrupted')
     case 'latest_outcome_unknown':
-      return {
-        icon: CircleHelp,
-        label: t('agentCenter.status.outcomeUnknown'),
-        tone: 'warning'
-      } as const
+      return t('agentCenter.status.outcomeUnknown')
     case 'archived':
-      return { icon: Archive, label: t('agentCenter.status.archived'), tone: 'muted' } as const
+      return t('agentCenter.status.archived')
     case 'disabled':
-      return { icon: CircleOff, label: t('agentCenter.status.disabled'), tone: 'muted' } as const
+      return t('agentCenter.status.disabled')
     case 'idle':
-      return { icon: CircleDot, label: t('agentCenter.status.idle'), tone: 'muted' } as const
+      return t('agentCenter.status.idle')
   }
 }
 
-function formatRecentActivity(timestamp: number, language: string, t: Translate): string {
+function baseModelLabel(agent: AgentSummary, t: Translate): string {
+  const modelConfigId = agent.model?.modelConfigId.trim()
+  return modelConfigId || t('agentCenter.modelUnavailable')
+}
+
+function formatRecentActivity(
+  timestamp: number,
+  now: number,
+  language: string,
+  t: Translate
+): string {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return t('agentCenter.timeUnknown')
-  const delta = timestamp - Date.now()
+  const delta = timestamp - now
   const absolute = Math.abs(delta)
   if (absolute < 60_000) return t('agentCenter.timeNow')
   const formatter = new Intl.RelativeTimeFormat(language, { numeric: 'auto' })

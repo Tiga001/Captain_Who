@@ -1658,33 +1658,28 @@ fn project_guidance_timeline(
             .then_some(trace.terminal_error.as_deref())
             .flatten()
     });
-    let presentation_only_items = existing_timeline
+    let trace_is_authoritative = trace.is_some();
+    let guidance_is_authoritative = trace_is_authoritative || !guidances.is_empty();
+    let mut presentation_suffix = existing_timeline
         .into_iter()
         .filter(|item| {
-            let item_type = item.get("type").and_then(serde_json::Value::as_str);
-            let item_id = item.get("id").and_then(serde_json::Value::as_str);
-            let backend_owned = match (item_type, item_id) {
-                (Some("message"), Some(id)) => id.starts_with("trace-message-"),
-                (Some("tool_call"), Some(id)) => id.starts_with("tool-call-"),
-                (Some("user_guidance"), Some(id)) => id.starts_with("user-guidance-"),
-                (Some("mcp_tool_call"), Some(id)) => id.starts_with("mcp-invocation-"),
-                (Some("context_compaction"), Some(id)) => id.starts_with("context-compaction-"),
-                (Some("error"), Some(id)) => {
-                    id.starts_with("trace-error-")
-                        || id == "terminal-error"
-                        || terminal_trace_error.is_some_and(|terminal_error| {
-                            item.get("message").and_then(serde_json::Value::as_str)
-                                == Some(terminal_error)
-                        })
-                }
-                _ => false,
-            };
-            !backend_owned
+            !timeline_item_is_rebuilt_from_durable_state(
+                item,
+                trace_is_authoritative,
+                guidance_is_authoritative,
+                terminal_trace_error.is_some(),
+            )
         })
         .collect::<Vec<_>>();
-    // Renderer-only items that have no durable trace identity remain presentation-only. Typed MCP
-    // items are rebuilt below from their call-id anchors so they retain their original sequence.
-    let mut timeline = presentation_only_items;
+    // A durable Trace is the ordered authority for the work performed during a Turn. Renderer-only
+    // items have no position in that sequence, so they form a presentation suffix (most notably
+    // the final answer) instead of being prepended ahead of the reconstructed work. With no Trace,
+    // preserve the existing presentation order and append journal-only Guidance as before.
+    let mut timeline = if trace_is_authoritative {
+        Vec::new()
+    } else {
+        std::mem::take(&mut presentation_suffix)
+    };
     let mut emitted_mcp_invocations = HashSet::new();
     let mut tool_calls = run
         .remove("toolCalls")
@@ -1763,6 +1758,7 @@ fn project_guidance_timeline(
                     "status": "applied",
                     "createdAt": created_at,
                     "sequence": sequence,
+                    "traceSequence": sequence,
                 })),
                 ConversationTurnTraceItem::ToolCall {
                     sequence,
@@ -1988,6 +1984,10 @@ fn project_guidance_timeline(
         }
     }
 
+    if trace_is_authoritative {
+        timeline.extend(presentation_suffix);
+    }
+
     run.insert("timeline".to_string(), timeline.into());
     run.insert("toolCalls".to_string(), tool_calls.into());
     run.insert("toolResults".to_string(), tool_results.into());
@@ -2035,6 +2035,38 @@ fn project_guidance_timeline(
 
     serde_json::to_string(&serde_json::Value::Object(run))
         .map_err(|error| format!("serialize guidance timeline: {error}"))
+}
+
+fn timeline_item_is_rebuilt_from_durable_state(
+    item: &serde_json::Value,
+    trace_is_authoritative: bool,
+    guidance_is_authoritative: bool,
+    has_terminal_trace_error: bool,
+) -> bool {
+    // Timeline ids are Renderer presentation identities, not persistence identities. A committed
+    // stream keeps ids such as `message-stream-*`, so id-prefix checks duplicate it on reload.
+    // `traceSequence` is the durable ordering anchor and must be projected exactly once.
+    if trace_is_authoritative
+        && item
+            .get("traceSequence")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+    {
+        return true;
+    }
+
+    match item.get("type").and_then(serde_json::Value::as_str) {
+        // These are views over durable Trace/MCP state. Older live projections may predate a
+        // traceSequence, so their type is also authoritative once the Trace exists.
+        Some("tool_call" | "mcp_tool_call" | "context_compaction") => trace_is_authoritative,
+        // Guidance can be queued in its journal before it receives a Trace sequence. Rebuild all
+        // Guidance from that journal/Trace pair so an in-run user insertion cannot appear twice.
+        Some("user_guidance") => guidance_is_authoritative,
+        // A terminal Trace error has one canonical projection. Host-only errors remain untouched
+        // when the Trace has no terminal error of its own.
+        Some("error") => trace_is_authoritative && has_terminal_trace_error,
+        _ => false,
+    }
 }
 
 fn project_activated_skill_from_trace_result(

@@ -135,7 +135,8 @@ fn in_progress_trace_and_guidance_application_commit_atomically() {
             "attachments": [],
             "status": "applied",
             "createdAt": 2,
-            "sequence": 0
+            "sequence": 0,
+            "traceSequence": 0
         }])
     );
 }

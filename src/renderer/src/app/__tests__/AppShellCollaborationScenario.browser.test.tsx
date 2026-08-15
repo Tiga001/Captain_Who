@@ -400,6 +400,14 @@ function emitObserverEvent(event: AgentObserverEventEnvelope): void {
   for (const listener of scenarioState.observerEventListeners) listener(event)
 }
 
+function requiredAgentCenterRow(container: HTMLElement, agentId: string): HTMLButtonElement {
+  const row = container.querySelector<HTMLButtonElement>(
+    `.agent-center__row[data-agent-id="${agentId}"]`
+  )
+  if (!row) throw new Error(`Missing Agent Center row for ${agentId}`)
+  return row
+}
+
 async function captureStableScreenshot(element: Element, path: string): Promise<void> {
   const staticMotionStyle = document.createElement('style')
   staticMotionStyle.textContent = `
@@ -506,16 +514,16 @@ describe('AppShell deterministic collaboration scenario', () => {
       .elementLocator(rejectionScreen.getByRole('button', { name: 'Subagents' }).element())
       .click()
     await expect
-      .element(rejectionScreen.getByRole('button', { name: 'Open security_review' }))
-      .toBeVisible()
-    expect(rejectionScreen.container.textContent).toContain('Model One')
-    expect(rejectionScreen.container.textContent).toContain('Model Two')
+      .poll(() =>
+        rejectionScreen.container.querySelector('.agent-center__row[data-agent-id="agent-review"]')
+      )
+      .not.toBeNull()
+    expect(rejectionScreen.container.textContent).toContain('model-1')
+    expect(rejectionScreen.container.textContent).toContain('model-2')
     await expect
       .poll(() => rejectionScreen.container.querySelector('.agent-center__observer'))
       .toBeNull()
-    const securityRow = rejectionScreen
-      .getByRole('button', { name: 'Open security_review' })
-      .element() as HTMLButtonElement
+    const securityRow = requiredAgentCenterRow(rejectionScreen.container, 'agent-review')
     securityRow.click()
     securityRow.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     await expect
@@ -688,10 +696,9 @@ describe('AppShell deterministic collaboration scenario', () => {
     await first.getByRole('button', { name: 'Subagents' }).click()
     await expect
       .poll(() =>
-        first
-          .getByRole('button', { name: 'Open security_review' })
-          .element()
-          .getAttribute('data-status')
+        first.container
+          .querySelector('.agent-center__row[data-agent-id="agent-review"]')
+          ?.getAttribute('data-status')
       )
       .toBe('latest_completed')
     expect(first.container.querySelector('[data-semantic="completed"]')).toBeNull()
@@ -716,18 +723,16 @@ describe('AppShell deterministic collaboration scenario', () => {
     expect(reloaded.container.querySelector('[data-semantic="waiting_approval"]')).toBeNull()
     await reloaded.getByRole('button', { name: 'Subagents' }).click()
     expect(
-      reloaded
-        .getByRole('button', { name: 'Open compatibility_review' })
-        .element()
-        .getAttribute('data-status')
+      requiredAgentCenterRow(reloaded.container, 'agent-compatibility').getAttribute('data-status')
     ).toBe('latest_interrupted')
     expect(
-      reloaded
-        .getByRole('button', { name: 'Open security_review' })
-        .element()
-        .getAttribute('data-status')
+      requiredAgentCenterRow(reloaded.container, 'agent-review').getAttribute('data-status')
     ).toBe('latest_completed')
-    expect(reloaded.container.textContent).toContain('Completed')
+    expect(
+      requiredAgentCenterRow(reloaded.container, 'agent-review').querySelector(
+        '.agent-center__row-meta'
+      )?.textContent
+    ).toBe('Now')
 
     await reloaded.getByRole('button', { name: 'select-conversation-other' }).click()
     await expect
