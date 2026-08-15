@@ -6,6 +6,7 @@
 - [Native semantic contract](#native-semantic-contract)
 - [Create and reuse one Builder](#create-and-reuse-one-builder)
 - [Edit an existing deck with one Editor](#edit-an-existing-deck-with-one-editor)
+- [Clean up managed scripts](#clean-up-managed-scripts)
 - [Preflight every Builder revision](#preflight-every-builder-revision)
 - [Bind inputs declaratively](#bind-inputs-declaratively)
 - [Observe every file effect](#observe-every-file-effect)
@@ -89,7 +90,20 @@ narrative, and visual direction before creating slides.
 
 The bundled `templates/builder.mjs` is a compact `pptxgenjs` starting point with a wide layout,
 theme, reusable footer, and optional mounted image. Locate its exact revision-bound URI with
-`skills_list_resources`, then copy it once into a new workspace path:
+`skills_list_resources`. Choose one dedicated workspace-relative script directory for this run.
+If the directory is absent, create it before materialization with a separate idempotent command;
+if it already exists as a plain directory, reuse it:
+
+```json
+{
+  "command": "mkdir -p scripts",
+  "cwd": ".",
+  "reason": "Prepare a workspace directory for the presentation Builder"
+}
+```
+
+The name `scripts` is only an example; keep the chosen directory consistent throughout the run.
+Then copy the Builder once into that directory:
 
 ```json
 {
@@ -123,6 +137,10 @@ fixed sequence is inspect and copy stable targets, render a visual baseline, mat
 `editor.mjs`, patch only its bounded edit region, syntax-check, execute one transaction, then
 inspect, validate, and render/read every final slide.
 
+Create or reuse the dedicated script directory before materializing the Editor, exactly as in the
+Builder workflow. Do not wait for `skills_materialize_resource` to fail before creating a missing
+parent directory.
+
 The Editor command has exactly one static `--source` and one static `--output`. Bind the source and
 every replacement asset through `run_command.inputs`; use its logical `mountPath` in `--source`
 and `input(...)`. Prefer a distinct output:
@@ -140,6 +158,15 @@ and `input(...)`. Prefer a distinct output:
   "reason": "Apply the reviewed changes to a private copy of the existing presentation"
 }
 ```
+
+## Clean up managed scripts
+
+After the final deck has been published and all required inspection, validation, rendering, and
+retries are complete, delete the exact materialized Builder or Editor and every temporary file
+created for this task. If this task created the script directory and it is now empty, remove it
+with non-recursive `rmdir`. If the directory existed before the task, leave the directory and all
+unrelated contents untouched. Never use `rm -rf` for this cleanup. Keep the script only when the
+user explicitly asks for it.
 
 Copy stable target strings verbatim from the latest `office_presentation` inspect result, for
 example `/slide[3]/shape[@id=42]`. A missing or stale target aborts the transaction. Never

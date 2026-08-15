@@ -24,9 +24,20 @@ The Builder and Editor are different fixed entry points:
 
 Never use the Builder to imitate an edit, and never turn the Editor into a general-purpose Node.js program.
 
+Before materializing either script, choose one dedicated workspace-relative script directory for
+this run. Reuse an existing plain directory when appropriate; otherwise create it first with a
+separate idempotent `mkdir -p <script-directory>` `run_command`. The directory name is not fixed,
+but use the same path for materialization, patching, syntax checks, and execution. Before the final
+response, delete the exact Builder or Editor and any task-created temporary files. If this task
+created the directory and it is then empty, remove it with `rmdir`; preserve pre-existing
+directories and unrelated files, and never use recursive deletion for this cleanup. Keep a script
+only when the user explicitly asks for it.
+
 ### Managed Builder
 
-Use `skills_list_resources` to locate `templates/builder.mjs`, then materialize it once with `skills_materialize_resource` into a new workspace path. Patch and rerun that same builder; do not create a trail of replacement scripts.
+Use `skills_list_resources` to locate `templates/builder.mjs`, ensure the selected script directory
+exists, then materialize the Builder once with `skills_materialize_resource` into a new path inside
+that directory. Patch and rerun that same builder; do not create a trail of replacement scripts.
 
 Immediately after materializing or modifying any `.mjs` Builder, run `node --check <builder>.mjs` as a separate `run_command` call. Never combine the check and build with `&&`, `|`, or `;`. A non-zero check forbids the build: patch the same Builder and check it again. Any later edit invalidates the successful check.
 
@@ -51,7 +62,11 @@ Treat the gates independently: `syntax-valid != runtime-valid != PPTX-valid`. Th
 
 Before editing, call `office_presentation` with `operation: "inspect"` and copy exact stable targets from its result while recording the source deck's authoritative slide count and order. Render affected slides when layout or appearance matters. If inspect does not return a stable target for an intended element, stop and report that the edit cannot be applied safely; do not guess from array position, visible text, or a hand-written object path.
 
-Use `skills_list_resources` to locate `templates/editor.mjs`, materialize it once into a new workspace path, and patch only its bounded `BEGIN EDIT REGION` / `END EDIT REGION`. Read [references/editing-existing.md](references/editing-existing.md) before the first existing-deck edit in a run. Keep using that same Editor file for corrections.
+Use `skills_list_resources` to locate `templates/editor.mjs`, ensure the selected script directory
+exists, materialize the Editor once into a new path inside it, and patch only its bounded
+`BEGIN EDIT REGION` / `END EDIT REGION`. Read
+[references/editing-existing.md](references/editing-existing.md) before the first existing-deck
+edit in a run. Keep using that same Editor file for corrections.
 
 Immediately after materializing or modifying the `.mjs` Editor, run `node --check <editor>.mjs` as a separate `run_command` call. Never combine the check and edit run with `&&`, `|`, or `;`. A non-zero check forbids execution, and any later edit invalidates the successful check.
 
@@ -71,5 +86,8 @@ Default to fidelity-preserving targeted changes. Do not unzip or rewrite OOXML, 
 6. For every slide `1..N`, make a separate `render` call with that `pageOrSlide` and a unique `outputPath`. Pass the exact returned `outputs[].readPath` to `read_image.path` and record one numbered visual verdict for that slide. Any later deck edit invalidates the ledger; re-inspect, revalidate, and rebuild all `N` verdicts from the final deck.
 7. `outputs[].layoutCoverage` proves only that the frozen requested slide set fits inside the PNG viewport under the trusted renderer's fixed layout geometry. It does not prove slide content, visual quality, or successful per-slide inspection. Do not infer visual coverage from it, `total`, `pageSelection`, an output filename, or a contact-sheet image. Without exactly `N` successful numbered verdicts, do not claim complete visual verification or completion.
 8. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
+9. After all required retries and verification are complete, clean up the task-owned Builder or
+   Editor and temporary files. Remove the script directory only if this task created it and it is
+   empty; never delete a pre-existing directory or unrelated files.
 
 Read [references/workflows.md](references/workflows.md) for routing, creation, input binding, verification, and presentation-specific quality checks. Read [references/editing-existing.md](references/editing-existing.md) for the fixed MJS editing contract, supported operations, stable-target rules, recovery, and fidelity checks.

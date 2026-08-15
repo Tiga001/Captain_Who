@@ -1148,6 +1148,9 @@ mod tests {
 
         for required in [
             "Immediately after materializing or modifying any `.mjs` Builder",
+            "mkdir -p <script-directory>",
+            "delete the exact Builder or Editor and any task-created temporary files",
+            "never use recursive deletion for this cleanup",
             "`node --check <builder>.mjs` as a separate `run_command` call",
             "Never combine the check and build with `&&`, `|`, or `;`",
             "Any later edit invalidates the successful check",
@@ -1163,6 +1166,10 @@ mod tests {
         }
 
         for required in [
+            "\"command\": \"mkdir -p scripts\"",
+            "If the directory is absent, create it before materialization",
+            "## Clean up managed scripts",
+            "Never use `rm -rf` for this cleanup",
             "\"command\": \"node --check scripts/build_deck.mjs\"",
             "If the check exits\nnon-zero, do not build",
             "Editing the file after a successful\ncheck invalidates that result",
@@ -1183,9 +1190,17 @@ mod tests {
         let check = workflows
             .find("\"command\": \"node --check scripts/build_deck.mjs\"")
             .unwrap();
+        let prepare = workflows.find("\"command\": \"mkdir -p scripts\"").unwrap();
+        let materialize = workflows
+            .find("\"destination\": \"scripts/build_deck.mjs\"")
+            .unwrap();
         let build = workflows
             .find("\"command\": \"node scripts/build_deck.mjs --output")
             .unwrap();
+        assert!(
+            prepare < materialize,
+            "script directory preparation must precede Builder materialization"
+        );
         assert!(
             check < build,
             "syntax preflight must precede Builder execution"
@@ -1203,6 +1218,7 @@ mod tests {
 
         for required in [
             "**Edit an existing `.pptx`:**",
+            "ensure the selected script directory\nexists",
             "`templates/editor.mjs`",
             "`BEGIN EDIT REGION` / `END EDIT REGION`",
             "`node --check <editor>.mjs` as a separate `run_command` call",
@@ -1221,6 +1237,8 @@ mod tests {
 
         for required in [
             "For every edit to an existing `.pptx`",
+            "Create or reuse the dedicated script directory before materializing the Editor",
+            "## Clean up managed scripts",
             "node scripts/edit_deck.mjs --source source.pptx --output source-edited.pptx",
             "copy stable targets",
             "`/slide[3]/shape[@id=42]`",
@@ -1236,6 +1254,10 @@ mod tests {
         }
 
         for required in [
+            "mkdir -p <script-directory>",
+            "Do not wait for `skills_materialize_resource` to fail",
+            "delete the exact Editor and task-created\n   temporary files",
+            "Never use recursive deletion",
             "import { editPresentation, input, output } from '@mycopilot/presentation-sdk'",
             "mode: 'saveAs'",
             "deck.set({ target, properties })",
@@ -1373,10 +1395,11 @@ mod tests {
             .unwrap();
         assert_eq!(materialized_source.text(), editor);
         let workspace = tempdir().unwrap();
+        fs::create_dir(workspace.path().join("scripts")).unwrap();
         let request = SkillMaterializationRequest::new(
             editor_uri,
             workspace.path(),
-            SkillMaterializationDestination::parse("edit_presentation.mjs").unwrap(),
+            SkillMaterializationDestination::parse("scripts/edit_deck.mjs").unwrap(),
         )
         .unwrap();
         let outcome = SkillResourceMaterializer::new()
@@ -1384,7 +1407,7 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
         assert_eq!(
-            fs::read_to_string(workspace.path().join("edit_presentation.mjs")).unwrap(),
+            fs::read_to_string(workspace.path().join("scripts/edit_deck.mjs")).unwrap(),
             editor
         );
     }

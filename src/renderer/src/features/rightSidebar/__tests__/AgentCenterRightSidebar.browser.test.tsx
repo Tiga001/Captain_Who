@@ -91,7 +91,7 @@ describe('Agent Center right sidebar', () => {
 
   it('groups active and ended agents, opens observer detail, and fits the 280px floor', async () => {
     const longTask = 'visual-review-nju-images-with-a-long-readable-suffix'
-    const childRunning = agent('root-a', 'child-running', 'running', longTask)
+    const childRunning = agent('root-a', 'child-running', 'running', longTask, 'kimi')
     const childDone = agent('root-a', 'child-done', 'latest_completed', 'completed-task')
     const screen = await render(
       <NarrowSidebar
@@ -111,13 +111,14 @@ describe('Agent Center right sidebar', () => {
       'Finished·1'
     )
     await expect.element(screen.getByText(longTask, { exact: true })).toBeVisible()
-    await expect.element(screen.getByText('model-child-running', { exact: true })).toBeVisible()
+    await expect.element(screen.getByText('kimi', { exact: true })).toBeVisible()
+    expect(screen.container.textContent).not.toContain('model-child-running')
     expect(screen.container.querySelector('.agent-center__row')?.getAttribute('style')).toBeNull()
 
     const listCenter = requiredElement(screen.container, '.agent-center')
     const listRow = requiredElement(screen.container, '.agent-center__row')
     const listMeta = requiredElement(listRow, '.agent-center__row-meta')
-    expect(listRow.title).toBe(`${longTask} · model-child-running`)
+    expect(listRow.title).toBe(`${longTask} · kimi`)
     expect(requiredElement(listRow, '.agent-center__row-copy strong').textContent).toBe(longTask)
     expect(listMeta.children).toHaveLength(1)
     expect(listMeta.textContent).toBe('Now')
@@ -134,11 +135,12 @@ describe('Agent Center right sidebar', () => {
     })
 
     const runningRow = screen.getByRole('button', {
-      name: `Open subagent ${longTask}, base model model-child-running, status Working`
+      name: `Open subagent ${longTask}, base model kimi, status Working`
     })
     await tabUntil(runningRow.element() as HTMLButtonElement)
     await userEvent.keyboard('{Enter}')
     await expect.element(screen.getByTestId('agent-observer-child-running')).toBeVisible()
+    await expect.element(screen.getByText('kimi', { exact: true })).toBeVisible()
 
     const backButton = screen.getByRole('button', { name: 'Back to subagents' })
     await tabUntil(backButton.element() as HTMLButtonElement)
@@ -491,7 +493,8 @@ function agent(
   rootConversationId: string,
   agentId: string,
   displayStatus: AgentDisplayStatusView,
-  taskName = agentId
+  taskName = agentId,
+  modelDisplayName = `model-${agentId}`
 ): AgentSummary {
   return {
     agentId,
@@ -499,7 +502,7 @@ function agent(
     displayStatus,
     latestActivityAt: 1_700_000_000_000 + agentId.length,
     lifecycle: 'active',
-    model: { displayName: `${agentId} model`, modelConfigId: `model-${agentId}` },
+    model: { displayName: modelDisplayName, modelConfigId: `model-${agentId}` },
     parentAgentId: `agent-${rootConversationId}`,
     projectId: 'project-a',
     rootAgentId: `agent-${rootConversationId}`,

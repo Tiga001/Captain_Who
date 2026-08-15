@@ -21,22 +21,28 @@ private copy. It is not a second deck-generation workflow.
    element, such as `/slide[3]/shape[@id=42]`.
 2. Render and read every slide whose layout or appearance may change. These images are the visual
    baseline; a contact sheet may help with overview but is not per-slide evidence.
-3. Locate the exact revision-bound `templates/editor.mjs` URI with `skills_list_resources` and
-   materialize it once to a new path such as `scripts/edit_deck.mjs`.
-4. Patch only the template's `BEGIN EDIT REGION` / `END EDIT REGION`. Keep the fixed import,
+3. Choose one dedicated workspace-relative script directory. Reuse it if it already exists as a
+   plain directory; otherwise create it first with a separate idempotent
+   `mkdir -p <script-directory>` `run_command`.
+4. Locate the exact revision-bound `templates/editor.mjs` URI with `skills_list_resources` and
+   materialize it once to a new path such as `scripts/edit_deck.mjs` inside that existing directory.
+5. Patch only the template's `BEGIN EDIT REGION` / `END EDIT REGION`. Keep the fixed import,
    argument parsing, `editPresentation`, `input`, `output`, and `mode: 'saveAs'` code unchanged.
-5. Run `node --check scripts/edit_deck.mjs` in a separate `run_command`. If it fails, patch the
+6. Run `node --check scripts/edit_deck.mjs` in a separate `run_command`. If it fails, patch the
    same file and check it again. Any later patch invalidates the successful check.
-6. Run the Editor once with exactly one static `--source` and one static `--output`. Bind the source
+7. Run the Editor once with exactly one static `--source` and one static `--output`. Bind the source
    and every replacement asset through `run_command.inputs`.
    If `run_command` returns `status: "running"`, the edit is still inside the Host-owned Office
    transaction: follow its `continueWith` receipt and call `command_session` with `action: "wait"`
    until the authoritative terminal result succeeds. A running receipt, Node exit, output file
    name, or preliminary observation is never proof that the edited deck was published.
-7. Only after terminal success and an `artifactObservation` confirming the declared destination,
+8. Only after terminal success and an `artifactObservation` confirming the declared destination,
    inspect the resulting deck again, validate it, render every final slide separately, read every
    returned image, and rebuild the numbered visual verdict ledger. Compare affected slides with
    the baseline and confirm unrelated slides remain intact.
+9. After all corrections and verification are complete, delete the exact Editor and task-created
+   temporary files. If this task created the script directory and it is empty, remove it with
+   `rmdir`; otherwise preserve the directory and every unrelated file. Never use recursive deletion.
 
 Do not skip directly from syntax validation to delivery. The independent gates are:
 
@@ -45,6 +51,20 @@ Do not skip directly from syntax validation to delivery. The independent gates a
 ## Materialize and run one Editor
 
 Materialize the exact revision returned by the active Skill. The URI below is illustrative only:
+
+First create or reuse a dedicated directory. This command is intentionally idempotent:
+
+```json
+{
+  "command": "mkdir -p scripts",
+  "cwd": ".",
+  "reason": "Prepare a workspace directory for the presentation Editor"
+}
+```
+
+The directory name is not fixed. Use the same chosen path in the materialization, patch, syntax
+check, and edit command. Do not wait for `skills_materialize_resource` to fail before creating a
+missing parent directory.
 
 ```json
 {
