@@ -591,9 +591,7 @@ pub(super) fn validate_document_artifact(
     kind: OfficeDocumentKind,
 ) -> Result<(), OfficeEngineError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        invalid_output(format!(
-            "OfficeCLI did not produce a readable document: {error}"
-        ))
+        invalid_output(format!("Office output is not a readable document: {error}"))
     })?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
@@ -601,7 +599,7 @@ pub(super) fn validate_document_artifact(
         || metadata.len() > MAX_OFFICE_DOCUMENT_BYTES
     {
         return Err(invalid_output(format!(
-            "OfficeCLI output must be a non-empty regular file no larger than {MAX_OFFICE_DOCUMENT_BYTES} bytes."
+            "Office output must be a non-empty regular file no larger than {MAX_OFFICE_DOCUMENT_BYTES} bytes."
         )));
     }
     if path
@@ -613,15 +611,15 @@ pub(super) fn validate_document_artifact(
     }
 
     let file = fs::File::open(path)
-        .map_err(|error| invalid_output(format!("Cannot open OfficeCLI output: {error}")))?;
+        .map_err(|error| invalid_output(format!("Cannot open Office output: {error}")))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|error| {
         invalid_output(format!(
-            "OfficeCLI output is not a valid OOXML ZIP package: {error}"
+            "Office output is not a valid OOXML ZIP package: {error}"
         ))
     })?;
     if archive.len() > 65_535 || archive.by_name("[Content_Types].xml").is_err() {
         return Err(invalid_output(
-            "OfficeCLI output is missing required OOXML package metadata.",
+            "Office output is missing required OOXML package metadata.",
         ));
     }
     let main_part = match kind {
@@ -631,7 +629,7 @@ pub(super) fn validate_document_artifact(
     };
     if archive.by_name(main_part).is_err() {
         return Err(invalid_output(format!(
-            "OfficeCLI output is missing required OOXML part `{main_part}`."
+            "Office output is missing required OOXML part `{main_part}`."
         )));
     }
     Ok(())

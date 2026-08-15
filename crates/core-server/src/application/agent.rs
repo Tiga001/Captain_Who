@@ -397,6 +397,7 @@ impl OfficeEngine for RefreshableOfficeEngine {
         &self,
         context: &mycopilot_core::office::OfficeExecutionContext,
         staging: &mut OfficeManagedScriptStaging,
+        managed_python: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeInvocation>,
         cancellation: AgentCancellationToken,
         action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {
@@ -404,6 +405,7 @@ impl OfficeEngine for RefreshableOfficeEngine {
         match current.commit_managed_script_output(
             context,
             staging,
+            managed_python,
             cancellation,
             action_cancel_flag,
         ) {

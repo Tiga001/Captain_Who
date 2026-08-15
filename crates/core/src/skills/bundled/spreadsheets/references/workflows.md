@@ -14,8 +14,8 @@
 
 ## Route the task
 
-Use `office_spreadsheet` only for the read/verification operations `status`, `inspect`,
-`validate`, and `render`. Do not call `create`, `addSheet`, `writeCell`, `setFormula`,
+Use `office_spreadsheet` only for the read/verification operations `inspect` and `render`. Do not
+call `status`, `validate`, `create`, `addSheet`, `writeCell`, `setFormula`,
 `formatRange`, `freezePanes`, `addConditionalFormat`, `addTable`, `addChart`,
 `insertImage`, `removeSheet`, `moveSheet`, or any invented low-level operation.
 
@@ -84,9 +84,8 @@ run one direct command:
 }
 ```
 
-Omit `runtimeProfile` and `observe`. The exact materialization receipt binds the pinned
-Python 3.12.13 runtime with `openpyxl` 3.1.5 and `xlsxwriter` 3.2.9. Use `openpyxl` for
-general authoring and `xlsxwriter` only when its creation-only feature set is useful.
+Omit `runtimeProfile` and `observe`. The exact materialization receipt binds the pinned Python
+3.12.13 runtime with `openpyxl` 3.1.5. Use `openpyxl` for all workbook creation and editing.
 
 ## Use the fixed Editor
 
@@ -117,7 +116,7 @@ Run exactly one source and one distinct output:
       "path": "budget.xlsx"
     }
   ],
-  "reason": "Edit the existing workbook and publish a validated save-as copy"
+  "reason": "Edit the existing workbook and publish a Host-gated save-as copy"
 }
 ```
 
@@ -152,9 +151,11 @@ or a syntax/build command joined with `&&`, `|`, or `;`.
 For a recognized Office script, the Host freezes the script bytes, runtime receipt,
 inputs, and target precondition; redirects the declared output to private staging; runs
 the genuine Python program under the ordinary `run_command` approval and permission
-boundary; validates the candidate; rechecks source, target, and cancellation state; and
-publishes atomically. A failed preflight, runtime error, timeout, cancellation, invalid
-package, or target conflict must not publish the declared final output.
+boundary; reopens the candidate with pinned `openpyxl.load_workbook(data_only=False)`;
+rechecks source, target, and cancellation state; and publishes atomically. The Host owns this
+prepublish reopen. Do not duplicate it in the script or call native `validate`. A failed preflight,
+runtime error, timeout, cancellation, reopen, or target conflict must not publish the declared
+final output.
 
 This is a transactional Office-output guarantee, not a claim that unrestricted Python is
 a separate cross-platform OS sandbox.
@@ -174,7 +175,7 @@ The Host supplies Office artifact observation automatically. Inspect
   link the target before terminal success.
 - Never blindly rerun after a command that may have produced a file effect.
 
-Observation records evidence. It does not replace native validation or visual review.
+Observation records evidence. It does not replace the Host prepublish reopen or visual review.
 
 ## Verify calculation and visual quality
 
@@ -182,14 +183,16 @@ After the final write:
 
 1. Inspect the final sheet list and order, each complete populated range, typed values,
    exact formula text, formats, names, tables, charts, images, validations, and links.
-2. Run native `validate`. This proves package validity, not formula evaluation.
+2. Confirm terminal success from the Host's pinned openpyxl reopen gate. Do not call native
+   `validate`; the model's Office workflow is inspect/render only.
 3. Build a visual ledger for every final sheet. Resolve its visual extent as the union of
    the populated range and every reported floating chart/image bound, then render it.
 4. Read the exact returned render `outputs[].readPath` with `read_image.path`. Never infer
    the path from the request, stdout, cwd, or filename.
 5. Record one verdict per final sheet. If floating-object bounds, rendering, or visual
    input are unavailable, disclose incomplete coverage rather than claiming success.
-6. Any later edit invalidates the ledger; re-inspect, validate, render, and review again.
+6. Any later edit invalidates the ledger; require a new successful Host publication, then
+   re-inspect, render, and review again.
 
 `openpyxl` stores formula expressions but does not calculate them. Cached values may be
 missing or stale. Claim recalculation only when a separate authoritative calculation

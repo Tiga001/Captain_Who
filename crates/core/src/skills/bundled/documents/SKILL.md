@@ -1,14 +1,14 @@
 ---
 name: documents
-description: Create, edit, inspect, render, and validate Microsoft Word-compatible .docx documents. Use for professional document authoring, existing-document changes, formatting, tables, images, page layout, headers and footers, repeated or data-driven generation, and any other Word document task.
+description: Create, edit, inspect, and render Microsoft Word-compatible .docx documents. Use for professional document authoring, existing-document changes, formatting, tables, images, page layout, headers and footers, repeated or data-driven generation, and any other Word document task.
 ---
 
 # Documents
 
 Route by intent:
 
-- **Read or verify:** use the flat semantic `office_document` surface for `status`, `inspect`,
-  `validate`, and `render`.
+- **Read or verify:** use the flat semantic `office_document` surface only for `inspect` and
+  `render`.
 - **Create a new `.docx`:** materialize and run the Managed Builder from `templates/builder.py`. Do not assemble a new
   document through a sequence of native write calls.
 - **Edit an existing `.docx`:** inspect first, then materialize and run `templates/editor.py` with
@@ -43,7 +43,9 @@ Every run declares exactly one static `--output`. An Editor also declares exactl
 `--source`, equal to one `run_command.inputs[].mountPath`, and a distinct `.docx` output. Omit
 `runtimeProfile` and `observe`: the Host verifies the run-scoped materialization receipt, derives
 the pinned `documents` runtime, freezes the script and inputs, runs preflight, directs Office output
-through a private candidate, validates it, publishes atomically, and binds observation.
+through a private candidate, runs the pinned OfficeCLI schema gate, publishes atomically, and binds
+observation. The fixed script saves once to the Host-provided output path; do not add another
+temporary file, candidate reopen, `os.replace`, or model-side validation layer.
 
 Bind every non-workspace input through `run_command.inputs`. Scripts resolve only declared logical
 mount names below `MYCOPILOT_INPUT_ROOT`; never pass or open `@attachments`, `skill://`, artifact
@@ -72,15 +74,17 @@ the user explicitly asks for them.
    the affected content.
 2. Create with the Builder or edit with the Editor. Confirm terminal success and an
    `artifactObservation` file effect for the declared output.
-3. Inspect the final document and validate the package. For comments, tracked changes, fields,
-   content controls, or other fidelity-sensitive parts, run an explicit structural check;
-   rendering is not structural evidence.
+3. The successful terminal result proves that the Host's pinned OfficeCLI schema gate accepted the
+   private candidate before publication. Do not call native `validate`. Inspect the final document.
+   For comments, tracked changes, fields, content controls, or other fidelity-sensitive parts, run
+   an explicit structural check; rendering is not structural evidence.
 4. Render the whole document once for overview, then render every known or affected page
    individually. Consume only exact `outputs[].readPath` values with `read_image.path` and keep a
    numbered ledger of pages actually read. The current semantic surface has no authoritative final
    page count, so do not claim exhaustive all-page coverage from a contact sheet or guessed count.
 5. Compare requested changes and unrelated content with the baseline. Any final edit invalidates
-   earlier inspection, validation, structural, and visual evidence; repeat the affected checks.
+   earlier inspection, Host publication, structural, and visual evidence; repeat the affected
+   checks.
 6. Report only checks that actually succeeded and disclose unsupported fidelity or unavailable
    visual coverage.
 

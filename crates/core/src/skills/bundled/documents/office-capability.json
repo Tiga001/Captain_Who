@@ -1,18 +1,18 @@
 {
-  "contractVersion": 10,
+  "contractVersion": 11,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
   "modes": {
     "native": {
       "tool": "office_document",
-      "bestFor": "read_inspect_validate_render",
+      "bestFor": "read_inspect_render",
       "requestStyle": "flat_semantic_v1",
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
       "writeOperationsModelVisible": false,
-      "operations": ["status", "inspect", "validate", "render"],
+      "operations": ["inspect", "render"],
       "unsupportedRecovery": "useManagedScript",
       "renderOutput": {
         "resultField": "outputs",
@@ -35,7 +35,7 @@
       "routes": {
         "create": "builder",
         "editExisting": "editor",
-        "inspectValidateRender": "native"
+        "inspectRender": "native"
       },
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
@@ -90,15 +90,39 @@
         "fixedWrapper": {
           "sourceResolution": "MYCOPILOT_INPUT_ROOT",
           "auxiliaryInputResolution": "mounted_input",
-          "temporarySave": true,
-          "candidateReopen": true,
+          "temporarySave": false,
+          "candidateReopen": false,
+          "candidateValidationOwner": "hostPinnedOfficeCliSchemaGate",
+          "scriptOutputWrite": "directToHostPrivateCandidate",
           "modelPatchScope": "boundedEditRegionOnly"
         },
         "transaction": {
           "script": "frozenBeforeLaunch",
           "source": "frozenReadOnlyMount",
           "candidate": "hostPrivate",
-          "packageValidation": "requiredBeforePublish",
+          "packageValidation": {
+            "owner": "host",
+            "phase": "prepublish",
+            "engine": "pinnedOfficeCli",
+            "mode": "strictSchema",
+            "required": true,
+            "modelNativeValidate": "forbidden",
+            "failurePublication": "forbidden",
+            "failureDiagnostics": {
+              "required": true,
+              "providerStableFields": [
+                "type",
+                "description",
+                "path",
+                "part",
+                "code",
+                "error",
+                "message"
+              ],
+              "hostFields": ["errorCode", "error"],
+              "bounded": true
+            }
+          },
           "publication": "atomic",
           "failureBeforePublish": "hostCandidateNotPublishedToDeclaredDestination",
           "pythonSideEffectScope": "outsideOfficePublicationNotTransactional"
@@ -148,7 +172,8 @@
     "inspectFinal": true,
     "pageCountSource": "notAvailableInCurrentSemanticSurface",
     "authoritativePageCountAvailable": false,
-    "packageValidation": "nativeValidate",
+    "packageValidation": "hostPrepublishPinnedOfficeCliSchemaGate",
+    "modelNativeValidate": "forbidden",
     "visual": {
       "coverage": "overviewPlusIndividuallyVerifiedKnownPages",
       "renderModes": ["wholeDocumentOverview", "oneKnownPagePerRequest"],

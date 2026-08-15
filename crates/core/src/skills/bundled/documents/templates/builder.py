@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tempfile
 from pathlib import Path
 
 from docx import Document
@@ -93,17 +92,8 @@ def publish(document: Document, output: Path) -> None:
     if output.suffix.lower() != ".docx":
         raise ValueError("--output must end in .docx")
     output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{output.name}.", suffix=".docx", dir=output.parent
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        document.save(temporary)
-        Document(temporary)  # Re-open before publication to catch a malformed package.
-        os.replace(temporary, output)
-    finally:
-        temporary.unlink(missing_ok=True)
+    # The Host rewrites this path to its private candidate and publishes atomically.
+    document.save(output)
 
 
 def main() -> None:

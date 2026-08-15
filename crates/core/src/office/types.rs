@@ -403,8 +403,8 @@ pub struct OfficeManagedScriptBinding {
 
 pub const OFFICE_MANAGED_SCRIPT_BINDING_SCHEMA_VERSION: u32 = 1;
 
-/// Stable diagnostics returned by the strict validation and atomic publication gate for a
-/// provenance-bound Office Skill script.
+/// Stable diagnostics returned by the format-specific validation and atomic publication gate for
+/// a provenance-bound Office Skill script.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfficeManagedScriptOutputResult {
     pub exit_code: Option<i32>,
@@ -1124,12 +1124,14 @@ pub trait OfficeEngine: Send + Sync {
     ) -> Result<OfficeExecutionResult, OfficeEngineError>;
 
     /// Validates and atomically publishes one Host-private candidate produced by a
-    /// provenance-bound Office Skill script. Engines without the pinned validation surface fail
-    /// closed; the private candidate is removed when its staging owner is dropped.
+    /// provenance-bound Office Skill script. Spreadsheet candidates receive the frozen managed
+    /// Python identity for the fixed openpyxl reopen gate; Word and PowerPoint retain the pinned
+    /// OfficeCLI schema gate. The private candidate is removed when its staging owner is dropped.
     fn commit_managed_script_output(
         &self,
         _context: &OfficeExecutionContext,
         _staging: &mut super::OfficeManagedScriptStaging,
+        _managed_python: Option<&crate::artifact_runtime::ArtifactRuntimeInvocation>,
         _cancellation: AgentCancellationToken,
         _action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {

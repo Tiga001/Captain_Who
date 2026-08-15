@@ -33,8 +33,9 @@ generation workflow.
 7. If the result is `status: "running"`, follow the returned `continueWith` receipt and wait with
    `command_session` until the authoritative terminal result. Only terminal success plus
    `artifactObservation` for the declared destination proves publication.
-8. Inspect and validate the result, then render and read every known or affected final page. Compare
-   it with the source baseline and check that unrelated content remains intact.
+8. The Host's pinned OfficeCLI schema gate runs before publication; do not call native `validate`.
+   Inspect the result, then render and read every known or affected final page. Compare it with the
+   source baseline and check that unrelated content remains intact.
 9. Delete the exact Editor and task-created temporary files after the final checks. If this task
    created the script directory and it is then empty, remove it with `rmdir`. Preserve pre-existing
    directories and unrelated files; never use recursive deletion.
@@ -83,14 +84,15 @@ name below `MYCOPILOT_INPUT_ROOT`, not a private attachment or original filesyst
       "path": "<exact auxiliary input readPath or artifact URI>"
     }
   ],
-  "reason": "Edit the frozen Word source and publish a validated save-as result"
+  "reason": "Edit the frozen Word source and publish a Host-gated save-as result"
 }
 ```
 
 Keep `--source` equal to one declared `inputs[].mountPath`. Use one workspace-relative `.docx`
 destination that differs from the source. Do not request in-place overwrite, delete or rename the
 source, or reconstruct a private input path. The Host may replace the process-visible output with a
-private candidate path; the declared destination is published only after validation succeeds.
+private candidate path; the declared destination is published only after the Host schema gate
+succeeds.
 
 Do not add `runtimeProfile` or `observe`. The Host derives the pinned `documents` profile from the
 materialized Editor receipt, freezes its source and inputs, performs Python syntax preflight, and
@@ -107,9 +109,10 @@ The Editor is real Python, not a serialized edit plan. Inside the marked region 
 - standard-library helpers when needed for the document transformation.
 
 The fixed wrapper already provides `document`, the resolved read-only `source_path`,
-`mounted_input`, argument parsing, save-as publication, temporary-file cleanup, and candidate
-reopen. The unmodified edit region fails closed instead of publishing an unchanged copy. Keep that
-wrapper unchanged. Restrict the script's effects to the requested document and
+`mounted_input`, argument parsing, and one direct save to the Host-provided private candidate. The
+Host alone validates and atomically publishes that candidate. The unmodified edit region fails
+closed instead of publishing an unchanged copy. Keep that wrapper unchanged. Restrict the script's
+effects to the requested document and
 declared mounted inputs. Do not install packages, invoke system Python, start child processes,
 access the network, or discover Host-private paths.
 
@@ -124,8 +127,11 @@ paragraph or table cell; inspect surrounding structure and assert expected preco
 The Python process executes against frozen, read-only source and input mounts. The Host freezes the
 materialized script bytes, runtime profile, inputs, destination state, conversation, and approval
 before launch. It directs the Editor's output to a private candidate, then requires a valid bounded
-DOCX package and a successful pinned Office validation before atomically publishing the declared
-destination. Cancellation and destination preconditions are rechecked immediately before publish.
+DOCX package and a successful pinned OfficeCLI schema validation before atomically publishing the
+declared destination. Cancellation and destination preconditions are rechecked immediately before
+publish. A gate failure returns bounded stable OfficeCLI `type`, `description`, `path`, `part`,
+`code`, `error`, and `message` details plus the Host error code/message when available, so patch the
+same Editor instead of retrying unchanged.
 
 Python remains normal Python within the existing managed-command permission and approval boundary;
 the fixed template is not an operating-system sandbox and does not make unrelated side effects
@@ -161,7 +167,8 @@ explain the unsupported boundary when proof is unavailable.
 - Confirm the source bytes did not change and the output is a distinct file.
 - Re-inspect headings, paragraph and table order, sections, headers/footers, media, and every
   requested content change.
-- Validate the final package after the last edit.
+- Require terminal success from the Host prepublish OfficeCLI schema gate after the last edit; do
+  not call native `validate`.
 - Run feature-specific structural checks for comments, tracked changes, fields, content controls,
   or other fidelity-sensitive parts. Rendering is not structural proof.
 - Render the whole document once for overview, then render and read every known or affected page
@@ -169,5 +176,5 @@ explain the unsupported boundary when proof is unavailable.
   is unavailable without a trusted final page count.
 - Compare typography, spacing, pagination, tables, images, and unchanged regions with the baseline.
 
-Any correction invalidates earlier inspection, validation, structural, and visual evidence. Repeat
-the affected checks on the new final output before delivery.
+Any correction invalidates earlier inspection, Host publication, structural, and visual evidence.
+Repeat the affected checks on the new final output before delivery.

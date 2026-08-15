@@ -2897,7 +2897,7 @@ mod tests {
                 script: "scripts/build.py",
                 profile: AgentCommandRuntimeProfile::Spreadsheets,
                 kind: AgentCommandRuntimeKind::Python,
-                packages: &[("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")],
+                packages: &[("openpyxl", "3.1.5")],
             },
             Case {
                 command: "node scripts/build.mjs --output 'outputs/product intro.pptx'",
@@ -3000,7 +3000,7 @@ mod tests {
             test_binding(
                 AgentCommandRuntimeProfile::Spreadsheets,
                 AgentCommandRuntimeKind::Python,
-                &[("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")],
+                &[("openpyxl", "3.1.5")],
             ),
         )
         .with_runtime_services(builder_run_id.to_string(), Some(storage.clone()));
@@ -3063,9 +3063,7 @@ mod tests {
                     AgentCommandRuntimeKind::Python,
                     match profile {
                         AgentCommandRuntimeProfile::Documents => &[("python-docx", "1.2.0")],
-                        AgentCommandRuntimeProfile::Spreadsheets => {
-                            &[("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")]
-                        }
+                        AgentCommandRuntimeProfile::Spreadsheets => &[("openpyxl", "3.1.5")],
                         _ => unreachable!(),
                     },
                 ),

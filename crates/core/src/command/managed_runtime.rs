@@ -641,6 +641,12 @@ pub(crate) fn prepare_managed_command_session(
     .with_output_redactions(output_redactions);
     let editor_cancellation = cancellation_token.clone();
     let has_managed_office_transaction = request.managed_office_script.is_some();
+    let managed_office_python = generic_office_script
+        .as_ref()
+        .filter(|script| {
+            script.binding.document_kind == crate::office::OfficeDocumentKind::Spreadsheet
+        })
+        .map(|_| prepared_runtime.invocation.clone());
     let approved_input_bindings = request.inputs.clone();
     let approved_input_specs = approved_input_bindings
         .iter()
@@ -782,6 +788,7 @@ pub(crate) fn prepare_managed_command_session(
                         (Some(engine), Some(context)) => match engine.commit_managed_script_output(
                             context,
                             &mut script.staging,
+                            managed_office_python.as_ref(),
                             editor_cancellation.clone(),
                             Some(Arc::clone(&session_cancel_flag)),
                         ) {
@@ -948,7 +955,15 @@ fn stable_office_json_diagnostic(stdout: &str, field_limit: usize) -> Option<Str
         if value.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
             continue;
         }
-        for key in ["code", "error", "message"] {
+        for key in [
+            "type",
+            "description",
+            "path",
+            "part",
+            "code",
+            "error",
+            "message",
+        ] {
             let Some(value) = find_stable_json_string(&value, key)
                 .and_then(|value| bounded_diagnostic_text(value, field_limit))
             else {
@@ -2869,6 +2884,20 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
 
+    #[test]
+    fn officecli_schema_diagnostic_keeps_precise_issue_fields() {
+        let diagnostic = stable_office_json_diagnostic(
+            r#"{"success":false,"issues":[{"type":"schema","description":"Duplicate child element.","path":"/w:tbl/w:tblPr/w:tblLayout[2]","part":"word/document.xml"}]}"#,
+            1_024,
+        )
+        .unwrap();
+
+        assert!(diagnostic.contains("type=schema"));
+        assert!(diagnostic.contains("description=Duplicate child element."));
+        assert!(diagnostic.contains("path=/w:tbl/w:tblPr/w:tblLayout[2]"));
+        assert!(diagnostic.contains("part=word/document.xml"));
+    }
+
     #[cfg(unix)]
     const EDITOR_PLAN_JSON: &str = r#"{"schemaVersion":1,"source":{"type":"input","mountPath":"source.pptx"},"destination":{"type":"output","path":"edited.pptx"},"mode":"saveAs","operations":[{"type":"set","target":"/slide[1]/shape[@id=1]","replacement":{"find":"Old","replace":"New"}}]}"#;
 
@@ -3099,6 +3128,7 @@ mod tests {
             &self,
             context: &OfficeExecutionContext,
             staging: &mut OfficeManagedScriptStaging,
+            _managed_python: Option<&ArtifactRuntimeInvocation>,
             _cancellation: AgentCancellationToken,
             _action_cancel_flag: Option<Arc<AtomicBool>>,
         ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {

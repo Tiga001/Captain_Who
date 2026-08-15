@@ -149,7 +149,7 @@ test('pinned ripgrep ZIP extraction reads only exact bounded members and rejects
 test('manifest pins runtime assets, PDF tools, and dependency versions for every desktop target', async () => {
   const manifest = await loadArtifactRuntimeManifest(manifestPath)
   assert.equal(manifest.schemaVersion, 4)
-  assert.equal(manifest.bundleVersion, '2026.08.2')
+  assert.equal(manifest.bundleVersion, '2026.08.3')
   assert.equal(manifest.node.version, '22.23.1')
   assert.equal(manifest.python.version, '3.12.13')
   assert.deepEqual(
@@ -197,7 +197,7 @@ test('manifest pins runtime assets, PDF tools, and dependency versions for every
   }
 })
 
-test('managed Python requirements freeze the PDF dependency closure and binary-only install policy', async () => {
+test('managed Python requirements freeze the reviewed dependency closure and binary-only install policy', async () => {
   const requirements = await readFile(requirementsPath, 'utf8')
   const records = requirements
     .replaceAll(/\\\r?\n\s*/g, ' ')

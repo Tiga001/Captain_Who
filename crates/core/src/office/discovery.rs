@@ -198,10 +198,18 @@ impl OfficeEngine for OfficeCliEngine {
         &self,
         context: &OfficeExecutionContext,
         staging: &mut crate::office::OfficeManagedScriptStaging,
+        managed_python: Option<&crate::artifact_runtime::ArtifactRuntimeInvocation>,
         cancellation: AgentCancellationToken,
         action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<crate::office::OfficeManagedScriptOutputResult, OfficeEngineError> {
-        run_managed_script_output_commit(self, context, staging, cancellation, action_cancel_flag)
+        run_managed_script_output_commit(
+            Some(self),
+            context,
+            staging,
+            managed_python,
+            cancellation,
+            action_cancel_flag,
+        )
     }
 
     fn prepare(
@@ -273,6 +281,27 @@ impl OfficeEngine for UnavailableOfficeEngine {
         _action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeExecutionResult, OfficeEngineError> {
         Err(self.error.clone())
+    }
+
+    fn commit_managed_script_output(
+        &self,
+        context: &OfficeExecutionContext,
+        staging: &mut crate::office::OfficeManagedScriptStaging,
+        managed_python: Option<&crate::artifact_runtime::ArtifactRuntimeInvocation>,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<crate::office::OfficeManagedScriptOutputResult, OfficeEngineError> {
+        if staging.document_kind() != super::types::OfficeDocumentKind::Spreadsheet {
+            return Err(self.error.clone());
+        }
+        run_managed_script_output_commit(
+            None,
+            context,
+            staging,
+            managed_python,
+            cancellation,
+            action_cancel_flag,
+        )
     }
 }
 

@@ -1,17 +1,17 @@
 {
-  "contractVersion": 10,
+  "contractVersion": 11,
   "engine": "officecli",
   "tool": "office_spreadsheet",
   "extensions": [".xlsx"],
   "modes": {
     "native": {
       "tool": "office_spreadsheet",
-      "bestFor": "authoritative_read_validate_render",
+      "bestFor": "authoritative_inspect_render",
       "requestStyle": "flat_semantic_v1",
       "reasonField": "reason",
       "reasonRequired": true,
       "providerArguments": "host_generated",
-      "operations": ["status", "inspect", "validate", "render"],
+      "operations": ["inspect", "render"],
       "writeOperationsModelVisible": false,
       "modelVisibleWrites": "forbidden",
       "writeRoute": "managedScripts",
@@ -43,7 +43,7 @@
       "routes": {
         "create": "builder",
         "editExisting": "editor",
-        "inspectValidateRender": "native",
+        "inspectRender": "native",
         "nativeWrite": "forbidden"
       },
       "pythonSemantics": {
@@ -61,7 +61,19 @@
         "runtimeAndInputsFrozen": true,
         "sourceSnapshot": "hostReadOnlyInput",
         "candidateOutput": "hostPrivateStaging",
-        "validation": "pinnedOfficeEngineBeforePublish",
+        "scriptOutputWrite": "directToHostPrivateCandidate",
+        "validation": {
+          "owner": "host",
+          "phase": "prepublish",
+          "engine": "pinnedOpenpyxl",
+          "operation": "load_workbook",
+          "arguments": { "data_only": false },
+          "reopenRequired": true,
+          "closeRequired": true,
+          "nonEmptySheetListRequired": true,
+          "modelNativeValidate": "forbidden",
+          "failurePublication": "forbidden"
+        },
         "targetPreconditionRechecked": true,
         "cancellationRechecked": true,
         "publish": "atomic",
@@ -98,10 +110,7 @@
           "command": "python",
           "extension": ".py",
           "runtimeVersion": "3.12.13",
-          "dependencies": [
-            { "name": "openpyxl", "version": "3.1.5" },
-            { "name": "xlsxwriter", "version": "3.2.9" }
-          ]
+          "dependencies": [{ "name": "openpyxl", "version": "3.1.5" }]
         }
       ],
       "resolution": {
@@ -144,7 +153,8 @@
     "sheetListSource": "nativeInspect",
     "usedRangeSource": "nativeInspect",
     "floatingObjectSource": "nativeInspectWhenReported",
-    "packageValidation": "nativeValidate",
+    "packageValidation": "hostPrepublishPinnedOpenpyxlReopen",
+    "modelNativeValidate": "forbidden",
     "formulaText": "nativeInspectExactExpression",
     "calculationEvidence": "separateAuthoritativeEngineResult",
     "visual": {

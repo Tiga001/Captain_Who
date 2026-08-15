@@ -24,7 +24,7 @@ const MAX_COMPONENT_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SHA256_HEX_LENGTH: usize = 64;
 
-pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.2";
+pub const ARTIFACT_RUNTIME_BUNDLE_VERSION: &str = "2026.08.3";
 pub const ARTIFACT_RUNTIME_NODE_VERSION: &str = "22.23.1";
 pub const ARTIFACT_RUNTIME_PYTHON_VERSION: &str = "3.12.13";
 pub const ARTIFACT_RUNTIME_RIPGREP_VERSION: &str = "15.1.0";
@@ -1701,7 +1701,7 @@ mod tests {
                 .iter()
                 .map(|package| (package.name.as_str(), package.version.as_str()))
                 .collect::<Vec<_>>(),
-            vec![("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")]
+            vec![("openpyxl", "3.1.5")]
         );
     }
 

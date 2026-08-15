@@ -13,8 +13,8 @@
 
 ## Route the task
 
-Use `office_document` only for `status`, `inspect`, `validate`, and `render`. Create every new
-document with the Managed Builder. Edit every existing document with the fixed Managed Editor in
+Use `office_document` only for `inspect` and `render`. Create every new document with the Managed
+Builder. Edit every existing document with the fixed Managed Editor in
 [editing-existing.md](editing-existing.md). Do not use a native create/mutation sequence, rebuild an
 existing file with the Builder, or unzip and patch OOXML as a generic fallback.
 
@@ -149,19 +149,24 @@ explicitly reports the final count.
 
 1. For creation, materialize one Builder and generate one new `.docx`. For an existing file, follow
    [editing-existing.md](editing-existing.md) instead.
-2. Wait for terminal command success and confirm the expected `artifactObservation` effect.
+2. Wait for terminal command success and confirm the expected `artifactObservation` effect. A
+   successful terminal result means the Host's pinned OfficeCLI schema gate accepted the private
+   candidate before atomic publication. Do not call native `validate`.
 3. Inspect headings, body order, tables, sections, headers/footers, media, and requested content.
-4. Run native `validate`.
-5. Run explicit structural checks for comments, tracked changes, fields, content controls, or other
+4. Run explicit structural checks for comments, tracked changes, fields, content controls, or other
    features whose semantics matter; rendering cannot verify them.
-6. Render and read the overview plus every known or affected page separately. Check clipping,
+5. Render and read the overview plus every known or affected page separately. Check clipping,
    overflow, blank pages, broken images, font substitution, hierarchy, and spacing.
-7. If a defect exists, patch the same script. Discard stale evidence and repeat all affected checks
+6. If a defect exists, patch the same script. Discard stale evidence and repeat all affected checks
    on the new final file.
-8. Clean up the task-owned script and temporary files only after verification.
+7. Clean up the task-owned script and temporary files only after verification.
 
-Do not claim visual quality from package validation alone. When rendering or image reading is
-unavailable, report the affected coverage as unverified rather than inventing a verdict.
+On a prepublish schema failure, use the bounded Host diagnostics: the stable OfficeCLI `type`,
+`description`, `path`, `part`, `code`, `error`, and `message` fields plus the Host error code/message
+when present. Patch the same script from those details; do not retry unchanged or expose provider
+arguments. A schema gate does not prove semantic fidelity or visual quality. When rendering or
+image reading is unavailable, report the affected coverage as unverified rather than inventing a
+verdict.
 
 ## Word quality checks
 

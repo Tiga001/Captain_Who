@@ -22,6 +22,12 @@ pub(super) struct BrowserProcessPolicy<'a> {
     max_invocations: u32,
 }
 
+pub(super) struct ProcessRunOptions<'a> {
+    pub(super) browser_policy: Option<BrowserProcessPolicy<'a>>,
+    pub(super) environment: Option<&'a BTreeMap<std::ffi::OsString, std::ffi::OsString>>,
+    pub(super) process_name: &'a str,
+}
+
 struct BrowserMarkerExpectation {
     path: PathBuf,
     nonce: String,
@@ -99,6 +105,30 @@ pub(super) fn run_process(
     action_cancel_flag: Option<&Arc<AtomicBool>>,
     browser_policy: Option<BrowserProcessPolicy<'_>>,
 ) -> Result<ProcessOutput, OfficeEngineError> {
+    run_process_with_options(
+        executable,
+        cwd,
+        argv,
+        timeout,
+        cancellation,
+        action_cancel_flag,
+        ProcessRunOptions {
+            browser_policy,
+            environment: None,
+            process_name: "OfficeCLI",
+        },
+    )
+}
+
+pub(super) fn run_process_with_options(
+    executable: &Path,
+    cwd: Option<&Path>,
+    argv: &[String],
+    timeout: Duration,
+    cancellation: &AgentCancellationToken,
+    action_cancel_flag: Option<&Arc<AtomicBool>>,
+    options: ProcessRunOptions<'_>,
+) -> Result<ProcessOutput, OfficeEngineError> {
     let private_home = tempfile::Builder::new()
         .prefix("mycopilot-office-runtime-")
         .tempdir()
@@ -109,7 +139,11 @@ pub(super) fn run_process(
         command.current_dir(cwd);
     }
     configure_private_environment(&mut command, private_home.path());
-    let browser_failure_marker = browser_policy
+    if let Some(environment) = options.environment {
+        command.envs(environment);
+    }
+    let browser_failure_marker = options
+        .browser_policy
         .map(|policy| configure_browser_environment(&mut command, private_home.path(), policy))
         .transpose()?;
 
@@ -126,24 +160,22 @@ pub(super) fn run_process(
             OfficeEngineError::new(
                 OfficeEngineErrorCode::ProcessFailure,
                 OfficeEngineRecovery::Retry,
-                format!("Cannot start OfficeCLI: {error}"),
+                format!("Cannot start {}: {error}", options.process_name),
             )
         })?;
     let capture_policy = ProcessOutputCapturePolicy::process_default();
     let capture_budget = ProcessOutputCaptureBudget::new(capture_policy.max_capture_bytes());
     let stdout_reader = spawn_process_output_capture(
-        child
-            .stdout
-            .take()
-            .ok_or_else(|| process_error("Cannot capture OfficeCLI stdout."))?,
+        child.stdout.take().ok_or_else(|| {
+            process_error(format!("Cannot capture {} stdout.", options.process_name))
+        })?,
         capture_budget.clone(),
         capture_policy,
     );
     let stderr_reader = spawn_process_output_capture(
-        child
-            .stderr
-            .take()
-            .ok_or_else(|| process_error("Cannot capture OfficeCLI stderr."))?,
+        child.stderr.take().ok_or_else(|| {
+            process_error(format!("Cannot capture {} stderr.", options.process_name))
+        })?,
         capture_budget,
         capture_policy,
     );
@@ -154,24 +186,26 @@ pub(super) fn run_process(
         if cancellation_requested(cancellation, action_cancel_flag) {
             cancelled = true;
             terminate_command_process_group(&mut child);
-            break wait_for_child(&mut child, "cancelled")?;
+            break wait_for_child(&mut child, "cancelled", options.process_name)?;
         }
-        match try_wait_command_process_group(&mut child)
-            .map_err(|error| process_error(format!("Cannot wait for OfficeCLI: {error}")))?
-        {
+        match try_wait_command_process_group(&mut child).map_err(|error| {
+            process_error(format!("Cannot wait for {}: {error}", options.process_name))
+        })? {
             Some(status) => break status,
             None if started.elapsed() >= timeout => {
                 timed_out = true;
                 terminate_command_process_group(&mut child);
-                break wait_for_child(&mut child, "timed out")?;
+                break wait_for_child(&mut child, "timed out", options.process_name)?;
             }
             None => thread::sleep(Duration::from_millis(25)),
         }
     };
     let stdout_capture =
-        join_process_output_capture(stdout_reader, "OfficeCLI stdout").map_err(process_error)?;
+        join_process_output_capture(stdout_reader, &format!("{} stdout", options.process_name))
+            .map_err(process_error)?;
     let stderr_capture =
-        join_process_output_capture(stderr_reader, "OfficeCLI stderr").map_err(process_error)?;
+        join_process_output_capture(stderr_reader, &format!("{} stderr", options.process_name))
+            .map_err(process_error)?;
     let output_capture =
         ProcessOutputCaptureMetadata::from_streams(&stdout_capture, &stderr_capture);
     let render_failure = browser_failure_marker
@@ -383,10 +417,14 @@ fn configure_private_environment(command: &mut Command, private_home: &Path) {
     }
 }
 
-fn wait_for_child(child: &mut Child, state: &str) -> Result<ExitStatus, OfficeEngineError> {
+fn wait_for_child(
+    child: &mut Child,
+    state: &str,
+    process_name: &str,
+) -> Result<ExitStatus, OfficeEngineError> {
     child
         .wait()
-        .map_err(|error| process_error(format!("Cannot wait for {state} OfficeCLI: {error}")))
+        .map_err(|error| process_error(format!("Cannot wait for {state} {process_name}: {error}")))
 }
 
 pub(super) fn cancellation_requested(

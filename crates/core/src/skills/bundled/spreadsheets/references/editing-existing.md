@@ -14,7 +14,7 @@ library imports inside `edit_workbook`.
    created it.
 3. Locate `templates/editor.py` with `skills_list_resources`, then materialize that
    exact revision once into a new path in the prepared directory.
-4. Patch only `edit_workbook`. Keep the CLI, mounted-input resolver, publication code,
+4. Patch only `edit_workbook`. Keep the CLI, mounted-input resolver, direct candidate save,
    and `BEGIN/END EDIT REGION` markers unchanged. Use normal Python rather than encoding
    the task as JSON or a list of artificial operations.
 5. Bind exactly one source and declare one distinct save-as output:
@@ -29,7 +29,7 @@ library imports inside `edit_workbook`.
       "path": "workbook.xlsx"
     }
   ],
-  "reason": "Edit the existing workbook and publish a validated save-as copy"
+  "reason": "Edit the existing workbook and publish a Host-gated save-as copy"
 }
 ```
 
@@ -41,13 +41,15 @@ result succeeds and `artifactObservation` confirms the expected workbook.
 The Host freezes the script bytes, runtime, source snapshot, declared inputs, and target
 precondition before execution. It runs the frozen Python script under the existing
 `run_command` permission and approval boundary, redirects the intended output to private
-staging, validates that candidate, rechecks source/target/cancellation state, and only
-then publishes atomically. This guarantees the declared Office output transaction; it
-does not pretend unrestricted Python is a separate cross-platform OS sandbox.
+staging, reopens that candidate with pinned `openpyxl.load_workbook(data_only=False)`, rechecks
+source/target/cancellation state, and only then publishes atomically. The Host owns this gate; do
+not duplicate the candidate reopen in the script or call native `validate`. This guarantees the
+declared Office output transaction; it does not pretend unrestricted Python is a separate
+cross-platform OS sandbox.
 
-6. Re-inspect the final workbook and compare the intended values, formula text, styles,
-   sheets, tables, charts, images, and names. Run native validation and rebuild the
-   per-sheet visual ledger from the final revision.
+6. Require terminal success from the Host openpyxl reopen gate. Re-inspect the final workbook and
+   compare the intended values, formula text, styles, sheets, tables, charts, images, and names.
+   Rebuild the per-sheet visual ledger from the final revision; do not call native `validate`.
 7. Delete the exact task-owned Editor and temporary files. Use `rmdir` only when this
    task created the now-empty directory. Never recursively delete it.
 

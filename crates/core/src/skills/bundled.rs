@@ -835,6 +835,7 @@ mod tests {
             first_entrypoint,
             first_dependency,
             first_dependency_version,
+            contract_version,
         ) in [
             (
                 DOCUMENTS_LOCAL_ID,
@@ -845,6 +846,7 @@ mod tests {
                 "python",
                 "python-docx",
                 "1.2.0",
+                11,
             ),
             (
                 PRESENTATIONS_LOCAL_ID,
@@ -855,6 +857,7 @@ mod tests {
                 "node",
                 "pptxgenjs",
                 "4.0.1",
+                10,
             ),
             (
                 SPREADSHEETS_LOCAL_ID,
@@ -865,6 +868,7 @@ mod tests {
                 "python",
                 "openpyxl",
                 "3.1.5",
+                11,
             ),
         ] {
             let descriptor = catalog
@@ -1014,7 +1018,7 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 10);
+            assert_eq!(capability["contractVersion"], contract_version);
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
@@ -1161,14 +1165,14 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 10);
+            assert_eq!(capability["contractVersion"], 11);
 
             let script = &capability["modes"]["script"];
             assert_eq!(script["entrypoints"].as_array().unwrap().len(), 1);
             assert_eq!(script["entrypoints"][0]["command"], "python");
             assert_eq!(
                 capability["modes"]["native"]["operations"],
-                serde_json::json!(["status", "inspect", "validate", "render"])
+                serde_json::json!(["inspect", "render"])
             );
             assert_eq!(
                 capability["modes"]["native"]["writeOperationsModelVisible"],
@@ -1244,9 +1248,17 @@ mod tests {
             assert!(materialized.is_file());
             if local_id == SPREADSHEETS_LOCAL_ID {
                 let builder = fs::read_to_string(materialized).unwrap();
-                assert!(builder.contains("if not verified.sheetnames:"));
-                assert!(!builder.contains("verified[\"数据\"][\"E2\"]"));
-                assert!(!builder.contains("formula verification failed"));
+                assert!(builder.contains("from openpyxl import Workbook"));
+                assert!(builder.contains("workbook.save(output)"));
+                assert!(!builder.contains("load_workbook"));
+                assert!(!builder.contains("tempfile"));
+                assert!(!builder.contains("os.replace"));
+            } else {
+                let builder = fs::read_to_string(materialized).unwrap();
+                assert!(builder.contains("document.save(output)"));
+                assert!(!builder.contains("Document(temporary)"));
+                assert!(!builder.contains("tempfile"));
+                assert!(!builder.contains("os.replace"));
             }
         }
 
@@ -1257,10 +1269,15 @@ mod tests {
             serde_json::json!({
                 "create": "builder",
                 "editExisting": "editor",
-                "inspectValidateRender": "native"
+                "inspectRender": "native"
             })
         );
         assert_eq!(documents["validation"]["inspectFinal"], true);
+        assert_eq!(
+            documents["validation"]["packageValidation"],
+            "hostPrepublishPinnedOfficeCliSchemaGate"
+        );
+        assert_eq!(documents["validation"]["modelNativeValidate"], "forbidden");
         assert_eq!(
             documents["validation"]["pageCountSource"],
             "notAvailableInCurrentSemanticSurface"
@@ -1286,11 +1303,19 @@ mod tests {
             serde_json::json!({
                 "create": "builder",
                 "editExisting": "editor",
-                "inspectValidateRender": "native",
+                "inspectRender": "native",
                 "nativeWrite": "forbidden"
             })
         );
         assert_eq!(spreadsheets["calculation"]["recalculation"], "notPerformed");
+        assert_eq!(
+            spreadsheets["validation"]["packageValidation"],
+            "hostPrepublishPinnedOpenpyxlReopen"
+        );
+        assert_eq!(
+            spreadsheets["modes"]["script"]["transaction"]["validation"]["arguments"]["data_only"],
+            false
+        );
         assert_eq!(
             spreadsheets["validation"]["visual"]["coverage"],
             "everyResolvableFinalSheetVisualExtent"
@@ -1331,10 +1356,13 @@ mod tests {
         }
 
         for required in [
-            "Create every new\ndocument with the Managed Builder",
+            "Create every new document with the Managed\nBuilder",
             "Edit every existing document with the fixed Managed Editor",
             "[editing-existing.md](editing-existing.md)",
-            "Use `office_document` only for `status`, `inspect`, `validate`, and `render`",
+            "Use `office_document` only for `inspect` and `render`",
+            "Host's pinned OfficeCLI schema gate",
+            "stable OfficeCLI `type`",
+            "`description`, `path`, `part`, `code`, `error`, and `message` fields",
         ] {
             assert!(
                 workflows.contains(required),
@@ -1381,9 +1409,7 @@ mod tests {
             "document = Document(source)",
             "edit_document(document, source)",
             "Replace the EDIT REGION with the requested document edits",
-            "tempfile.mkstemp(",
-            "Document(temporary)",
-            "os.replace(temporary, output)",
+            "document.save(output)",
         ] {
             assert!(editor.contains(required), "Editor is missing `{required}`");
         }
@@ -1394,11 +1420,15 @@ mod tests {
             );
         }
 
-        assert_eq!(capability["contractVersion"], 10);
+        assert!(!editor.contains("Document(temporary)"));
+        assert!(!editor.contains("tempfile"));
+        assert!(!editor.contains("os.replace"));
+
+        assert_eq!(capability["contractVersion"], 11);
         let native = &capability["modes"]["native"];
         assert_eq!(
             native["operations"],
-            serde_json::json!(["status", "inspect", "validate", "render"])
+            serde_json::json!(["inspect", "render"])
         );
         assert_eq!(native["writeOperationsModelVisible"], false);
         let script = &capability["modes"]["script"];
@@ -1436,6 +1466,33 @@ mod tests {
             ])
         );
         assert_eq!(editor_contract["transaction"]["candidate"], "hostPrivate");
+        assert_eq!(editor_contract["fixedWrapper"]["candidateReopen"], false);
+        assert_eq!(editor_contract["fixedWrapper"]["temporarySave"], false);
+        assert_eq!(
+            editor_contract["fixedWrapper"]["candidateValidationOwner"],
+            "hostPinnedOfficeCliSchemaGate"
+        );
+        assert_eq!(
+            editor_contract["fixedWrapper"]["scriptOutputWrite"],
+            "directToHostPrivateCandidate"
+        );
+        assert_eq!(
+            editor_contract["transaction"]["packageValidation"]["engine"],
+            "pinnedOfficeCli"
+        );
+        assert_eq!(
+            editor_contract["transaction"]["packageValidation"]["failureDiagnostics"]
+                ["providerStableFields"],
+            serde_json::json!([
+                "type",
+                "description",
+                "path",
+                "part",
+                "code",
+                "error",
+                "message"
+            ])
+        );
         assert_eq!(editor_contract["transaction"]["publication"], "atomic");
         assert_eq!(
             editor_contract["transaction"]["failureBeforePublish"],
@@ -1492,7 +1549,7 @@ mod tests {
             "executes normal Python against the frozen source snapshot",
             "Never convert it into an AST, JSON, or artificial operation DSL",
             "automatic syntax preflight",
-            "wait on that same command session",
+            "wait on\nthat same command session",
             "never use recursive deletion",
         ] {
             assert!(
@@ -1506,6 +1563,7 @@ mod tests {
             "patch only `edit_workbook`",
             "The edit region is normal Python",
             "private staging",
+            "pinned `openpyxl.load_workbook(data_only=False)`",
             "publishes atomically",
             "not a claim that unrestricted Python is\na separate cross-platform OS sandbox",
         ] {
@@ -1520,7 +1578,8 @@ mod tests {
             "helper functions, loops, conditions, comprehensions",
             "existing\n`run_command` permission and approval boundary",
             "redirects the intended output to private\nstaging",
-            "does not pretend unrestricted Python is a separate cross-platform OS sandbox",
+            "does not pretend unrestricted Python is a separate",
+            "cross-platform OS sandbox",
             "Stop rather than silently degrade",
         ] {
             assert!(
@@ -1549,8 +1608,7 @@ mod tests {
             "data_only=False",
             "keep_links=True",
             "rich_text=True",
-            "tempfile.mkstemp(",
-            "os.replace(temporary, output)",
+            "workbook.save(output)",
         ] {
             assert!(editor.contains(required), "Editor is missing `{required}`");
         }
@@ -1561,10 +1619,14 @@ mod tests {
             );
         }
 
-        assert_eq!(capability["contractVersion"], 10);
+        assert!(!editor.contains("verified = load_workbook"));
+        assert!(!editor.contains("tempfile"));
+        assert!(!editor.contains("os.replace"));
+
+        assert_eq!(capability["contractVersion"], 11);
         assert_eq!(
             capability["modes"]["native"]["operations"],
-            serde_json::json!(["status", "inspect", "validate", "render"])
+            serde_json::json!(["inspect", "render"])
         );
         assert_eq!(
             capability["modes"]["native"]["writeOperationsModelVisible"],
@@ -1577,6 +1639,7 @@ mod tests {
         assert_eq!(script["routes"]["create"], "builder");
         assert_eq!(script["routes"]["editExisting"], "editor");
         assert_eq!(script["routes"]["nativeWrite"], "forbidden");
+        assert_eq!(script["routes"]["inspectRender"], "native");
         assert_eq!(
             script["runtimeProfileBinding"],
             "host_from_materialized_script_receipt"
@@ -1590,6 +1653,10 @@ mod tests {
             script["transaction"]["candidateOutput"],
             "hostPrivateStaging"
         );
+        assert_eq!(
+            script["transaction"]["scriptOutputWrite"],
+            "directToHostPrivateCandidate"
+        );
         assert_eq!(script["transaction"]["publish"], "atomic");
         assert_eq!(
             script["transaction"]["failureBeforePublish"],
@@ -1600,6 +1667,29 @@ mod tests {
             "outsideOfficePublicationNotTransactional"
         );
         assert_eq!(script["transaction"]["crossPlatformOsSandboxClaim"], false);
+        assert_eq!(
+            script["transaction"]["validation"]["engine"],
+            "pinnedOpenpyxl"
+        );
+        assert_eq!(
+            script["transaction"]["validation"]["operation"],
+            "load_workbook"
+        );
+        assert_eq!(
+            script["transaction"]["validation"]["arguments"]["data_only"],
+            false
+        );
+        assert_eq!(
+            script["entrypoints"][0]["dependencies"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            script["entrypoints"][0]["dependencies"][0]["name"],
+            "openpyxl"
+        );
 
         let service = SkillsService::new().with_bundled_source().unwrap();
         let descriptor = service

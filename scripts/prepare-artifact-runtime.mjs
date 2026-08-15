@@ -390,8 +390,8 @@ export function validateArtifactRuntimeManifest(value) {
   if (manifest.providerId !== 'mycopilot.artifact-runtime') {
     throw new Error('manifest.providerId must be mycopilot.artifact-runtime')
   }
-  if (manifest.bundleVersion !== '2026.08.2') {
-    throw new Error('artifact runtime bundle must remain pinned to 2026.08.2')
+  if (manifest.bundleVersion !== '2026.08.3') {
+    throw new Error('artifact runtime bundle must remain pinned to 2026.08.3')
   }
   const buildInputs = validateBuildInputs(manifest.buildInputs)
 

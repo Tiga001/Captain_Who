@@ -1,11 +1,11 @@
 {
   "schemaVersion": 4,
   "providerId": "mycopilot.artifact-runtime",
-  "bundleVersion": "2026.08.2",
+  "bundleVersion": "2026.08.3",
   "buildInputs": {
     "builder": {
       "path": "scripts/prepare-artifact-runtime.mjs",
-      "sha256": "750b94a603f1f6b349722c698d3db997919e1a9dfe760b3e05795ef737a8c600"
+      "sha256": "2f8bcf9573cd5dc48d6eef313b33bfe64da959c5c086ddb8ad6ca37fa0fc0740"
     },
     "nodeBootstrap": {
       "path": "resources/artifact-runtime/node-bootstrap.mjs",

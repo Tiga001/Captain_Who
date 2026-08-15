@@ -407,8 +407,8 @@ impl OfficeTool {
 
     fn description(&self) -> &'static str {
         match self.document_kind {
-            OfficeDocumentKind::Document => "Inspect, validate, and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
-            OfficeDocumentKind::Spreadsheet => "Inspect, validate, and render Excel-compatible .xlsx workbooks with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
+            OfficeDocumentKind::Document => "Inspect and render Word-compatible .docx documents with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
+            OfficeDocumentKind::Spreadsheet => "Inspect and render Excel-compatible .xlsx workbooks with a flat provider-neutral semantic request. This model-facing tool is intentionally read-only; create and edit files with the bundled managed Python Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, validation/status calls, or retired write operations.",
             OfficeDocumentKind::Presentation => "Inspect, validate, and render PowerPoint-compatible .pptx presentations with a flat provider-neutral semantic request. This model-facing tool is intentionally read/verification-only; create and edit files with the bundled managed MJS Builder or Editor. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].readPath; pass it as read_image.path and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, arbitrary property maps, or retired write operations.",
         }
     }
@@ -1574,19 +1574,21 @@ fn parse_args_with_scope(
         .get("operation")
         .and_then(Value::as_str)
         .ok_or_else(|| AgentError::new(format!("{tool_name}.operation must be a string.")))?;
-    if scope == OfficeSemanticParseScope::ModelVisible
-        && !matches!(operation, "status" | "inspect" | "validate" | "render")
+    let document_kind = document_kind_for_tool_name(tool_name)?;
+    let canonical_operations = semantic_operation_names(document_kind);
+    if scope == OfficeSemanticParseScope::ModelVisible && !canonical_operations.contains(&operation)
     {
+        let advertised_operations = canonical_operations.join(", ");
         return Err(AgentError::structured(
-            "office.model_write_removed",
+            "office.model_operation_removed",
             format!(
-                "{tool_name}.{operation} is not model-visible; create or edit Office files with the activated Skill's managed Builder or Editor."
+                "{tool_name}.{operation} is not model-visible. Advertised operations: {advertised_operations}."
             ),
             json!({
                 "type": "office_semantic_request",
-                "code": "modelWriteRemoved",
-                "recovery": "useManagedScript",
-                "canonicalOperations": ["status", "inspect", "validate", "render"],
+                "code": "modelOperationRemoved",
+                "recovery": "useAdvertisedOperation",
+                "canonicalOperations": canonical_operations,
             }),
         ));
     }
@@ -1636,7 +1638,6 @@ fn parse_args_with_scope(
         ));
     }
     let reason = reason.to_string();
-    let document_kind = document_kind_for_tool_name(tool_name)?;
     let mut semantic_value = value;
     semantic_value
         .as_object_mut()
@@ -1917,8 +1918,12 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
 }
 
 fn semantic_operation_names(document_kind: OfficeDocumentKind) -> Vec<&'static str> {
-    let _ = document_kind;
-    vec!["status", "inspect", "validate", "render"]
+    match document_kind {
+        OfficeDocumentKind::Document | OfficeDocumentKind::Spreadsheet => {
+            vec!["inspect", "render"]
+        }
+        OfficeDocumentKind::Presentation => vec!["status", "inspect", "validate", "render"],
+    }
 }
 
 fn schema_properties<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
@@ -2060,6 +2065,13 @@ mod tests {
                 "cell": "A1",
                 "value": "Budget"
             }),
+            "render" => json!({
+                "operation": "render",
+                "filePath": "budget.xlsx",
+                "sheetName": "Sheet1",
+                "range": "A1:E8",
+                "outputPath": "preview.png"
+            }),
             other => json!({ "operation": other, "filePath": "budget.xlsx" }),
         };
         if let Some(reason) = reason {
@@ -2073,8 +2085,8 @@ mod tests {
     }
 
     #[test]
-    fn office_reason_is_required_and_bounded_for_read_and_status_calls() {
-        for operation in ["status", "get"] {
+    fn office_reason_is_required_and_bounded_for_model_visible_read_calls() {
+        for operation in ["get", "render"] {
             for (reason, expected_code) in [
                 (None, "office.reason_required"),
                 (Some(json!("   ")), "office.reason_required"),
@@ -2103,7 +2115,7 @@ mod tests {
     fn office_reason_accepts_240_unicode_characters_and_normalizes_whitespace() {
         let bounded = "界".repeat(AGENT_OFFICE_REASON_MAX_CHARS);
         let parsed = parse_args(
-            office_args("status", Some(json!(format!("  {bounded}  ")))),
+            office_args("get", Some(json!(format!("  {bounded}  ")))),
             "office_spreadsheet",
         )
         .expect("a normalized 240-character reason is valid");
@@ -2127,7 +2139,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_raw_help_is_rejected_with_managed_script_recovery() {
+    fn retired_raw_help_is_rejected_with_advertised_operation_recovery() {
         let error = parse_args(
             json!({
             "operation": "help",
@@ -2138,40 +2150,36 @@ mod tests {
             "office_document",
         )
         .expect_err("raw provider help is not part of the semantic model surface");
-        assert_eq!(error.code(), Some("office.model_write_removed"));
+        assert_eq!(error.code(), Some("office.model_operation_removed"));
         assert_eq!(
             error.details().expect("structured semantic error")["recovery"],
-            "useManagedScript"
+            "useAdvertisedOperation"
         );
     }
 
     #[test]
-    fn common_semantic_reads_do_not_require_approval() {
+    fn model_visible_word_inspect_is_read_only_and_render_keeps_its_output_approval() {
         let tool = OfficeTool::new(
             OfficeDocumentKind::Document,
             Arc::new(PreparingOfficeEngine),
         );
-        for call in [
-            json!({
-                "operation": "status",
-                "reason": "检查文档引擎状态"
-            }),
-            json!({
-                "operation": "inspect",
-                "filePath": "document.docx",
-                "reason": "查看文档结构"
-            }),
-            json!({
-                "operation": "validate",
-                "filePath": "document.docx",
-                "reason": "校验文档结构"
-            }),
-        ] {
-            assert!(
-                !tool.requires_approval_for_call(&call),
-                "{call} must remain read-only"
-            );
-        }
+        let inspect = json!({
+            "operation": "inspect",
+            "filePath": "document.docx",
+            "reason": "查看文档结构"
+        });
+        assert!(!tool.requires_approval_for_call(&inspect));
+
+        let render = json!({
+            "operation": "render",
+            "filePath": "document.docx",
+            "outputPath": "preview.png",
+            "reason": "渲染文档"
+        });
+        assert!(
+            tool.requires_approval_for_call(&render),
+            "render still publishes an output image and keeps its existing approval policy"
+        );
     }
 
     #[test]
@@ -2248,14 +2256,17 @@ mod tests {
             Arc::new(PreparingOfficeEngine),
         );
 
-        for operation in ["status", "inspect"] {
+        for operation in ["inspect", "render"] {
             let first = office_args(operation, Some(json!("Inspect the workbook")));
             let second = office_args(operation, Some(json!("检查工作簿")));
             assert_eq!(
                 tool.requires_approval_for_call(&first),
                 tool.requires_approval_for_call(&second)
             );
-            assert!(!tool.requires_approval_for_call(&first));
+            assert_eq!(
+                tool.requires_approval_for_call(&first),
+                operation == "render"
+            );
         }
     }
 
@@ -2277,9 +2288,17 @@ mod tests {
             assert_eq!(schema["type"], "object");
             assert_eq!(schema["additionalProperties"], false);
             assert_eq!(schema["required"], json!(["operation", "reason"]));
+            let expected_operations = match kind {
+                OfficeDocumentKind::Document | OfficeDocumentKind::Spreadsheet => {
+                    json!(["inspect", "render"])
+                }
+                OfficeDocumentKind::Presentation => {
+                    json!(["status", "inspect", "validate", "render"])
+                }
+            };
             assert_eq!(
                 schema["properties"]["operation"]["enum"],
-                json!(["status", "inspect", "validate", "render"])
+                expected_operations
             );
             for field in ["operation", "reason", "filePath", "outputPath", "timeoutMs"] {
                 assert!(schema["properties"].get(field).is_some(), "missing {field}");
@@ -2346,17 +2365,8 @@ mod tests {
                 "depth": 2,
                 "reason": "Read the workbook range"
             }),
-            json!({
-                "operation": "validate",
-                "filePath": "budget.xlsx",
-                "reason": "Validate the workbook"
-            }),
         ];
-        let expected = [
-            OfficeOperation::View,
-            OfficeOperation::Get,
-            OfficeOperation::Validate,
-        ];
+        let expected = [OfficeOperation::View, OfficeOperation::Get];
 
         for (call, expected) in calls.into_iter().zip(expected) {
             let request = parse_args(call, "office_spreadsheet")
@@ -2366,10 +2376,37 @@ mod tests {
             assert_eq!(request.operation, expected);
             assert_eq!(request.typed_parameters().operation(), expected);
         }
+
+        let status = parse_args(
+            json!({
+                "operation": "status",
+                "reason": "Check presentation tools"
+            }),
+            "office_presentation",
+        )
+        .expect("presentation status remains model-visible");
+        assert!(status.is_status());
+
+        let validation = parse_args(
+            json!({
+                "operation": "validate",
+                "filePath": "deck.pptx",
+                "reason": "Validate the presentation"
+            }),
+            "office_presentation",
+        )
+        .expect("presentation validation remains model-visible")
+        .into_request()
+        .expect("presentation validation compiles");
+        assert_eq!(validation.operation, OfficeOperation::Validate);
+        assert_eq!(
+            validation.typed_parameters().operation(),
+            OfficeOperation::Validate
+        );
     }
 
     #[test]
-    fn retired_model_write_operations_fail_closed_with_managed_script_recovery() {
+    fn retired_model_write_operations_fail_closed_with_advertised_operation_recovery() {
         for (tool_name, operations) in [
             (
                 "office_document",
@@ -2419,6 +2456,13 @@ mod tests {
                 ][..],
             ),
         ] {
+            let canonical_operations = match tool_name {
+                "office_document" | "office_spreadsheet" => json!(["inspect", "render"]),
+                "office_presentation" => {
+                    json!(["status", "inspect", "validate", "render"])
+                }
+                _ => unreachable!(),
+            };
             for operation in operations {
                 let error = parse_args(
                     json!({
@@ -2429,14 +2473,54 @@ mod tests {
                     tool_name,
                 )
                 .expect_err("a retired model write must fail before semantic parsing");
-                assert_eq!(error.code(), Some("office.model_write_removed"));
+                assert_eq!(error.code(), Some("office.model_operation_removed"));
                 let details = error.details().expect("structured migration guidance");
-                assert_eq!(details["code"], "modelWriteRemoved");
-                assert_eq!(details["recovery"], "useManagedScript");
-                assert_eq!(
-                    details["canonicalOperations"],
-                    json!(["status", "inspect", "validate", "render"])
+                assert_eq!(details["code"], "modelOperationRemoved");
+                assert_eq!(details["recovery"], "useAdvertisedOperation");
+                assert_eq!(details["canonicalOperations"], canonical_operations);
+            }
+        }
+    }
+
+    #[test]
+    fn word_and_excel_hide_status_and_validate_without_breaking_frozen_compatibility() {
+        for (tool_name, file_path) in [
+            ("office_document", "document.docx"),
+            ("office_spreadsheet", "workbook.xlsx"),
+        ] {
+            for operation in ["status", "validate"] {
+                let semantic_args = if operation == "status" {
+                    json!({
+                        "operation": operation,
+                        "reason": "Replay the historical read operation"
+                    })
+                } else {
+                    json!({
+                        "operation": operation,
+                        "filePath": file_path,
+                        "reason": "Replay the historical read operation"
+                    })
+                };
+
+                let error = parse_args(semantic_args.clone(), tool_name)
+                    .expect_err("new Word and Excel calls expose only inspect and render");
+                assert_eq!(error.code(), Some("office.model_operation_removed"));
+                assert!(
+                    error.to_string().contains("inspect, render"),
+                    "the recovery message must enumerate the actual advertised operations"
                 );
+                let details = error.details().expect("structured model surface error");
+                assert_eq!(details["code"], "modelOperationRemoved");
+                assert_eq!(details["recovery"], "useAdvertisedOperation");
+                assert_eq!(details["canonicalOperations"], json!(["inspect", "render"]));
+
+                parse_args_with_scope(
+                    semantic_args,
+                    tool_name,
+                    |_| Err(AgentError::new("this fixture has no file input")),
+                    OfficeSemanticParseScope::FrozenApprovedSnapshot,
+                )
+                .expect("historical frozen status/validate grammar must remain restart-safe");
             }
         }
     }
@@ -2480,7 +2564,7 @@ mod tests {
             .expect("an exact historical approved snapshot must remain restart-safe");
         let error = parse_args(semantic_args, "office_spreadsheet")
             .expect_err("the same write must remain unavailable to a new model call");
-        assert_eq!(error.code(), Some("office.model_write_removed"));
+        assert_eq!(error.code(), Some("office.model_operation_removed"));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use super::types::{
     OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
     OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
+use crate::artifact_runtime::{ArtifactRuntimeInvocation, ArtifactRuntimeKind};
 use crate::command::{
     configure_command_process_group, join_process_output_capture, spawn_process_output_capture,
     terminate_command_process_group, try_wait_command_process_group, ProcessOutputCaptureBudget,
@@ -95,6 +96,10 @@ impl OfficeManagedScriptStaging {
 
     pub(crate) fn private_directory(&self) -> &Path {
         self.staging.directory()
+    }
+
+    pub(crate) fn document_kind(&self) -> OfficeDocumentKind {
+        self.binding.document_kind
     }
 }
 
@@ -856,14 +861,14 @@ pub(super) fn run_office_presentation_edit(
 /// provenance-bound Python/Node Office Skill script. The script process has already terminated;
 /// this function is the only path from its private candidate to the approved destination.
 pub(super) fn run_managed_script_output_commit(
-    engine: &OfficeCliEngine,
+    engine: Option<&OfficeCliEngine>,
     context: &OfficeExecutionContext,
     staging: &mut OfficeManagedScriptStaging,
+    managed_python: Option<&ArtifactRuntimeInvocation>,
     cancellation: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<OfficeManagedScriptOutputResult, OfficeEngineError> {
     validate_platform()?;
-    engine.verify_engine_revision()?;
     let started = Instant::now();
     if cancellation_requested(&cancellation, action_cancel_flag.as_ref()) {
         return Ok(OfficeManagedScriptOutputResult {
@@ -885,25 +890,60 @@ pub(super) fn run_managed_script_output_commit(
         return Ok(managed_script_output_error(started, error));
     }
 
-    let candidate_name = staging
-        .staging
-        .path()
-        .file_name()
-        .ok_or_else(|| invalid_output("Managed Office script candidate has no file name."))?
-        .to_string_lossy()
-        .into_owned();
     let timeout = Duration::from_millis(DEFAULT_OFFICE_TIMEOUT_MS);
-    let output = run_process(
-        engine.executable_path(),
-        Some(staging.staging.directory()),
-        &["validate".to_string(), candidate_name, "--json".to_string()],
-        timeout,
-        &cancellation,
-        action_cancel_flag.as_ref(),
-        None,
-    )?;
-    let (process_error_code, process_error) = execution_error(&output);
-    let semantic_success = strict_validation_succeeded(&output.stdout);
+    let (output, process_error_code, process_error, semantic_success) = match staging
+        .binding
+        .document_kind
+    {
+        OfficeDocumentKind::Spreadsheet => {
+            let output = run_managed_openpyxl_reopen(
+                managed_python.ok_or_else(|| {
+                    OfficeEngineError::new(
+                        OfficeEngineErrorCode::PreconditionFailed,
+                        OfficeEngineRecovery::Retry,
+                        "Managed spreadsheet publication requires the frozen Python runtime.",
+                    )
+                })?,
+                staging.staging.path(),
+                staging.staging.directory(),
+                timeout,
+                &cancellation,
+                action_cancel_flag.as_ref(),
+            )?;
+            let (error_code, error) = managed_openpyxl_execution_error(&output);
+            let success = error_code.is_none();
+            (output, error_code, error, success)
+        }
+        OfficeDocumentKind::Document | OfficeDocumentKind::Presentation => {
+            let engine = engine.ok_or_else(|| {
+                OfficeEngineError::new(
+                    OfficeEngineErrorCode::Unavailable,
+                    OfficeEngineRecovery::InstallComponent,
+                    "OfficeCLI is required to validate Word and PowerPoint output.",
+                )
+            })?;
+            engine.verify_engine_revision()?;
+            let candidate_name = staging
+                .staging
+                .path()
+                .file_name()
+                .ok_or_else(|| invalid_output("Managed Office script candidate has no file name."))?
+                .to_string_lossy()
+                .into_owned();
+            let output = run_process(
+                engine.executable_path(),
+                Some(staging.staging.directory()),
+                &["validate".to_string(), candidate_name, "--json".to_string()],
+                timeout,
+                &cancellation,
+                action_cancel_flag.as_ref(),
+                None,
+            )?;
+            let (error_code, error) = execution_error(&output);
+            let success = strict_validation_succeeded(&output.stdout);
+            (output, error_code, error, success)
+        }
+    };
     let mut result = OfficeManagedScriptOutputResult {
         exit_code: output.status.code(),
         stdout: output.stdout,
@@ -971,6 +1011,95 @@ pub(super) fn run_managed_script_output_commit(
     }
     redact_managed_script_paths(&mut result, staging);
     Ok(result)
+}
+
+const OPENPYXL_REOPEN_CHECK: &str = r#"import sys
+from openpyxl import load_workbook
+workbook = load_workbook(sys.argv[1], data_only=False, read_only=False)
+if not workbook.sheetnames:
+    raise ValueError("workbook has no worksheets")
+workbook.close()
+"#;
+
+fn run_managed_openpyxl_reopen(
+    invocation: &ArtifactRuntimeInvocation,
+    candidate: &Path,
+    cwd: &Path,
+    timeout: Duration,
+    cancellation: &AgentCancellationToken,
+    action_cancel_flag: Option<&Arc<AtomicBool>>,
+) -> Result<ProcessOutput, OfficeEngineError> {
+    if invocation.kind() != ArtifactRuntimeKind::Python {
+        return Err(OfficeEngineError::new(
+            OfficeEngineErrorCode::PreconditionFailed,
+            OfficeEngineRecovery::Retry,
+            "Managed spreadsheet publication received a non-Python runtime.",
+        ));
+    }
+    let mut arguments = invocation
+        .arguments_prefix()
+        .iter()
+        .map(|argument| {
+            argument.to_str().map(str::to_string).ok_or_else(|| {
+                OfficeEngineError::new(
+                    OfficeEngineErrorCode::PreconditionFailed,
+                    OfficeEngineRecovery::Retry,
+                    "Managed Python runtime arguments must be UTF-8.",
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    arguments.extend([
+        "-c".to_string(),
+        OPENPYXL_REOPEN_CHECK.to_string(),
+        candidate.to_string_lossy().into_owned(),
+    ]);
+    run_process_with_options(
+        invocation.executable(),
+        Some(cwd),
+        &arguments,
+        timeout,
+        cancellation,
+        action_cancel_flag,
+        ProcessRunOptions {
+            browser_policy: None,
+            environment: Some(invocation.environment()),
+            process_name: "managed openpyxl validation",
+        },
+    )
+}
+
+fn managed_openpyxl_execution_error(output: &ProcessOutput) -> (Option<String>, Option<String>) {
+    if output.cancelled {
+        return (
+            Some("office.cancelled".to_string()),
+            Some("Managed openpyxl validation was cancelled.".to_string()),
+        );
+    }
+    if output.timed_out {
+        return (
+            Some("office.timeout".to_string()),
+            Some("Managed openpyxl validation exceeded its timeout.".to_string()),
+        );
+    }
+    match output.status.code() {
+        Some(0) => (None, None),
+        Some(_) => (
+            Some(
+                OfficeEngineErrorCode::InvalidOutput
+                    .stable_name()
+                    .to_string(),
+            ),
+            Some(
+                "Spreadsheet output could not be reopened by the managed openpyxl runtime."
+                    .to_string(),
+            ),
+        ),
+        None => (
+            Some("office.terminated_without_exit_code".to_string()),
+            Some("Managed openpyxl validation terminated without an exit code.".to_string()),
+        ),
+    }
 }
 
 fn strict_validation_succeeded(stdout: &str) -> bool {
@@ -2164,7 +2293,7 @@ fn validate_platform() -> Result<(), OfficeEngineError> {
         Err(OfficeEngineError::new(
             OfficeEngineErrorCode::UnsupportedOperation,
             OfficeEngineRecovery::ChangeRequest,
-            "Managed OfficeCLI execution currently requires Unix process-group isolation; Windows remains disabled until Job Object containment is available.",
+            "Managed Office process execution currently requires Unix process-group isolation; Windows remains disabled until Job Object containment is available.",
         ))
     }
 }

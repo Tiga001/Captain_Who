@@ -2,6 +2,7 @@ use super::discovery::discover_with_test_path;
 use super::execution::{compile_office_arguments, install_commit_test_hook, CommitTestPhase};
 use super::types::office_agent_input_placeholder;
 use super::*;
+use crate::artifact_runtime::{ArtifactRuntimeInvocation, ArtifactRuntimeKind};
 use crate::file_input::{
     prepare_agent_file_input_bindings, read_verified_agent_file_input,
     AgentFileInputExecutionContext,
@@ -227,6 +228,38 @@ fn write_docx(path: &Path, text: &str) {
     archive.start_file("word/document.xml", options).unwrap();
     archive.write_all(text.as_bytes()).unwrap();
     archive.finish().unwrap();
+}
+
+fn write_xlsx_package(path: &Path) {
+    let file = fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("[Content_Types].xml", options).unwrap();
+    archive
+        .write_all(
+            b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+        )
+        .unwrap();
+    archive.start_file("xl/workbook.xml", options).unwrap();
+    archive
+        .write_all(
+            b"<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>",
+        )
+        .unwrap();
+    archive.finish().unwrap();
+}
+
+fn fake_python_invocation(executable: PathBuf) -> ArtifactRuntimeInvocation {
+    ArtifactRuntimeInvocation::new(
+        "test-bundle".to_string(),
+        "test-revision".to_string(),
+        "test-fingerprint".to_string(),
+        ArtifactRuntimeKind::Python,
+        "3.12".to_string(),
+        executable,
+        Vec::new(),
+        BTreeMap::new(),
+    )
 }
 
 fn write_png(path: &Path, width: u32, height: u32) {
@@ -1327,6 +1360,7 @@ exit 64
         .commit_managed_script_output(
             &invalid_context,
             &mut invalid_staging,
+            None,
             AgentCancellationToken::new(),
             None,
         )
@@ -1363,6 +1397,7 @@ exit 64
         .commit_managed_script_output(
             &cancelled_context,
             &mut cancelled_staging,
+            None,
             AgentCancellationToken::new(),
             Some(cancel_flag),
         )
@@ -1398,6 +1433,7 @@ exit 64
         .commit_managed_script_output(
             &conflicted_context,
             &mut conflicted_staging,
+            None,
             AgentCancellationToken::new(),
             None,
         )
@@ -1407,6 +1443,275 @@ exit 64
         Some("office.precondition_failed")
     );
     assert_eq!(fs::read(target).unwrap(), concurrent_bytes);
+}
+
+#[test]
+fn document_managed_script_keeps_officecli_schema_diagnostics() {
+    let fixture = Fixture::new(
+        r#"if [ "$1" = "--version" ]; then printf 'OfficeCLI 1.2.3\n'; exit 0; fi
+if [ "$1" = "validate" ]; then
+  printf '{"success":false,"issues":[{"type":"schema","description":"Duplicate child element.","path":"/w:tbl/w:tblPr/w:tblLayout[2]","part":"word/document.xml"}]}\n'
+  exit 7
+fi
+exit 64
+"#,
+    );
+    let context = workspace_context(fixture.workspace.path());
+    let binding = prepare_managed_script_binding(
+        &context,
+        OfficeDocumentKind::Document,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/documents/builder.py".to_string(),
+        None,
+        "rejected.docx",
+    )
+    .unwrap();
+    let mut staging = prepare_managed_script_staging(&context, &binding).unwrap();
+    write_docx(staging.candidate_path(), "candidate");
+
+    let result = fixture
+        .engine
+        .commit_managed_script_output(
+            &context,
+            &mut staging,
+            None,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(result.error_code.as_deref(), Some("office.nonzero_exit"));
+    for diagnostic in [
+        "schema",
+        "Duplicate child element.",
+        "/w:tbl/w:tblPr/w:tblLayout[2]",
+        "word/document.xml",
+    ] {
+        assert!(result.stdout.contains(diagnostic));
+    }
+    assert!(!fixture.workspace.path().join("rejected.docx").exists());
+}
+
+#[test]
+fn spreadsheet_managed_script_uses_only_frozen_python_reopen_gate() {
+    let office_evidence = tempfile::tempdir().unwrap();
+    let office_marker_path = office_evidence.path().join("officecli-called");
+    let fixture = Fixture::new(&format!(
+        r#"if [ "$1" = "--version" ]; then printf 'OfficeCLI 1.2.3\n'; exit 0; fi
+if [ "$1" = "validate" ]; then printf called > '{}'; exit 91; fi
+exit 64
+"#,
+        office_marker_path.display()
+    ));
+    let python_dir = tempfile::tempdir().unwrap();
+    let python_marker = python_dir.path().join("python-args.txt");
+    let python = python_dir.path().join("python3");
+    write_executable(
+        &python,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 0\n",
+            python_marker.display()
+        ),
+    );
+    let invocation = fake_python_invocation(python);
+    let context = workspace_context(fixture.workspace.path());
+    let binding = prepare_managed_script_binding(
+        &context,
+        OfficeDocumentKind::Spreadsheet,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/spreadsheets/builder.py".to_string(),
+        None,
+        "created.xlsx",
+    )
+    .unwrap();
+    let mut staging = prepare_managed_script_staging(&context, &binding).unwrap();
+    write_xlsx_package(staging.candidate_path());
+
+    let result = fixture
+        .engine
+        .commit_managed_script_output(
+            &context,
+            &mut staging,
+            Some(&invocation),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(result.exit_code, Some(0), "{:?}", result.error);
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert!(fixture.workspace.path().join("created.xlsx").is_file());
+    assert!(
+        !office_marker_path.exists(),
+        "OfficeCLI validate must not run"
+    );
+    let python_arguments = fs::read_to_string(python_marker).unwrap();
+    assert!(python_arguments.contains("openpyxl"));
+    assert!(python_arguments.contains("created.xlsx"));
+}
+
+#[test]
+fn spreadsheet_openpyxl_reopen_failure_never_publishes() {
+    let fixture = Fixture::new(
+        "if [ \"$1\" = \"--version\" ]; then printf 'OfficeCLI 1.2.3\\n'; exit 0; fi\nexit 88\n",
+    );
+    let python_dir = tempfile::tempdir().unwrap();
+    let python = python_dir.path().join("python3");
+    write_executable(
+        &python,
+        "#!/bin/sh\nprintf 'openpyxl rejected workbook' >&2\nexit 7\n",
+    );
+    let invocation = fake_python_invocation(python);
+    let context = workspace_context(fixture.workspace.path());
+    let binding = prepare_managed_script_binding(
+        &context,
+        OfficeDocumentKind::Spreadsheet,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/spreadsheets/builder.py".to_string(),
+        None,
+        "rejected.xlsx",
+    )
+    .unwrap();
+    let mut staging = prepare_managed_script_staging(&context, &binding).unwrap();
+    write_xlsx_package(staging.candidate_path());
+
+    let result = fixture
+        .engine
+        .commit_managed_script_output(
+            &context,
+            &mut staging,
+            Some(&invocation),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(result.error_code.as_deref(), Some("office.invalid_output"));
+    assert!(result.stderr.contains("openpyxl rejected workbook"));
+    assert!(!fixture.workspace.path().join("rejected.xlsx").exists());
+}
+
+#[test]
+fn spreadsheet_publication_does_not_require_an_available_officecli() {
+    let workspace = tempfile::tempdir().unwrap();
+    let context = workspace_context(workspace.path());
+    let binding = prepare_managed_script_binding(
+        &context,
+        OfficeDocumentKind::Spreadsheet,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/spreadsheets/builder.py".to_string(),
+        None,
+        "created.xlsx",
+    )
+    .unwrap();
+    let mut staging = prepare_managed_script_staging(&context, &binding).unwrap();
+    write_xlsx_package(staging.candidate_path());
+    let python_dir = tempfile::tempdir().unwrap();
+    let python = python_dir.path().join("python3");
+    write_executable(&python, "#!/bin/sh\nexit 0\n");
+    let invocation = fake_python_invocation(python);
+    let unavailable = UnavailableOfficeEngine::new(OfficeEngineError::new(
+        OfficeEngineErrorCode::Unavailable,
+        OfficeEngineRecovery::InstallComponent,
+        "OfficeCLI is absent",
+    ));
+
+    let result = unavailable
+        .commit_managed_script_output(
+            &context,
+            &mut staging,
+            Some(&invocation),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    assert!(result.error_code.is_none());
+    assert!(workspace.path().join("created.xlsx").is_file());
+}
+
+#[test]
+#[ignore = "requires MYCOPILOT_OFFICE_TEST_PYTHON with openpyxl"]
+fn real_openpyxl_workbook_passes_host_reopen_gate_without_officecli_validate() {
+    let python = std::env::var_os("MYCOPILOT_OFFICE_TEST_PYTHON")
+        .map(PathBuf::from)
+        .expect("set MYCOPILOT_OFFICE_TEST_PYTHON to managed Python with openpyxl");
+    let office_evidence = tempfile::tempdir().unwrap();
+    let office_marker = office_evidence.path().join("officecli-called");
+    let fixture = Fixture::new(&format!(
+        r#"if [ "$1" = "--version" ]; then printf 'OfficeCLI 1.2.3\n'; exit 0; fi
+if [ "$1" = "validate" ]; then printf called > '{}'; exit 91; fi
+exit 64
+"#,
+        office_marker.display()
+    ));
+    let context = workspace_context(fixture.workspace.path());
+    let binding = prepare_managed_script_binding(
+        &context,
+        OfficeDocumentKind::Spreadsheet,
+        OfficeManagedScriptPurpose::Create,
+        "__mycopilot/managed-office-script/spreadsheets/builder.py".to_string(),
+        None,
+        "real.xlsx",
+    )
+    .unwrap();
+    let mut staging = prepare_managed_script_staging(&context, &binding).unwrap();
+    let created = std::process::Command::new(&python)
+        .args([
+            "-I",
+            "-B",
+            "-c",
+            "from openpyxl import Workbook; import sys; w=Workbook(); w.active['A1']='ok'; w.save(sys.argv[1])",
+        ])
+        .arg(staging.candidate_path())
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let invocation = ArtifactRuntimeInvocation::new(
+        "test-bundle".to_string(),
+        "test-revision".to_string(),
+        "test-fingerprint".to_string(),
+        ArtifactRuntimeKind::Python,
+        "3.12".to_string(),
+        python.clone(),
+        vec![OsString::from("-I"), OsString::from("-B")],
+        BTreeMap::new(),
+    );
+
+    let result = fixture
+        .engine
+        .commit_managed_script_output(
+            &context,
+            &mut staging,
+            Some(&invocation),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(result.exit_code, Some(0), "{:?}", result.error);
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert!(!office_marker.exists(), "OfficeCLI validate must not run");
+    let verified = std::process::Command::new(python)
+        .args([
+            "-I",
+            "-B",
+            "-c",
+            "from openpyxl import load_workbook; import sys; w=load_workbook(sys.argv[1]); assert w.active['A1'].value == 'ok'; w.close()",
+        ])
+        .arg(fixture.workspace.path().join("real.xlsx"))
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
 }
 
 #[test]

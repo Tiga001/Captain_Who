@@ -6,10 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tempfile
 from pathlib import Path
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
@@ -100,20 +99,8 @@ def publish(workbook, output: Path) -> None:
     if output.suffix.lower() != ".xlsx":
         raise ValueError("--output must end in .xlsx")
     output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{output.name}.", suffix=".xlsx", dir=output.parent
-    )
-    os.close(descriptor)
-    temporary = Path(temporary_name)
-    try:
-        workbook.save(temporary)
-        verified = load_workbook(temporary, data_only=False, read_only=False)
-        if not verified.sheetnames:
-            raise RuntimeError("published workbook has no worksheets")
-        verified.close()
-        os.replace(temporary, output)
-    finally:
-        temporary.unlink(missing_ok=True)
+    # The Host rewrites this path to its private candidate and publishes atomically.
+    workbook.save(output)
 
 
 def main() -> None:
