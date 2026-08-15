@@ -23,9 +23,9 @@ use crate::storage::{
     context_compaction_receipt_repository, context_compaction_repository,
     conversation_context_adaptation_repository, conversation_fork_repository,
     conversation_history_archive_repository, conversation_history_repository,
-    conversation_model_context_repository,
-    conversation_trace_repository, conversation_turn_rewrite_repository, file_draft_repository,
-    guidance_repository, image_generation_repository, mcp_approval_envelope_repository,
+    conversation_model_context_repository, conversation_trace_repository,
+    conversation_turn_rewrite_repository, file_draft_repository, guidance_repository,
+    image_generation_repository, mcp_approval_envelope_repository,
     model_request_observation_repository, now_ms, pending_action_repository,
     preferences_repository, project_repository, provider_continuation_repository,
     provider_transition_repository, skill_enablement_repository, storage_error,
@@ -38,9 +38,8 @@ use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionPrefix, ContextCompactionReceipt, ContextCompactionSummary,
     ContextCompactionSummaryDraft, ContextJournalCursor, ConversationModelContextItem,
-    ConversationModelContextLog, ConversationTurnTrace,
-    ConversationTurnTraceItem, ModelRequestObservation, ProviderContinuationVault,
-    WorldStateRecord,
+    ConversationModelContextLog, ConversationTurnTrace, ConversationTurnTraceItem,
+    ModelRequestObservation, ProviderContinuationVault, WorldStateRecord,
 };
 use base64::Engine;
 use rusqlite::{config::DbConfig, OptionalExtension};

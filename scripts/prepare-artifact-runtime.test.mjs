@@ -41,6 +41,12 @@ const requirementsPath = join(
 const builderPath = join(repositoryRoot, 'scripts', 'prepare-artifact-runtime.mjs')
 const bootstrapPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-bootstrap.mjs')
 const loaderPath = join(repositoryRoot, 'resources', 'artifact-runtime', 'node-loader.mjs')
+const presentationSdkPath = join(
+  repositoryRoot,
+  'resources',
+  'artifact-runtime',
+  'presentation-sdk.mjs'
+)
 const pdfCliPath = join(repositoryRoot, 'crates', 'core', 'src', 'command', 'pdf_runtime_cli.py')
 
 async function rawManifest() {
@@ -171,6 +177,12 @@ test('manifest pins runtime assets, PDF tools, and dependency versions for every
   assert.equal(manifest.tools.pdfCli.target, 'runtime/pdf-runtime-cli.py')
   assert.equal(manifest.tools.ripgrep.version, '15.1.0')
   assert.equal(manifest.tools.ripgrep.licenseFiles.length, 3)
+  assert.equal(manifest.node.presentationSdk, 'runtime/presentation-sdk.mjs')
+  assert.equal(
+    manifest.buildInputs.presentationSdk.path,
+    'resources/artifact-runtime/presentation-sdk.mjs'
+  )
+  assert.match(manifest.buildInputs.presentationSdk.sha256, /^(?!0{64}$)[a-f0-9]{64}$/)
   for (const platform of ['darwin', 'linux', 'win32']) {
     for (const arch of ['arm64', 'x64']) {
       const selected = selectArtifactRuntimeAssets(manifest, platform, arch)
@@ -288,6 +300,7 @@ async function managedNodeFixture() {
   await mkdir(runtime, { recursive: true })
   await cp(bootstrapPath, join(runtime, 'node-bootstrap.mjs'))
   await cp(loaderPath, join(runtime, 'node-loader.mjs'))
+  await cp(presentationSdkPath, join(runtime, 'presentation-sdk.mjs'))
   return {
     directory,
     moduleRoot: join(directory, ...manifest.node.packageRoot.split('/')),
@@ -550,6 +563,8 @@ test(
         'dependencies/node/node-package-evidence.json'
       )
     )
+    assert.ok(first.receipt.runtimes.node.identityFiles.includes('runtime/presentation-sdk.mjs'))
+    assert.ok((await stat(join(output, 'runtime', 'presentation-sdk.mjs'))).isFile())
     assert.equal(first.receipt.tools.pdfCli.path, 'runtime/pdf-runtime-cli.py')
     assert.deepEqual(first.receipt.tools.pdfCli.identityFiles, ['runtime/pdf-runtime-cli.py'])
     assert.equal(first.receipt.tools.ripgrep.version, '15.1.0')
@@ -686,6 +701,19 @@ test(
       /not an executable regular file/
     )
     await chmod(preparedRipgrep, 0o755)
+    await prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true })
+
+    const preparedPresentationSdk = join(output, 'runtime', 'presentation-sdk.mjs')
+    const presentationSdkBytes = await readFile(preparedPresentationSdk)
+    await writeFile(
+      preparedPresentationSdk,
+      Buffer.concat([presentationSdkBytes, Buffer.from('\n// tampered editor facade\n')])
+    )
+    await assert.rejects(
+      prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true }),
+      /component files do not match|SHA-256|receipt/
+    )
+    await writeFile(preparedPresentationSdk, presentationSdkBytes)
     await prepareArtifactRuntime({ manifestPath, outputDirectory: output, verifyOnly: true })
 
     await writeFile(preparedRipgrep, '#!/bin/sh\nexit 9\n')

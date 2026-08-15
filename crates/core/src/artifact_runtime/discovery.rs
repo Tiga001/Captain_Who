@@ -1820,6 +1820,7 @@ mod tests {
                 Some(Arc::clone(&provider)),
                 None,
                 None,
+                None,
                 Arc::new(|_| {}),
                 AgentCancellationToken::new(),
                 None,

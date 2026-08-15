@@ -1723,6 +1723,7 @@ impl AgentService {
         let run_cancellation_token = cancellation_token.clone();
         let command_for_error = command.clone();
         let artifact_runtime = self.artifact_runtime.clone();
+        let office_engine = self.office_engine.clone();
         let skill_resources = self
             .restore_skill_resource_session(&record.agent_input)
             .ok()
@@ -1769,6 +1770,7 @@ impl AgentService {
                     "approvalStatus": "approved",
                 }),
                 artifact_runtime,
+                office_engine: Some(office_engine),
                 file_inputs: Some(&file_input_context),
                 notifications: Some(session_notifications),
                 cancellation_token,

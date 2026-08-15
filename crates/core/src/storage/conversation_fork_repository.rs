@@ -308,6 +308,12 @@ pub(crate) fn build_fork_plan_at_point(
             "用户只能从根 Agent Conversation 继续新任务；子 Agent 保持只读。".to_string(),
         ));
     }
+    if chat_repository::get_active_conversation(connection, source_conversation_id)
+        .map_err(database_error)?
+        .is_none()
+    {
+        return Err(ConversationForkError::Other("原任务不存在。".to_string()));
+    }
     let cutoff_at = authoritative_fork_cutoff_at(connection, source_conversation_id, fork_point)?;
 
     let target_root_conversation_id = new_id("conversation");

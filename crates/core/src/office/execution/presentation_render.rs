@@ -574,6 +574,19 @@ fn normalize_slide_target(target: &str) -> Result<String, OfficeEngineError> {
             "Presentation slide relationship target is not a canonical internal package path.",
         ));
     }
+    // OPC relationship targets may be relative to `/ppt/presentation.xml` or package-absolute.
+    // OfficeCLI emits the latter. Accept only the exact `/ppt/` package prefix; every other
+    // absolute form remains closed, and the component walk below still prevents `..` escape.
+    let target = if let Some(package_relative) = target.strip_prefix("/ppt/") {
+        package_relative
+    } else {
+        if Path::new(target).is_absolute() {
+            return Err(invalid_request(
+                "Presentation slide relationship uses an unsupported package-absolute path.",
+            ));
+        }
+        target
+    };
     let mut normalized = PathBuf::from("ppt");
     for component in Path::new(target).components() {
         match component {
@@ -853,6 +866,33 @@ mod tests {
                 height: 900
             }
         );
+    }
+
+    #[test]
+    fn slide_relationship_targets_accept_only_safe_relative_or_ppt_package_absolute_paths() {
+        for target in ["slides/slide1.xml", "/ppt/slides/slide1.xml"] {
+            assert_eq!(
+                normalize_slide_target(target).unwrap(),
+                "ppt/slides/slide1.xml"
+            );
+        }
+        for target in [
+            "/slides/slide1.xml",
+            "/word/slides/slide1.xml",
+            "/ppt/../slides/slide1.xml",
+            "/ppt/slides/../../slide1.xml",
+            "https://example.test/ppt/slides/slide1.xml",
+            "/ppt/slides/slide1.xml?query",
+            "/ppt/slides/slide1.xml#fragment",
+            "/ppt/slides/slide%31.xml",
+            "\\ppt\\slides\\slide1.xml",
+            "/ppt/media/image1.xml",
+        ] {
+            assert!(
+                normalize_slide_target(target).is_err(),
+                "unsafe slide target `{target}` was accepted"
+            );
+        }
     }
 
     #[test]

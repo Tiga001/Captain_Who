@@ -237,7 +237,6 @@ async fn runtime_tool_registry_bridge_manager_stdio_fixture_chain() {
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-mcp-stdio-e2e".to_string()),
         context_compaction_summary: None,
-        goal: None,
         world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,

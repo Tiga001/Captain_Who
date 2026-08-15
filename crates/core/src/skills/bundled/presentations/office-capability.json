@@ -1,5 +1,5 @@
 {
-  "contractVersion": 9,
+  "contractVersion": 10,
   "engine": "officecli",
   "tool": "office_presentation",
   "extensions": [".pptx"],
@@ -63,11 +63,85 @@
     },
     "script": {
       "builderTemplate": "templates/builder.mjs",
+      "editorTemplate": "templates/editor.mjs",
+      "editingReference": "references/editing-existing.md",
+      "routes": {
+        "create": "builder",
+        "editExisting": "editor",
+        "inspectValidateRender": "native"
+      },
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
       "runtimeProfile": "presentations",
-      "runtimeProfileBinding": "host_from_materialized_builder_receipt",
+      "runtimeProfileBinding": "host_from_materialized_script_receipt",
       "outputArgument": "--output",
+      "editor": {
+        "sourceArgument": "--source",
+        "sourceArgumentCardinality": 1,
+        "outputArgument": "--output",
+        "outputArgumentCardinality": 1,
+        "defaultPublishMode": "saveAs",
+        "supportedPublishModes": ["saveAs"],
+        "inPlace": false,
+        "sourceBinding": "inputs.mountPath",
+        "sourceRequired": true,
+        "inspectBeforeEdit": true,
+        "stableInspectedTargetsRequired": true,
+        "positionShape": "taggedIndexAfterOrBefore",
+        "structuralScope": "elementsOnly",
+        "wholeSlideMutations": "nativeThenReinspect",
+        "targetRules": {
+          "elementTarget": "inspectedIdRequired",
+          "copyFrom": "inspectedIdRequired",
+          "positionReference": "inspectedIdRequired",
+          "parent": "slideContainerAllowed",
+          "newParent": "slideContainerAllowed"
+        },
+        "boundedEditRegion": {
+          "begin": "// BEGIN EDIT REGION",
+          "end": "// END EDIT REGION"
+        },
+        "facade": {
+          "specifier": "@mycopilot/presentation-sdk",
+          "apiVersion": 1,
+          "binding": "host",
+          "providerArguments": "forbidden",
+          "realPaths": "forbidden",
+          "rawOoxml": "forbidden",
+          "processLaunch": "forbidden",
+          "network": "forbidden",
+          "operations": [
+            "editPresentation",
+            "input",
+            "output",
+            "set",
+            "replaceText",
+            "add",
+            "remove",
+            "move",
+            "swap",
+            "replaceImage",
+            "updateTableCell",
+            "updateChart"
+          ]
+        },
+        "transaction": {
+          "source": "frozenReadOnly",
+          "candidate": "hostPrivate",
+          "targetSource": "nativeInspect",
+          "targetValidation": "exactStableTargetOnFrozenSource",
+          "planValidation": "host",
+          "packageValidation": "requiredBeforePublish",
+          "publication": "atomic",
+          "failureBeforePublish": "sourceAndDestinationUnchanged"
+        },
+        "completion": {
+          "inspectFinalSlideCount": true,
+          "validate": true,
+          "renderMode": "oneSlidePerRequest",
+          "visualVerdicts": "onePerInspectedFinalSlide"
+        }
+      },
       "entrypoints": [
         {
           "command": "node",

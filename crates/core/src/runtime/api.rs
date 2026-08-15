@@ -780,7 +780,6 @@ pub fn create_conversation_context_state(
         DurableConversationTimeline {
             compaction_summary: input.context_compaction_summary.clone(),
             world_state_records: input.world_state_records.clone(),
-            goal: input.goal.clone(),
             messages: input.messages,
         },
         None,

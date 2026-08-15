@@ -71,10 +71,17 @@ const NODE_BOOTSTRAP_SOURCE = join(
   'node-bootstrap.mjs'
 )
 const NODE_LOADER_SOURCE = join(REPOSITORY_ROOT, 'resources', 'artifact-runtime', 'node-loader.mjs')
+const PRESENTATION_SDK_SOURCE = join(
+  REPOSITORY_ROOT,
+  'resources',
+  'artifact-runtime',
+  'presentation-sdk.mjs'
+)
 const BUILD_INPUT_RELATIVE_PATHS = Object.freeze({
   builder: 'scripts/prepare-artifact-runtime.mjs',
   nodeBootstrap: 'resources/artifact-runtime/node-bootstrap.mjs',
   nodeLoader: 'resources/artifact-runtime/node-loader.mjs',
+  presentationSdk: 'resources/artifact-runtime/presentation-sdk.mjs',
   nodePackageManifest: 'packages/artifact-runtime-node/package.json',
   nodePackageEvidence: 'resources/artifact-runtime-node-package-evidence.json',
   pnpmLockfile: 'pnpm-lock.yaml',
@@ -397,6 +404,7 @@ export function validateArtifactRuntimeManifest(value) {
       'packageRoot',
       'bootstrap',
       'loader',
+      'presentationSdk',
       'assets',
       'dependencies',
       'licenseFile'
@@ -472,6 +480,10 @@ export function validateArtifactRuntimeManifest(value) {
       packageRoot: canonicalRelativePath(node.packageRoot, 'manifest.node.packageRoot'),
       bootstrap: canonicalRelativePath(node.bootstrap, 'manifest.node.bootstrap'),
       loader: canonicalRelativePath(node.loader, 'manifest.node.loader'),
+      presentationSdk: canonicalRelativePath(
+        node.presentationSdk,
+        'manifest.node.presentationSdk'
+      ),
       assets: validateTargetAssets(node.assets, 'manifest.node.assets', { node: true }),
       dependencies: validateDependencies(
         node.dependencies,
@@ -1562,6 +1574,10 @@ async function copyRuntimeSupportFiles(manifestPath, manifest, staging, download
     force: false,
     errorOnExist: true
   })
+  await cp(PRESENTATION_SDK_SOURCE, join(staging, ...manifest.node.presentationSdk.split('/')), {
+    force: false,
+    errorOnExist: true
+  })
   await verifyPinnedLocalFile(
     join(staging, ...manifest.node.bootstrap.split('/')),
     manifest.buildInputs.nodeBootstrap.sha256,
@@ -1571,6 +1587,11 @@ async function copyRuntimeSupportFiles(manifestPath, manifest, staging, download
     join(staging, ...manifest.node.loader.split('/')),
     manifest.buildInputs.nodeLoader.sha256,
     'staged managed Node loader'
+  )
+  await verifyPinnedLocalFile(
+    join(staging, ...manifest.node.presentationSdk.split('/')),
+    manifest.buildInputs.presentationSdk.sha256,
+    'staged Presentation Editor SDK'
   )
   const pdfCliSource = BUILD_INPUT_SOURCE_PATHS.pdfRuntimeCli
   const pdfCliTarget = join(staging, ...manifest.tools.pdfCli.target.split('/'))
@@ -2103,6 +2124,7 @@ function buildRuntimeReceipt(manifest, platform) {
     executable,
     manifest.node.bootstrap,
     manifest.node.loader,
+    manifest.node.presentationSdk,
     NODE_PACKAGE_EVIDENCE_TARGET,
     ...manifest.node.dependencies.map((dependency) => dependency.identityFile)
   ]
@@ -2338,6 +2360,11 @@ async function verifyReceipt(outputDirectory, manifest, platform, arch) {
     join(outputDirectory, ...manifest.node.loader.split('/')),
     manifest.buildInputs.nodeLoader.sha256,
     'published managed Node loader'
+  )
+  await verifyPinnedLocalFile(
+    join(outputDirectory, ...manifest.node.presentationSdk.split('/')),
+    manifest.buildInputs.presentationSdk.sha256,
+    'published Presentation Editor SDK'
   )
   await verifyPinnedLocalFile(
     join(outputDirectory, ...manifest.tools.pdfCli.target.split('/')),

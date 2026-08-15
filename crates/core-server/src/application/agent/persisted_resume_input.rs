@@ -2,13 +2,13 @@ use crate::application::agent_support::serialize_json;
 use mycopilot_core::{
     skills::AgentSkillDiscoverySnapshot, AgentApiStyle, AgentChatInput, AgentPromptPreferences,
     AgentRunCheckpoint, AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentSkillActivation,
-    AnchoredWorldStateRecord, ContextCompactionSummary, ConversationGoal, ModelCapabilities,
-    ProviderProfileConfig, ProviderProtocolKey,
+    AnchoredWorldStateRecord, ContextCompactionSummary, ModelCapabilities, ProviderProfileConfig,
+    ProviderProtocolKey,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 8;
+const PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 9;
 
 fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -56,7 +56,7 @@ pub(super) struct PersistedAgentResumeInput {
     temperature: Option<f32>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     stream: Option<bool>,
-    /// Host-authenticated Run context. Schema v8 explicitly permits collaboration identity here;
+    /// Host-authenticated Run context. The current schema explicitly permits collaboration identity here;
     /// it must exactly match the same frozen identity in `resume_checkpoint.run_context`.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     context: Option<AgentRunContext>,
@@ -69,8 +69,6 @@ pub(super) struct PersistedAgentResumeInput {
     assistant_message_id: Option<String>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     context_compaction_summary: Option<ContextCompactionSummary>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    goal: Option<ConversationGoal>,
     world_state_records: Vec<AnchoredWorldStateRecord>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     skill_activation: Option<AgentSkillActivation>,
@@ -246,7 +244,6 @@ impl PersistedAgentResumeInput {
             resume_checkpoint,
             assistant_message_id: input.assistant_message_id.clone(),
             context_compaction_summary: input.context_compaction_summary.clone(),
-            goal: input.goal.clone(),
             world_state_records: input.world_state_records.clone(),
             skill_activation: input.skill_activation.clone(),
             skill_discovery: input.skill_discovery.clone(),
@@ -369,7 +366,6 @@ impl PersistedAgentResumeInput {
                 resume_checkpoint: Some(self.resume_checkpoint),
                 assistant_message_id: self.assistant_message_id,
                 context_compaction_summary: self.context_compaction_summary,
-                goal: self.goal,
                 world_state_records: self.world_state_records,
                 skill_activation: self.skill_activation,
                 skill_discovery: self.skill_discovery,
@@ -550,7 +546,7 @@ mod tests {
         assert!(!encoded.contains(API_URL_CANARY));
         assert!(!encoded.contains(SEARCH_KEY_CANARY));
         assert!(!encoded.contains("raw messages are checkpoint-owned"));
-        assert!(encoded.contains("\"resumeInputSchemaVersion\":8"));
+        assert!(encoded.contains("\"resumeInputSchemaVersion\":9"));
         let encoded_object = serde_json::from_str::<Value>(&encoded).unwrap();
         for absent_placeholder in [
             "approvalDecision",
@@ -720,6 +716,13 @@ mod tests {
             PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
 
+        let mut retired_goal = serde_json::from_str::<Value>(&encoded).unwrap();
+        retired_goal["goal"] = Value::Null;
+        assert_eq!(
+            PersistedAgentResumeInput::decode(&retired_goal.to_string()).unwrap_err(),
+            PersistedAgentResumeInputError::UnsupportedOrMalformed
+        );
+
         let mut nested = serde_json::from_str::<Value>(&encoded).unwrap();
         nested["promptPreferences"] = json!({
             "futureSecretField": "must not be ignored inside a current persisted DTO"
@@ -757,7 +760,7 @@ mod tests {
             PersistedAgentResumeInputError::UnsupportedOrMalformed
         );
 
-        for unsupported_version in [0, 5, 6, 7] {
+        for unsupported_version in [0, 5, 6, 7, 8] {
             let mut old_version = serde_json::from_str::<Value>(&encoded).unwrap();
             old_version["resumeInputSchemaVersion"] = Value::from(unsupported_version);
             assert_eq!(
@@ -809,7 +812,6 @@ mod tests {
             "promptPreferences",
             "assistantMessageId",
             "contextCompactionSummary",
-            "goal",
             "skillActivation",
             "skillDiscovery",
         ] {

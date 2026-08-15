@@ -5,6 +5,7 @@
 - [Route the task](#route-the-task)
 - [Native semantic contract](#native-semantic-contract)
 - [Create and reuse one Builder](#create-and-reuse-one-builder)
+- [Edit an existing deck with one Editor](#edit-an-existing-deck-with-one-editor)
 - [Preflight every Builder revision](#preflight-every-builder-revision)
 - [Bind inputs declaratively](#bind-inputs-declaratively)
 - [Observe every file effect](#observe-every-file-effect)
@@ -14,17 +15,20 @@
 
 ## Route the task
 
-Use `office_presentation` first when the request is a bounded combination of its semantic
+Use `office_presentation` for reading, inspection, validation, rendering, and bounded creation
 operations:
 
 `create`, `inspect`, `validate`, `render`, `addSlide`, `addText`, `insertImage`, `addTable`,
 `addChart`, `addShape`, `addFooter`, `removeSlide`, and `moveSlide`.
 
-Use the Managed Builder for a complete visual narrative, repeated layouts, a coordinated theme,
-complex diagrams, template population, many slides or media items, batch generation, or a semantic
-operation that the backend reports as unsupported. Do not emulate an unsupported operation with
-low-level OfficeCLI fields. A hybrid flow—Builder write, native inspect/validate/render—is usually
-best for a complete deck.
+Use the Managed Builder for a new complete visual narrative, repeated layouts, a coordinated
+theme, complex diagrams, template population, many slides or media items, or batch generation.
+
+For every edit to an existing `.pptx`, inspect first and then use the fixed Managed Editor from
+`templates/editor.mjs`. It emits a typed plan through `@mycopilot/presentation-sdk`; it does not
+open or rewrite the package itself. Do not recreate an existing deck with the Builder, and do not
+emulate an unsupported edit with low-level OfficeCLI fields. Native inspect/validate/render around
+one Builder creation or one Editor transaction is the supported hybrid flow.
 
 ## Native semantic contract
 
@@ -46,8 +50,8 @@ Image, template, data, and deck inputs use one path string. For an attachment, c
 `attachments_list` and copy its exact `readPath`; for a generated image, copy its exact
 `image-artifact://...` path. If the backend returns
 `office.capability_not_supported`, `capabilityNotSupported`, or
-`recovery=useManagedScript`, preserve the error and switch to the Builder path. Do not repeat the
-same failed call with invented fields.
+`recovery=useManagedScript`, preserve the error and switch to the correct fixed script: Builder for
+a new deck, Editor for an existing deck. Do not repeat the same failed call with invented fields.
 
 Add a slide, then place a registered image with explicit presentation geometry:
 
@@ -112,6 +116,54 @@ static Office output, and binds observation; omit `runtimeProfile` and `observe`
 private executable path, system Python/Node.js, `pip`, `npm`, inline code, a heredoc, or shell
 redirection.
 
+## Edit an existing deck with one Editor
+
+Read [editing-existing.md](editing-existing.md) before the first existing-deck edit in a run. The
+fixed sequence is inspect and copy stable targets, render a visual baseline, materialize one
+`editor.mjs`, patch only its bounded edit region, syntax-check, execute one transaction, then
+inspect, validate, and render/read every final slide.
+
+The Editor command has exactly one static `--source` and one static `--output`. Bind the source and
+every replacement asset through `run_command.inputs`; use its logical `mountPath` in `--source`
+and `input(...)`. Prefer a distinct output:
+
+```json
+{
+  "command": "node scripts/edit_deck.mjs --source source.pptx --output source-edited.pptx",
+  "cwd": ".",
+  "inputs": [
+    {
+      "mountPath": "source.pptx",
+      "path": "<exact source path or readPath>"
+    }
+  ],
+  "reason": "Apply the reviewed changes to a private copy of the existing presentation"
+}
+```
+
+Copy stable target strings verbatim from the latest `office_presentation` inspect result, for
+example `/slide[3]/shape[@id=42]`. A missing or stale target aborts the transaction. Never
+substitute a guessed array index, visible-text-only selector, relationship ID, XML part, or
+hand-written object path. The Host owns source freezing, target and plan validation, private
+staging, final package validation, and atomic publication. The MJS must import only
+`editPresentation`, `input`, and `output` from `@mycopilot/presentation-sdk`; it must not import
+filesystem, process-launch, archive, XML, network, or `pptxgenjs` modules and must not invoke
+OfficeCLI.
+
+Editor structural operations are element-only. Element `target`, `copyFrom`, and position
+references must contain an inspected `[@id=…]`; only `add.parent` and `move.newParent` may be a
+whole-slide `/slide[N]` container. Perform whole-slide additions, removals, or reordering with the
+existing native `addSlide`, `removeSlide`, or `moveSlide` operation. Any native slide mutation
+invalidates every earlier element target: re-inspect the resulting deck before opening an Editor
+transaction.
+
+Editor v1 supports save-as only. Use a distinct output and never point `--output` at the mounted
+source. Prefer a workspace-root output name unless its parent directory already exists. If the user
+requested in-place editing, preserve the original, deliver a distinct validated output, and
+disclose that final replacement was not performed. If a typed edit is unsupported, preserve the
+structured error and report the limitation; do not unzip/rezip OOXML, rebuild the deck, flatten it
+into images, or invent an SDK method.
+
 ## Preflight every Builder revision
 
 Immediately after materializing or patching an `.mjs` Builder, syntax-check that exact file in its
@@ -137,6 +189,11 @@ command unchanged or vary only `reason` or the output filename to evade duplicat
 Keep the three gates distinct: `syntax-valid != runtime-valid != PPTX-valid`. `node --check` proves
 only that Node.js can parse the file. A successful Builder run is still required for runtime/API
 correctness, followed by native package validation and rendering for PPTX and visual correctness.
+
+Apply the same syntax discipline to an Editor revision with
+`node --check scripts/edit_deck.mjs` in its own call. Do not combine it with execution. For an
+existing-deck edit the complete gate sequence is
+`syntax-valid != edit-plan-valid != runtime-valid != PPTX-valid != visually-verified`.
 
 ## Bind inputs declaratively
 
@@ -165,6 +222,10 @@ then exposes the run-scoped root in `MYCOPILOT_INPUT_ROOT`. The Builder resolves
 `MYCOPILOT_INPUT_ROOT / mountPath`. Never let Python or Node.js open `@attachments`, `skill://`, an
 attachment library path, or another private storage path directly.
 
+An Editor uses the same declarative input field, but accesses it only through
+`input(logicalMountPath)`. Do not read `MYCOPILOT_INPUT_ROOT` or construct filesystem paths inside
+`editor.mjs`; the Host-backed facade resolves the logical handle.
+
 ## Observe every file effect
 
 Every Builder build command must declare its expected `.pptx` with exactly one static `--output`
@@ -185,6 +246,12 @@ Inspect `artifactObservation` after success, non-zero exit, timeout, and cancell
 
 Observation records effects; it does not grant access, make arbitrary scripts transactional, or
 prove that the deck is valid.
+
+Every Editor command also declares exactly one static `.pptx` `--output`, but its effect is
+transactional: the Host applies the typed plan to a private candidate, validates it, rechecks
+approval, cancellation, and destination preconditions, and only then publishes. A pre-publication
+failure must leave the source and destination unchanged. `artifactObservation` remains evidence of
+the resulting file effect, not proof of fidelity or visual quality.
 
 ## Consume render outputs
 
@@ -262,7 +329,7 @@ Treat render metadata and paths narrowly:
 
 Use this fixed loop for a final deck:
 
-1. Generate or edit the `.pptx`.
+1. Generate the `.pptx` with one Builder, or edit an existing deck with one fixed Editor transaction.
 2. Confirm the expected file effect.
 3. Inspect slide count `N` and order, titles, text, notes, media, tables, charts, and required content.
 4. Run native `validate`.
@@ -271,9 +338,10 @@ Use this fixed loop for a final deck:
    returned `readPath`; read every image and record exactly `N` numbered visual verdicts.
 7. Inspect every slide for overflow, overlap, off-canvas objects, broken media, font substitution,
    alignment, contrast, spacing, and continuity with neighboring slides.
-8. If a defect exists, patch the same Builder or issue one corrected semantic operation,
-   regenerate, discard the earlier visual ledger, re-inspect `N`, revalidate, and render/read all
-   `N` final slides again. Repeat the overview only when narrative continuity may have changed.
+8. If a defect exists, patch the same Builder or the same Editor edit region, run the appropriate
+   syntax gate, execute one corrected transaction, discard the earlier visual ledger, re-inspect
+   `N`, revalidate, and render/read all `N` final slides again. Repeat the overview only when
+   narrative continuity may have changed.
 
 Do not claim visual quality from package validation alone. If rendering returns an
 `office.render_backend_*` error, report the affected slide as unverified; do not launch a user

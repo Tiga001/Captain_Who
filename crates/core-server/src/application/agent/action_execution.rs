@@ -597,6 +597,7 @@ impl AgentService {
                             "approvalStatus": "approved",
                         }),
                         artifact_runtime: self.artifact_runtime.clone(),
+                        office_engine: Some(self.office_engine.clone()),
                         file_inputs: Some(&file_input_context),
                         notifications: notifications.clone(),
                         cancellation_token: cancellation_token.clone(),

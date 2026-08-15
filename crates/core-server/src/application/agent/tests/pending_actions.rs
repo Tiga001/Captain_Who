@@ -3759,7 +3759,7 @@ fn pending_resume_sqlite_row_contains_only_versioned_secret_free_projection() {
     let row = storage.list_pending_agent_actions().unwrap().remove(0);
     assert!(row
         .agent_input_json
-        .contains("\"resumeInputSchemaVersion\":8"));
+        .contains("\"resumeInputSchemaVersion\":9"));
     for forbidden_key in ["\"apiUrl\"", "\"apiToken\"", "\"tavilyApiKey\""] {
         assert!(!row.agent_input_json.contains(forbidden_key));
     }

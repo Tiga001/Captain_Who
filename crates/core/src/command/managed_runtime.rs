@@ -3,8 +3,16 @@ use crate::artifact_runtime::{
     ArtifactRuntimeErrorCode, ArtifactRuntimeInvocation, ArtifactRuntimeProvider,
     ArtifactRuntimeRecovery,
 };
+use crate::office::{
+    OfficeEngine, OfficeExecutionContext, OfficePresentationEditRequest,
+    OfficePresentationEditResult,
+};
 use crate::AgentCommandRuntimeProfile;
+use crate::{AgentFileInputRef, AgentFileInputSpec};
 use std::ffi::{OsStr, OsString};
+
+const PRESENTATION_EDITOR_PLAN_TIMEOUT_MS: u64 = 30_000;
+const PRESENTATION_EDITOR_OFFICE_TIMEOUT_MS: u64 = 120_000;
 
 #[cfg(target_os = "macos")]
 const MANAGED_PDF_SANDBOX_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
@@ -71,6 +79,7 @@ pub(crate) enum ManagedCommandSessionPreparation {
 
 pub(crate) struct ManagedCommandSessionServices<'a> {
     pub(crate) artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
+    pub(crate) office_engine: Option<Arc<dyn OfficeEngine>>,
     pub(crate) file_inputs: Option<&'a AgentFileInputExecutionContext>,
     pub(crate) managed_workspace: Option<ManagedCommandWorkspaceLease>,
 }
@@ -88,6 +97,7 @@ pub(crate) fn prepare_managed_command_session(
 ) -> Result<ManagedCommandSessionPreparation, CommandExecutionError> {
     let ManagedCommandSessionServices {
         artifact_runtime,
+        office_engine,
         file_inputs,
         managed_workspace,
     } = services;
@@ -260,6 +270,30 @@ pub(crate) fn prepare_managed_command_session(
     }
 
     let resolution = ready_binding_resolution(binding, &prepared_runtime.invocation);
+    let editor_contract = match presentation_editor_contract(
+        input_workspace_root.as_deref(),
+        &cwd,
+        request,
+        binding,
+        &parsed,
+        managed_builder.as_ref(),
+    ) {
+        Ok(contract) => contract,
+        Err(message) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                binding_resolution_error(
+                    binding,
+                    ERROR_INVALID_COMMAND,
+                    ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                    &message,
+                ),
+                0,
+            )))
+        }
+    };
     let empty_input_context = AgentFileInputExecutionContext::default();
     let prepared_inputs = match materialize_agent_file_inputs(
         input_workspace_root.as_deref(),
@@ -282,11 +316,88 @@ pub(crate) fn prepare_managed_command_session(
     let input_evidence = prepared_inputs
         .as_ref()
         .map(|inputs| inputs.evidence().to_vec())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|input| input.mount_path != super::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH)
+        .collect::<Vec<_>>();
+    let editor_execution = match editor_contract
+        .map(|contract| {
+            prepare_presentation_editor_execution(
+                contract,
+                prepared_inputs.as_ref(),
+                provider.component_root(),
+            )
+        })
+        .transpose()
+    {
+        Ok(editor) => editor,
+        Err(message) => {
+            return Ok(immediate(runtime_failure_result(
+                root.as_deref(),
+                &cwd,
+                request,
+                binding_resolution_error(
+                    binding,
+                    ERROR_INVALID_COMMAND,
+                    ArtifactRuntimeRecovery::Retry.stable_name(),
+                    &message,
+                ),
+                0,
+            )))
+        }
+    };
+    let editor_office_context = editor_execution.as_ref().map(|_| {
+        let file_inputs = file_inputs.cloned().unwrap_or_default();
+        OfficeExecutionContext::new(
+            input_workspace_root.clone(),
+            permissions,
+            file_inputs.attachment_library().cloned(),
+        )
+        .with_file_inputs(file_inputs)
+    });
     let mut arguments = prepared_runtime.invocation.arguments_prefix().to_vec();
-    arguments.extend(parsed.process_arguments.iter().cloned());
     let mut environment =
         managed_environment(&prepared_runtime.invocation, prepared_inputs.as_ref());
+    if let Some(editor) = editor_execution.as_ref() {
+        arguments = canonical_editor_arguments_prefix(&prepared_runtime.invocation)?;
+        arguments.push(OsString::from("--experimental-permission"));
+        arguments.push(OsString::from(format!(
+            "--allow-fs-read={}",
+            editor.runtime_root.display()
+        )));
+        arguments.push(OsString::from(format!(
+            "--allow-fs-read={}",
+            editor.frozen_script_path.display()
+        )));
+        arguments.push(OsString::from(format!(
+            "--allow-fs-write={}",
+            editor
+                .plan_path
+                .parent()
+                .expect("private plan path has a parent")
+                .display()
+        )));
+        arguments.push(OsString::from("--disallow-code-generation-from-strings"));
+        arguments.push(OsString::from("--no-experimental-fetch"));
+        arguments.push(OsString::from("--max-old-space-size=256"));
+        arguments.push(editor.frozen_script_path.clone().into_os_string());
+        arguments.extend(parsed.process_arguments.iter().skip(1).cloned());
+        environment = presentation_editor_environment(&prepared_runtime.invocation, editor);
+        environment.push((
+            OsString::from("MYCOPILOT_PRESENTATION_EDIT_MODE"),
+            OsString::from("v1"),
+        ));
+        environment.push((
+            OsString::from("MYCOPILOT_PRESENTATION_EDITOR_ENTRY"),
+            editor.frozen_script_path.clone().into_os_string(),
+        ));
+        environment.push((
+            OsString::from(super::PRESENTATION_EDITOR_PLAN_ENV),
+            editor.plan_path.clone().into_os_string(),
+        ));
+    } else {
+        arguments.extend(parsed.process_arguments.iter().cloned());
+    }
     let requires_automatic_node_syntax_check = should_automatically_check_node_builder(
         binding.profile,
         binding.kind,
@@ -294,10 +405,15 @@ pub(crate) fn prepare_managed_command_session(
         managed_builder.as_ref(),
     );
     if requires_automatic_node_syntax_check {
-        let script = parsed
-            .script
-            .as_deref()
-            .expect("managed Node Builder carries a saved script");
+        let frozen_editor_script = editor_execution
+            .as_ref()
+            .map(|editor| editor.frozen_script_path.to_string_lossy().into_owned());
+        let script = frozen_editor_script.as_deref().unwrap_or_else(|| {
+            parsed
+                .script
+                .as_deref()
+                .expect("managed Node Builder carries a saved script")
+        });
         let redactions = managed_node_syntax_check_redactions(
             provider.component_root(),
             &prepared_runtime.invocation,
@@ -336,7 +452,8 @@ pub(crate) fn prepare_managed_command_session(
             return Ok(immediate(result));
         }
     }
-    let hard_timeout = managed_command_hard_timeout(managed_pdf, request.timeout_ms);
+    let hard_timeout =
+        managed_command_hard_timeout(managed_pdf, editor_execution.is_some(), request.timeout_ms);
     let launch = if let Some(workspace) = managed_workspace.as_ref() {
         let pdf_cli = match provider.pdf_cli_path() {
             Ok(path) => path,
@@ -431,6 +548,13 @@ pub(crate) fn prepare_managed_command_session(
             prepared_inputs.as_ref(),
             provider.component_root(),
         )
+    } else if let Some(editor) = editor_execution.as_ref() {
+        presentation_editor_output_redactions(
+            editor,
+            prepared_inputs.as_ref(),
+            &prepared_runtime.invocation,
+            &cwd,
+        )
     } else if parsed.node_syntax_check {
         managed_node_syntax_check_redactions(
             provider.component_root(),
@@ -452,30 +576,111 @@ pub(crate) fn prepare_managed_command_session(
         launch,
     )
     .with_output_redactions(output_redactions);
-    let completion_hook: super::session::CommandSessionCompletionHook = Box::new(move |result| {
-        result.runtime = Some(resolution.clone());
-        result.input_files = input_evidence;
-        result.managed_outputs = managed_output_capture.clone();
-        if let Err(error) = provider.verify_integrity() {
-            let code = format!("artifactRuntime.{}", error.code().stable_name());
-            let runtime = with_resolution_error(
-                result
-                    .runtime
-                    .take()
-                    .expect("managed session completion has runtime evidence"),
-                &code,
-                error.recovery().stable_name(),
-                provider_error_message(error.code()),
-            );
-            result.error = runtime.message.clone();
-            result.runtime = Some(runtime);
-        }
-        if let Some((observer, before)) = observer.zip(before) {
-            let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
-            result.artifact_observation = Some(observer.finish(before, after));
-        }
-        drop(prepared_inputs);
-    });
+    let editor_cancellation = cancellation_token.clone();
+    let has_editor = editor_execution.is_some();
+    let completion_hook: super::session::CommandSessionCompletionHook = Box::new(
+        move |result, session_cancel_flag| {
+            result.runtime = Some(resolution.clone());
+            result.input_files = input_evidence;
+            result.managed_outputs = managed_output_capture.clone();
+            let mut runtime_integrity_valid = true;
+            if let Err(error) = provider.verify_integrity() {
+                runtime_integrity_valid = false;
+                let code = format!("artifactRuntime.{}", error.code().stable_name());
+                let runtime = with_resolution_error(
+                    result
+                        .runtime
+                        .take()
+                        .expect("managed session completion has runtime evidence"),
+                    &code,
+                    error.recovery().stable_name(),
+                    provider_error_message(error.code()),
+                );
+                result.error = runtime.message.clone();
+                result.runtime = Some(runtime);
+            }
+            let mut editor_applied = !has_editor;
+            if let Some(editor) = editor_execution {
+                if runtime_integrity_valid
+                    && result.exit_code == Some(0)
+                    && !result.timed_out
+                    && !result.cancelled
+                    && result.error.is_none()
+                {
+                    if editor_cancellation.is_cancelled()
+                        || session_cancel_flag.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        result.cancelled = true;
+                        result.error = Some(
+                            "Presentation edit was cancelled before the Host transaction began."
+                                .to_string(),
+                        );
+                    } else {
+                        match super::read_presentation_editor_plan(&editor.plan_path) {
+                        Ok(plan)
+                            if plan.source.mount_path() == editor.contract.source_mount_path
+                                && plan.destination.path()
+                                    == editor.contract.destination_path =>
+                        {
+                            match (office_engine.as_ref(), editor_office_context.as_ref()) {
+                                (Some(engine), Some(context)) => {
+                                    let request = OfficePresentationEditRequest {
+                                        source_path: editor.contract.source_path.clone(),
+                                        source_binding: editor.contract.source_binding.clone(),
+                                        destination_path: editor.contract.destination_path.clone(),
+                                        inputs: editor.contract.asset_specs.clone(),
+                                        input_bindings: editor.contract.asset_bindings.clone(),
+                                        operations: plan.operations,
+                                        timeout_ms: Some(PRESENTATION_EDITOR_OFFICE_TIMEOUT_MS),
+                                    };
+                                    match engine.execute_presentation_edit(
+                                        context,
+                                        &request,
+                                        editor_cancellation.clone(),
+                                        Some(Arc::clone(&session_cancel_flag)),
+                                    ) {
+                                        Ok(office_result) => {
+                                            editor_applied = settle_presentation_editor_office_result(
+                                                result,
+                                                office_result,
+                                            );
+                                        }
+                                        Err(error) => {
+                                            fail_presentation_editor_result(
+                                                result,
+                                                &format!(
+                                                    "Presentation Editor Host transaction failed ({}): {}",
+                                                    error.code().stable_name(),
+                                                    error.message()
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => fail_presentation_editor_result(
+                                    result,
+                                    "Presentation Editor requires the Host Office engine, but it is unavailable.",
+                                ),
+                            }
+                        }
+                        Ok(_) => fail_presentation_editor_result(
+                            result,
+                            "Presentation Editor plan source or destination differs from the approved command.",
+                        ),
+                        Err(error) => fail_presentation_editor_result(result, &error),
+                    }
+                    }
+                }
+            }
+            if editor_applied {
+                if let Some((observer, before)) = observer.zip(before) {
+                    let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
+                    result.artifact_observation = Some(observer.finish(before, after));
+                }
+            }
+            drop(prepared_inputs);
+        },
+    );
     Ok(ManagedCommandSessionPreparation::Ready {
         plan,
         completion_hook,
@@ -484,13 +689,152 @@ pub(crate) fn prepare_managed_command_session(
 
 fn managed_command_hard_timeout(
     managed_pdf: bool,
+    presentation_editor: bool,
     requested_timeout_ms: Option<u64>,
 ) -> Option<Duration> {
     if managed_pdf {
         Some(Duration::from_millis(MANAGED_PDF_HARD_TIMEOUT_MS))
+    } else if presentation_editor {
+        Some(Duration::from_millis(
+            requested_timeout_ms
+                .unwrap_or(PRESENTATION_EDITOR_PLAN_TIMEOUT_MS)
+                .clamp(1, PRESENTATION_EDITOR_PLAN_TIMEOUT_MS),
+        ))
     } else {
         requested_timeout_ms.map(|timeout| Duration::from_millis(timeout.clamp(1, MAX_TIMEOUT_MS)))
     }
+}
+
+fn settle_presentation_editor_office_result(
+    command: &mut AgentCommandExecutionResult,
+    office: OfficePresentationEditResult,
+) -> bool {
+    let succeeded = office.exit_code == Some(0)
+        && !office.timed_out
+        && !office.cancelled
+        && office.error_code.is_none()
+        && office.error.is_none();
+    if succeeded {
+        command.exit_code = Some(0);
+        return true;
+    }
+    command.exit_code = office.exit_code.or(Some(1));
+    command.timed_out |= office.timed_out;
+    command.cancelled |= office.cancelled;
+    let preserve_missing_exit =
+        (office.timed_out || office.cancelled) && office.exit_code.is_none();
+    let message = presentation_editor_office_failure_message(&office);
+    fail_presentation_editor_result(command, &message);
+    if preserve_missing_exit {
+        command.exit_code = None;
+    }
+    false
+}
+
+fn presentation_editor_office_failure_message(office: &OfficePresentationEditResult) -> String {
+    const FIELD_LIMIT: usize = 1_024;
+    const MESSAGE_LIMIT: usize = 4_096;
+
+    let provider = stable_office_json_diagnostic(&office.stdout, FIELD_LIMIT).or_else(|| {
+        bounded_diagnostic_text(&office.stderr, FIELD_LIMIT)
+            .map(|diagnostic| format!("OfficeCLI stderr: {diagnostic}"))
+    });
+    let host_code = office
+        .error_code
+        .as_deref()
+        .and_then(|value| bounded_diagnostic_text(value, FIELD_LIMIT));
+    let host_error = office
+        .error
+        .as_deref()
+        .and_then(|value| bounded_diagnostic_text(value, FIELD_LIMIT));
+
+    let mut parts = Vec::new();
+    push_unique_diagnostic(&mut parts, provider);
+    push_unique_diagnostic(
+        &mut parts,
+        host_code.map(|code| format!("Host code: {code}")),
+    );
+    push_unique_diagnostic(
+        &mut parts,
+        host_error.map(|error| format!("Host error: {error}")),
+    );
+    if parts.is_empty() {
+        parts.push("Presentation Editor Host transaction failed.".to_string());
+    }
+    parts.join(" | ").chars().take(MESSAGE_LIMIT).collect()
+}
+
+fn stable_office_json_diagnostic(stdout: &str, field_limit: usize) -> Option<String> {
+    let mut fields = Vec::new();
+    for value in serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .take(8)
+    {
+        let Ok(value) = value else {
+            break;
+        };
+        if value.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+        for key in ["code", "error", "message"] {
+            let Some(value) = find_stable_json_string(&value, key)
+                .and_then(|value| bounded_diagnostic_text(value, field_limit))
+            else {
+                continue;
+            };
+            let field = format!("{key}={value}");
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+    }
+    (!fields.is_empty()).then(|| format!("OfficeCLI: {}", fields.join("; ")))
+}
+
+fn find_stable_json_string<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    match value {
+        serde_json::Value::Object(values) => values
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                values
+                    .values()
+                    .find_map(|value| find_stable_json_string(value, key))
+            }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|value| find_stable_json_string(value, key)),
+        _ => None,
+    }
+}
+
+fn bounded_diagnostic_text(value: &str, limit: usize) -> Option<String> {
+    let normalized = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(limit)
+        .collect::<String>();
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn push_unique_diagnostic(parts: &mut Vec<String>, candidate: Option<String>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if !parts
+        .iter()
+        .any(|part| part == &candidate || part.ends_with(&candidate) || candidate.ends_with(part))
+    {
+        parts.push(candidate);
+    }
+}
+
+fn fail_presentation_editor_result(result: &mut AgentCommandExecutionResult, message: &str) {
+    result.exit_code = result.exit_code.filter(|code| *code != 0).or(Some(1));
+    result.error = Some(message.chars().take(4_096).collect());
 }
 
 fn should_automatically_check_node_builder(
@@ -503,6 +847,344 @@ fn should_automatically_check_node_builder(
         && kind == AgentCommandRuntimeKind::Node
         && !parsed.node_syntax_check
         && builder.is_some_and(|builder| !builder.output_paths.is_empty())
+}
+
+#[derive(Debug, Clone)]
+struct PresentationEditorContract {
+    source_mount_path: String,
+    source_path: String,
+    source_binding: crate::AgentFileInputBinding,
+    destination_path: String,
+    asset_specs: Vec<AgentFileInputSpec>,
+    asset_bindings: Vec<crate::AgentFileInputBinding>,
+}
+
+struct PreparedPresentationEditor {
+    contract: PresentationEditorContract,
+    _plan_directory: tempfile::TempDir,
+    plan_path: PathBuf,
+    frozen_script_path: PathBuf,
+    runtime_root: PathBuf,
+    private_home: PathBuf,
+    private_tmp: PathBuf,
+}
+
+fn presentation_editor_contract(
+    workspace_root: Option<&Path>,
+    cwd: &Path,
+    request: &AgentCommandRequest,
+    binding: &crate::AgentCommandRuntimeBinding,
+    parsed: &ManagedArtifactCommand,
+    builder: Option<&ManagedArtifactBuilderCommand>,
+) -> Result<Option<PresentationEditorContract>, String> {
+    let editor_bindings = request
+        .inputs
+        .iter()
+        .filter(|input| input.mount_path == super::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH)
+        .collect::<Vec<_>>();
+    if editor_bindings.is_empty() {
+        return Ok(None);
+    }
+    if editor_bindings.len() != 1
+        || binding.profile != AgentCommandRuntimeProfile::Presentations
+        || binding.kind != AgentCommandRuntimeKind::Node
+        || parsed.node_syntax_check
+    {
+        return Err(
+            "Presentation Editor reserved script binding has an invalid runtime identity."
+                .to_string(),
+        );
+    }
+    let builder = builder.ok_or_else(|| {
+        "Presentation Editor requires one direct, statically inspectable Builder command."
+            .to_string()
+    })?;
+    if !is_presentation_editor_direct_command(&request.command) {
+        return Err(
+            "Presentation Editor accepts only `node <editor.mjs> --source <mount.pptx> --output <destination.pptx>` (flags may be swapped)."
+                .to_string(),
+        );
+    }
+    let workspace_root = workspace_root.ok_or_else(|| {
+        "Presentation Editor requires the workspace which owns its materialized script.".to_string()
+    })?;
+    let script_binding = editor_bindings[0];
+    let AgentFileInputRef::Workspace {
+        path: frozen_script_source,
+    } = &script_binding.source
+    else {
+        return Err("Presentation Editor script binding must be workspace-owned.".to_string());
+    };
+    let requested_script = Path::new(
+        parsed
+            .script
+            .as_deref()
+            .ok_or_else(|| "Presentation Editor command is missing its script.".to_string())?,
+    );
+    let requested_script = if requested_script.is_absolute() {
+        requested_script.to_path_buf()
+    } else {
+        cwd.join(requested_script)
+    };
+    let frozen_source = workspace_root.join(frozen_script_source);
+    if requested_script.canonicalize().ok() != frozen_source.canonicalize().ok() {
+        return Err(
+            "Presentation Editor command script does not match its frozen materialization input."
+                .to_string(),
+        );
+    }
+
+    let source_mount_path = builder.source_paths[0].clone();
+    if source_mount_path == super::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH
+        || Path::new(&source_mount_path)
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_none_or(|extension| !extension.eq_ignore_ascii_case("pptx"))
+    {
+        return Err("Presentation Editor --source must name one mounted .pptx input.".to_string());
+    }
+    let source_matches = request
+        .inputs
+        .iter()
+        .filter(|input| input.mount_path == source_mount_path)
+        .collect::<Vec<_>>();
+    if source_matches.len() != 1 {
+        return Err(
+            "Presentation Editor --source must match exactly one frozen input binding.".to_string(),
+        );
+    }
+    let source_binding = source_matches[0].clone();
+    let source_path = presentation_editor_source_path(&source_binding.source)?;
+    let destination_path = builder.output_paths[0].clone();
+    if source_mount_path == destination_path {
+        return Err(
+            "Presentation Editor save-as destination must differ from its source mount."
+                .to_string(),
+        );
+    }
+
+    let mut asset_specs = Vec::new();
+    let mut asset_bindings = Vec::new();
+    for input in &request.inputs {
+        if input.mount_path == super::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH
+            || input.mount_path == source_mount_path
+        {
+            continue;
+        }
+        asset_specs.push(AgentFileInputSpec {
+            mount_path: input.mount_path.clone(),
+            source: input.source.clone(),
+        });
+        asset_bindings.push(input.clone());
+    }
+    Ok(Some(PresentationEditorContract {
+        source_mount_path,
+        source_path,
+        source_binding,
+        destination_path,
+        asset_specs,
+        asset_bindings,
+    }))
+}
+
+pub(crate) fn is_presentation_editor_direct_command(command: &str) -> bool {
+    let Ok(Some(builder)) = infer_managed_artifact_builder_command(command) else {
+        return false;
+    };
+    if builder.kind != AgentCommandRuntimeKind::Node
+        || builder.node_syntax_check
+        || builder.source_paths.len() != 1
+        || builder.output_paths.len() != 1
+    {
+        return false;
+    }
+    let Ok(tokens) = managed_artifact_command_tokens(command) else {
+        return false;
+    };
+    tokens.len() == 6
+        && tokens[0] == "node"
+        && tokens[1].ends_with(".mjs")
+        && matches!(tokens[2].as_str(), "--source" | "--output")
+        && matches!(tokens[4].as_str(), "--source" | "--output")
+        && tokens[2] != tokens[4]
+}
+
+fn presentation_editor_source_path(source: &AgentFileInputRef) -> Result<String, String> {
+    match source {
+        AgentFileInputRef::Workspace { path } | AgentFileInputRef::External { path } => {
+            Ok(path.clone())
+        }
+        AgentFileInputRef::Attachment { read_path } => Ok(read_path.clone()),
+        AgentFileInputRef::GeneratedArtifact { path, .. } => Ok(path.clone()),
+        AgentFileInputRef::SkillResource { .. } => Err(
+            "Presentation Editor source must be a workspace, attachment, Artifact, or authorized external .pptx."
+                .to_string(),
+        ),
+    }
+}
+
+fn prepare_presentation_editor_execution(
+    contract: PresentationEditorContract,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
+    runtime_root: &Path,
+) -> Result<PreparedPresentationEditor, String> {
+    let inputs = prepared_inputs.ok_or_else(|| {
+        "Presentation Editor is missing its frozen private input snapshot.".to_string()
+    })?;
+    let frozen_script_path = inputs
+        .root()
+        .join(super::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH);
+    let metadata = fs::symlink_metadata(&frozen_script_path)
+        .map_err(|error| format!("Cannot inspect frozen Presentation Editor script: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("Frozen Presentation Editor script must be a regular file.".to_string());
+    }
+    let frozen_script_path = frozen_script_path.canonicalize().map_err(|error| {
+        format!("Cannot canonicalize frozen Presentation Editor script: {error}")
+    })?;
+    super::validate_presentation_editor_script(&frozen_script_path)?;
+    let runtime_root = runtime_root
+        .canonicalize()
+        .map_err(|error| format!("Cannot canonicalize Managed Runtime root: {error}"))?;
+    let plan_directory = tempfile::Builder::new()
+        .prefix("mycopilot-presentation-editor-")
+        .tempdir()
+        .map_err(|error| {
+            format!("Cannot create private Presentation Editor plan directory: {error}")
+        })?;
+    let plan_root = plan_directory.path().canonicalize().map_err(|error| {
+        format!("Cannot canonicalize private Presentation Editor plan directory: {error}")
+    })?;
+    let private_home = plan_root.join("home");
+    let private_tmp = plan_root.join("tmp");
+    fs::create_dir(&private_home)
+        .and_then(|_| fs::create_dir(&private_tmp))
+        .map_err(|error| {
+            format!("Cannot prepare private Presentation Editor environment: {error}")
+        })?;
+    let private_home = private_home.canonicalize().map_err(|error| {
+        format!("Cannot canonicalize private Presentation Editor HOME: {error}")
+    })?;
+    let private_tmp = private_tmp.canonicalize().map_err(|error| {
+        format!("Cannot canonicalize private Presentation Editor temporary directory: {error}")
+    })?;
+    let plan_path = plan_root.join("edit-plan.json");
+    Ok(PreparedPresentationEditor {
+        contract,
+        _plan_directory: plan_directory,
+        plan_path,
+        frozen_script_path,
+        runtime_root,
+        private_home,
+        private_tmp,
+    })
+}
+
+fn canonical_editor_arguments_prefix(
+    invocation: &ArtifactRuntimeInvocation,
+) -> Result<Vec<OsString>, CommandExecutionError> {
+    let mut arguments = invocation.arguments_prefix().to_vec();
+    let mut index = 0usize;
+    while index < arguments.len() {
+        if arguments[index] == OsStr::new("--import") {
+            let bootstrap = arguments.get(index + 1).ok_or_else(|| {
+                CommandExecutionError::from(
+                    "Managed Node runtime is missing its fixed bootstrap path.".to_string(),
+                )
+            })?;
+            let bootstrap = Path::new(bootstrap).canonicalize().map_err(|error| {
+                CommandExecutionError::from(format!(
+                    "Cannot canonicalize Managed Node bootstrap: {error}"
+                ))
+            })?;
+            arguments[index + 1] = bootstrap.into_os_string();
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(arguments)
+}
+
+fn presentation_editor_environment(
+    invocation: &ArtifactRuntimeInvocation,
+    editor: &PreparedPresentationEditor,
+) -> Vec<(OsString, OsString)> {
+    let mut environment = invocation
+        .environment()
+        .iter()
+        .map(|(key, value)| {
+            if key == OsStr::new("MYCOPILOT_ARTIFACT_NODE_MODULES") {
+                let canonical = Path::new(value)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(value));
+                (key.clone(), canonical.into_os_string())
+            } else {
+                (key.clone(), value.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+    environment.extend([
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (OsString::from("LC_ALL"), OsString::from("C")),
+        (OsString::from("TZ"), OsString::from("UTC")),
+        (OsString::from("TERM"), OsString::from("dumb")),
+        (OsString::from("CI"), OsString::from("1")),
+        (
+            OsString::from("HOME"),
+            editor.private_home.clone().into_os_string(),
+        ),
+        (
+            OsString::from("USERPROFILE"),
+            editor.private_home.clone().into_os_string(),
+        ),
+        (
+            OsString::from("TMPDIR"),
+            editor.private_tmp.clone().into_os_string(),
+        ),
+        (
+            OsString::from("TMP"),
+            editor.private_tmp.clone().into_os_string(),
+        ),
+        (
+            OsString::from("TEMP"),
+            editor.private_tmp.clone().into_os_string(),
+        ),
+    ]);
+    environment
+}
+
+fn presentation_editor_output_redactions(
+    editor: &PreparedPresentationEditor,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
+    invocation: &ArtifactRuntimeInvocation,
+    cwd: &Path,
+) -> super::output_capture::ProcessOutputRedactionSet {
+    let mut replacements = Vec::new();
+    append_private_path_spellings(
+        &mut replacements,
+        editor
+            .plan_path
+            .parent()
+            .expect("private editor plan has a parent"),
+        "<presentation-editor-private>",
+    );
+    append_private_path_spellings(
+        &mut replacements,
+        &editor.frozen_script_path,
+        "<presentation-editor.mjs>",
+    );
+    if let Some(inputs) = prepared_inputs {
+        append_private_path_spellings(
+            &mut replacements,
+            inputs.root(),
+            "<presentation-editor-inputs>",
+        );
+    }
+    append_private_path_spellings(&mut replacements, &editor.runtime_root, "<managed-runtime>");
+    append_private_path_spellings(&mut replacements, invocation.executable(), "<managed-node>");
+    append_private_path_spellings(&mut replacements, cwd, ".");
+    super::output_capture::ProcessOutputRedactionSet::new(replacements)
 }
 
 #[derive(Debug)]
@@ -1054,6 +1736,7 @@ struct ManagedArtifactCommand {
 pub(crate) struct ManagedArtifactBuilderCommand {
     pub kind: AgentCommandRuntimeKind,
     pub script: String,
+    pub source_paths: Vec<String>,
     pub output_paths: Vec<String>,
     pub node_syntax_check: bool,
 }
@@ -1108,13 +1791,51 @@ pub(crate) fn infer_managed_artifact_builder_command(
         Err(_) => return Ok(None),
     };
 
+    let mut source_paths = Vec::new();
     let mut output_paths = Vec::new();
+    let mut saw_source = false;
     let mut saw_output = false;
     let mut index = 2;
     while index < tokens.len() {
         let token = &tokens[index];
         if token == "--" {
             break;
+        }
+        let source = if token == "--source" {
+            if saw_source {
+                return Err(
+                    "Managed Builder 只允许一个静态 `--source` 参数；请拆分为独立命令。"
+                        .to_string(),
+                );
+            }
+            index += 1;
+            Some(
+                tokens
+                    .get(index)
+                    .ok_or_else(|| {
+                        "Managed Builder 的 `--source` 必须紧跟一个输入挂载路径。".to_string()
+                    })?
+                    .as_str(),
+            )
+        } else {
+            let source = token.strip_prefix("--source=");
+            if source.is_some() && saw_source {
+                return Err(
+                    "Managed Builder 只允许一个静态 `--source` 参数；请拆分为独立命令。"
+                        .to_string(),
+                );
+            }
+            source
+        };
+        if let Some(source) = source {
+            let source = source.trim();
+            if source.is_empty() || source.starts_with('-') {
+                return Err("Managed Builder 的 `--source` 必须指定非空输入挂载路径。".to_string());
+            }
+            saw_source = true;
+            source_paths.push(source.to_string());
+            index += 1;
+            continue;
         }
         let output = if token == "--output" {
             if saw_output {
@@ -1158,6 +1879,7 @@ pub(crate) fn infer_managed_artifact_builder_command(
         script: parsed
             .script
             .expect("ordinary managed artifact commands always carry a saved script"),
+        source_paths,
         output_paths,
         node_syntax_check: parsed.node_syntax_check,
     }))
@@ -1652,11 +2374,824 @@ fn runtime_kind_name(kind: AgentCommandRuntimeKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact_runtime::ArtifactRuntimeKind;
-    use crate::AgentApprovalStatus;
+    use crate::artifact_runtime::{
+        ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeKind, ArtifactRuntimeProvider,
+        ARTIFACT_RUNTIME_BUNDLE_VERSION, ARTIFACT_RUNTIME_NODE_VERSION,
+        ARTIFACT_RUNTIME_PROVIDER_ID, ARTIFACT_RUNTIME_PYTHON_VERSION,
+        ARTIFACT_RUNTIME_RIPGREP_VERSION,
+    };
+    use crate::file_input::prepare_agent_file_input_bindings;
+    use crate::office::{
+        OfficeEngineCapabilities, OfficeEngineError, OfficeExecutionRequest, OfficeExecutionResult,
+        OfficePreparedExecution,
+    };
+    use crate::{
+        AgentApprovalStatus, AgentCommandArtifactObservationKind,
+        AgentCommandArtifactObservationRequest, AgentCommandPermission, AgentCommandSafetyPolicy,
+        AgentFileInputRef, AgentFileInputSpec, AgentPatchPermission, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use serde::Serialize;
     use std::collections::BTreeMap;
     use std::io::Read;
+    use std::sync::atomic::AtomicUsize;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    const EDITOR_PLAN_JSON: &str = r#"{"schemaVersion":1,"source":{"type":"input","mountPath":"source.pptx"},"destination":{"type":"output","path":"edited.pptx"},"mode":"saveAs","operations":[{"type":"set","target":"/slide[1]/shape[@id=1]","replacement":{"find":"Old","replace":"New"}}]}"#;
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestComponentReceipt {
+        schema_version: u32,
+        provider_id: String,
+        bundle_version: String,
+        build_inputs_revision: String,
+        platform: String,
+        arch: String,
+        runtimes: TestRuntimeSet,
+        tools: TestToolSet,
+        files: Vec<TestFileReceipt>,
+        bundle_revision: String,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestRuntimeSet {
+        node: TestRuntimeReceipt,
+        python: TestRuntimeReceipt,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestRuntimeReceipt {
+        version: String,
+        executable: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        package_root: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runtime_home: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bootstrap: Option<String>,
+        dependencies: Vec<TestDependencyReceipt>,
+        identity_files: Vec<String>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestDependencyReceipt {
+        name: String,
+        version: String,
+        identity_file: String,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestToolSet {
+        pdf_cli: TestPdfCliReceipt,
+        ripgrep: TestExecutableToolReceipt,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestPdfCliReceipt {
+        version: String,
+        path: String,
+        identity_files: Vec<String>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestExecutableToolReceipt {
+        version: String,
+        executable: String,
+        identity_files: Vec<String>,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestFileReceipt {
+        path: String,
+        size: u64,
+        sha256: String,
+    }
+
+    #[cfg(unix)]
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TestReceiptRevisionPayload<'a> {
+        schema_version: u32,
+        provider_id: &'a str,
+        bundle_version: &'a str,
+        build_inputs_revision: &'a str,
+        platform: &'a str,
+        arch: &'a str,
+        runtimes: &'a TestRuntimeSet,
+        tools: &'a TestToolSet,
+        files: &'a [TestFileReceipt],
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum TestOfficeOutcome {
+        Success,
+        Failure,
+        Cancelled,
+    }
+
+    #[cfg(unix)]
+    struct RecordingPresentationOfficeEngine {
+        calls: AtomicUsize,
+        outcome: TestOfficeOutcome,
+    }
+
+    #[cfg(unix)]
+    impl RecordingPresentationOfficeEngine {
+        fn new(outcome: TestOfficeOutcome) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                outcome,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(unix)]
+    impl OfficeEngine for RecordingPresentationOfficeEngine {
+        fn capabilities(&self) -> OfficeEngineCapabilities {
+            OfficeEngineCapabilities::office_cli()
+        }
+
+        fn status(
+            &self,
+            _cancellation: AgentCancellationToken,
+        ) -> crate::office::OfficeEngineStatus {
+            panic!("status is not used by the managed-runtime completion hook fixture")
+        }
+
+        fn prepare(
+            &self,
+            _context: &OfficeExecutionContext,
+            _request: &OfficeExecutionRequest,
+        ) -> Result<OfficePreparedExecution, OfficeEngineError> {
+            panic!("prepare is not used by the managed-runtime completion hook fixture")
+        }
+
+        fn execute_prepared(
+            &self,
+            _context: &OfficeExecutionContext,
+            _prepared: &OfficePreparedExecution,
+            _cancellation: AgentCancellationToken,
+            _action_cancel_flag: Option<Arc<AtomicBool>>,
+        ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+            panic!("execute_prepared is not used by the managed-runtime completion hook fixture")
+        }
+
+        fn execute_presentation_edit(
+            &self,
+            context: &OfficeExecutionContext,
+            request: &OfficePresentationEditRequest,
+            _cancellation: AgentCancellationToken,
+            _action_cancel_flag: Option<Arc<AtomicBool>>,
+        ) -> Result<OfficePresentationEditResult, OfficeEngineError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.source_path, "source.pptx");
+            assert_eq!(request.source_binding.mount_path, "source.pptx");
+            assert_eq!(request.destination_path, "edited.pptx");
+            assert_eq!(request.operations.len(), 1);
+            match self.outcome {
+                TestOfficeOutcome::Success => {
+                    let destination = context
+                        .workspace_root()
+                        .expect("editor fixture has a workspace")
+                        .join(&request.destination_path);
+                    fs::write(destination, b"fixture presentation output").unwrap();
+                    Ok(OfficePresentationEditResult {
+                        exit_code: Some(0),
+                        stdout: r#"{"success":true,"message":"provider success"}"#.to_string(),
+                        stderr: "provider success noise".to_string(),
+                        timed_out: false,
+                        cancelled: false,
+                        duration_ms: 1,
+                        error_code: None,
+                        error: None,
+                    })
+                }
+                TestOfficeOutcome::Failure => Ok(OfficePresentationEditResult {
+                    exit_code: Some(7),
+                    stdout: r#"{"success":false,"error":{"code":"invalid_target","error":"Could not find the inspected target.","message":"Re-inspect the deck.","details":"/private/var/folders/secret/presentation-edit-plan.json"}}"#.to_string(),
+                    stderr:
+                        "provider trace /private/var/folders/secret/presentation-edit-plan.json"
+                            .to_string(),
+                    timed_out: false,
+                    cancelled: false,
+                    duration_ms: 1,
+                    error_code: Some("office.fixture_failure".to_string()),
+                    error: Some("fixture Office failure".to_string()),
+                }),
+                TestOfficeOutcome::Cancelled => Ok(OfficePresentationEditResult {
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    timed_out: false,
+                    cancelled: true,
+                    duration_ms: 1,
+                    error_code: Some("office.cancelled".to_string()),
+                    error: Some("fixture Office cancellation".to_string()),
+                }),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct PreparedEditorCompletionFixture {
+        _runtime: TempDir,
+        workspace: TempDir,
+        office: Arc<RecordingPresentationOfficeEngine>,
+        plan: CommandSpawnPlan,
+        completion_hook: super::super::session::CommandSessionCompletionHook,
+    }
+
+    #[cfg(unix)]
+    fn test_sha256(bytes: &[u8]) -> String {
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn test_platform() -> &'static str {
+        match std::env::consts::OS {
+            "macos" => "darwin",
+            "windows" => "win32",
+            other => other,
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_arch() -> &'static str {
+        match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "x64",
+            other => other,
+        }
+    }
+
+    #[cfg(unix)]
+    fn test_dependency(name: &str, version: &str, identity_file: &str) -> TestDependencyReceipt {
+        TestDependencyReceipt {
+            name: name.to_string(),
+            version: version.to_string(),
+            identity_file: identity_file.to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_test_artifact_runtime() -> (TempDir, Arc<ArtifactRuntimeProvider>) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new().unwrap();
+        let node_fixture = format!(
+            r#"#!/bin/sh
+for argument in "$@"; do
+  if [ "$argument" = "--check" ]; then
+    exit 0
+  fi
+done
+if [ -z "$MYCOPILOT_PRESENTATION_EDIT_PLAN" ]; then
+  exit 9
+fi
+printf '%s' '{}' > "$MYCOPILOT_PRESENTATION_EDIT_PLAN"
+"#,
+            EDITOR_PLAN_JSON
+        );
+        let mut files = vec![
+            ("dependencies/node/bin/node", node_fixture.into_bytes()),
+            (
+                "dependencies/node/node_modules/docx/package.json",
+                br#"{"name":"docx","version":"9.6.1"}"#.to_vec(),
+            ),
+            (
+                "dependencies/node/node_modules/exceljs/package.json",
+                br#"{"name":"exceljs","version":"4.4.0"}"#.to_vec(),
+            ),
+            (
+                "dependencies/node/node_modules/pptxgenjs/package.json",
+                br#"{"name":"pptxgenjs","version":"4.0.1"}"#.to_vec(),
+            ),
+            (
+                "dependencies/python/bin/python3",
+                b"python fixture".to_vec(),
+            ),
+            ("dependencies/tools/rg", b"ripgrep fixture".to_vec()),
+            ("legal/ripgrep/COPYING", b"fixture copyright\n".to_vec()),
+            (
+                "legal/ripgrep/LICENSE-MIT",
+                b"fixture MIT license\n".to_vec(),
+            ),
+            ("legal/ripgrep/UNLICENSE", b"fixture unlicense\n".to_vec()),
+            ("runtime/node-bootstrap.mjs", b"// fixture\n".to_vec()),
+            (
+                "runtime/pdf-runtime-cli.py",
+                b"# managed PDF CLI fixture\n".to_vec(),
+            ),
+        ];
+        for (name, version, path) in [
+            (
+                "openpyxl",
+                "3.1.5",
+                "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA",
+            ),
+            (
+                "pdfplumber",
+                "0.11.9",
+                "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA",
+            ),
+            (
+                "pypdf",
+                "6.15.0",
+                "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA",
+            ),
+            (
+                "pypdfium2",
+                "5.12.1",
+                "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA",
+            ),
+            (
+                "python-docx",
+                "1.2.0",
+                "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA",
+            ),
+            (
+                "python-pptx",
+                "1.0.2",
+                "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA",
+            ),
+            (
+                "reportlab",
+                "4.4.9",
+                "dependencies/python/lib/python3.12/site-packages/reportlab-4.4.9.dist-info/METADATA",
+            ),
+            (
+                "XlsxWriter",
+                "3.2.9",
+                "dependencies/python/lib/python3.12/site-packages/xlsxwriter-3.2.9.dist-info/METADATA",
+            ),
+        ] {
+            files.push((
+                path,
+                format!("Name: {name}\nVersion: {version}\n").into_bytes(),
+            ));
+        }
+        files.sort_by_key(|(path, _)| *path);
+        for (relative, bytes) in &files {
+            let path = directory.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            if relative.ends_with("/node")
+                || relative.ends_with("/python3")
+                || relative.ends_with("/rg")
+            {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let file_receipts = files
+            .iter()
+            .map(|(path, bytes)| TestFileReceipt {
+                path: (*path).to_string(),
+                size: bytes.len() as u64,
+                sha256: test_sha256(bytes),
+            })
+            .collect::<Vec<_>>();
+        let node_dependencies = vec![
+            test_dependency(
+                "docx",
+                "9.6.1",
+                "dependencies/node/node_modules/docx/package.json",
+            ),
+            test_dependency(
+                "exceljs",
+                "4.4.0",
+                "dependencies/node/node_modules/exceljs/package.json",
+            ),
+            test_dependency(
+                "pptxgenjs",
+                "4.0.1",
+                "dependencies/node/node_modules/pptxgenjs/package.json",
+            ),
+        ];
+        let python_dependencies = vec![
+            test_dependency(
+                "openpyxl",
+                "3.1.5",
+                "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA",
+            ),
+            test_dependency(
+                "pdfplumber",
+                "0.11.9",
+                "dependencies/python/lib/python3.12/site-packages/pdfplumber-0.11.9.dist-info/METADATA",
+            ),
+            test_dependency(
+                "pypdf",
+                "6.15.0",
+                "dependencies/python/lib/python3.12/site-packages/pypdf-6.15.0.dist-info/METADATA",
+            ),
+            test_dependency(
+                "pypdfium2",
+                "5.12.1",
+                "dependencies/python/lib/python3.12/site-packages/pypdfium2-5.12.1.dist-info/METADATA",
+            ),
+            test_dependency(
+                "python-docx",
+                "1.2.0",
+                "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA",
+            ),
+            test_dependency(
+                "python-pptx",
+                "1.0.2",
+                "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA",
+            ),
+            test_dependency(
+                "reportlab",
+                "4.4.9",
+                "dependencies/python/lib/python3.12/site-packages/reportlab-4.4.9.dist-info/METADATA",
+            ),
+            test_dependency(
+                "xlsxwriter",
+                "3.2.9",
+                "dependencies/python/lib/python3.12/site-packages/xlsxwriter-3.2.9.dist-info/METADATA",
+            ),
+        ];
+        let mut receipt = TestComponentReceipt {
+            schema_version: 3,
+            provider_id: ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
+            bundle_version: ARTIFACT_RUNTIME_BUNDLE_VERSION.to_string(),
+            build_inputs_revision: format!(
+                "artifact-runtime-build-inputs-sha256-v1:{}",
+                "a".repeat(64)
+            ),
+            platform: test_platform().to_string(),
+            arch: test_arch().to_string(),
+            runtimes: TestRuntimeSet {
+                node: TestRuntimeReceipt {
+                    version: ARTIFACT_RUNTIME_NODE_VERSION.to_string(),
+                    executable: "dependencies/node/bin/node".to_string(),
+                    package_root: Some("dependencies/node/node_modules".to_string()),
+                    runtime_home: None,
+                    bootstrap: Some("runtime/node-bootstrap.mjs".to_string()),
+                    identity_files: std::iter::once("dependencies/node/bin/node".to_string())
+                        .chain(std::iter::once("runtime/node-bootstrap.mjs".to_string()))
+                        .chain(
+                            node_dependencies
+                                .iter()
+                                .map(|dependency| dependency.identity_file.clone()),
+                        )
+                        .collect(),
+                    dependencies: node_dependencies,
+                },
+                python: TestRuntimeReceipt {
+                    version: ARTIFACT_RUNTIME_PYTHON_VERSION.to_string(),
+                    executable: "dependencies/python/bin/python3".to_string(),
+                    package_root: None,
+                    runtime_home: Some("dependencies/python".to_string()),
+                    bootstrap: None,
+                    identity_files: std::iter::once("dependencies/python/bin/python3".to_string())
+                        .chain(
+                            python_dependencies
+                                .iter()
+                                .map(|dependency| dependency.identity_file.clone()),
+                        )
+                        .collect(),
+                    dependencies: python_dependencies,
+                },
+            },
+            tools: TestToolSet {
+                pdf_cli: TestPdfCliReceipt {
+                    version: "1".to_string(),
+                    path: "runtime/pdf-runtime-cli.py".to_string(),
+                    identity_files: vec!["runtime/pdf-runtime-cli.py".to_string()],
+                },
+                ripgrep: TestExecutableToolReceipt {
+                    version: ARTIFACT_RUNTIME_RIPGREP_VERSION.to_string(),
+                    executable: "dependencies/tools/rg".to_string(),
+                    identity_files: vec![
+                        "dependencies/tools/rg".to_string(),
+                        "legal/ripgrep/COPYING".to_string(),
+                        "legal/ripgrep/LICENSE-MIT".to_string(),
+                        "legal/ripgrep/UNLICENSE".to_string(),
+                    ],
+                },
+            },
+            files: file_receipts,
+            bundle_revision: String::new(),
+        };
+        let revision_payload = TestReceiptRevisionPayload {
+            schema_version: receipt.schema_version,
+            provider_id: &receipt.provider_id,
+            bundle_version: &receipt.bundle_version,
+            build_inputs_revision: &receipt.build_inputs_revision,
+            platform: &receipt.platform,
+            arch: &receipt.arch,
+            runtimes: &receipt.runtimes,
+            tools: &receipt.tools,
+            files: &receipt.files,
+        };
+        receipt.bundle_revision = format!(
+            "artifact-runtime-bundle-sha256-v1:{}",
+            test_sha256(&serde_json::to_vec(&revision_payload).unwrap())
+        );
+        fs::write(
+            directory.path().join("component-receipt.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        let provider = Arc::new(
+            ArtifactRuntimeProvider::discover(
+                &ArtifactRuntimeDiscoveryOptions::new()
+                    .with_configured_component_dir(directory.path()),
+            )
+            .unwrap(),
+        );
+        (directory, provider)
+    }
+
+    #[cfg(unix)]
+    fn editor_permissions() -> AgentPermissions {
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            patch: AgentPatchPermission::RequireApproval,
+        }
+    }
+
+    #[cfg(unix)]
+    fn prepare_editor_completion_fixture(
+        outcome: TestOfficeOutcome,
+    ) -> PreparedEditorCompletionFixture {
+        let workspace = TempDir::new().unwrap();
+        fs::create_dir_all(workspace.path().join("scripts")).unwrap();
+        fs::write(
+            workspace.path().join("scripts/editor.mjs"),
+            include_str!("../skills/bundled/presentations/templates/editor.mjs"),
+        )
+        .unwrap();
+        fs::write(workspace.path().join("source.pptx"), b"fixture source").unwrap();
+        let input_context = AgentFileInputExecutionContext::default();
+        let permissions = editor_permissions();
+        let inputs = prepare_agent_file_input_bindings(
+            Some(workspace.path()),
+            permissions,
+            &input_context,
+            &[
+                AgentFileInputSpec {
+                    mount_path: super::super::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH.to_string(),
+                    source: AgentFileInputRef::Workspace {
+                        path: "scripts/editor.mjs".to_string(),
+                    },
+                },
+                AgentFileInputSpec {
+                    mount_path: "source.pptx".to_string(),
+                    source: AgentFileInputRef::Workspace {
+                        path: "source.pptx".to_string(),
+                    },
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        let (runtime, provider) = create_test_artifact_runtime();
+        let binding = super::super::prepare_command_runtime_profile(
+            &provider,
+            AgentCommandRuntimeProfile::Presentations,
+            AgentCommandRuntimeKind::Node,
+        )
+        .unwrap()
+        .binding;
+        let request = AgentCommandRequest {
+            id: "presentation-editor-completion".to_string(),
+            command: "node scripts/editor.mjs --source source.pptx --output edited.pptx"
+                .to_string(),
+            cwd: None,
+            timeout_ms: Some(5_000),
+            approval_status: AgentApprovalStatus::Approved,
+            risk_level: None,
+            reason: None,
+            observe: Some(AgentCommandArtifactObservationRequest {
+                kinds: vec![AgentCommandArtifactObservationKind::Office],
+                expected_outputs: vec!["edited.pptx".to_string()],
+                additional_roots: Vec::new(),
+            }),
+            inputs,
+            runtime_binding: Some(Box::new(binding)),
+        };
+        let office = Arc::new(RecordingPresentationOfficeEngine::new(outcome));
+        let preparation = prepare_managed_command_session(
+            Some(workspace.path()),
+            &request,
+            permissions,
+            CommandAuthorizationSource::ExplicitUser,
+            AgentCancellationToken::new(),
+            ManagedCommandSessionServices {
+                artifact_runtime: Some(provider),
+                office_engine: Some(office.clone()),
+                file_inputs: Some(&input_context),
+                managed_workspace: None,
+            },
+        )
+        .unwrap();
+        let ManagedCommandSessionPreparation::Ready {
+            plan,
+            completion_hook,
+        } = preparation
+        else {
+            panic!("editor fixture unexpectedly failed during preparation")
+        };
+        PreparedEditorCompletionFixture {
+            _runtime: runtime,
+            workspace,
+            office,
+            plan,
+            completion_hook,
+        }
+    }
+
+    #[cfg(unix)]
+    fn completion_result(
+        plan: &CommandSpawnPlan,
+        exit_code: Option<i32>,
+    ) -> AgentCommandExecutionResult {
+        AgentCommandExecutionResult {
+            outputs: Vec::new(),
+            command: plan.command().to_string(),
+            cwd: plan.cwd_projection().to_string(),
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 1,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            output_capture: ProcessOutputCaptureMetadata::default(),
+            stdout_spool: ProcessOutputSpool::default(),
+            stderr_spool: ProcessOutputSpool::default(),
+            error: None,
+            policy_evaluation: None,
+            artifact_observation: None,
+            input_files: Vec::new(),
+            runtime: None,
+            managed_outputs: None,
+            authoritative_archive_ref: None,
+            history_open: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_editor_completion_applies_office_once_before_after_observation() {
+        let fixture = prepare_editor_completion_fixture(TestOfficeOutcome::Success);
+        let output = fixture.plan.build().output().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut result = completion_result(&fixture.plan, output.status.code());
+
+        (fixture.completion_hook)(&mut result, Arc::new(AtomicBool::new(false)));
+
+        assert_eq!(fixture.office.calls(), 1);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.error.is_none());
+        assert!(result.stdout.is_empty());
+        assert!(result.stderr.is_empty());
+        assert!(fixture.workspace.path().join("edited.pptx").is_file());
+        let observation = result
+            .artifact_observation
+            .as_ref()
+            .expect("successful Host edit must perform the After capture");
+        assert!(observation.coverage.after.roots_scanned > 0);
+        assert!(observation
+            .changes
+            .iter()
+            .any(|change| change.path == "edited.pptx"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_editor_completion_office_failure_fails_command_without_after_observation() {
+        let fixture = prepare_editor_completion_fixture(TestOfficeOutcome::Failure);
+        let output = fixture.plan.build().output().unwrap();
+        assert!(output.status.success());
+        let mut result = completion_result(&fixture.plan, output.status.code());
+
+        (fixture.completion_hook)(&mut result, Arc::new(AtomicBool::new(false)));
+
+        assert_eq!(fixture.office.calls(), 1);
+        assert_eq!(result.exit_code, Some(7));
+        let error = result.error.as_deref().expect("bounded Office diagnostic");
+        assert!(error.contains("invalid_target"));
+        assert!(error.contains("Could not find the inspected target."));
+        assert!(error.contains("Re-inspect the deck."));
+        assert!(error.contains("office.fixture_failure"));
+        assert!(error.contains("fixture Office failure"));
+        assert!(!error.contains("/private/var/folders/secret"));
+        assert!(!error.contains("presentation-edit-plan.json"));
+        assert!(error.chars().count() <= 4_096);
+        assert!(result.artifact_observation.is_none());
+        assert!(!fixture.workspace.path().join("edited.pptx").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_editor_completion_plan_and_cancellation_failures_never_publish_after() {
+        #[derive(Clone, Copy, Debug)]
+        enum FailureCase {
+            MissingPlan,
+            MalformedPlan,
+            OfficeCancelled,
+        }
+
+        for case in [
+            FailureCase::MissingPlan,
+            FailureCase::MalformedPlan,
+            FailureCase::OfficeCancelled,
+        ] {
+            let outcome = match case {
+                FailureCase::OfficeCancelled => TestOfficeOutcome::Cancelled,
+                FailureCase::MissingPlan | FailureCase::MalformedPlan => TestOfficeOutcome::Success,
+            };
+            let fixture = prepare_editor_completion_fixture(outcome);
+            let mut result = completion_result(&fixture.plan, Some(0));
+            if !matches!(case, FailureCase::MissingPlan) {
+                let mut command = fixture.plan.build();
+                let plan_path = command
+                    .get_envs()
+                    .find_map(|(name, value)| {
+                        (name == OsStr::new(super::super::PRESENTATION_EDITOR_PLAN_ENV))
+                            .then_some(value)
+                            .flatten()
+                    })
+                    .map(PathBuf::from)
+                    .expect("Editor plan path is a Host-owned launch environment value");
+                let output = command.output().unwrap();
+                assert!(output.status.success(), "case={case:?}");
+                if matches!(case, FailureCase::MalformedPlan) {
+                    fs::write(plan_path, b"{malformed").unwrap();
+                }
+            }
+
+            (fixture.completion_hook)(&mut result, Arc::new(AtomicBool::new(false)));
+
+            assert!(result.error.is_some(), "case={case:?}");
+            assert!(result.artifact_observation.is_none(), "case={case:?}");
+            assert!(
+                !fixture.workspace.path().join("edited.pptx").exists(),
+                "case={case:?}"
+            );
+            match case {
+                FailureCase::OfficeCancelled => {
+                    assert_eq!(fixture.office.calls(), 1);
+                    assert!(result.cancelled);
+                    assert_eq!(result.exit_code, None);
+                }
+                FailureCase::MissingPlan | FailureCase::MalformedPlan => {
+                    assert_eq!(fixture.office.calls(), 0);
+                    assert!(!result.cancelled);
+                    assert_eq!(result.exit_code, Some(1));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn presentation_editor_completion_node_failure_skips_office_and_after_observation() {
+        let fixture = prepare_editor_completion_fixture(TestOfficeOutcome::Success);
+        let mut result = completion_result(&fixture.plan, Some(9));
+
+        (fixture.completion_hook)(&mut result, Arc::new(AtomicBool::new(false)));
+
+        assert_eq!(fixture.office.calls(), 0);
+        assert_eq!(result.exit_code, Some(9));
+        assert!(result.artifact_observation.is_none());
+        assert!(!fixture.workspace.path().join("edited.pptx").exists());
+    }
 
     #[cfg(unix)]
     fn fake_managed_node(runtime_root: &Path, marker: &Path) -> ArtifactRuntimeInvocation {
@@ -1938,12 +3473,20 @@ fi
     #[test]
     fn managed_pdf_uses_one_host_owned_hard_timeout() {
         let expected = Some(Duration::from_millis(MANAGED_PDF_HARD_TIMEOUT_MS));
-        assert_eq!(managed_command_hard_timeout(true, None), expected);
-        assert_eq!(managed_command_hard_timeout(true, Some(1)), expected);
-        assert_eq!(managed_command_hard_timeout(false, None), None);
+        assert_eq!(managed_command_hard_timeout(true, false, None), expected);
+        assert_eq!(managed_command_hard_timeout(true, true, Some(1)), expected);
+        assert_eq!(managed_command_hard_timeout(false, false, None), None);
         assert_eq!(
-            managed_command_hard_timeout(false, Some(MAX_TIMEOUT_MS + 1)),
+            managed_command_hard_timeout(false, false, Some(MAX_TIMEOUT_MS + 1)),
             Some(Duration::from_millis(MAX_TIMEOUT_MS))
+        );
+        assert_eq!(
+            managed_command_hard_timeout(false, true, None),
+            Some(Duration::from_millis(PRESENTATION_EDITOR_PLAN_TIMEOUT_MS))
+        );
+        assert_eq!(
+            managed_command_hard_timeout(false, true, Some(250)),
+            Some(Duration::from_millis(250))
         );
     }
 

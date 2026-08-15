@@ -162,7 +162,7 @@ pub type CommandSessionLifecycleObserver =
     Arc<dyn Fn(CommandSessionLifecycleEvent) + Send + Sync + 'static>;
 
 pub(crate) type CommandSessionCompletionHook =
-    Box<dyn FnOnce(&mut AgentCommandExecutionResult) + Send + 'static>;
+    Box<dyn FnOnce(&mut AgentCommandExecutionResult, Arc<AtomicBool>) + Send + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandSessionError {
@@ -252,6 +252,9 @@ pub(crate) struct ManagedCommandSession {
     /// after its durable receipt fails or has an unknown commit outcome; that retry may observe
     /// state again, but must never enqueue a second SIGINT request.
     interrupt_requested: AtomicBool,
+    /// Shared with terminal settlement so an interrupt arriving after the child exits can still
+    /// cancel a Host-owned post-process transaction before publication.
+    completion_cancel_requested: Arc<AtomicBool>,
     control_tx: SyncSender<ProcessControl>,
     watcher: Mutex<Option<std::thread::JoinHandle<()>>>,
     lifecycle_observer: Option<CommandSessionLifecycleObserver>,
@@ -300,6 +303,7 @@ impl ManagedCommandSession {
             lifecycle_order: Mutex::new(()),
             interaction: Mutex::new(ModelInteractionState::default()),
             interrupt_requested: AtomicBool::new(false),
+            completion_cancel_requested: Arc::new(AtomicBool::new(false)),
             control_tx,
             watcher: Mutex::new(None),
             lifecycle_observer,
@@ -629,6 +633,8 @@ impl ManagedCommandSession {
             ProcessControl::Interrupt => !self.interrupt_requested.swap(true, Ordering::AcqRel),
             ProcessControl::ForceTerminate => true,
         };
+        self.completion_cancel_requested
+            .store(true, Ordering::Release);
         if should_send && self.control_tx.send(control).is_err() {
             if matches!(control, ProcessControl::Interrupt) {
                 self.interrupt_requested.store(false, Ordering::Release);
@@ -655,6 +661,8 @@ impl ManagedCommandSession {
     /// a model poll that is intentionally holding the interaction lock.
     pub(crate) fn force_for_shutdown(&self) {
         if !lock(&self.observed).state.is_terminal() {
+            self.completion_cancel_requested
+                .store(true, Ordering::Release);
             let _ = self.control_tx.try_send(ProcessControl::ForceTerminate);
         }
     }
@@ -886,13 +894,15 @@ pub(crate) fn run_session_watcher(
         history_open: None,
     };
     if let Some(completion_hook) = completion_hook {
+        let completion_cancel_requested = Arc::clone(&session.completion_cancel_requested);
         let completion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            completion_hook(&mut result);
+            completion_hook(&mut result, completion_cancel_requested);
         }));
         if completion.is_err() {
             result.error = Some("命令终态结算回调异常退出。".to_string());
         }
     }
+    result.duration_ms = elapsed_millis(started);
     // Completion hooks are part of terminal settlement. In particular, managed-runtime integrity
     // verification can turn a successful OS exit into a failed command result. Derive the public
     // state only after the hook has produced the final result so Session, ToolResult, Trace, and UI
@@ -901,11 +911,11 @@ pub(crate) fn run_session_watcher(
         Some(TerminationIntent::Interrupted) => CommandSessionState::Interrupted,
         Some(TerminationIntent::TimedOut) => CommandSessionState::TimedOut,
         Some(TerminationIntent::Failed) => CommandSessionState::Failed,
+        None if result.cancelled => CommandSessionState::Interrupted,
+        None if result.timed_out => CommandSessionState::TimedOut,
         None if result.error.is_some() => CommandSessionState::Failed,
         None => CommandSessionState::Exited {
-            exit_code: exit_status
-                .as_ref()
-                .and_then(std::process::ExitStatus::code),
+            exit_code: result.exit_code,
         },
     };
     let terminal_error = result.error.clone();

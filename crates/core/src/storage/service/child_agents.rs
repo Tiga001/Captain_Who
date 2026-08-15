@@ -1167,6 +1167,7 @@ mod tests {
         files
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_terminal_assistant_for_tree_fork(
         fixture: &Fixture,
         conversation_id: &str,

@@ -661,8 +661,6 @@ fn prepare_conversation_turn_from_source(
         conversation_turn_trace: None,
         conversation_model_context_items: Vec::new(),
     });
-    let goal = storage.load_visible_conversation_goal(&conversation_id)?;
-
     let provider_usage_semantics =
         mycopilot_core::resolve_provider_runtime_capabilities(&provider_protocol_key)
             .map_err(|error| error.to_string())?
@@ -695,7 +693,6 @@ fn prepare_conversation_turn_from_source(
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,
-        goal,
         world_state_records,
         skill_activation: prepared_skills.runtime,
         skill_discovery: skill_discovery.clone(),

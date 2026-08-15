@@ -7,6 +7,38 @@ struct ForbiddenMarker {
 
 const FORBIDDEN_MARKERS: &[ForbiddenMarker] = &[
     ForbiddenMarker {
+        value: "create_goal",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "get_goal",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "update_goal",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "ConversationGoal",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "conversation_goals",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "conversation_goal_revisions",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "goalTokens",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "goal_tokens",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
         value: "throughAssistantMessageId",
         allowed_files: &[],
     },
@@ -116,6 +148,14 @@ const FORBIDDEN_MARKERS: &[ForbiddenMarker] = &[
     },
     ForbiddenMarker {
         value: "PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 6",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "PERSISTED_AGENT_RESUME_INPUT_SCHEMA_VERSION: u32 = 8",
+        allowed_files: &[],
+    },
+    ForbiddenMarker {
+        value: "MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION: u32 = 2",
         allowed_files: &[],
     },
     ForbiddenMarker {

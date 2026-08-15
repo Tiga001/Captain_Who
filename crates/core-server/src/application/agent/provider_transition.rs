@@ -1108,7 +1108,6 @@ fn resolve_provider_transition_target(
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
-        goal: storage.load_visible_conversation_goal(&conversation.id)?,
         world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,

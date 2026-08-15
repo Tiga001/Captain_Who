@@ -2,9 +2,11 @@ use super::{clean_relative_path, AgentTool, ToolExecutionContext};
 use crate::command::{
     classify_command_risk, infer_managed_artifact_builder_command,
     infer_managed_artifact_command_kind, infer_managed_pdf_command_kind,
-    infer_managed_pdf_workspace_inputs, normalize_command_text, validate_command_runtime_binding,
+    infer_managed_pdf_workspace_inputs, is_presentation_editor_direct_command,
+    normalize_command_text, validate_command_runtime_binding,
     validate_managed_artifact_builder_output_scope, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
-    MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
+    MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS, PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX,
+    PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH,
 };
 use crate::file_input::{
     agent_file_input_ref_from_model_path, agent_file_input_ref_matches_model_path,
@@ -28,6 +30,19 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum TrustedManagedBuilderPurpose {
+    Create,
+    EditPresentation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TrustedManagedBuilder {
+    profile: AgentCommandRuntimeProfile,
+    purpose: TrustedManagedBuilderPurpose,
+    workspace_script_path: String,
+}
 
 pub(super) struct RunCommandTool;
 
@@ -360,8 +375,30 @@ fn command_request_from_call(
         .or_else(|| call.reason.clone())
         .map(|reason| reason.trim().to_string())
         .filter(|reason| !reason.is_empty());
-    let host_builder_profile =
-        trusted_materialized_builder_profile(context, &command, cwd.as_deref())?;
+    let trusted_builder = trusted_materialized_builder_profile(context, &command, cwd.as_deref())?;
+    let trusted_editor_syntax_check = if trusted_builder
+        .as_ref()
+        .is_some_and(|builder| builder.purpose == TrustedManagedBuilderPurpose::EditPresentation)
+    {
+        let parsed = infer_managed_artifact_builder_command(&command)
+            .map_err(builder_contract_error)?
+            .ok_or_else(|| {
+                builder_contract_error("后端验证的 Presentation Editor 命令无法解析。".to_string())
+            })?;
+        if parsed.node_syntax_check {
+            true
+        } else if is_presentation_editor_direct_command(&command) {
+            false
+        } else {
+            return Err(builder_contract_error(
+                "Presentation Editor 只允许 `node --check <editor.mjs>` 语法校验，或标准的 `node <editor.mjs> --source <input> --output <save-as.pptx>` 执行形状。"
+                    .to_string(),
+            ));
+        }
+    } else {
+        false
+    };
+    let host_builder_profile = trusted_builder.as_ref().map(|builder| builder.profile);
     let builder_config = derive_managed_builder_config(
         &command,
         args.runtime_profile,
@@ -396,6 +433,32 @@ fn command_request_from_call(
     .with_conversation_id(context.conversation_id_optional());
     let workspace_root = context.workspace_root_optional()?;
     let mut input_specs = resolve_run_command_inputs(&input_context, args.inputs)?;
+    if input_specs
+        .iter()
+        .any(|input| is_presentation_editor_reserved_mount(&input.mount_path))
+    {
+        return Err(AgentError::structured(
+            "agent.fileInput.invalidRequest",
+            "Presentation Editor 的 Host 保留挂载命名空间不能由模型声明。",
+            json!({
+                "type": "agentFileInput",
+                "code": "agent.fileInput.invalidRequest",
+                "recovery": "changeRequest"
+            }),
+        ));
+    }
+    if let Some(builder) = trusted_builder
+        .as_ref()
+        .filter(|builder| builder.purpose == TrustedManagedBuilderPurpose::EditPresentation)
+        .filter(|_| !trusted_editor_syntax_check)
+    {
+        input_specs.push(AgentFileInputSpec {
+            mount_path: crate::command::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH.to_string(),
+            source: AgentFileInputRef::Workspace {
+                path: builder.workspace_script_path.clone(),
+            },
+        });
+    }
     if managed_pdf_profile.is_some() {
         for relative in infer_managed_pdf_workspace_inputs(&command).map_err(|message| {
             AgentError::structured(
@@ -598,7 +661,7 @@ fn trusted_materialized_builder_profile(
     context: &ToolExecutionContext,
     command: &str,
     cwd: Option<&str>,
-) -> AgentResult<Option<AgentCommandRuntimeProfile>> {
+) -> AgentResult<Option<TrustedManagedBuilder>> {
     let builder =
         infer_managed_artifact_builder_command(command).map_err(builder_contract_error)?;
     let Some(builder) = builder else {
@@ -697,10 +760,11 @@ fn trusted_materialized_builder_profile(
                 }),
             ));
         }
-        let Some(profile) = profile_for_bundled_builder_receipt(&receipt, builder.kind)? else {
+        let Some((profile, purpose)) = profile_for_bundled_builder_receipt(&receipt, builder.kind)?
+        else {
             continue;
         };
-        profiles.insert(profile);
+        profiles.insert((profile, purpose));
     }
     if profiles.len() > 1 {
         return Err(AgentError::structured(
@@ -713,7 +777,7 @@ fn trusted_materialized_builder_profile(
             }),
         ));
     }
-    let Some(profile) = profiles.into_iter().next() else {
+    let Some((profile, purpose)) = profiles.into_iter().next() else {
         return Ok(None);
     };
 
@@ -753,13 +817,17 @@ fn trusted_materialized_builder_profile(
             }),
         ));
     }
-    Ok(Some(profile))
+    Ok(Some(TrustedManagedBuilder {
+        profile,
+        purpose,
+        workspace_script_path: relative_script,
+    }))
 }
 
 fn profile_for_bundled_builder_receipt(
     receipt: &AgentSkillMaterializationResult,
     command_kind: crate::AgentCommandRuntimeKind,
-) -> AgentResult<Option<AgentCommandRuntimeProfile>> {
+) -> AgentResult<Option<(AgentCommandRuntimeProfile, TrustedManagedBuilderPurpose)>> {
     let source = SkillResourceUri::parse(&receipt.source_uri)
         .map_err(|error| AgentError::new(format!("Skill 物化审计包含无效 sourceUri：{error}")))?;
     if source.package().skill_id().source_id().as_str() != APPLICATION_BUNDLED_SKILL_SOURCE_ID {
@@ -778,19 +846,30 @@ fn profile_for_bundled_builder_receipt(
     }
     let local_id = source.package().skill_id().local_id();
     let path = source.path().as_str();
-    let profile = match (local_id, path, command_kind) {
-        (DOCUMENTS_LOCAL_ID, "templates/builder.py", crate::AgentCommandRuntimeKind::Python) => {
-            AgentCommandRuntimeProfile::Documents
-        }
+    let (profile, purpose) = match (local_id, path, command_kind) {
+        (DOCUMENTS_LOCAL_ID, "templates/builder.py", crate::AgentCommandRuntimeKind::Python) => (
+            AgentCommandRuntimeProfile::Documents,
+            TrustedManagedBuilderPurpose::Create,
+        ),
         (SPREADSHEETS_LOCAL_ID, "templates/builder.py", crate::AgentCommandRuntimeKind::Python) => {
-            AgentCommandRuntimeProfile::Spreadsheets
+            (
+                AgentCommandRuntimeProfile::Spreadsheets,
+                TrustedManagedBuilderPurpose::Create,
+            )
         }
         (PRESENTATIONS_LOCAL_ID, "templates/builder.mjs", crate::AgentCommandRuntimeKind::Node) => {
-            AgentCommandRuntimeProfile::Presentations
+            (
+                AgentCommandRuntimeProfile::Presentations,
+                TrustedManagedBuilderPurpose::Create,
+            )
         }
+        (PRESENTATIONS_LOCAL_ID, "templates/editor.mjs", crate::AgentCommandRuntimeKind::Node) => (
+            AgentCommandRuntimeProfile::Presentations,
+            TrustedManagedBuilderPurpose::EditPresentation,
+        ),
         _ => return Ok(None),
     };
-    Ok(Some(profile))
+    Ok(Some((profile, purpose)))
 }
 
 fn normalize_builder_script_path(path: PathBuf) -> AgentResult<PathBuf> {
@@ -1111,14 +1190,47 @@ pub(crate) fn validate_frozen_command_trace_args(
         .map(sanitize_observe)
         .transpose()
         .map_err(|_| "run_command frozen ToolCall observe hint is invalid".to_string())?;
-    let frozen_inputs = frozen
-        .inputs
-        .iter()
-        .map(|binding| AgentFileInputSpec {
+    let mut frozen_inputs = Vec::with_capacity(frozen.inputs.len());
+    let mut editor_script = None;
+    for binding in &frozen.inputs {
+        if binding.mount_path == PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH {
+            if editor_script.replace(binding).is_some() {
+                return Err(
+                    "run_command frozen command contains multiple Host-reserved Presentation Editor scripts"
+                        .to_string(),
+                );
+            }
+            continue;
+        }
+        if is_presentation_editor_reserved_mount(&binding.mount_path) {
+            return Err(
+                "run_command frozen command contains an invalid Host-reserved Presentation Editor input"
+                    .to_string(),
+            );
+        }
+        frozen_inputs.push(AgentFileInputSpec {
             mount_path: binding.mount_path.clone(),
             source: binding.source.clone(),
-        })
-        .collect::<Vec<_>>();
+        });
+    }
+    if let Some(editor_script) = editor_script {
+        let Some(binding) = frozen.runtime_binding.as_deref() else {
+            return Err(
+                "run_command frozen Presentation Editor script has no managed runtime identity"
+                    .to_string(),
+            );
+        };
+        if binding.profile != AgentCommandRuntimeProfile::Presentations
+            || binding.kind != crate::AgentCommandRuntimeKind::Node
+            || !matches!(&editor_script.source, AgentFileInputRef::Workspace { .. })
+            || !is_presentation_editor_direct_command(&command)
+        {
+            return Err(
+                "run_command frozen Presentation Editor script has an invalid Host identity"
+                    .to_string(),
+            );
+        }
+    }
     let frozen_pdf = frozen
         .runtime_binding
         .as_deref()
@@ -1164,6 +1276,12 @@ pub(crate) fn validate_frozen_command_trace_args(
         );
     }
     Ok(())
+}
+
+fn is_presentation_editor_reserved_mount(mount_path: &str) -> bool {
+    mount_path
+        .strip_prefix(PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1514,6 +1632,65 @@ mod tests {
         storage
             .upsert_agent_action_audit(AgentActionAuditRecord {
                 action_id: format!("materialize-{local_id}"),
+                run_id: run_id.to_string(),
+                conversation_id: None,
+                assistant_message_id: None,
+                action_type: "skill_materialization".to_string(),
+                tool_name: "skills_materialize_resource".to_string(),
+                decision: Some("approved".to_string()),
+                status: "completed".to_string(),
+                action_json: "{}".to_string(),
+                patch_result_json: None,
+                command_result_json: None,
+                tool_result_json: Some(serde_json::to_string(&tool_result).unwrap()),
+                error: None,
+                created_at: 1,
+                decided_at: Some(2),
+                completed_at: Some(3),
+                effective_permissions_json: None,
+                path_scope: None,
+                command_cwd_scope: None,
+                blocked_reason: None,
+                decision_source: Some("manual".to_string()),
+            })
+            .unwrap();
+    }
+
+    fn record_materialized_presentation_editor(
+        storage: &StorageService,
+        run_id: &str,
+        source_id: &str,
+        destination: &str,
+    ) {
+        let revision = SkillRevision::parse("revision-presentations-editor").unwrap();
+        let source = SkillPackageUri::new(
+            SkillId::parse(format!("{source_id}:{PRESENTATIONS_LOCAL_ID}")).unwrap(),
+            revision.clone(),
+        )
+        .resource(SkillResourcePath::parse("templates/editor.mjs".to_string()).unwrap());
+        let result = AgentSkillMaterializationResult {
+            status: AgentSkillMaterializationResultStatus::Applied,
+            source_uri: source.to_string(),
+            source_prefix: None,
+            destination: destination.to_string(),
+            source_revision: revision.to_string(),
+            file_count: 1,
+            byte_count: 100,
+            plan_digest: Some("skill-materialization-sha256-v1:editor-test".to_string()),
+            error: None,
+            message: Some("created".to_string()),
+        };
+        let tool_result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: format!("materialize-editor-{source_id}"),
+            tool: "skills_materialize_resource".to_string(),
+            ok: true,
+            result: Some(serde_json::to_value(result).unwrap()),
+            error: None,
+        };
+        storage
+            .upsert_agent_action_audit(AgentActionAuditRecord {
+                action_id: format!("materialize-editor-{source_id}"),
                 run_id: run_id.to_string(),
                 conversation_id: None,
                 assistant_message_id: None,
@@ -2376,6 +2553,361 @@ mod tests {
             assert_eq!(observe.expected_outputs.len(), 1);
             assert!(observe.expected_outputs[0].starts_with("outputs/"));
             validate_frozen_command_trace_args(&request, &args).unwrap();
+        }
+    }
+
+    #[test]
+    fn exact_bundled_editor_receipt_freezes_the_script_as_a_host_reserved_input() {
+        let workspace = tempfile::tempdir().unwrap();
+        let editor = "scripts/edit_existing.mjs";
+        std::fs::create_dir_all(workspace.path().join("scripts")).unwrap();
+        let editor_bytes = b"// materialized fixed editor\n";
+        std::fs::write(workspace.path().join(editor), editor_bytes).unwrap();
+        let source_bytes = b"PK\x03\x04presentation fixture";
+        std::fs::write(workspace.path().join("source.pptx"), source_bytes).unwrap();
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+        let run_id = "run-presentation-editor-provenance";
+        record_materialized_presentation_editor(
+            &storage,
+            run_id,
+            APPLICATION_BUNDLED_SKILL_SOURCE_ID,
+            editor,
+        );
+        let args = json!({
+            "command": format!(
+                "node {editor} --source source.pptx --output outputs/source-edited.pptx"
+            ),
+            "inputs": [{ "path": "source.pptx", "mountPath": "source.pptx" }]
+        });
+        let call = AgentToolCall {
+            id: "tool-presentation-editor-provenance".to_string(),
+            tool: "run_command".to_string(),
+            args: args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: Some("conversation-presentation-editor".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("presentation editor".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node,
+                &[("pptxgenjs", "4.0.1")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(storage));
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert_eq!(
+            request
+                .runtime_binding
+                .as_deref()
+                .map(|binding| binding.profile),
+            Some(AgentCommandRuntimeProfile::Presentations)
+        );
+        assert_eq!(request.inputs.len(), 2);
+        let script = request
+            .inputs
+            .iter()
+            .find(|input| input.mount_path == crate::command::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH)
+            .expect("the exact bundled Editor script is a Host-reserved frozen input");
+        assert_eq!(
+            script.source,
+            AgentFileInputRef::Workspace {
+                path: editor.to_string()
+            }
+        );
+        assert_eq!(script.size_bytes, editor_bytes.len() as u64);
+        assert_eq!(script.sha256, format!("{:x}", Sha256::digest(editor_bytes)));
+        let source = request
+            .inputs
+            .iter()
+            .find(|input| input.mount_path == "source.pptx")
+            .expect("source deck remains independently frozen");
+        assert_eq!(source.size_bytes, source_bytes.len() as u64);
+        validate_frozen_command_trace_args(&request, &args).unwrap();
+
+        let restored: AgentCommandRequest =
+            serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+        validate_frozen_command_trace_args(&restored, &args)
+            .expect("restart reconciliation ignores only the exact Host-hidden script binding");
+        assert_eq!(restored.inputs, request.inputs);
+
+        let hidden = request
+            .inputs
+            .iter()
+            .find(|input| input.mount_path == PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH)
+            .unwrap()
+            .clone();
+        let mut duplicate_hidden = request.clone();
+        duplicate_hidden.inputs.push(hidden.clone());
+        validate_frozen_command_trace_args(&duplicate_hidden, &args)
+            .expect_err("multiple hidden Editor identities must fail closed");
+
+        let mut malformed_hidden = request.clone();
+        malformed_hidden.inputs.push(crate::AgentFileInputBinding {
+            mount_path: format!("{PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX}/unexpected.mjs"),
+            ..hidden.clone()
+        });
+        validate_frozen_command_trace_args(&malformed_hidden, &args)
+            .expect_err("unknown inputs beneath the Host-reserved prefix must fail closed");
+
+        let mut external_hidden = request.clone();
+        external_hidden
+            .inputs
+            .iter_mut()
+            .find(|input| input.mount_path == PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH)
+            .unwrap()
+            .source = AgentFileInputRef::External {
+            path: "/tmp/forged-editor.mjs".to_string(),
+        };
+        validate_frozen_command_trace_args(&external_hidden, &args)
+            .expect_err("the hidden Editor script must remain workspace-owned");
+
+        let mut wrong_shape = request.clone();
+        wrong_shape.command = format!("node {editor} --output outputs/source-edited.pptx");
+        let mut wrong_shape_args = args.clone();
+        wrong_shape_args["command"] = json!(wrong_shape.command);
+        validate_frozen_command_trace_args(&wrong_shape, &wrong_shape_args)
+            .expect_err("the hidden identity cannot survive a command-shape downgrade");
+
+        let syntax_args = json!({
+            "command": format!("node --check {editor}")
+        });
+        let syntax_call = AgentToolCall {
+            id: "tool-presentation-editor-syntax-check".to_string(),
+            tool: "run_command".to_string(),
+            args: syntax_args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let syntax_request = command_request_from_call(&context, &syntax_call)
+            .expect("the exact Editor receipt must authorize its syntax-only check");
+        assert_eq!(
+            syntax_request
+                .runtime_binding
+                .as_deref()
+                .map(|binding| (binding.profile, binding.kind)),
+            Some((
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node
+            ))
+        );
+        assert!(
+            syntax_request.inputs.is_empty(),
+            "syntax-only checks must not receive the Host-hidden execution identity"
+        );
+        assert!(syntax_request.observe.is_none());
+        validate_frozen_command_trace_args(&syntax_request, &syntax_args).unwrap();
+
+        let unicode_source = "素材/南京 大学.pptx";
+        std::fs::create_dir_all(workspace.path().join("素材")).unwrap();
+        std::fs::write(
+            workspace.path().join(unicode_source),
+            b"PK\x03\x04unicode deck",
+        )
+        .unwrap();
+        let quoted_args = json!({
+            "command": format!(
+                "node '{editor}' --source '南京 大学.pptx' --output 'outputs/南京 大学-编辑.pptx'"
+            ),
+            "inputs": [{ "path": unicode_source, "mountPath": "南京 大学.pptx" }]
+        });
+        let quoted_call = AgentToolCall {
+            id: "tool-presentation-editor-quoted-unicode".to_string(),
+            tool: "run_command".to_string(),
+            args: quoted_args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let quoted_request = command_request_from_call(&context, &quoted_call)
+            .expect("quoted spaces and Unicode paths must keep the exact Editor contract");
+        assert!(quoted_request
+            .inputs
+            .iter()
+            .any(|input| input.mount_path == "南京 大学.pptx"));
+        assert!(quoted_request
+            .inputs
+            .iter()
+            .any(|input| input.mount_path == PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH));
+        assert_eq!(
+            quoted_request
+                .observe
+                .as_ref()
+                .and_then(|observe| observe.expected_outputs.first())
+                .map(String::as_str),
+            Some("outputs/南京 大学-编辑.pptx")
+        );
+        validate_frozen_command_trace_args(&quoted_request, &quoted_args).unwrap();
+
+        for unsafe_output in ["/tmp/escaped.pptx", "../escaped.pptx"] {
+            let unsafe_args = json!({
+                "command": format!(
+                    "node {editor} --source source.pptx --output '{unsafe_output}'"
+                ),
+                "inputs": [{ "path": "source.pptx", "mountPath": "source.pptx" }]
+            });
+            let unsafe_call = AgentToolCall {
+                id: format!("tool-presentation-editor-unsafe-output-{unsafe_output}"),
+                tool: "run_command".to_string(),
+                args: unsafe_args,
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let error = command_request_from_call(&context, &unsafe_call)
+                .expect_err("Editor outputs must remain inside the effective write scope");
+            assert_eq!(error.code(), Some("managedBuilder.outputOutsideWriteScope"));
+        }
+
+        let malformed_args = json!({
+            "command": format!("node {editor} --output outputs/source-edited.pptx")
+        });
+        let malformed_call = AgentToolCall {
+            id: "tool-presentation-editor-malformed".to_string(),
+            tool: "run_command".to_string(),
+            args: malformed_args,
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = command_request_from_call(&context, &malformed_call)
+            .expect_err("an Editor receipt must never downgrade a malformed command to Builder");
+        assert_eq!(error.code(), Some("managedBuilder.invalidOutputContract"));
+    }
+
+    #[test]
+    fn third_party_editor_receipt_cannot_unlock_the_host_editor_identity() {
+        let workspace = tempfile::tempdir().unwrap();
+        let editor = "scripts/edit_existing.mjs";
+        std::fs::create_dir_all(workspace.path().join("scripts")).unwrap();
+        std::fs::write(workspace.path().join(editor), "// spoofed editor\n").unwrap();
+        std::fs::write(workspace.path().join("source.pptx"), b"PK\x03\x04fixture").unwrap();
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+        let run_id = "run-third-party-presentation-editor";
+        record_materialized_presentation_editor(&storage, run_id, "workspace:workspace-1", editor);
+        let base_args = json!({
+            "command": format!(
+                "node {editor} --source source.pptx --output outputs/source-edited.pptx"
+            ),
+            "inputs": [{ "path": "source.pptx", "mountPath": "source.pptx" }]
+        });
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                collaboration_identity: None,
+                conversation_id: Some("conversation-third-party-editor".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("third-party editor".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().into_owned()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node,
+                &[("pptxgenjs", "4.0.1")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(storage));
+        let call = AgentToolCall {
+            id: "tool-third-party-editor".to_string(),
+            tool: "run_command".to_string(),
+            args: base_args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = command_request_from_call(&context, &call)
+            .expect_err("third-party receipt cannot authorize managed inputs or the Editor");
+        assert_eq!(error.code(), Some("agent.fileInput.invalidRequest"));
+
+        let mut explicit_args = base_args;
+        explicit_args["runtimeProfile"] = json!("presentations");
+        let explicit_call = AgentToolCall {
+            id: "tool-third-party-editor-explicit-runtime".to_string(),
+            tool: "run_command".to_string(),
+            args: explicit_args,
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let ordinary = command_request_from_call(&context, &explicit_call)
+            .expect("an explicit ordinary Office runtime remains a separate compatibility path");
+        assert!(
+            ordinary
+                .inputs
+                .iter()
+                .all(|input| input.mount_path
+                    != crate::command::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH)
+        );
+
+        let forged_args = json!({
+            "command": format!(
+                "node {editor} --source source.pptx --output outputs/source-edited.pptx"
+            ),
+            "runtimeProfile": "presentations",
+            "inputs": [{
+                "path": editor,
+                "mountPath": crate::command::PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH
+            }]
+        });
+        let forged_call = AgentToolCall {
+            id: "tool-forged-editor-reserved-input".to_string(),
+            tool: "run_command".to_string(),
+            args: forged_args,
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let forged = command_request_from_call(&context, &forged_call)
+            .expect_err("model arguments cannot forge the Host-reserved Editor binding");
+        assert_eq!(forged.code(), Some("agent.fileInput.invalidRequest"));
+
+        for (case, mount_path) in [
+            (
+                "reserved-sibling",
+                format!("{PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX}/loader.mjs"),
+            ),
+            (
+                "reserved-child",
+                format!("{PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH}/payload"),
+            ),
+        ] {
+            let forged_args = json!({
+                "command": format!(
+                    "node {editor} --source source.pptx --output outputs/source-edited.pptx"
+                ),
+                "runtimeProfile": "presentations",
+                "inputs": [{ "path": editor, "mountPath": mount_path }]
+            });
+            let forged_call = AgentToolCall {
+                id: format!("tool-forged-editor-{case}"),
+                tool: "run_command".to_string(),
+                args: forged_args,
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let forged = command_request_from_call(&context, &forged_call)
+                .expect_err("the entire Presentation Editor namespace is Host-reserved");
+            assert_eq!(forged.code(), Some("agent.fileInput.invalidRequest"));
         }
     }
 

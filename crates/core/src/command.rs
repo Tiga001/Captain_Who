@@ -38,6 +38,9 @@ mod managed_pdf_shell;
 mod managed_runtime;
 mod output_capture;
 mod policy;
+mod presentation_editor;
+#[cfg(test)]
+mod presentation_editor_tests;
 mod process_control;
 mod risk;
 mod runtime_profile;
@@ -63,7 +66,7 @@ pub use managed_output_publication::{
 pub(crate) use managed_runtime::{
     infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
     infer_managed_pdf_command_kind, infer_managed_pdf_workspace_inputs,
-    validate_managed_artifact_builder_output_scope,
+    is_presentation_editor_direct_command, validate_managed_artifact_builder_output_scope,
 };
 pub use output_capture::{
     join_process_output_capture, materialize_process_tool_result_archive,
@@ -73,6 +76,11 @@ pub use output_capture::{
     ProcessOutputObserver, ProcessOutputSpool, ProcessOutputSpoolSubstitution,
 };
 pub use policy::*;
+pub(crate) use presentation_editor::{
+    read_presentation_editor_plan, validate_presentation_editor_script,
+    PRESENTATION_EDITOR_PLAN_ENV, PRESENTATION_EDITOR_RESERVED_MOUNT_PREFIX,
+    PRESENTATION_EDITOR_SCRIPT_MOUNT_PATH,
+};
 pub(crate) use process_control::{
     configure_command_process_group, force_terminate_command_process_group,
     interrupt_command_process_group, terminate_command_process_group,

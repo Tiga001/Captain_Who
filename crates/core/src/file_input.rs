@@ -127,6 +127,10 @@ impl AgentFileInputExecutionContext {
         }
     }
 
+    pub(crate) fn attachment_library(&self) -> Option<&AgentAttachmentLibraryContext> {
+        self.attachment_library.as_ref()
+    }
+
     pub fn from_attachment_library(
         attachment_library: Option<AgentAttachmentLibraryContext>,
     ) -> Self {

@@ -643,7 +643,7 @@ fn managed_runtime_integrity_completion_error_marks_session_failed() {
     let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
     let lifecycle_observer: CommandSessionLifecycleObserver =
         Arc::new(move |event| lifecycle_tx.send(event).unwrap());
-    let completion_hook: CommandSessionCompletionHook = Box::new(|result| {
+    let completion_hook: CommandSessionCompletionHook = Box::new(|result, _| {
         result.error = Some("managed runtime integrity verification failed".to_string());
     });
     let outcome = manager
@@ -697,7 +697,7 @@ fn completion_hook_panic_marks_successful_process_failed() {
     let workspace = TestWorkspace::new();
     let manager = CommandSessionManager::new(test_config()).unwrap();
     let completion_hook: CommandSessionCompletionHook =
-        Box::new(|_| panic!("simulated completion hook panic"));
+        Box::new(|_, _| panic!("simulated completion hook panic"));
     let outcome = manager
         .start_plan_with_observers(
             CommandSessionScopeId::new("completion-hook-panic").unwrap(),

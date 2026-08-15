@@ -456,6 +456,24 @@ pub(super) fn copy_file_snapshot(source: &Path, target: &Path) -> Result<(), Off
         .map_err(|error| io_error("preserve Office file permissions in staging", error))
 }
 
+/// Makes only the Host-private mutation candidate writable by its owner. Agent input snapshots
+/// remain read-only, and publication still applies the destination's frozen permissions in
+/// [`StagingArea::publish`].
+pub(super) fn make_private_staging_owner_writable(path: &Path) -> Result<(), OfficeEngineError> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| io_error("inspect private Office staging permissions", error))?
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o600);
+    }
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| io_error("make private Office staging owner-writable", error))
+}
+
 pub(super) fn snapshot_prepared_resources(
     prepared: &OfficePreparedExecution,
 ) -> Result<(tempfile::TempDir, HashMap<String, PathBuf>), OfficeEngineError> {

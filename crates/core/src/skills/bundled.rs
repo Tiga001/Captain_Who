@@ -72,12 +72,20 @@ const PRESENTATIONS_RESOURCES: &[EmbeddedSkillResource] = &[
         bytes: include_bytes!("bundled/presentations/office-capability.json"),
     },
     EmbeddedSkillResource {
+        path: "references/editing-existing.md",
+        bytes: include_bytes!("bundled/presentations/references/editing-existing.md"),
+    },
+    EmbeddedSkillResource {
         path: "references/workflows.md",
         bytes: include_bytes!("bundled/presentations/references/workflows.md"),
     },
     EmbeddedSkillResource {
         path: "templates/builder.mjs",
         bytes: include_bytes!("bundled/presentations/templates/builder.mjs"),
+    },
+    EmbeddedSkillResource {
+        path: "templates/editor.mjs",
+        bytes: include_bytes!("bundled/presentations/templates/editor.mjs"),
     },
 ];
 
@@ -851,7 +859,14 @@ mod tests {
                 .revision()
                 .as_str()
                 .starts_with("skill-package-sha256-v3:"));
-            assert_eq!(package.resources().len(), 3);
+            assert_eq!(
+                package.resources().len(),
+                if local_id == PRESENTATIONS_LOCAL_ID {
+                    5
+                } else {
+                    3
+                }
+            );
             assert_eq!(
                 package.resources().entries()[0].path(),
                 "office-capability.json"
@@ -860,19 +875,50 @@ mod tests {
                 package.resources().entries()[0].kind(),
                 SkillResourceKind::Other
             );
-            assert_eq!(
-                package.resources().entries()[1].path(),
-                "references/workflows.md"
-            );
-            assert_eq!(
-                package.resources().entries()[1].kind(),
-                SkillResourceKind::Reference
-            );
-            assert_eq!(package.resources().entries()[2].path(), template_path);
-            assert_eq!(
-                package.resources().entries()[2].kind(),
-                SkillResourceKind::Other
-            );
+            let workflow = package
+                .resources()
+                .get("references/workflows.md")
+                .expect("every Office Skill must expose its workflow reference");
+            assert_eq!(workflow.kind(), SkillResourceKind::Reference);
+            let template = package
+                .resources()
+                .get(template_path)
+                .expect("every Office Skill must expose its builder template");
+            assert_eq!(template.kind(), SkillResourceKind::Other);
+            if local_id == PRESENTATIONS_LOCAL_ID {
+                assert_eq!(
+                    package
+                        .resources()
+                        .entries()
+                        .iter()
+                        .map(|resource| resource.path())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        "office-capability.json",
+                        "references/editing-existing.md",
+                        "references/workflows.md",
+                        "templates/builder.mjs",
+                        "templates/editor.mjs",
+                    ]
+                );
+                assert_eq!(
+                    package
+                        .resources()
+                        .get("references/editing-existing.md")
+                        .unwrap()
+                        .kind(),
+                    SkillResourceKind::Reference
+                );
+                assert_eq!(
+                    package
+                        .resources()
+                        .get("templates/editor.mjs")
+                        .unwrap()
+                        .kind(),
+                    SkillResourceKind::Other
+                );
+                assert!(package.instructions().contains("Managed Editor"));
+            }
             assert!(package.instructions().contains(tool));
             assert!(package.instructions().contains("flat semantic"));
             assert!(package.instructions().contains("Managed Builder"));
@@ -890,7 +936,7 @@ mod tests {
             assert_eq!(
                 capability["contractVersion"],
                 if local_id == PRESENTATIONS_LOCAL_ID {
-                    9
+                    10
                 } else {
                     8
                 }
@@ -934,7 +980,11 @@ mod tests {
             assert_eq!(script["runtimeProfile"], runtime_profile);
             assert_eq!(
                 script["runtimeProfileBinding"],
-                "host_from_materialized_builder_receipt"
+                if local_id == PRESENTATIONS_LOCAL_ID {
+                    "host_from_materialized_script_receipt"
+                } else {
+                    "host_from_materialized_builder_receipt"
+                }
             );
             assert_eq!(script["outputArgument"], "--output");
             assert!(script.get("runtimeProfileField").is_none());
@@ -1143,6 +1193,203 @@ mod tests {
     }
 
     #[test]
+    fn presentations_skill_exposes_one_fixed_existing_deck_editor_contract() {
+        let workflows = include_str!("bundled/presentations/references/workflows.md");
+        let editing = include_str!("bundled/presentations/references/editing-existing.md");
+        let editor = include_str!("bundled/presentations/templates/editor.mjs");
+        let capability: Value =
+            serde_json::from_str(include_str!("bundled/presentations/office-capability.json"))
+                .unwrap();
+
+        for required in [
+            "**Edit an existing `.pptx`:**",
+            "`templates/editor.mjs`",
+            "`BEGIN EDIT REGION` / `END EDIT REGION`",
+            "`node --check <editor>.mjs` as a separate `run_command` call",
+            "exactly one static `--source` and one static `--output`",
+            "`@mycopilot/presentation-sdk`",
+            "The SDK writes a Host-only typed plan",
+            "Structural `add`, `remove`, `move`, and `swap` are element-only",
+            "Use native `addSlide`, `removeSlide`, or `moveSlide`",
+            "Do not unzip or rewrite OOXML",
+        ] {
+            assert!(
+                PRESENTATIONS_SOURCE.contains(required),
+                "presentation instructions are missing `{required}`"
+            );
+        }
+
+        for required in [
+            "For every edit to an existing `.pptx`",
+            "node scripts/edit_deck.mjs --source source.pptx --output source-edited.pptx",
+            "copy stable targets",
+            "`/slide[3]/shape[@id=42]`",
+            "must import only",
+            "`editPresentation`, `input`, and `output` from `@mycopilot/presentation-sdk`",
+            "`node --check scripts/edit_deck.mjs` in its own call",
+            "pre-publication\nfailure must leave the source and destination unchanged",
+        ] {
+            assert!(
+                workflows.contains(required),
+                "presentation workflow is missing `{required}`"
+            );
+        }
+
+        for required in [
+            "import { editPresentation, input, output } from '@mycopilot/presentation-sdk'",
+            "mode: 'saveAs'",
+            "deck.set({ target, properties })",
+            "deck.replaceText({ target, find, replace })",
+            "deck.add({ parent, elementType, copyFrom?, position?, properties? })",
+            "deck.remove({ target, properties? })",
+            "deck.move({ target, newParent?, position?, properties? })",
+            "deck.swap({ firstTarget, secondTarget })",
+            "deck.replaceImage({ target, source: input(...) })",
+            "deck.updateTableCell({ target, text })",
+            "deck.updateChart({ target, properties: { categories, series } })",
+            "Editor v1 does not add,\nremove, move, or swap whole slides",
+            "discard every earlier element target and re-inspect",
+            "Never recover from an unsupported or failed edit by",
+            "render and read every final slide separately",
+        ] {
+            assert!(
+                editing.contains(required),
+                "existing-deck editing reference is missing `{required}`"
+            );
+        }
+
+        assert_eq!(editor.matches("// BEGIN EDIT REGION").count(), 1);
+        assert_eq!(editor.matches("// END EDIT REGION").count(), 1);
+        let begin = editor.find("// BEGIN EDIT REGION").unwrap();
+        let end = editor.find("// END EDIT REGION").unwrap();
+        assert!(begin < end, "the Editor edit region must be ordered");
+        for required in [
+            "import { editPresentation, input, output } from '@mycopilot/presentation-sdk'",
+            "source: input(requiredValue('--source'))",
+            "destination: output(requiredValue('--output'))",
+            "mode: 'saveAs'",
+            "deck.replaceText({",
+            "deck.replaceImage({",
+            "deck.updateTableCell({",
+            "deck.updateChart({",
+            "deck.set({",
+            "deck.add({",
+            "deck.move({",
+            "deck.swap({",
+            "deck.remove({",
+        ] {
+            assert!(editor.contains(required), "Editor is missing `{required}`");
+        }
+        for forbidden in [
+            "pptxgenjs",
+            "node:fs",
+            "child_process",
+            "openPresentation",
+            "findOne",
+            "JSZip",
+            "target: '/slide[7]'",
+            "firstTarget: '/slide[6]'",
+        ] {
+            assert!(
+                !editor.contains(forbidden),
+                "Editor must not expose or import `{forbidden}`"
+            );
+        }
+
+        assert_eq!(capability["contractVersion"], 10);
+        let script = &capability["modes"]["script"];
+        assert_eq!(script["builderTemplate"], "templates/builder.mjs");
+        assert_eq!(script["editorTemplate"], "templates/editor.mjs");
+        assert_eq!(script["editingReference"], "references/editing-existing.md");
+        assert_eq!(script["routes"]["create"], "builder");
+        assert_eq!(script["routes"]["editExisting"], "editor");
+        let editor_contract = &script["editor"];
+        assert_eq!(editor_contract["sourceArgument"], "--source");
+        assert_eq!(editor_contract["outputArgument"], "--output");
+        assert_eq!(editor_contract["defaultPublishMode"], "saveAs");
+        assert_eq!(
+            editor_contract["supportedPublishModes"],
+            serde_json::json!(["saveAs"])
+        );
+        assert_eq!(editor_contract["inPlace"], false);
+        assert_eq!(editor_contract["positionShape"], "taggedIndexAfterOrBefore");
+        assert_eq!(editor_contract["structuralScope"], "elementsOnly");
+        assert_eq!(
+            editor_contract["wholeSlideMutations"],
+            "nativeThenReinspect"
+        );
+        assert_eq!(
+            editor_contract["targetRules"]["elementTarget"],
+            "inspectedIdRequired"
+        );
+        assert_eq!(
+            editor_contract["targetRules"]["parent"],
+            "slideContainerAllowed"
+        );
+        assert_eq!(editor_contract["facade"]["apiVersion"], 1);
+        assert_eq!(
+            editor_contract["facade"]["specifier"],
+            "@mycopilot/presentation-sdk"
+        );
+        assert_eq!(
+            editor_contract["facade"]["operations"],
+            serde_json::json!([
+                "editPresentation",
+                "input",
+                "output",
+                "set",
+                "replaceText",
+                "add",
+                "remove",
+                "move",
+                "swap",
+                "replaceImage",
+                "updateTableCell",
+                "updateChart"
+            ])
+        );
+        assert_eq!(editor_contract["transaction"]["publication"], "atomic");
+        assert_eq!(
+            editor_contract["transaction"]["failureBeforePublish"],
+            "sourceAndDestinationUnchanged"
+        );
+
+        let service = SkillsService::new().with_bundled_source().unwrap();
+        let descriptor = service
+            .list()
+            .unwrap()
+            .skills()
+            .iter()
+            .find(|skill| skill.id().local_id() == PRESENTATIONS_LOCAL_ID)
+            .unwrap()
+            .clone();
+        let activated = service.activate(&[descriptor.selection()]).unwrap();
+        let resources = service.resource_session(&activated).unwrap();
+        let package = resources.package_uris().into_iter().next().unwrap();
+        let editor_uri =
+            package.resource(SkillResourcePath::parse("templates/editor.mjs").unwrap());
+        let materialized_source = resources
+            .read_text(&editor_uri, SkillResourceTextReadOptions::default())
+            .unwrap();
+        assert_eq!(materialized_source.text(), editor);
+        let workspace = tempdir().unwrap();
+        let request = SkillMaterializationRequest::new(
+            editor_uri,
+            workspace.path(),
+            SkillMaterializationDestination::parse("edit_presentation.mjs").unwrap(),
+        )
+        .unwrap();
+        let outcome = SkillResourceMaterializer::new()
+            .materialize(&resources, &request)
+            .unwrap();
+        assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("edit_presentation.mjs")).unwrap(),
+            editor
+        );
+    }
+
+    #[test]
     fn presentations_skill_requires_one_visual_verdict_per_inspected_slide() {
         let workflows = include_str!("bundled/presentations/references/workflows.md");
 
@@ -1193,7 +1440,7 @@ mod tests {
         let capability: Value =
             serde_json::from_str(include_str!("bundled/presentations/office-capability.json"))
                 .unwrap();
-        assert_eq!(capability["contractVersion"], 9);
+        assert_eq!(capability["contractVersion"], 10);
         let render_output = &capability["modes"]["native"]["renderOutput"];
         assert_eq!(
             render_output["contactSheetSemantics"],
@@ -1264,7 +1511,14 @@ mod tests {
             let listed = resources
                 .list(&package, &SkillResourceListOptions::default())
                 .unwrap();
-            assert_eq!(listed.entries().len(), 3);
+            assert_eq!(
+                listed.entries().len(),
+                if local_id == PRESENTATIONS_LOCAL_ID {
+                    5
+                } else {
+                    3
+                }
+            );
             assert!(listed
                 .entries()
                 .iter()

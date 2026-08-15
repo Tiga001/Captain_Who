@@ -74,7 +74,6 @@ pub(crate) struct ContextFrameSemanticBreakdown {
     pub(crate) system_tokens: u64,
     pub(crate) summary_tokens: u64,
     pub(crate) world_state_tokens: u64,
-    pub(crate) goal_tokens: u64,
     pub(crate) todo_tokens: u64,
     pub(crate) recent_history_tokens: u64,
 }
@@ -89,8 +88,6 @@ impl ContextFrameSemanticBreakdown {
             || sources.contains(&ContextSource::WorldStateDiff)
         {
             &mut self.world_state_tokens
-        } else if sources.contains(&ContextSource::ConversationGoal) {
-            &mut self.goal_tokens
         } else if sources.contains(&ContextSource::RuntimeTodo) {
             &mut self.todo_tokens
         } else {
@@ -105,7 +102,6 @@ impl ContextFrameSemanticBreakdown {
         self.system_tokens
             .saturating_add(self.summary_tokens)
             .saturating_add(self.world_state_tokens)
-            .saturating_add(self.goal_tokens)
             .saturating_add(self.todo_tokens)
             .saturating_add(self.recent_history_tokens)
     }

@@ -73,7 +73,7 @@ Tool observation 文本现在只序列化精简后的 `result`/`error`，不再�
 | Web            | `web_search`、`web_fetch`                                                                                                       |
 | 文件与命令     | `apply_patch`、`write_file`、`run_command`                                                                                      |
 | Skill          | `skills_list_resources`、`skills_read_resource`、`skills_materialize_resource`、`skills_preflight_script`、`skills_run_script`  |
-| 历史与 Goal    | `conversation_history`、`get_goal`、`create_goal`、`update_goal`                                                                |
+| 历史           | `conversation_history`                                                                                                          |
 | 条件能力       | `office_document`、`office_spreadsheet`、`office_presentation`、`image_generation`                                              |
 | 动态 Extension | `todo_update`、`skills_activate`                                                                                                |
 
@@ -155,16 +155,14 @@ Tool observation 文本现在只序列化精简后的 `result`/`error`，不再�
 
 `favicon` 的真实消费者位于 `agentWebSearch.ts` 和 `WebSearchSources.tsx`。它不是无效字段，只是不需要默认进入模型文本。
 
-### 4.4 Todo、Goal 与历史
+### 4.4 Todo 与历史
 
-| Tool                               | 字段                                                                                           | 消费者            | 归属和约束                                           |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------- |
-| `todo_update` Model                | `accepted/revision/itemCount/completedCount`                                                   | M                 | 简短确认；不重复整份 Todo                            |
-| `todo_update` Canonical            | `revision/updatedAt`、`items[].id/title/status/note/createdAt/updatedAt`                       | E/R/T/A/C         | UI、审计、恢复；R 生成 Todo context 和 `TodoUpdated` |
-| Goal 原始结果                      | `goal.objective/status`、`created`、`updated`                                                  | M，当前也进入 E/C | 行动、恢复                                           |
-| Goal Trace                         | `goalPresent`、`created`、`updated`、`status`、`goalStatePersisted`                            | T/E               | 审计；不进入 Exact Archive                           |
-| `conversation_history` Model       | `view`、turn/result/timeline/record、`content`、`navigation.*`、`open`、范围、hash、完整性标记 | M/C               | 行动、正文、恢复；固定 instruction 不进入结果        |
-| `conversation_history` Trace/Event | query/open ref、读取范围、hash、返回数量、状态                                                 | T/E               | 审计；不重复保存取回正文，不再次归档                 |
+| Tool                               | 字段                                                                                           | 消费者    | 归属和约束                                           |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------- |
+| `todo_update` Model                | `accepted/revision/itemCount/completedCount`                                                   | M         | 简短确认；不重复整份 Todo                            |
+| `todo_update` Canonical            | `revision/updatedAt`、`items[].id/title/status/note/createdAt/updatedAt`                       | E/R/T/A/C | UI、审计、恢复；R 生成 Todo context 和 `TodoUpdated` |
+| `conversation_history` Model       | `view`、turn/result/timeline/record、`content`、`navigation.*`、`open`、范围、hash、完整性标记 | M/C       | 行动、正文、恢复；固定 instruction 不进入结果        |
+| `conversation_history` Trace/Event | query/open ref、读取范围、hash、返回数量、状态                                                 | T/E       | 审计；不重复保存取回正文，不再次归档                 |
 
 Todo 的完整状态不能从 E/R 删除；当前 M 已经只接收确认回执，权威 Todo snapshot
 继续由 Extension 注入。

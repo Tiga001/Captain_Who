@@ -714,6 +714,7 @@ fn action_cancellation_fence_does_not_abort_a_sibling_command_session() {
                 authorization_source: CommandAuthorizationSource::Automatic,
                 approval_provenance: serde_json::json!({"source": "test"}),
                 artifact_runtime: None,
+                office_engine: None,
                 file_inputs: None,
                 notifications: None,
                 cancellation_token: AgentCancellationToken::new(),

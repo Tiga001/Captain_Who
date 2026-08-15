@@ -12,7 +12,8 @@ use super::types::{
     OfficeEngineStatus, OfficeExecutionContext, OfficeExecutionRequest, OfficeExecutionResult,
     OfficeFileState, OfficeFrozenPath, OfficeGridLayout, OfficeOperation, OfficeOperationAccess,
     OfficeOperationParameters, OfficePathIdentity, OfficePathPurpose, OfficePathScope,
-    OfficePathSlot, OfficePreparedExecution, OfficePresentationRenderPlan, OfficePropertyMap,
+    OfficePathSlot, OfficePreparedExecution, OfficePresentationEditRequest,
+    OfficePresentationEditResult, OfficePresentationRenderPlan, OfficePropertyMap,
     OfficePublishedOutput, OfficePublishedOutputKind, OfficePublishedOutputRole,
     OfficeRenderPageSelection, OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
     OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
@@ -309,6 +310,690 @@ pub(super) fn run_prepared_office_cli(
             prepared_inputs.as_ref(),
         ),
     }
+}
+
+/// Executes one fixed-facade existing-presentation edit with one provider open/save cycle and one
+/// atomic publication. Each operation first passes the ordinary typed Office compiler; the
+/// provider's `batch` surface is constructed only inside this adapter and is never model input.
+pub(super) fn run_office_presentation_edit(
+    engine: &OfficeCliEngine,
+    context: &OfficeExecutionContext,
+    request: &OfficePresentationEditRequest,
+    cancellation: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<OfficePresentationEditResult, OfficeEngineError> {
+    validate_platform()?;
+    engine.verify_engine_revision()?;
+    if request.operations.is_empty() || request.operations.len() > 256 {
+        return Err(invalid_request(
+            "Presentation edit requires between 1 and 256 typed operations.",
+        ));
+    }
+    if request.source_path == request.destination_path {
+        return Err(invalid_request(
+            "Presentation edit source and save-as destination must differ.",
+        ));
+    }
+    let resolved_context = ResolvedExecutionContext::resolve(context)?;
+    let source_spec = crate::AgentFileInputSpec {
+        mount_path: request.source_binding.mount_path.clone(),
+        source: request.source_binding.source.clone(),
+    };
+    let source_inputs = materialize_agent_file_inputs(
+        resolved_context.workspace.as_deref(),
+        resolved_context.permissions,
+        &resolved_context.file_inputs,
+        std::slice::from_ref(&request.source_binding),
+        Some(&cancellation),
+    )
+    .map_err(office_input_execution_error)?
+    .ok_or_else(|| precondition_error("Presentation edit source snapshot is missing."))?;
+    let source_snapshot = source_inputs
+        .root()
+        .join(&request.source_binding.mount_path);
+    let source_metadata = fs::symlink_metadata(&source_snapshot)
+        .map_err(|error| io_error("inspect private presentation source snapshot", error))?;
+    if source_metadata.file_type().is_symlink()
+        || !source_metadata.is_file()
+        || source_metadata.len() != request.source_binding.size_bytes
+    {
+        return Err(precondition_error(
+            "Presentation edit source snapshot does not match its frozen approval identity.",
+        ));
+    }
+
+    let destination = freeze_path(
+        &resolved_context,
+        OfficePathSlot::Destination,
+        &request.destination_path,
+        OfficePathPurpose::WriteTarget,
+    )?;
+    if !OfficeDocumentKind::Presentation.accepts_path(Path::new(&destination.normalized_path)) {
+        return Err(invalid_request(
+            "Presentation edit destination must use the .pptx extension.",
+        ));
+    }
+    if destination.state != OfficeFileState::Missing {
+        return Err(precondition_error(
+            "Presentation Editor save-as destination already exists; choose a new output path.",
+        ));
+    }
+
+    let expected_asset_bindings = request
+        .input_bindings
+        .iter()
+        .map(|binding| (binding.mount_path.as_str(), binding))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if expected_asset_bindings.len() != request.input_bindings.len()
+        || request.inputs.len() != request.input_bindings.len()
+        || request.inputs.iter().any(|input| {
+            expected_asset_bindings
+                .get(input.mount_path.as_str())
+                .is_none_or(|binding| binding.source != input.source)
+        })
+    {
+        return Err(precondition_error(
+            "Presentation edit asset specs do not match their frozen approval identities.",
+        ));
+    }
+
+    struct PreparedPresentationMutation {
+        request: OfficeExecutionRequest,
+        argv: Vec<String>,
+        input_bindings: Vec<AgentFileInputBinding>,
+    }
+    let mut prepared = Vec::with_capacity(request.operations.len());
+    let mut referenced_input_mounts = std::collections::BTreeSet::new();
+    for parameters in &request.operations {
+        let operation = parameters.operation();
+        if !matches!(
+            operation,
+            OfficeOperation::Set
+                | OfficeOperation::Add
+                | OfficeOperation::Remove
+                | OfficeOperation::Move
+                | OfficeOperation::Swap
+        ) {
+            return Err(invalid_request(
+                "Presentation edit plans may contain only typed mutation operations.",
+            ));
+        }
+        let operation_inputs = presentation_edit_inputs_for_operation(
+            parameters,
+            &request.inputs,
+            &mut referenced_input_mounts,
+        )?;
+        let operation_request = OfficeExecutionRequest {
+            document_kind: OfficeDocumentKind::Presentation,
+            operation,
+            document_path: Some(request.source_path.clone()),
+            parameters: parameters.clone(),
+            output_path: None,
+            destination_path: Some(request.destination_path.clone()),
+            inputs: operation_inputs,
+            timeout_ms: request.timeout_ms,
+        };
+        let (arguments, resources) = validate_request_syntax(&operation_request)?;
+        if resources
+            .iter()
+            .any(|resource| !resource.starts_with(OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX))
+        {
+            return Err(invalid_request(
+                "Presentation Editor file resources must be declared through run_command.inputs.",
+            ));
+        }
+        let input_bindings = operation_request
+            .inputs
+            .iter()
+            .map(|input| {
+                expected_asset_bindings
+                    .get(input.mount_path.as_str())
+                    .copied()
+                    .cloned()
+                    .ok_or_else(|| {
+                        precondition_error(
+                            "Presentation edit operation references an unfrozen asset.",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_frozen_agent_inputs(&operation_request, &input_bindings)?;
+        let mut argv = vec![
+            operation.cli_name().to_string(),
+            request.source_binding.mount_path.clone(),
+        ];
+        argv.extend(arguments);
+        prepared.push(PreparedPresentationMutation {
+            request: operation_request,
+            argv,
+            input_bindings,
+        });
+    }
+    let declared_input_mounts = request
+        .inputs
+        .iter()
+        .map(|input| input.mount_path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if referenced_input_mounts != declared_input_mounts {
+        return Err(invalid_request(
+            "Every declared presentation edit asset must be referenced by at least one typed operation.",
+        ));
+    }
+    if cancellation_requested(&cancellation, action_cancel_flag.as_ref()) {
+        return Ok(cancelled_presentation_edit_result());
+    }
+    let target = PathBuf::from(&destination.normalized_path);
+    let mut staging = StagingArea::new(&target)?;
+    copy_file_snapshot(&source_snapshot, staging.path())?;
+    make_private_staging_owner_writable(staging.path())?;
+    let (revision, size) = file_revision(staging.path())?;
+    if revision.strip_prefix(FILE_REVISION_PREFIX) != Some(request.source_binding.sha256.as_str())
+        || size != request.source_binding.size_bytes
+    {
+        return Err(precondition_error(
+            "Presentation source changed while its private edit snapshot was created.",
+        ));
+    }
+
+    let materialized_inputs = materialize_agent_file_inputs(
+        resolved_context.workspace.as_deref(),
+        resolved_context.permissions,
+        &resolved_context.file_inputs,
+        &request.input_bindings,
+        Some(&cancellation),
+    )
+    .map_err(office_input_execution_error)?;
+    let mut resolved_assets = HashMap::new();
+    if let Some(inputs) = materialized_inputs.as_ref() {
+        for binding in &request.input_bindings {
+            resolved_assets.insert(
+                office_agent_input_placeholder(&binding.mount_path),
+                inputs.root().join(&binding.mount_path),
+            );
+        }
+    }
+    let mut batch = Vec::with_capacity(prepared.len());
+    for operation in &prepared {
+        validate_frozen_agent_inputs(&operation.request, &operation.input_bindings)?;
+        let mut argv = operation.argv.clone();
+        rewrite_path_bearing_properties(&resolved_assets, &mut argv)?;
+        batch.push(batch_entry_from_canonical_argv(&argv)?);
+    }
+    let batch_file = write_private_batch_file(staging.directory(), &batch)?;
+    engine.verify_engine_revision()?;
+    let timeout = Duration::from_millis(
+        request
+            .timeout_ms
+            .unwrap_or(DEFAULT_OFFICE_TIMEOUT_MS)
+            .clamp(1, MAX_OFFICE_TIMEOUT_MS),
+    );
+    let staged_name = staging
+        .path()
+        .file_name()
+        .ok_or_else(|| invalid_request("Staged presentation has no file name."))?
+        .to_string_lossy()
+        .into_owned();
+    let batch_name = batch_file
+        .path()
+        .file_name()
+        .ok_or_else(|| invalid_request("Private presentation edit plan has no file name."))?
+        .to_string_lossy()
+        .into_owned();
+    let argv = vec![
+        "batch".to_string(),
+        staged_name.clone(),
+        "--input".to_string(),
+        batch_name,
+        "--stop-on-error".to_string(),
+        "--json".to_string(),
+    ];
+    let started = Instant::now();
+    let output = run_process(
+        engine.executable_path(),
+        Some(staging.directory()),
+        &argv,
+        timeout,
+        &cancellation,
+        action_cancel_flag.as_ref(),
+        None,
+    )?;
+    let (error_code, error) = execution_error(&output);
+    let mut result = OfficePresentationEditResult {
+        exit_code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        timed_out: output.timed_out,
+        cancelled: output.cancelled,
+        duration_ms: started.elapsed().as_millis() as u64,
+        error_code,
+        error,
+    };
+    if result.error_code.is_none()
+        && serde_json::from_str::<Value>(result.stdout.trim())
+            .ok()
+            .and_then(|value| value.get("success").and_then(Value::as_bool))
+            != Some(true)
+    {
+        result.error_code = Some(
+            OfficeEngineErrorCode::InvalidOutput
+                .stable_name()
+                .to_string(),
+        );
+        result.error = Some(
+            "The pinned OfficeCLI batch did not return an explicit successful result.".to_string(),
+        );
+    }
+    if result.error_code.is_some() {
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    if let Err(error) = validate_document_artifact(staging.path(), OfficeDocumentKind::Presentation)
+    {
+        attach_presentation_edit_error(&mut result, error);
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    let validation_started = Instant::now();
+    let validation_output = run_process(
+        engine.executable_path(),
+        Some(staging.directory()),
+        &["validate".to_string(), staged_name, "--json".to_string()],
+        timeout,
+        &cancellation,
+        action_cancel_flag.as_ref(),
+        None,
+    )?;
+    result.duration_ms = result
+        .duration_ms
+        .saturating_add(validation_started.elapsed().as_millis() as u64);
+    if !validation_output.stdout.trim().is_empty() {
+        if !result.stdout.is_empty() {
+            result.stdout.push('\n');
+        }
+        result.stdout.push_str(&validation_output.stdout);
+    }
+    if !validation_output.stderr.trim().is_empty() {
+        if !result.stderr.is_empty() {
+            result.stderr.push('\n');
+        }
+        result.stderr.push_str(&validation_output.stderr);
+    }
+    let (validation_error_code, validation_error) = execution_error(&validation_output);
+    let validation_semantically_succeeded =
+        serde_json::from_str::<Value>(validation_output.stdout.trim())
+            .ok()
+            .and_then(|value| value.get("success").and_then(Value::as_bool))
+            == Some(true);
+    if validation_error_code.is_some() || !validation_semantically_succeeded {
+        result.exit_code = validation_output.status.code();
+        result.timed_out |= validation_output.timed_out;
+        result.cancelled |= validation_output.cancelled;
+        result.error_code = validation_error_code.or_else(|| {
+            Some(
+                OfficeEngineErrorCode::InvalidOutput
+                    .stable_name()
+                    .to_string(),
+            )
+        });
+        result.error = validation_error.or_else(|| {
+            Some("The edited presentation failed the pinned OfficeCLI validation gate.".to_string())
+        });
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    let commit_lock = office_target_commit_lock(&target);
+    let _commit_guard = commit_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let current_source = prepare_agent_file_input_bindings(
+        resolved_context.workspace.as_deref(),
+        resolved_context.permissions,
+        &resolved_context.file_inputs,
+        std::slice::from_ref(&source_spec),
+        Some(&cancellation),
+    )
+    .map_err(office_input_execution_error)?;
+    if current_source.as_slice() != std::slice::from_ref(&request.source_binding) {
+        attach_presentation_edit_error(
+            &mut result,
+            precondition_error("Presentation edit source changed before publication."),
+        );
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    let current_assets = prepare_agent_file_input_bindings(
+        resolved_context.workspace.as_deref(),
+        resolved_context.permissions,
+        &resolved_context.file_inputs,
+        &request.inputs,
+        Some(&cancellation),
+    )
+    .map_err(office_input_execution_error)?;
+    if current_assets != request.input_bindings {
+        attach_presentation_edit_error(
+            &mut result,
+            precondition_error("A presentation edit asset changed before publication."),
+        );
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    let current_destination = freeze_path(
+        &resolved_context,
+        OfficePathSlot::Destination,
+        &request.destination_path,
+        OfficePathPurpose::WriteTarget,
+    )?;
+    if current_destination != destination {
+        attach_presentation_edit_error(
+            &mut result,
+            precondition_error("Presentation edit destination changed before publication."),
+        );
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    if cancellation_requested(&cancellation, action_cancel_flag.as_ref()) {
+        result.cancelled = true;
+        result.error_code = Some("office.cancelled".to_string());
+        result.error = Some(
+            "Presentation edit was cancelled after validation and before atomic publication."
+                .to_string(),
+        );
+        redact_presentation_edit_private_paths(
+            &mut result,
+            staging.directory(),
+            &source_inputs,
+            materialized_inputs.as_ref(),
+        );
+        return Ok(result);
+    }
+    if let Err(error) = staging.publish(&target, destination.state) {
+        attach_presentation_edit_error(&mut result, error);
+    }
+    redact_presentation_edit_private_paths(
+        &mut result,
+        staging.directory(),
+        &source_inputs,
+        materialized_inputs.as_ref(),
+    );
+    Ok(result)
+}
+
+fn presentation_edit_inputs_for_operation(
+    parameters: &OfficeOperationParameters,
+    declared: &[crate::AgentFileInputSpec],
+    transaction_references: &mut std::collections::BTreeSet<String>,
+) -> Result<Vec<crate::AgentFileInputSpec>, OfficeEngineError> {
+    let encoded = serde_json::to_value(parameters).map_err(|error| {
+        invalid_request(format!(
+            "Cannot inspect presentation edit input references: {error}"
+        ))
+    })?;
+    let mut placeholders = Vec::new();
+    collect_presentation_edit_input_placeholders(&encoded, &mut placeholders);
+    let mut inputs = Vec::new();
+    for placeholder in placeholders {
+        let mount_path = placeholder
+            .strip_prefix(OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX)
+            .expect("collector returns only Agent input placeholders");
+        let input = declared
+            .iter()
+            .find(|input| input.mount_path == mount_path)
+            .ok_or_else(|| {
+                invalid_request(format!(
+                    "Presentation edit resource `{placeholder}` has no declared input."
+                ))
+            })?;
+        if inputs
+            .iter()
+            .any(|existing: &crate::AgentFileInputSpec| existing.mount_path == input.mount_path)
+        {
+            return Err(invalid_request(format!(
+                "Presentation edit input `{mount_path}` is referenced more than once by one operation."
+            )));
+        }
+        inputs.push(input.clone());
+        transaction_references.insert(mount_path.to_string());
+    }
+    Ok(inputs)
+}
+
+fn collect_presentation_edit_input_placeholders(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::String(value) if value.starts_with(OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX) => {
+            output.push(value.clone());
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_presentation_edit_input_placeholders(value, output);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_presentation_edit_input_placeholders(value, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn cancelled_presentation_edit_result() -> OfficePresentationEditResult {
+    OfficePresentationEditResult {
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        cancelled: true,
+        duration_ms: 0,
+        error_code: Some("office.cancelled".to_string()),
+        error: Some("Presentation edit was cancelled before execution.".to_string()),
+    }
+}
+
+fn attach_presentation_edit_error(
+    result: &mut OfficePresentationEditResult,
+    error: OfficeEngineError,
+) {
+    result.error_code = Some(error.code().stable_name().to_string());
+    result.error = Some(error.message().to_string());
+}
+
+fn write_private_batch_file(
+    directory: &Path,
+    batch: &[Value],
+) -> Result<tempfile::NamedTempFile, OfficeEngineError> {
+    let bytes = serde_json::to_vec(batch).map_err(|error| {
+        invalid_request(format!("Cannot encode presentation edit plan: {error}"))
+    })?;
+    if bytes.len() > 512 * 1024 {
+        return Err(invalid_request(
+            "Compiled presentation edit plan exceeds the 512 KiB Host limit.",
+        ));
+    }
+    let mut file = tempfile::Builder::new()
+        .prefix("presentation-edit-plan-")
+        .suffix(".json")
+        .tempfile_in(directory)
+        .map_err(|error| io_error("create private presentation edit plan", error))?;
+    file.write_all(&bytes)
+        .map_err(|error| io_error("write private presentation edit plan", error))?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| io_error("sync private presentation edit plan", error))?;
+    Ok(file)
+}
+
+fn redact_presentation_edit_private_paths(
+    result: &mut OfficePresentationEditResult,
+    staging_root: &Path,
+    source_inputs: &PreparedAgentFileInputs,
+    asset_inputs: Option<&PreparedAgentFileInputs>,
+) {
+    let mut paths = vec![staging_root, source_inputs.root()];
+    if let Some(inputs) = asset_inputs {
+        paths.push(inputs.root());
+    }
+    let mut spellings = Vec::new();
+    for path in paths {
+        spellings.push(path.to_string_lossy().into_owned());
+        if let Ok(canonical) = path.canonicalize() {
+            spellings.push(canonical.to_string_lossy().into_owned());
+        }
+    }
+    #[cfg(target_vendor = "apple")]
+    {
+        let aliases = spellings
+            .iter()
+            .filter_map(|path| {
+                if path.starts_with("/var/") || path.starts_with("/tmp/") {
+                    Some(format!("/private{path}"))
+                } else {
+                    path.strip_prefix("/private")
+                        .filter(|path| path.starts_with("/var/") || path.starts_with("/tmp/"))
+                        .map(str::to_string)
+                }
+            })
+            .collect::<Vec<_>>();
+        spellings.extend(aliases);
+    }
+    spellings.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    spellings.dedup();
+    for path in spellings {
+        if path.is_empty() {
+            continue;
+        }
+        result.stdout = result.stdout.replace(&path, "<presentation-edit-private>");
+        result.stderr = result.stderr.replace(&path, "<presentation-edit-private>");
+        if let Some(error) = result.error.as_mut() {
+            *error = error.replace(&path, "<presentation-edit-private>");
+        }
+    }
+}
+
+fn batch_entry_from_canonical_argv(argv: &[String]) -> Result<Value, OfficeEngineError> {
+    let command = argv
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| precondition_error("Prepared Office mutation argv is empty."))?;
+    if argv.len() < 3 || argv.last().map(String::as_str) != Some("--json") {
+        return Err(precondition_error(
+            "Prepared Office mutation argv is not canonical.",
+        ));
+    }
+    let mut entry = serde_json::Map::new();
+    entry.insert("command".to_string(), Value::String(command.to_string()));
+    let positional = &argv[2..argv.len() - 1];
+    let required_positional = match command {
+        "set" | "add" | "remove" | "move" => 1,
+        "swap" => 2,
+        _ => {
+            return Err(precondition_error(
+                "Prepared presentation edit contains an unsupported operation.",
+            ))
+        }
+    };
+    let mut index = 0usize;
+    let mut positionals = Vec::new();
+    while index < positional.len() && !positional[index].starts_with('-') {
+        positionals.push(positional[index].clone());
+        index += 1;
+    }
+    if positionals.len() != required_positional {
+        return Err(precondition_error(
+            "Prepared presentation edit has an invalid positional contract.",
+        ));
+    }
+    match command {
+        "add" => {
+            entry.insert("parent".to_string(), Value::String(positionals[0].clone()));
+        }
+        "swap" => {
+            entry.insert("path".to_string(), Value::String(positionals[0].clone()));
+            entry.insert("path2".to_string(), Value::String(positionals[1].clone()));
+        }
+        _ => {
+            entry.insert("path".to_string(), Value::String(positionals[0].clone()));
+        }
+    }
+    let mut properties = serde_json::Map::new();
+    while index < positional.len() {
+        let option = positional[index].as_str();
+        if option == "--force" {
+            entry.insert("force".to_string(), Value::Bool(true));
+            index += 1;
+            continue;
+        }
+        let value = positional.get(index + 1).ok_or_else(|| {
+            precondition_error("Prepared presentation edit option is missing its value.")
+        })?;
+        if option == "--prop" {
+            let (name, property_value) = value.split_once('=').ok_or_else(|| {
+                precondition_error("Prepared presentation property is not canonical.")
+            })?;
+            properties.insert(name.to_string(), Value::String(property_value.to_string()));
+        } else if matches!(option, "--find" | "--replace") {
+            properties.insert(
+                option.trim_start_matches('-').to_string(),
+                Value::String(value.clone()),
+            );
+        } else if option == "--index" {
+            let index = value.parse::<u32>().map_err(|_| {
+                precondition_error(
+                    "Prepared presentation edit index is not a canonical non-negative integer.",
+                )
+            })?;
+            entry.insert("index".to_string(), Value::Number(index.into()));
+        } else {
+            let key = match option {
+                "--type" => "type",
+                "--from" => "from",
+                "--after" => "after",
+                "--before" => "before",
+                "--to" => "to",
+                "--shift" => "shift",
+                _ => {
+                    return Err(precondition_error(
+                        "Prepared presentation edit contains an unsupported option.",
+                    ))
+                }
+            };
+            entry.insert(key.to_string(), Value::String(value.clone()));
+        }
+        index += 2;
+    }
+    if !properties.is_empty() {
+        entry.insert("props".to_string(), Value::Object(properties));
+    }
+    Ok(Value::Object(entry))
 }
 
 fn validate_prepared_identity(

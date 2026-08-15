@@ -337,7 +337,6 @@ impl RuntimeExtensions {
     pub(super) fn todo_state(&self) -> Option<AgentTodoState> {
         self.todo.as_ref().map(TodoStateHandle::state)
     }
-
 }
 
 fn validate_extensions(extensions: &[Box<dyn RuntimeExtension>]) -> AgentResult<()> {

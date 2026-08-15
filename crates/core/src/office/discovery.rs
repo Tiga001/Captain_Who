@@ -1,9 +1,12 @@
-use super::execution::{prepare_office_cli, probe_engine, run_prepared_office_cli};
+use super::execution::{
+    prepare_office_cli, probe_engine, run_office_presentation_edit, run_prepared_office_cli,
+};
 use super::render_runtime::{OfficeRenderRuntime, OfficeRenderRuntimeDiscoveryOptions};
 use super::types::{
     OfficeEngine, OfficeEngineCapabilities, OfficeEngineError, OfficeEngineErrorCode,
     OfficeEngineRecovery, OfficeEngineSource, OfficeEngineStatus, OfficeExecutionContext,
-    OfficeExecutionRequest, OfficeExecutionResult, OfficePreparedExecution, OFFICECLI_PROVIDER_ID,
+    OfficeExecutionRequest, OfficeExecutionResult, OfficePreparedExecution,
+    OfficePresentationEditRequest, OfficePresentationEditResult, OFFICECLI_PROVIDER_ID,
     OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
 };
 use crate::AgentCancellationToken;
@@ -178,6 +181,16 @@ impl OfficeEngine for OfficeCliEngine {
 
     fn status(&self, cancellation: AgentCancellationToken) -> OfficeEngineStatus {
         probe_engine(self, cancellation)
+    }
+
+    fn execute_presentation_edit(
+        &self,
+        context: &OfficeExecutionContext,
+        request: &OfficePresentationEditRequest,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficePresentationEditResult, OfficeEngineError> {
+        run_office_presentation_edit(self, context, request, cancellation, action_cancel_flag)
     }
 
     fn prepare(

@@ -264,7 +264,6 @@ impl ContextBudgetReport {
                 .saturating_add(self.usage.breakdown.run_transient.tool_definition_tokens),
             summary_tokens: semantic.summary_tokens,
             world_state_tokens: semantic.world_state_tokens,
-            goal_tokens: semantic.goal_tokens,
             todo_tokens: semantic.todo_tokens,
             provider_continuation_tokens,
             recent_history_tokens: semantic
@@ -1026,13 +1025,6 @@ mod tests {
             ),
             ContextItem::text(
                 LlmMessageRole::User,
-                "explicit objective",
-                ContextSource::ConversationGoal,
-                ContextScope::Conversation,
-                ContextRetention::Retained,
-            ),
-            ContextItem::text(
-                LlmMessageRole::User,
                 "recent conversation tail",
                 ContextSource::ConversationHistory,
                 ContextScope::Conversation,
@@ -1053,7 +1045,6 @@ mod tests {
         assert!(costs.tool_schema_tokens > 0);
         assert!(costs.summary_tokens > 0);
         assert!(costs.world_state_tokens > 0);
-        assert!(costs.goal_tokens > 0);
         assert!(costs.todo_tokens > 0);
         assert!(costs.recent_history_tokens > 0);
         assert_eq!(
@@ -1063,14 +1054,13 @@ mod tests {
                 .saturating_add(costs.tool_schema_tokens)
                 .saturating_add(costs.summary_tokens)
                 .saturating_add(costs.world_state_tokens)
-                .saturating_add(costs.goal_tokens)
                 .saturating_add(costs.todo_tokens)
                 .saturating_add(costs.recent_history_tokens)
         );
     }
 
     #[test]
-    fn ordinary_conversation_has_zero_goal_and_todo_context_cost() {
+    fn ordinary_conversation_has_zero_todo_context_cost() {
         let mut frame = ContextFrame::new(vec![
             ContextItem::text(
                 LlmMessageRole::System,
@@ -1090,7 +1080,6 @@ mod tests {
         let report = detector(&[]).inspect(&mut frame, None, 1_000);
         let costs = report.context_cost_breakdown();
 
-        assert_eq!(costs.goal_tokens, 0);
         assert_eq!(costs.todo_tokens, 0);
         assert!(costs.recent_history_tokens > 0);
     }

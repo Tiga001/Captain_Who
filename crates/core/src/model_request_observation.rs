@@ -7,7 +7,7 @@ use crate::context::{ContextBudgetReport, ContextBudgetStatus, ContextMeasuremen
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
 use serde::{Deserialize, Serialize};
 
-pub const MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION: u32 = 2;
+pub const MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION: u32 = 3;
 const MAXIMUM_OBSERVATION_ERROR_CHARACTERS: usize = 2_000;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -177,7 +177,7 @@ impl ModelRequestToolSetObservation {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelRequestEstimate {
     pub estimator_id: String,
     pub estimator_version: u32,
@@ -201,8 +201,6 @@ pub struct ModelRequestEstimate {
     pub summary_tokens: u64,
     #[serde(default)]
     pub world_state_tokens: u64,
-    #[serde(default)]
-    pub goal_tokens: u64,
     #[serde(default)]
     pub todo_tokens: u64,
     #[serde(default)]
@@ -239,7 +237,6 @@ impl ModelRequestEstimate {
             tool_schema_tokens: costs.tool_schema_tokens,
             summary_tokens: costs.summary_tokens,
             world_state_tokens: costs.world_state_tokens,
-            goal_tokens: costs.goal_tokens,
             todo_tokens: costs.todo_tokens,
             provider_continuation_tokens: costs.provider_continuation_tokens,
             recent_history_tokens: costs.recent_history_tokens,
@@ -277,7 +274,6 @@ impl ModelRequestEstimate {
                 .saturating_add(self.tool_schema_tokens)
                 .saturating_add(self.summary_tokens)
                 .saturating_add(self.world_state_tokens)
-                .saturating_add(self.goal_tokens)
                 .saturating_add(self.todo_tokens)
                 .saturating_add(self.provider_continuation_tokens)
                 .saturating_add(self.recent_history_tokens);
@@ -726,5 +722,62 @@ mod tests {
         .with_tool_set(tool_set(AgentApiStyle::OpenAiCompatible))
         .completed(None, Some("stop".to_string()), 2);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn current_observation_round_trips_and_previous_schema_fails_closed() {
+        let current = observation_builder(
+            ModelRequestPurpose::AgentLoop,
+            AgentApiStyle::OpenAiCompatible,
+        )
+        .completed(None, Some("stop".to_string()), 2)
+        .unwrap();
+        let encoded = serde_json::to_value(&current).unwrap();
+        assert_eq!(
+            encoded["schemaVersion"],
+            MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION
+        );
+        let decoded: ModelRequestObservation = serde_json::from_value(encoded.clone()).unwrap();
+        decoded.validate().unwrap();
+
+        let mut previous = encoded;
+        previous["schemaVersion"] =
+            serde_json::json!(MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION.saturating_sub(1));
+        let decoded: ModelRequestObservation = serde_json::from_value(previous).unwrap();
+        assert!(decoded.validate().is_err());
+    }
+
+    #[test]
+    fn removed_semantic_breakdown_field_is_not_accepted() {
+        let mut estimate = serde_json::json!({
+            "estimatorId": "heuristic-v1",
+            "estimatorVersion": 1,
+            "measurementMode": "full_recount",
+            "capacityStatus": "within_budget",
+            "contextRevision": "context-1",
+            "persistentRevision": "persistent-1",
+            "fixedInputTokens": 0,
+            "durableInputTokens": 0,
+            "runTransientInputTokens": 0,
+            "requestOnlyInputTokens": 0,
+            "additiveInputTokens": 0,
+            "estimatedInputTokens": 0,
+            "systemTokens": 0,
+            "toolSchemaTokens": 0,
+            "summaryTokens": 0,
+            "worldStateTokens": 0,
+            "todoTokens": 0,
+            "providerContinuationTokens": 0,
+            "recentHistoryTokens": 0,
+            "totalInputTokens": 0,
+            "reservedOutputTokens": 0,
+            "safetyMarginTokens": 0
+        });
+        estimate
+            .as_object_mut()
+            .unwrap()
+            .insert("removedSemanticCategory".to_string(), serde_json::json!(0));
+
+        assert!(serde_json::from_value::<ModelRequestEstimate>(estimate).is_err());
     }
 }

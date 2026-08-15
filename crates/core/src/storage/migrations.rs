@@ -1,13 +1,13 @@
 use rusqlite::{ffi, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
-pub const STORAGE_SCHEMA_VERSION: i32 = 13;
+pub const STORAGE_SCHEMA_VERSION: i32 = 14;
 pub const DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED: &str =
     "development_storage_schema_reset_required";
 
 const CANONICAL_SCHEMA: &str = include_str!("canonical_schema.sql");
 const CANONICAL_SCHEMA_FINGERPRINT: &str =
-    "sha256:85f3d034ef5194becb604fc1515a2a06407a58a64b6fabe88831da3b78dfbae9";
+    "sha256:c7ec1de5a7ca3f42e5fab8c7013415127a93146a011c4b20ea94d20bf9b011ff";
 
 /// Opens the single supported development schema.
 ///
@@ -308,6 +308,31 @@ mod tests {
                 .unwrap()
                 .is_some();
             assert!(exists, "missing canonical schema object {required_object}");
+        }
+
+        for retired_goal_object in [
+            "conversation_goals",
+            "conversation_goal_revisions",
+            "validate_conversation_goal_source_insert",
+            "validate_conversation_goal_source_update",
+            "conversation_goal_revisions_conversation",
+            "prevent_conversation_goal_revision_update",
+            "prevent_conversation_goal_revision_delete",
+        ] {
+            let exists = connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_schema
+                     WHERE name = ?1 AND sql IS NOT NULL",
+                    [retired_goal_object],
+                    |_| Ok(()),
+                )
+                .optional()
+                .unwrap()
+                .is_some();
+            assert!(
+                !exists,
+                "retired Goal schema object {retired_goal_object} must stay absent"
+            );
         }
 
         let maintenance_table_exists = connection
@@ -920,7 +945,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 3"));
+            .contains("expected schema version 14, found 3"));
         assert_eq!(read_schema_version(&connection).unwrap(), 3);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -969,7 +994,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 4"));
+            .contains("expected schema version 14, found 4"));
         assert_eq!(read_schema_version(&connection).unwrap(), 4);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1011,7 +1036,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 5"));
+            .contains("expected schema version 14, found 5"));
         assert_eq!(read_schema_version(&connection).unwrap(), 5);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1062,7 +1087,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 6"));
+            .contains("expected schema version 14, found 6"));
         assert_eq!(read_schema_version(&connection).unwrap(), 6);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1113,7 +1138,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 7"));
+            .contains("expected schema version 14, found 7"));
         assert_eq!(read_schema_version(&connection).unwrap(), 7);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1156,7 +1181,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 8"));
+            .contains("expected schema version 14, found 8"));
         assert_eq!(read_schema_version(&connection).unwrap(), 8);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1201,7 +1226,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 9"));
+            .contains("expected schema version 14, found 9"));
         assert_eq!(read_schema_version(&connection).unwrap(), 9);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1244,7 +1269,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 10"));
+            .contains("expected schema version 14, found 10"));
         assert_eq!(read_schema_version(&connection).unwrap(), 10);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1298,7 +1323,7 @@ mod tests {
             .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
         assert!(error
             .to_string()
-            .contains("expected schema version 13, found 11"));
+            .contains("expected schema version 14, found 11"));
         assert_eq!(read_schema_version(&connection).unwrap(), 11);
         assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
         assert_eq!(connection.total_changes(), before_changes);
@@ -1322,6 +1347,100 @@ mod tests {
             .optional()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn a_v12_database_requires_reset_without_rewriting_retired_goal_state() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v12.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE conversation_goals (
+                         conversation_id TEXT PRIMARY KEY,
+                         objective TEXT NOT NULL
+                     );
+                     INSERT INTO conversation_goals (conversation_id, objective)
+                     VALUES ('conversation-v12', 'retired Goal state');
+                     PRAGMA user_version = 12;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error
+            .to_string()
+            .contains("expected schema version 14, found 12"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 12);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT objective FROM conversation_goals
+                     WHERE conversation_id = 'conversation-v12'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "retired Goal state"
+        );
+    }
+
+    #[test]
+    fn a_v13_database_requires_reset_after_goal_storage_removal() {
+        let fixture = tempfile::tempdir().unwrap();
+        let database_path = fixture.path().join("legacy-v13.sqlite");
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE conversation_goal_revisions (
+                         goal_id TEXT NOT NULL,
+                         sequence INTEGER NOT NULL,
+                         event_json TEXT NOT NULL,
+                         PRIMARY KEY (goal_id, sequence)
+                     );
+                     INSERT INTO conversation_goal_revisions (goal_id, sequence, event_json)
+                     VALUES ('goal-v13', 1, '{\"type\":\"initial\"}');
+                     PRAGMA user_version = 13;",
+                )
+                .unwrap();
+        }
+        let connection = Connection::open(&database_path).unwrap();
+        let before_fingerprint = schema_fingerprint(&connection).unwrap();
+        let before_changes = connection.total_changes();
+
+        let error = run_migrations(&connection).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(DEVELOPMENT_STORAGE_SCHEMA_RESET_REQUIRED));
+        assert!(error
+            .to_string()
+            .contains("expected schema version 14, found 13"));
+        assert_eq!(read_schema_version(&connection).unwrap(), 13);
+        assert_eq!(schema_fingerprint(&connection).unwrap(), before_fingerprint);
+        assert_eq!(connection.total_changes(), before_changes);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT event_json FROM conversation_goal_revisions
+                     WHERE goal_id = 'goal-v13' AND sequence = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            r#"{"type":"initial"}"#
+        );
     }
 
     #[test]

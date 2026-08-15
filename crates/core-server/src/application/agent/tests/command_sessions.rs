@@ -287,6 +287,7 @@ fn start_owned_session_with_tracker(
             "status": "approved"
         }),
         artifact_runtime: None,
+        office_engine: None,
         file_inputs: None,
         notifications,
         cancellation_token: AgentCancellationToken::new(),
@@ -586,6 +587,7 @@ fn assert_session_create_failure_is_fail_closed(
                 "status": "approved"
             }),
             artifact_runtime: None,
+            office_engine: None,
             file_inputs: None,
             notifications: Some(notifications),
             cancellation_token: AgentCancellationToken::new(),
@@ -931,6 +933,7 @@ fn indeterminate_then_absent_synthesizes_one_settled_failed_session() {
                 "status": "approved"
             }),
             artifact_runtime: None,
+            office_engine: None,
             file_inputs: None,
             notifications: None,
             cancellation_token: AgentCancellationToken::new(),
@@ -1097,6 +1100,7 @@ fn running_transition_failure_has_one_failed_terminal_across_host_and_storage() 
                 "status": "approved"
             }),
             artifact_runtime: None,
+            office_engine: None,
             file_inputs: None,
             notifications: Some(notifications),
             cancellation_token: AgentCancellationToken::new(),
@@ -3670,6 +3674,7 @@ fn aspen_pdf_runs_a_five_step_managed_session_workflow() {
                     "manualSmoke": true
                 }),
                 artifact_runtime: Some(Arc::clone(&provider)),
+                office_engine: None,
                 file_inputs: Some(&file_inputs),
                 notifications: None,
                 cancellation_token: AgentCancellationToken::new(),

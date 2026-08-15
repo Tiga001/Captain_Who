@@ -49,8 +49,9 @@ pub use types::{
     OfficeExecutionRequest, OfficeExecutionResult, OfficeFileState, OfficeFrozenPath,
     OfficeGridLayout, OfficeHelpVerb, OfficeOperation, OfficeOperationAccess,
     OfficeOperationParameters, OfficePageRange, OfficePathIdentity, OfficePathPurpose,
-    OfficePathScope, OfficePathSlot, OfficePreparedExecution, OfficePresentationRenderPlan,
-    OfficePropertyMap, OfficePublishedOutput, OfficePublishedOutputKind, OfficePublishedOutputRole,
+    OfficePathScope, OfficePathSlot, OfficePreparedExecution, OfficePresentationEditRequest,
+    OfficePresentationEditResult, OfficePresentationRenderPlan, OfficePropertyMap,
+    OfficePublishedOutput, OfficePublishedOutputKind, OfficePublishedOutputRole,
     OfficeRenderGridGeometry, OfficeRenderLayoutCoverage, OfficeRenderLayoutEvidence,
     OfficeRenderPageSelection, OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode,
     OfficeViewport, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
@@ -58,6 +59,7 @@ pub use types::{
 };
 
 pub use discovery::{resolve_office_engine, OfficeCliEngine, UnavailableOfficeEngine};
+pub(crate) use types::OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX;
 
 #[cfg(all(test, unix))]
 mod tests;

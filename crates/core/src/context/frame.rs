@@ -115,7 +115,6 @@ pub(crate) enum ContextSource {
     ConversationSummary,
     WorldStateSnapshot,
     WorldStateDiff,
-    ConversationGoal,
     ConversationHistory,
     ConversationTrace,
     CurrentTurn,
@@ -140,7 +139,6 @@ impl ContextSource {
             Self::ConversationSummary => "conversation_summary",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
-            Self::ConversationGoal => "conversation_goal",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
@@ -165,7 +163,6 @@ impl ContextSource {
             "conversation_summary" => Some(Self::ConversationSummary),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
-            "conversation_goal" => Some(Self::ConversationGoal),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
@@ -433,7 +430,6 @@ impl ContextMetadata {
         if self.sources.contains(&ContextSource::ConversationSummary)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
                 && matches!(self.scope, ContextScope::Conversation)
-            || self.sources.contains(&ContextSource::ConversationGoal)
         {
             return ContextCacheBand::ConversationEpochPrelude;
         }
@@ -450,7 +446,6 @@ impl ContextMetadata {
         if self.sources.contains(&ContextSource::ConversationSummary)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
-            || self.sources.contains(&ContextSource::ConversationGoal)
         {
             return LlmMessagePlacement::BackendStateTimeline;
         }

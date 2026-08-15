@@ -36,9 +36,11 @@ struct LifecycleTestOfficeEngine {
     invalid_status: bool,
     invalid_prepare: bool,
     invalid_execute: bool,
+    invalid_presentation_edit: bool,
     status_calls: Arc<AtomicUsize>,
     prepare_calls: Arc<AtomicUsize>,
     executions: Arc<AtomicUsize>,
+    presentation_edits: Arc<AtomicUsize>,
 }
 
 impl LifecycleTestOfficeEngine {
@@ -48,9 +50,11 @@ impl LifecycleTestOfficeEngine {
             invalid_status: false,
             invalid_prepare: false,
             invalid_execute: false,
+            invalid_presentation_edit: false,
             status_calls: Arc::new(AtomicUsize::new(0)),
             prepare_calls: Arc::new(AtomicUsize::new(0)),
             executions: Arc::new(AtomicUsize::new(0)),
+            presentation_edits: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -150,6 +154,35 @@ impl OfficeEngine for LifecycleTestOfficeEngine {
             error_code: None,
             error: None,
             outputs: Vec::new(),
+        })
+    }
+
+    fn execute_presentation_edit(
+        &self,
+        _context: &OfficeExecutionContext,
+        request: &OfficePresentationEditRequest,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficePresentationEditResult, OfficeEngineError> {
+        self.presentation_edits.fetch_add(1, Ordering::SeqCst);
+        if self.invalid_presentation_edit {
+            return Err(Self::invalid_configuration(
+                "The Office component changed before presentation edit settlement.",
+            ));
+        }
+        let cancelled = cancellation.is_cancelled()
+            || action_cancel_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst));
+        Ok(OfficePresentationEditResult {
+            exit_code: (!cancelled).then_some(0),
+            stdout: request.destination_path.clone(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled,
+            duration_ms: 1,
+            error_code: None,
+            error: None,
         })
     }
 }
@@ -651,6 +684,26 @@ fn prepared_render_action(id: &str) -> AgentProposedAction {
     }
 }
 
+fn presentation_edit_request() -> OfficePresentationEditRequest {
+    OfficePresentationEditRequest {
+        source_path: "source.pptx".to_string(),
+        source_binding: mycopilot_core::AgentFileInputBinding {
+            schema_version: mycopilot_core::AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION,
+            mount_path: "source.pptx".to_string(),
+            source: mycopilot_core::AgentFileInputRef::Workspace {
+                path: "source.pptx".to_string(),
+            },
+            size_bytes: 128,
+            sha256: "0".repeat(64),
+        },
+        destination_path: "edited.pptx".to_string(),
+        inputs: Vec::new(),
+        input_bindings: Vec::new(),
+        operations: Vec::new(),
+        timeout_ms: Some(30_000),
+    }
+}
+
 #[test]
 fn office_status_rediscovery_replaces_a_stale_engine_once() {
     let stale = LifecycleTestOfficeEngine {
@@ -753,6 +806,82 @@ fn concurrent_office_preparation_uses_one_rediscovery_for_a_stale_instance() {
     for worker in workers {
         assert_eq!(worker.join().unwrap(), "office-engine-v2");
     }
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn presentation_edit_is_forwarded_to_the_current_engine_with_host_cancellation() {
+    let current = LifecycleTestOfficeEngine::valid("office-engine-v1");
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver: OfficeEngineResolver = {
+        let current = current.clone();
+        let resolver_calls = Arc::clone(&resolver_calls);
+        Arc::new(move || {
+            resolver_calls.fetch_add(1, Ordering::SeqCst);
+            Arc::new(current.clone())
+        })
+    };
+    let engine = RefreshableOfficeEngine::with_current(Arc::new(current.clone()), resolver);
+    let action_cancel_flag = Arc::new(AtomicBool::new(true));
+
+    let result = engine
+        .execute_presentation_edit(
+            &OfficeExecutionContext::from_run_context(None),
+            &presentation_edit_request(),
+            AgentCancellationToken::new(),
+            Some(action_cancel_flag),
+        )
+        .expect("the current engine handles the editor transaction");
+
+    assert!(result.cancelled);
+    assert_eq!(result.stdout, "edited.pptx");
+    assert_eq!(current.presentation_edits.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn presentation_edit_invalid_configuration_refreshes_without_replaying_the_transaction() {
+    let stale = LifecycleTestOfficeEngine {
+        invalid_presentation_edit: true,
+        ..LifecycleTestOfficeEngine::valid("office-engine-v1")
+    };
+    let replacement = LifecycleTestOfficeEngine::valid("office-engine-v2");
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver: OfficeEngineResolver = {
+        let replacement = replacement.clone();
+        let resolver_calls = Arc::clone(&resolver_calls);
+        Arc::new(move || {
+            resolver_calls.fetch_add(1, Ordering::SeqCst);
+            Arc::new(replacement.clone())
+        })
+    };
+    let engine = RefreshableOfficeEngine::with_current(Arc::new(stale.clone()), resolver);
+
+    let error = engine
+        .execute_presentation_edit(
+            &OfficeExecutionContext::from_run_context(None),
+            &presentation_edit_request(),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .expect_err("an approved editor transaction must not cross engine revisions");
+
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+    assert_eq!(error.recovery(), OfficeEngineRecovery::Retry);
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(stale.presentation_edits.load(Ordering::SeqCst), 1);
+    assert_eq!(replacement.presentation_edits.load(Ordering::SeqCst), 0);
+
+    let retry = engine
+        .execute_presentation_edit(
+            &OfficeExecutionContext::from_run_context(None),
+            &presentation_edit_request(),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .expect("a new transaction may use the refreshed engine");
+    assert_eq!(retry.exit_code, Some(0));
+    assert_eq!(replacement.presentation_edits.load(Ordering::SeqCst), 1);
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
 }
 

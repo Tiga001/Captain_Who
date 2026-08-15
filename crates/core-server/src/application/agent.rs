@@ -40,6 +40,7 @@ use mycopilot_core::image_generation::{ImageGenerationExecutionService, ImageGen
 use mycopilot_core::office::{
     resolve_office_engine, OfficeCliDiscoveryOptions, OfficeEngine, OfficeEngineError,
     OfficeEngineErrorCode, OfficeEngineRecovery, OfficeExecutionResult,
+    OfficePresentationEditRequest, OfficePresentationEditResult,
 };
 use mycopilot_core::skills::{
     execute_skill_python_script, SkillInstallationService, SkillInstallationWorkflow,
@@ -360,6 +361,31 @@ impl OfficeEngine for RefreshableOfficeEngine {
                     OfficeEngineErrorCode::PreconditionFailed,
                     OfficeEngineRecovery::Retry,
                     "The Office engine changed after this operation was prepared. The Host refreshed the engine, but did not replay the stale prepared or approved operation; prepare it again.",
+                ))
+            }
+            result => result,
+        }
+    }
+
+    fn execute_presentation_edit(
+        &self,
+        context: &mycopilot_core::office::OfficeExecutionContext,
+        request: &OfficePresentationEditRequest,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficePresentationEditResult, OfficeEngineError> {
+        let current = self.current();
+        match current.execute_presentation_edit(context, request, cancellation, action_cancel_flag)
+        {
+            Err(error) if error.code() == OfficeEngineErrorCode::InvalidConfiguration => {
+                // The fixed Editor transaction is frozen to both its Artifact Runtime and the
+                // Office engine observed at settlement. Refresh discovery for the next attempt,
+                // but never replay a possibly approved mutation against a replacement engine.
+                self.refresh_if_current(&current);
+                Err(OfficeEngineError::new(
+                    OfficeEngineErrorCode::PreconditionFailed,
+                    OfficeEngineRecovery::Retry,
+                    "The Office engine changed before the presentation edit transaction settled. The Host refreshed it but did not replay the approved edit; run the Editor again.",
                 ))
             }
             result => result,

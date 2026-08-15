@@ -345,6 +345,35 @@ pub struct OfficePresentationRenderPlan {
 /// extensible.
 pub type OfficePropertyMap = BTreeMap<String, Value>;
 
+/// Host-owned request for one bounded edit of an existing presentation.
+///
+/// The fixed MJS facade emits only the existing provider-neutral mutation parameter variants.
+/// Raw OfficeCLI argv, batch JSON, OOXML, executable paths and staging locations never enter this
+/// contract. The Host applies the whole vector to one private source copy and publishes once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfficePresentationEditRequest {
+    pub source_path: String,
+    pub source_binding: AgentFileInputBinding,
+    pub destination_path: String,
+    pub inputs: Vec<AgentFileInputSpec>,
+    pub input_bindings: Vec<AgentFileInputBinding>,
+    pub operations: Vec<OfficeOperationParameters>,
+    pub timeout_ms: Option<u64>,
+}
+
+/// Bounded provider outcome for the Host-owned presentation edit transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfficePresentationEditResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub cancelled: bool,
+    pub duration_ms: u64,
+    pub error_code: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Typed, provider-neutral parameters for one managed Office operation.
 ///
 /// `OfficeExecutionRequest.operation` is repeated outside this enum for compact UI routing. The
@@ -1050,6 +1079,25 @@ pub trait OfficeEngine: Send + Sync {
         cancellation: AgentCancellationToken,
         action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Result<OfficeExecutionResult, OfficeEngineError>;
+
+    /// Applies one fixed-facade presentation edit as a single Host-owned transaction.
+    ///
+    /// Engines which do not implement the pinned Office transaction surface fail closed. This
+    /// default keeps test/fallback engines source-compatible without accidentally emulating batch
+    /// edits as several independently published mutations.
+    fn execute_presentation_edit(
+        &self,
+        _context: &OfficeExecutionContext,
+        _request: &OfficePresentationEditRequest,
+        _cancellation: AgentCancellationToken,
+        _action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficePresentationEditResult, OfficeEngineError> {
+        Err(OfficeEngineError::new(
+            OfficeEngineErrorCode::UnsupportedOperation,
+            OfficeEngineRecovery::ChangeRequest,
+            "This Office engine does not support atomic existing-presentation edits.",
+        ))
+    }
 
     fn execute(
         &self,

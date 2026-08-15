@@ -19,6 +19,7 @@ use super::{
 };
 use crate::artifact_runtime::ArtifactRuntimeProvider;
 use crate::file_input::AgentFileInputExecutionContext;
+use crate::office::OfficeEngine;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -251,6 +252,7 @@ impl CommandSessionManager {
         authorization_source: CommandAuthorizationSource,
         options: CommandStartOptions,
         artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
+        office_engine: Option<Arc<dyn OfficeEngine>>,
         file_inputs: Option<&AgentFileInputExecutionContext>,
         managed_workspace: Option<ManagedCommandWorkspaceLease>,
         lifecycle_observer: CommandSessionLifecycleObserver,
@@ -285,6 +287,7 @@ impl CommandSessionManager {
             cancellation_token,
             super::managed_runtime::ManagedCommandSessionServices {
                 artifact_runtime,
+                office_engine,
                 file_inputs,
                 managed_workspace,
             },
@@ -362,7 +365,7 @@ impl CommandSessionManager {
         let completion_hook: Option<CommandSessionCompletionHook> = artifact_observer
             .zip(artifact_before)
             .map(|(observer, before)| {
-                Box::new(move |result: &mut super::AgentCommandExecutionResult| {
+                Box::new(move |result: &mut super::AgentCommandExecutionResult, _| {
                     let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
                     result.artifact_observation = Some(observer.finish(before, after));
                 }) as CommandSessionCompletionHook

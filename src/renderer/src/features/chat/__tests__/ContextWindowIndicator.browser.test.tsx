@@ -32,7 +32,6 @@ function snapshot(inputTokens: number): AgentContextWindowSnapshot {
       toolSchemaTokens: started ? 7_000 : 0,
       summaryTokens: 0,
       worldStateTokens: 0,
-      goalTokens: 0,
       todoTokens: 0,
       providerContinuationTokens: 0,
       recentHistoryTokens: started ? inputTokens - 19_000 : 0,
