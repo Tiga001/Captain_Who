@@ -226,6 +226,49 @@ fn write_docx(path: &Path, text: &str) {
     archive.finish().unwrap();
 }
 
+fn write_png(path: &Path, width: u32, height: u32) {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba([24, 48, 72, 255]));
+    image
+        .save_with_format(path, image::ImageFormat::Png)
+        .unwrap();
+}
+
+fn copy_render_script(path: &Path) -> String {
+    format!(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf 'render-output:%s\\ncwd:%s\\n' \"$output\" \"$PWD\"\n/bin/cp '{}' \"$output\"\n",
+        path.display()
+    )
+}
+
+fn write_pptx(path: &Path, slide_count: u32) {
+    let file = fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("[Content_Types].xml", options).unwrap();
+    archive.write_all(b"<Types/>").unwrap();
+    archive.start_file("ppt/presentation.xml", options).unwrap();
+    let slide_ids = (1..=slide_count)
+        .map(|slide| format!("<p:sldId id=\"{}\" r:id=\"rId{slide}\"/>", 255 + slide))
+        .collect::<String>();
+    archive
+        .write_all(format!("<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx=\"12192000\" cy=\"6858000\"/></p:presentation>").as_bytes())
+        .unwrap();
+    archive
+        .start_file("ppt/_rels/presentation.xml.rels", options)
+        .unwrap();
+    let relationships = (1..=slide_count)
+        .map(|slide| format!("<Relationship Id=\"rId{slide}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{slide}.xml\"/>"))
+        .collect::<String>();
+    archive.write_all(format!("<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{relationships}</Relationships>").as_bytes()).unwrap();
+    for slide in 1..=slide_count {
+        archive
+            .start_file(format!("ppt/slides/slide{slide}.xml"), options)
+            .unwrap();
+        archive.write_all(b"<p:sld xmlns:p=\"urn:test\"/>").unwrap();
+    }
+    archive.finish().unwrap();
+}
+
 #[test]
 fn configured_discovery_and_probe_are_structured() {
     let fixture = Fixture::new(basic_script());
@@ -271,7 +314,13 @@ fn prepared_execution_freezes_engine_workspace_and_file_revisions() {
         .as_deref()
         .unwrap()
         .starts_with("office-file-sha256-v1:"));
-    serde_json::to_string(&prepared).unwrap();
+    let mut serialized = serde_json::to_value(&prepared).unwrap();
+    assert_eq!(serialized["resolvedRenderPlan"], serde_json::Value::Null);
+    serialized
+        .as_object_mut()
+        .unwrap()
+        .remove("resolvedRenderPlan");
+    assert!(serde_json::from_value::<OfficePreparedExecution>(serialized).is_err());
 }
 
 #[test]
@@ -734,9 +783,9 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
         fs::read(replacement.path()).unwrap()
     );
 
-    let fixture = Fixture::new(
-        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf 'render-output:%s\\ncwd:%s\\n' \"$output\" \"$PWD\"\nprintf '\\211PNG\\r\\n\\032\\n\\000\\000\\000\\rIHDR\\000\\000\\002\\200\\000\\000\\001h' > \"$output\"\n",
-    );
+    let rendered_png = tempfile::NamedTempFile::new().unwrap();
+    write_png(rendered_png.path(), 640, 360);
+    let fixture = Fixture::new(&copy_render_script(rendered_png.path()));
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let mut request = fixture.request(OfficeOperation::View);
     request.parameters = OfficeOperationParameters::View {
@@ -794,7 +843,10 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
     assert_eq!(output["readPath"], "preview.png");
     assert_eq!(output["scope"], "workspace");
     assert_eq!(output["readableByAgent"], true);
-    assert_eq!(output["sizeBytes"], 24);
+    assert_eq!(
+        output["sizeBytes"],
+        fs::metadata(rendered_png.path()).unwrap().len()
+    );
     assert!(output["sha256"]
         .as_str()
         .is_some_and(|digest| digest.len() == 64
@@ -831,6 +883,23 @@ fn failed_timed_out_or_cancelled_render_never_reports_a_published_output() {
         .is_none());
     assert!(!invalid.workspace.path().join("invalid.png").exists());
 
+    let truncated = Fixture::new(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\n\\000\\000\\000\\rIHDR\\000\\000\\002\\200\\000\\000\\001h' > \"$output\"\n",
+    );
+    fs::write(truncated.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let result = truncated
+        .engine
+        .execute(
+            &workspace_context(truncated.workspace.path()),
+            &screenshot_request(&truncated, "truncated.png"),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.error_code.as_deref(), Some("office.invalid_output"));
+    assert!(result.outputs.is_empty());
+    assert!(!truncated.workspace.path().join("truncated.png").exists());
+
     let timed_out = Fixture::new(
         "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\npartial' > \"$output\"\n/bin/sleep 5\n",
     );
@@ -854,9 +923,9 @@ fn failed_timed_out_or_cancelled_render_never_reports_a_published_output() {
         .is_none());
     assert!(!timed_out.workspace.path().join("timed-out.png").exists());
 
-    let cancelled = Fixture::new(
-        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
-    );
+    let cancelled_png = tempfile::NamedTempFile::new().unwrap();
+    write_png(cancelled_png.path(), 640, 360);
+    let cancelled = Fixture::new(&copy_render_script(cancelled_png.path()));
     fs::write(cancelled.workspace.path().join("sample.docx"), b"doc").unwrap();
     let context = workspace_context(cancelled.workspace.path());
     let prepared = cancelled
@@ -907,10 +976,19 @@ fn document_spreadsheet_and_presentation_renders_share_the_published_output_cont
             "presentation-preview.png",
         ),
     ] {
-        let fixture = Fixture::new(
-            "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
-        );
-        fs::write(fixture.workspace.path().join(input_name), b"office-input").unwrap();
+        let rendered_png = tempfile::NamedTempFile::new().unwrap();
+        let dimensions = if document_kind == OfficeDocumentKind::Presentation {
+            (1600, 900)
+        } else {
+            (640, 360)
+        };
+        write_png(rendered_png.path(), dimensions.0, dimensions.1);
+        let fixture = Fixture::new(&copy_render_script(rendered_png.path()));
+        if document_kind == OfficeDocumentKind::Presentation {
+            write_pptx(&fixture.workspace.path().join(input_name), 1);
+        } else {
+            fs::write(fixture.workspace.path().join(input_name), b"office-input").unwrap();
+        }
         let mut request = screenshot_request(&fixture, output_name);
         request.document_kind = document_kind;
         request.document_path = Some(input_name.to_string());
@@ -940,9 +1018,9 @@ fn document_spreadsheet_and_presentation_renders_share_the_published_output_cont
 
 #[test]
 fn external_render_output_reports_whether_the_current_read_policy_can_reuse_it() {
-    let fixture = Fixture::new(
-        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
-    );
+    let rendered_png = tempfile::NamedTempFile::new().unwrap();
+    write_png(rendered_png.path(), 640, 360);
+    let fixture = Fixture::new(&copy_render_script(rendered_png.path()));
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let external = tempfile::tempdir().unwrap();
     let target = fs::canonicalize(external.path())
@@ -2533,4 +2611,83 @@ fn real_officecli_renders_through_the_application_managed_browser() {
     .unwrap();
     assert_eq!(verified.size_bytes, published.size_bytes);
     assert_eq!(verified.sha256, published.sha256);
+}
+
+#[test]
+#[ignore = "requires managed Office components and MYCOPILOT_NINE_SLIDE_PPTX"]
+fn real_nine_slide_presentation_render_verifies_contact_sheet_layout_geometry() {
+    let officecli = std::env::var_os("MYCOPILOT_OFFICECLI_PATH")
+        .expect("MYCOPILOT_OFFICECLI_PATH is required for the nine-slide render smoke test");
+    let renderer = std::env::var_os("MYCOPILOT_OFFICE_RENDERER_DIR")
+        .expect("MYCOPILOT_OFFICE_RENDERER_DIR is required for the nine-slide render smoke test");
+    let browser_proxy = std::env::var_os("MYCOPILOT_CORE_SERVER_PATH")
+        .expect("MYCOPILOT_CORE_SERVER_PATH is required for the nine-slide render smoke test");
+    let source = std::env::var_os("MYCOPILOT_NINE_SLIDE_PPTX")
+        .expect("MYCOPILOT_NINE_SLIDE_PPTX is required for the nine-slide render smoke test");
+    let workspace = tempfile::tempdir().unwrap();
+    fs::copy(source, workspace.path().join("nine-slides.pptx")).unwrap();
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(officecli)
+            .with_configured_render_runtime_dir(renderer)
+            .with_browser_proxy_executable(browser_proxy)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+    let request = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Presentation,
+        operation: OfficeOperation::View,
+        document_path: Some("nine-slides.pptx".to_string()),
+        parameters: OfficeOperationParameters::View {
+            mode: OfficeViewMode::Screenshot,
+            start: None,
+            end: None,
+            max_lines: None,
+            issue_type: None,
+            limit: None,
+            columns: Vec::new(),
+            pages: Vec::new(),
+            range: None,
+            viewport: None,
+            grid: Some(OfficeGridLayout::Auto),
+            render_mode: Some(OfficeViewRenderMode::Auto),
+            page_count: false,
+        },
+        output_path: Some("nine-slides.png".to_string()),
+        destination_path: None,
+        inputs: Vec::new(),
+        timeout_ms: Some(90_000),
+    };
+    let context = workspace_context(workspace.path());
+    let prepared = engine.prepare(&context, &request).unwrap();
+    let plan = prepared.resolved_render_plan.as_ref().unwrap();
+    assert_eq!(plan.requested_pages, (1..=9).collect::<Vec<_>>());
+    assert_eq!(plan.grid, Some(OfficeGridLayout::Columns { columns: 3 }));
+    assert_eq!(
+        plan.viewport,
+        OfficeViewport {
+            width: 1600,
+            height: 922
+        }
+    );
+
+    let result = engine
+        .execute_prepared(&context, &prepared, AgentCancellationToken::new(), None)
+        .unwrap();
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    let published = result.outputs.first().expect("published contact sheet");
+    assert_eq!((published.width, published.height), (Some(1600), Some(922)));
+    let layout = published
+        .layout_coverage
+        .as_ref()
+        .expect("layout geometry receipt");
+    assert_eq!(layout.requested_pages, (1..=9).collect::<Vec<_>>());
+    assert_eq!(
+        layout.evidence,
+        crate::office::OfficeRenderLayoutEvidence::TrustedRendererGeometry
+    );
+    let grid = layout.grid.as_ref().expect("grid geometry");
+    assert_eq!((grid.columns, grid.rows), (3, 3));
+    assert!(grid.content_width <= grid.viewport_width);
+    assert!(grid.content_height <= grid.viewport_height);
 }

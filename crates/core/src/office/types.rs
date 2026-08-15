@@ -22,7 +22,7 @@ where
 
 pub const OFFICECLI_PROVIDER_ID: &str = "officecli";
 pub const OFFICE_ENGINE_STATUS_SCHEMA_VERSION: u32 = 1;
-pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 5;
+pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 6;
 
 pub(crate) const OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX: &str = "__mycopilot_agent_input__/";
 
@@ -320,6 +320,21 @@ pub struct OfficePageRange {
 pub struct OfficeViewport {
     pub width: u32,
     pub height: u32,
+}
+
+/// Host-resolved presentation screenshot plan frozen into an approved Office
+/// execution. The original model request remains unchanged; this records the
+/// deterministic slide set and geometry used to compile provider argv and to
+/// verify that the resulting layout fits the final PNG viewport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficePresentationRenderPlan {
+    pub requested_pages: Vec<u32>,
+    pub slide_width_emu: u32,
+    pub slide_height_emu: u32,
+    pub viewport: OfficeViewport,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub grid: Option<OfficeGridLayout>,
 }
 
 /// Provider-neutral Office property values.
@@ -734,6 +749,45 @@ pub enum OfficeRenderPageSelection {
     Explicit { pages: Vec<u32> },
 }
 
+/// Host-verified layout geometry for one presentation screenshot.
+///
+/// This receipt has deliberately narrow semantics: it proves that the frozen
+/// requested slide set fits inside the decoded PNG viewport according to the
+/// trusted renderer's fixed layout formula. It does not prove that each slide's
+/// visual content rendered correctly and cannot replace per-slide `read_image`
+/// inspection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficeRenderLayoutCoverage {
+    /// Exact, canonical page/slide set used by the frozen layout plan.
+    pub requested_pages: Vec<u32>,
+    /// The sole evidence class accepted by this receipt.
+    pub evidence: OfficeRenderLayoutEvidence,
+    /// Verified contact-sheet geometry. Single-slide renders omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<OfficeRenderGridGeometry>,
+}
+
+/// Evidence used for an [`OfficeRenderLayoutCoverage`] receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeRenderLayoutEvidence {
+    TrustedRendererGeometry,
+}
+
+/// Integer geometry from the Host-owned contact-sheet plan after it has been
+/// checked against the decoded image dimensions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficeRenderGridGeometry {
+    pub columns: u16,
+    pub rows: u32,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub content_width: u32,
+    pub content_height: u32,
+}
+
 /// One validated Office artifact at its final, atomically published location.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -761,6 +815,11 @@ pub struct OfficePublishedOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     pub page_selection: OfficeRenderPageSelection,
+    /// Host-verified renderer layout geometry. This is not visual-quality or
+    /// per-slide content evidence; final slides still require individual visual
+    /// inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_coverage: Option<OfficeRenderLayoutCoverage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -851,6 +910,10 @@ pub struct OfficePreparedExecution {
     /// Logical, user-reviewable argv. Runtime-private staging paths never
     /// replace these values in the frozen plan.
     pub argv: Vec<String>,
+    /// Host-owned render geometry. Required for presentation screenshots and
+    /// null for every other Office operation.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub resolved_render_plan: Option<OfficePresentationRenderPlan>,
     /// Current normalized path plan. It is rebuilt from the logical request
     /// and the current execution context immediately before execution.
     pub paths: Vec<OfficeFrozenPath>,

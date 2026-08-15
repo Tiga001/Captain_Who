@@ -12,9 +12,9 @@ use super::types::{
     OfficeEngineStatus, OfficeExecutionContext, OfficeExecutionRequest, OfficeExecutionResult,
     OfficeFileState, OfficeFrozenPath, OfficeGridLayout, OfficeOperation, OfficeOperationAccess,
     OfficeOperationParameters, OfficePathIdentity, OfficePathPurpose, OfficePathScope,
-    OfficePathSlot, OfficePreparedExecution, OfficePropertyMap, OfficePublishedOutput,
-    OfficePublishedOutputKind, OfficePublishedOutputRole, OfficeRenderPageSelection,
-    OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
+    OfficePathSlot, OfficePreparedExecution, OfficePresentationRenderPlan, OfficePropertyMap,
+    OfficePublishedOutput, OfficePublishedOutputKind, OfficePublishedOutputRole,
+    OfficeRenderPageSelection, OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
     OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
     OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
@@ -46,14 +46,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod arguments;
+mod coverage;
 mod filesystem;
+mod presentation_render;
 mod process;
 mod validation;
 
 #[cfg(test)]
 use arguments::canonical_page_ranges;
 pub(crate) use arguments::compile_office_arguments;
+pub(crate) use coverage::verify_render_layout_coverage;
 use filesystem::*;
+use presentation_render::{apply_presentation_render_plan, resolve_presentation_render_plan};
 use process::*;
 pub(crate) use validation::validate_office_request;
 use validation::*;
@@ -67,8 +71,8 @@ pub const MAX_OFFICE_PROPERTIES: usize = 96;
 pub const MAX_OFFICE_LIST_VALUES: usize = 64;
 pub const MAX_OFFICE_SCREENSHOT_DIMENSION: u32 = 16_384;
 pub const MAX_OFFICE_GRID_COLUMNS: u16 = 32;
-const MAX_OFFICE_PAGE_NUMBER: u32 = 10_000;
-const MAX_OFFICE_TOTAL_PAGES: u32 = 128;
+pub const MAX_OFFICE_PAGE_NUMBER: u32 = 10_000;
+pub const MAX_OFFICE_TOTAL_PAGES: u32 = 128;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FILE_REVISION_PREFIX: &str = "office-file-sha256-v1:";
 static OFFICE_COMMIT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -214,6 +218,7 @@ pub(super) fn prepare_office_cli(
         access: request.access(),
         request: request.clone(),
         argv: prepared.argv,
+        resolved_render_plan: prepared.resolved_render_plan,
         paths: prepared.paths,
         input_bindings,
     })
@@ -242,6 +247,7 @@ pub(super) fn run_prepared_office_cli(
     }
     let current = prepare_request(&context, &prepared.request)?;
     if current.argv != prepared.argv
+        || current.resolved_render_plan != prepared.resolved_render_plan
         || prepared.access != prepared.request.access()
         || current.paths != prepared.paths
     {
@@ -361,7 +367,10 @@ fn verify_preconditions(
             error.message()
         ))
     })?;
-    if current.argv != prepared.argv || current.paths != prepared.paths {
+    if current.argv != prepared.argv
+        || current.resolved_render_plan != prepared.resolved_render_plan
+        || current.paths != prepared.paths
+    {
         return Err(precondition_error(
             "An Office input, target, resource, or parent directory changed after preparation.",
         ));
@@ -776,7 +785,7 @@ fn prepare_published_render_output(
         Some("screenshot") => (
             OfficePublishedOutputKind::Image,
             "image/png",
-            png_dimensions(staged_path),
+            Some(png_dimensions(staged_path)?),
         ),
         Some("svg") => (OfficePublishedOutputKind::Image, "image/svg+xml", None),
         Some("html") => (OfficePublishedOutputKind::Document, "text/html", None),
@@ -788,6 +797,27 @@ fn prepare_published_render_output(
     };
     let (width, height) =
         dimensions.map_or((None, None), |(width, height)| (Some(width), Some(height)));
+    let layout_coverage = if prepared.request.document_kind == OfficeDocumentKind::Presentation
+        && mode == Some("screenshot")
+    {
+        let plan = prepared.resolved_render_plan.as_ref().ok_or_else(|| {
+            precondition_error(
+                "Presentation screenshot output is missing its frozen Host render plan.",
+            )
+        })?;
+        let (actual_width, actual_height) = dimensions.ok_or_else(|| {
+            published_output_verification_error(
+                "Presentation screenshot dimensions could not be verified.",
+            )
+        })?;
+        Some(verify_render_layout_coverage(
+            plan,
+            actual_width,
+            actual_height,
+        )?)
+    } else {
+        None
+    };
     Ok(OfficePublishedOutput {
         role: OfficePublishedOutputRole::Render,
         kind,
@@ -801,6 +831,7 @@ fn prepare_published_render_output(
         width,
         height,
         page_selection: requested_page_selection(&prepared.request),
+        layout_coverage,
     })
 }
 
@@ -838,17 +869,26 @@ fn requested_page_selection(request: &OfficeExecutionRequest) -> OfficeRenderPag
     OfficeRenderPageSelection::Explicit { pages }
 }
 
-fn png_dimensions(path: &Path) -> Option<(u32, u32)> {
-    let mut file = fs::File::open(path).ok()?;
-    let mut header = [0_u8; 24];
-    file.read_exact(&mut header).ok()?;
-    if header[..8] != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] || &header[12..16] != b"IHDR"
-    {
-        return None;
+fn png_dimensions(path: &Path) -> Result<(u32, u32), OfficeEngineError> {
+    let file = fs::File::open(path)
+        .map_err(|error| invalid_output(format!("Cannot inspect PNG output: {error}")))?;
+    let mut reader =
+        image::ImageReader::with_format(std::io::BufReader::new(file), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_OFFICE_SCREENSHOT_DIMENSION);
+    limits.max_image_height = Some(MAX_OFFICE_SCREENSHOT_DIMENSION);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| {
+        invalid_output("OfficeCLI screenshot output is not a completely decodable bounded PNG.")
+    })?;
+    let dimensions = (decoded.width(), decoded.height());
+    if dimensions.0 == 0 || dimensions.1 == 0 {
+        return Err(invalid_output(
+            "OfficeCLI screenshot output has invalid zero dimensions.",
+        ));
     }
-    let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
-    (width > 0 && height > 0).then_some((width, height))
+    Ok(dimensions)
 }
 
 fn redact_private_render_paths<'a, const N: usize>(
@@ -1004,13 +1044,14 @@ fn run_commit_test_hook(_target: &Path, _phase: CommitTestPhase) {}
 struct PreparedRequest {
     argv: Vec<String>,
     paths: Vec<OfficeFrozenPath>,
+    resolved_render_plan: Option<OfficePresentationRenderPlan>,
 }
 
 fn prepare_request(
     context: &ResolvedExecutionContext,
     request: &OfficeExecutionRequest,
 ) -> Result<PreparedRequest, OfficeEngineError> {
-    let (arguments, resource_paths) = validate_request_syntax(request)?;
+    let (_, resource_paths) = validate_request_syntax(request)?;
     let mut argv = vec![request.operation.cli_name().to_string()];
     let mut paths = Vec::new();
     match request.operation {
@@ -1076,7 +1117,17 @@ fn prepare_request(
             }
         }
     }
-    argv.extend(arguments);
+    let document = paths
+        .iter()
+        .find(|path| path.slot == OfficePathSlot::Document)
+        .filter(|_| request.operation != OfficeOperation::Create)
+        .map(|path| Path::new(&path.normalized_path));
+    let resolved_render_plan = document
+        .map(|path| resolve_presentation_render_plan(request, path))
+        .transpose()?
+        .flatten();
+    let provider_request = apply_presentation_render_plan(request, resolved_render_plan.as_ref());
+    argv.extend(compile_office_arguments(&provider_request)?);
     if let Some(output) = request.output_path.as_deref() {
         if request.operation != OfficeOperation::View {
             return Err(invalid_request(
@@ -1140,7 +1191,11 @@ fn prepare_request(
             OfficePathPurpose::ReadSource,
         )?);
     }
-    Ok(PreparedRequest { argv, paths })
+    Ok(PreparedRequest {
+        argv,
+        paths,
+        resolved_render_plan,
+    })
 }
 
 /// Validates the complete, side-effect-free portion of an Office request.

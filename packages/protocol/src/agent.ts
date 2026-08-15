@@ -1580,6 +1580,34 @@ export interface OfficeViewport {
   height: number
 }
 
+export interface OfficePresentationRenderPlan {
+  requestedPages: number[]
+  slideWidthEmu: number
+  slideHeightEmu: number
+  viewport: OfficeViewport
+  grid: OfficeGridLayout | null
+}
+
+export interface OfficeRenderGridGeometry {
+  columns: number
+  rows: number
+  viewportWidth: number
+  viewportHeight: number
+  contentWidth: number
+  contentHeight: number
+}
+
+/**
+ * Host-verified renderer geometry only. This proves that the frozen requested
+ * slide set fits the decoded PNG viewport under the trusted layout formula; it
+ * is not visual-content evidence and does not replace per-slide inspection.
+ */
+export interface OfficeRenderLayoutCoverage {
+  requestedPages: number[]
+  evidence: 'trustedRendererGeometry'
+  grid?: OfficeRenderGridGeometry
+}
+
 export type OfficePropertyValue = string | number | boolean | { resourcePath: string }
 
 export type OfficePropertyMap = Record<string, OfficePropertyValue>
@@ -1694,6 +1722,8 @@ export interface OfficePreparedExecution {
   access: OfficeOperationAccess
   request: OfficeExecutionRequest
   argv: string[]
+  /** Host-owned deterministic presentation render plan; null for other operations. */
+  resolvedRenderPlan: OfficePresentationRenderPlan | null
   paths: OfficeFrozenPath[]
   inputBindings: AgentFileInputBinding[]
 }

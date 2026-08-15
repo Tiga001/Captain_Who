@@ -209,6 +209,7 @@ fn project_office_execution(value: &Value) -> Option<Value> {
                         "width",
                         "height",
                         "pageSelection",
+                        "layoutCoverage",
                     ],
                 )
             })
@@ -2374,6 +2375,7 @@ mod tests {
                 access: request.access(),
                 request: request.clone(),
                 argv: vec![request.operation.cli_name().to_string()],
+                resolved_render_plan: None,
                 paths: Vec::new(),
                 input_bindings: Vec::new(),
             })
@@ -3023,16 +3025,16 @@ mod tests {
     }
 
     #[test]
-    fn office_model_projection_keeps_actionable_outputs_without_provider_audit() {
+    fn office_render_layout_geometry_reaches_every_consumer_projection() {
         let raw = AgentToolResult {
             exact_archive_file: None,
             call_id: "office-1".to_string(),
-            tool: "office_document".to_string(),
+            tool: "office_presentation".to_string(),
             ok: true,
             result: Some(json!({
                 "providerId": "officecli",
                 "engineRevision": "sha256:private",
-                "documentKind": "document",
+                "documentKind": "presentation",
                 "operation": "render",
                 "outputs": [{
                     "role": "render",
@@ -3046,7 +3048,11 @@ mod tests {
                     "sha256": "private",
                     "width": 800,
                     "height": 600,
-                    "pageSelection": { "type": "all" }
+                    "pageSelection": { "type": "all" },
+                    "layoutCoverage": {
+                        "requestedPages": [1],
+                        "evidence": "trustedRendererGeometry"
+                    }
                 }],
                 "argv": ["render", "report.docx"],
                 "cwd": "/workspace",
@@ -3072,6 +3078,14 @@ mod tests {
         let model = model.result.as_ref().unwrap();
         assert_eq!(model["outputs"][0]["readPath"], "report.png");
         assert_eq!(model["outputs"][0]["width"], 800);
+        assert_eq!(
+            model["outputs"][0]["layoutCoverage"]["requestedPages"],
+            json!([1])
+        );
+        assert_eq!(
+            model["outputs"][0]["layoutCoverage"]["evidence"],
+            "trustedRendererGeometry"
+        );
         assert!(model.get("providerId").is_none());
         assert!(model.get("engineRevision").is_none());
         assert!(model.get("argv").is_none());
@@ -3086,6 +3100,20 @@ mod tests {
         assert!(raw.result.as_ref().unwrap()["outputs"][0]
             .get("sha256")
             .is_some());
+
+        let tool = OfficePresentationTool::new(Arc::new(PreparingOfficeEngine));
+        for (consumer, projection) in [
+            ("event", tool.event_projection(&raw)),
+            ("trace", tool.trace_projection(&raw)),
+            ("archive", tool.archive_projection(&raw)),
+            ("checkpoint", tool.checkpoint_projection(&raw)),
+        ] {
+            assert_eq!(
+                projection.result.as_ref().unwrap()["outputs"][0]["layoutCoverage"],
+                raw.result.as_ref().unwrap()["outputs"][0]["layoutCoverage"],
+                "{consumer} projection lost the Host-verified render layout geometry"
+            );
+        }
     }
 
     fn contains_object_key(value: &Value, key: &str) -> bool {

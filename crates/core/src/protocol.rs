@@ -1601,14 +1601,14 @@ pub enum AgentSkillDependencyStatus {
 
 /// Version of the persisted, approval-gated Office action envelope.
 ///
-/// Version 5 binds the original flat semantic model request, its compiled
+/// Version 6 binds the original flat semantic model request, its compiled
 /// provider-neutral operation request, and a normalized, non-empty user-facing
 /// reason of at most [`AGENT_OFFICE_REASON_MAX_CHARS`] characters to the same
 /// frozen Office action. The Host re-parses and recompiles `semantic_args`
 /// before execution, so neither approval nor history recovery ever has to infer
 /// model intent from provider parameters. Provider argv remains trusted
 /// Host-owned state. Older actions must be prepared again.
-pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 5;
+pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 6;
 
 /// Maximum number of Unicode scalar values accepted in an Office call reason.
 pub const AGENT_OFFICE_REASON_MAX_CHARS: usize = 240;

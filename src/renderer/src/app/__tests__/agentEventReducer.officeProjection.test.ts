@@ -53,7 +53,7 @@ describe('Office frozen action projection', () => {
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         id: 'office-add',
         approvalStatus: 'required',
         reason: 'Add the quarterly summary chart',
@@ -74,7 +74,7 @@ describe('Office frozen action projection', () => {
           reason: 'Add the quarterly summary chart'
         },
         prepared: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           providerId: 'officecli',
           engineRevision: 'sha256:engine',
           access: 'fileWrite',
@@ -107,6 +107,7 @@ describe('Office frozen action projection', () => {
             '--prop',
             'title=Quarterly summary'
           ],
+          resolvedRenderPlan: null,
           paths: [],
           workspaceRevision: null,
           inputBindings: []
@@ -136,7 +137,7 @@ describe('Office frozen action projection', () => {
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         id: 'office-render',
         approvalStatus: 'required',
         reason: 'Render a five-slide contact sheet',
@@ -150,7 +151,7 @@ describe('Office frozen action projection', () => {
           reason: 'Render a five-slide contact sheet'
         },
         prepared: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           providerId: 'officecli',
           engineRevision: 'sha256:engine',
           access: 'fileWrite',
@@ -170,6 +171,13 @@ describe('Office frozen action projection', () => {
             timeoutMs: null
           },
           argv: ['view', 'deck.pptx', 'screenshot', '--grid', '3', '-o', 'preview.png'],
+          resolvedRenderPlan: {
+            requestedPages: [1, 2, 3, 4, 5],
+            slideWidthEmu: 12_192_000,
+            slideHeightEmu: 6_858_000,
+            viewport: { width: 1600, height: 922 },
+            grid: { mode: 'columns', columns: 3 }
+          },
           paths: [],
           workspaceRevision: null,
           inputBindings: []

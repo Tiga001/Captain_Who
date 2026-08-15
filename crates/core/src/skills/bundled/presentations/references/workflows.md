@@ -188,39 +188,75 @@ prove that the deck is valid.
 
 ## Consume render outputs
 
-Render every slide to an explicit contact-sheet image:
+First inspect the final deck and record its authoritative slide count `N` and ordered slides. Repeat
+this inspection after the last edit because earlier counts become stale:
+
+```json
+{
+  "operation": "inspect",
+  "filePath": "outputs/product-intro.pptx",
+  "reason": "Inspect the final slide count and order before visual review"
+}
+```
+
+A whole-deck contact sheet may be rendered once for narrative flow and layout rhythm, but it is an
+overview only. It cannot prove that every slide is present, fully visible, or readable:
 
 ```json
 {
   "operation": "render",
   "filePath": "outputs/product-intro.pptx",
-  "outputPath": "outputs/product-intro-preview.png",
-  "reason": "Render every final slide for visual review"
+  "outputPath": "outputs/product-intro-overview.png",
+  "reason": "Render an overview contact sheet for narrative review"
 }
 ```
 
-After a successful render, take the exact path from `outputs[].readPath` and pass it as
-`read_image.path`:
+For final visual verification, render each slide independently. Use one call per slide, set
+`pageOrSlide` to that one-based slide number, and give every call a unique `outputPath`:
 
 ```json
 {
-  "path": "outputs/product-intro-preview.png"
+  "operation": "render",
+  "filePath": "outputs/product-intro.pptx",
+  "pageOrSlide": 1,
+  "outputPath": "outputs/product-intro-slide-01.png",
+  "reason": "Render slide 1 for full-size visual review"
 }
 ```
 
-Treat the returned output as authoritative:
+After each successful render, take the exact path from that call's `outputs[].readPath` and pass it
+to `read_image.path`. The path below is illustrative; use the returned value rather than copying
+the request path:
+
+```json
+{
+  "path": "<exact outputs[0].readPath from the slide 1 render>"
+}
+```
+
+Maintain a numbered verification ledger from slide `1` through slide `N`. Each entry requires a
+successful render, a successful `read_image`, and a visual verdict such as `slide 1: PASS` or
+`slide 1: text clips at the right edge`. Exactly `N` numbered verdicts are required before claiming
+complete visual verification.
+
+Treat render metadata and paths narrowly:
 
 - Select the output whose `role` is `render` and whose `kind` is `image`.
 - Use only its `readPath`; never reconstruct a path from the render request, `source`, `argv`,
   `cwd`, `stdout`, or a file search.
 - Never rerender merely to discover where the first render was published.
-- `pageSelection` records the requested selection (`all` or explicit slide numbers); it is not an
-  independent proof of the deck's actual slide count. Establish the final slide count with
-  `inspect`, compare it with the request, and then inspect the returned image.
-- If the output is absent, not readable, or `read_image` reports an unsupported model capability,
-  state that visual verification was unavailable.
-- If a preview exceeds the visual-input limit, render bounded slide groups rather than repeating
-  the same oversized request. Do not claim inspection of unread images.
+- `total` and `pageSelection` describe source or requested selection metadata; neither proves that
+  a returned image contains every slide without clipping.
+- `layoutCoverage.evidence = trustedRendererGeometry` proves only that its `requestedPages` fit the
+  decoded PNG viewport under the frozen renderer layout. It does not inspect slide pixels, text,
+  images, clipping inside a slide, or visual quality, and never replaces the per-slide ledger.
+- An output filename such as `complete`, `all`, or `full` is never coverage evidence.
+- A contact sheet is never a substitute for the per-slide ledger, even when it looks complete.
+- If any output is absent or unreadable, or `read_image` is unavailable, keep that slide's verdict
+  missing and state that complete visual verification was unavailable.
+- When delegating visual review, pass the numbered slide-to-`readPath` mapping and require one
+  verdict for every expected slide. Do not ask a reviewer to infer the slide count from a dense
+  contact sheet.
 
 ## Generate, verify, render, iterate
 
@@ -228,18 +264,21 @@ Use this fixed loop for a final deck:
 
 1. Generate or edit the `.pptx`.
 2. Confirm the expected file effect.
-3. Inspect slide count and order, titles, text, notes, media, tables, charts, and required content.
+3. Inspect slide count `N` and order, titles, text, notes, media, tables, charts, and required content.
 4. Run native `validate`.
-5. Run one native `render` request covering every final slide with a contact-sheet grid.
-6. Read the exact returned render output with `read_image`, then visually inspect every slide for
-   overflow, overlap, off-canvas objects, broken media, font substitution, alignment, contrast,
-   spacing, and continuity with neighboring slides.
-7. If a defect exists, patch the same Builder or issue one corrected semantic operation,
-   regenerate, and repeat validation and rendering.
+5. Optionally render one whole-deck contact sheet for narrative flow only.
+6. Render slides `1..N` independently with `pageOrSlide`, unique output paths, and the exact
+   returned `readPath`; read every image and record exactly `N` numbered visual verdicts.
+7. Inspect every slide for overflow, overlap, off-canvas objects, broken media, font substitution,
+   alignment, contrast, spacing, and continuity with neighboring slides.
+8. If a defect exists, patch the same Builder or issue one corrected semantic operation,
+   regenerate, discard the earlier visual ledger, re-inspect `N`, revalidate, and render/read all
+   `N` final slides again. Repeat the overview only when narrative continuity may have changed.
 
 Do not claim visual quality from package validation alone. If rendering returns an
-`office.render_backend_*` error, report that visual verification was unavailable; do not launch a
-user browser or render every slide in separate retry calls.
+`office.render_backend_*` error, report the affected slide as unverified; do not launch a user
+browser. Do not claim completion unless the final deck has exactly `N` successful numbered visual
+verdicts.
 
 ## Presentation quality checks
 

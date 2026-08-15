@@ -673,6 +673,7 @@ mod tests {
             width: Some(1),
             height: Some(1),
             page_selection: OfficeRenderPageSelection::All,
+            layout_coverage: None,
         };
 
         let result = execute(

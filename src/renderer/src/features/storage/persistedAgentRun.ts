@@ -14,6 +14,11 @@ import type {
 import { parseManagedCommandOutputs } from '../chat/managedCommandOutputs'
 
 const MAX_STORED_RUN_ITEMS = 10_000
+const MAX_OFFICE_RENDER_PAGES = 128
+const MAX_OFFICE_PAGE_NUMBER = 10_000
+const MAX_OFFICE_SCREENSHOT_DIMENSION = 16_384
+const MAX_OFFICE_GRID_COLUMNS = 32
+const MAX_U32 = 0xffff_ffff
 export const STORED_AGENT_RUN_CORRUPTION_ERROR = 'Stored Agent run is malformed'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
@@ -791,22 +796,84 @@ function isOfficePrepared(value: unknown): boolean {
       'access',
       'request',
       'argv',
+      'resolvedRenderPlan',
       'paths',
       'inputBindings'
     ]) &&
-    value.schemaVersion === 5 &&
+    value.schemaVersion === 6 &&
     isBoundedString(value.providerId, 1024) &&
     isBoundedString(value.engineRevision, 4096) &&
     isNullableBoundedString(value.workspaceRevision, 4096) &&
     (value.access === 'readOnly' || value.access === 'fileWrite') &&
     isOfficeRequest(value.request) &&
     isStringArray(value.argv, 64 * 1024) &&
+    (value.resolvedRenderPlan === null ||
+      isOfficePresentationRenderPlan(value.resolvedRenderPlan)) &&
+    (value.resolvedRenderPlan !== null) === requiresPresentationRenderPlan(value.request) &&
     Array.isArray(value.paths) &&
     value.paths.length <= MAX_STORED_RUN_ITEMS &&
     value.paths.every(isOfficeFrozenPath) &&
     Array.isArray(value.inputBindings) &&
     value.inputBindings.length <= MAX_STORED_RUN_ITEMS &&
     value.inputBindings.every(isFileInputBinding)
+  )
+}
+
+function requiresPresentationRenderPlan(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.parameters)) return false
+  return (
+    value.documentKind === 'presentation' &&
+    value.operation === 'view' &&
+    value.parameters.type === 'view' &&
+    value.parameters.mode === 'screenshot'
+  )
+}
+
+function isOfficePresentationRenderPlan(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      'requestedPages',
+      'slideWidthEmu',
+      'slideHeightEmu',
+      'viewport',
+      'grid'
+    ]) ||
+    !Array.isArray(value.requestedPages) ||
+    value.requestedPages.length === 0 ||
+    value.requestedPages.length > MAX_OFFICE_RENDER_PAGES ||
+    !value.requestedPages.every(
+      (page, index, pages) =>
+        isSafeInteger(page) &&
+        page > 0 &&
+        page <= MAX_OFFICE_PAGE_NUMBER &&
+        (index === 0 || (pages[index - 1] as number) < page)
+    ) ||
+    !isSafeInteger(value.slideWidthEmu) ||
+    value.slideWidthEmu <= 0 ||
+    value.slideWidthEmu > MAX_U32 ||
+    !isSafeInteger(value.slideHeightEmu) ||
+    value.slideHeightEmu <= 0 ||
+    value.slideHeightEmu > MAX_U32 ||
+    !isRecord(value.viewport) ||
+    !hasExactKeys(value.viewport, ['width', 'height']) ||
+    !isSafeInteger(value.viewport.width) ||
+    value.viewport.width <= 0 ||
+    value.viewport.width > MAX_OFFICE_SCREENSHOT_DIMENSION ||
+    !isSafeInteger(value.viewport.height) ||
+    value.viewport.height <= 0 ||
+    value.viewport.height > MAX_OFFICE_SCREENSHOT_DIMENSION
+  ) {
+    return false
+  }
+  return (
+    value.grid === null ||
+    (isRecord(value.grid) &&
+      hasExactKeys(value.grid, ['mode', 'columns']) &&
+      value.grid.mode === 'columns' &&
+      isSafeInteger(value.grid.columns) &&
+      value.grid.columns > 0 &&
+      value.grid.columns <= MAX_OFFICE_GRID_COLUMNS)
   )
 }
 
@@ -821,7 +888,7 @@ function isOfficeOperation(value: unknown): boolean {
       'approvalStatus',
       'reason'
     ]) &&
-    value.schemaVersion === 5 &&
+    value.schemaVersion === 6 &&
     isBoundedString(value.id, 1024) &&
     isRecord(value.semanticArgs) &&
     isOfficePrepared(value.prepared) &&

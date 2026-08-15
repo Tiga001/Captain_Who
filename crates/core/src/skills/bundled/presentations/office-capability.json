@@ -1,5 +1,5 @@
 {
-  "contractVersion": 8,
+  "contractVersion": 9,
   "engine": "officecli",
   "tool": "office_presentation",
   "extensions": [".pptx"],
@@ -39,7 +39,26 @@
         "sizeField": "sizeBytes",
         "selectionField": "pageSelection",
         "selectionSemantics": "requested_not_verified_coverage",
-        "pathInference": "forbidden"
+        "layoutCoverageField": "layoutCoverage",
+        "layoutCoverageSemantics": "trusted_renderer_geometry_only_not_visual_content_evidence",
+        "pathInference": "forbidden",
+        "contactSheetSemantics": "overview_only_not_coverage_evidence",
+        "visualVerification": {
+          "slideCountSource": "inspect",
+          "requestMode": "one_slide_per_render",
+          "requestField": "pageOrSlide",
+          "uniqueOutputPathPerSlide": true,
+          "consumeEveryReturnedReadPath": true,
+          "requiredVerdicts": "one_per_inspected_slide",
+          "ledgerInvalidation": "any_deck_edit",
+          "coverageCannotBeInferredFrom": [
+            "total",
+            "pageSelection",
+            "layoutCoverage",
+            "outputFilename",
+            "contactSheet"
+          ]
+        }
       }
     },
     "script": {

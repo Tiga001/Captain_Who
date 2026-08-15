@@ -1880,6 +1880,44 @@ fn current_office_frozen_path_is_safe(value: &serde_json::Value) -> bool {
             ))
 }
 
+fn current_office_render_plan_is_safe(value: &serde_json::Value) -> bool {
+    let Ok(plan) =
+        serde_json::from_value::<crate::office::OfficePresentationRenderPlan>(value.clone())
+    else {
+        return false;
+    };
+    !plan.requested_pages.is_empty()
+        && plan.requested_pages.len() <= crate::office::MAX_OFFICE_TOTAL_PAGES as usize
+        && plan
+            .requested_pages
+            .iter()
+            .all(|page| *page > 0 && *page <= crate::office::MAX_OFFICE_PAGE_NUMBER)
+        && plan
+            .requested_pages
+            .windows(2)
+            .all(|pages| pages[0] < pages[1])
+        && plan.slide_width_emu > 0
+        && plan.slide_height_emu > 0
+        && plan.viewport.width > 0
+        && plan.viewport.width <= crate::office::MAX_OFFICE_SCREENSHOT_DIMENSION
+        && plan.viewport.height > 0
+        && plan.viewport.height <= crate::office::MAX_OFFICE_SCREENSHOT_DIMENSION
+        && match plan.grid {
+            None => true,
+            Some(crate::office::OfficeGridLayout::Columns { columns }) => {
+                columns > 0 && columns <= crate::office::MAX_OFFICE_GRID_COLUMNS
+            }
+            Some(crate::office::OfficeGridLayout::Auto) => false,
+        }
+}
+
+fn current_office_request_requires_render_plan(value: &serde_json::Value) -> bool {
+    value["documentKind"] == "presentation"
+        && value["operation"] == "view"
+        && value["parameters"]["type"] == "view"
+        && value["parameters"]["mode"] == "screenshot"
+}
+
 fn current_office_prepared_is_safe(value: &serde_json::Value) -> bool {
     let Some(prepared) = value.as_object() else {
         return false;
@@ -1894,6 +1932,7 @@ fn current_office_prepared_is_safe(value: &serde_json::Value) -> bool {
             "access",
             "request",
             "argv",
+            "resolvedRenderPlan",
             "paths",
             "inputBindings",
         ],
@@ -1904,6 +1943,11 @@ fn current_office_prepared_is_safe(value: &serde_json::Value) -> bool {
         && matches!(prepared["access"].as_str(), Some("readOnly" | "fileWrite"))
         && current_office_request_is_safe(&prepared["request"])
         && current_string_array_is_safe(&prepared["argv"], 64 * 1_024)
+        && if current_office_request_requires_render_plan(&prepared["request"]) {
+            current_office_render_plan_is_safe(&prepared["resolvedRenderPlan"])
+        } else {
+            prepared["resolvedRenderPlan"].is_null()
+        }
         && prepared["paths"].as_array().is_some_and(|paths| {
             paths.len() <= MAX_CURRENT_RUN_ITEMS
                 && paths.iter().all(current_office_frozen_path_is_safe)
@@ -3371,11 +3415,11 @@ mod tests {
         serde_json::json!({
             "type": "office_operation",
             "officeOperation": {
-                "schemaVersion": 5,
+                "schemaVersion": crate::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
                 "id": "office-call",
                 "semanticArgs": {},
                 "prepared": {
-                    "schemaVersion": 5,
+                    "schemaVersion": crate::office::OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
                     "providerId": "officecli",
                     "engineRevision": "officecli-v1",
                     "workspaceRevision": null,
@@ -3391,6 +3435,7 @@ mod tests {
                         "parameters": { "type": "create" }
                     },
                     "argv": [],
+                    "resolvedRenderPlan": null,
                     "paths": [],
                     "inputBindings": []
                 },
@@ -3398,6 +3443,26 @@ mod tests {
                 "reason": "Create a document"
             }
         })
+    }
+
+    fn current_presentation_render_approval() -> serde_json::Value {
+        let mut approval = current_office_approval();
+        let prepared = &mut approval["officeOperation"]["prepared"];
+        prepared["access"] = "readOnly".into();
+        prepared["request"]["documentKind"] = "presentation".into();
+        prepared["request"]["operation"] = "view".into();
+        prepared["request"]["parameters"] = serde_json::json!({
+            "type": "view",
+            "mode": "screenshot"
+        });
+        prepared["resolvedRenderPlan"] = serde_json::json!({
+            "requestedPages": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "slideWidthEmu": 12_192_000,
+            "slideHeightEmu": 6_858_000,
+            "viewport": { "width": 1600, "height": 922 },
+            "grid": { "mode": "columns", "columns": 3 }
+        });
+        approval
     }
 
     fn current_skill_installation_approval() -> serde_json::Value {
@@ -3535,6 +3600,7 @@ mod tests {
                 }
             }),
             current_office_approval(),
+            current_presentation_render_approval(),
             current_skill_installation_approval(),
         ];
 
@@ -3556,6 +3622,28 @@ mod tests {
         let mut wrong_inner = current_office_approval();
         wrong_inner["officeOperation"]["prepared"]["schemaVersion"] = 4.into();
         assert!(!approval_is_safe(&wrong_inner));
+
+        let mut missing_render_plan = current_presentation_render_approval();
+        missing_render_plan["officeOperation"]["prepared"]["resolvedRenderPlan"] =
+            serde_json::Value::Null;
+        assert!(!approval_is_safe(&missing_render_plan));
+
+        let mut unresolved_grid = current_presentation_render_approval();
+        unresolved_grid["officeOperation"]["prepared"]["resolvedRenderPlan"]["grid"] =
+            serde_json::json!({ "mode": "auto" });
+        assert!(!approval_is_safe(&unresolved_grid));
+
+        let mut duplicate_pages = current_presentation_render_approval();
+        duplicate_pages["officeOperation"]["prepared"]["resolvedRenderPlan"]["requestedPages"] =
+            serde_json::json!([1, 2, 2]);
+        assert!(!approval_is_safe(&duplicate_pages));
+
+        let mut unexpected_render_plan = current_office_approval();
+        unexpected_render_plan["officeOperation"]["prepared"]["resolvedRenderPlan"] =
+            current_presentation_render_approval()["officeOperation"]["prepared"]
+                ["resolvedRenderPlan"]
+                .clone();
+        assert!(!approval_is_safe(&unexpected_render_plan));
 
         let mut unsafe_integer = current_office_approval();
         unsafe_integer["officeOperation"]["prepared"]["request"]["timeoutMs"] =

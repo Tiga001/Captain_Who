@@ -578,11 +578,11 @@ function currentOfficeApproval() {
   return {
     type: 'office_operation',
     officeOperation: {
-      schemaVersion: 5,
+      schemaVersion: 6,
       id: 'office-validate',
       semanticArgs: { operation: 'validate', filePath: 'report.docx' },
       prepared: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         providerId: 'officecli',
         engineRevision: 'sha256:engine',
         workspaceRevision: null,
@@ -598,11 +598,73 @@ function currentOfficeApproval() {
           parameters: { type: 'validate' }
         },
         argv: ['validate', 'report.docx'],
+        resolvedRenderPlan: null,
         paths: [],
         inputBindings: []
       },
       approvalStatus: 'required',
       reason: 'Validate the document'
+    }
+  }
+}
+
+function currentPresentationRenderApproval() {
+  const current = currentOfficeApproval()
+  return {
+    ...current,
+    officeOperation: {
+      ...current.officeOperation,
+      id: 'office-render',
+      semanticArgs: {
+        operation: 'render',
+        filePath: 'deck.pptx',
+        outputPath: 'preview.png'
+      },
+      prepared: {
+        ...current.officeOperation.prepared,
+        access: 'fileWrite',
+        request: {
+          documentKind: 'presentation',
+          operation: 'view',
+          documentPath: 'deck.pptx',
+          outputPath: 'preview.png',
+          destinationPath: null,
+          inputs: [],
+          timeoutMs: null,
+          parameters: {
+            type: 'view',
+            mode: 'screenshot',
+            pages: [{ start: 1, end: 3 }],
+            grid: { mode: 'auto' }
+          }
+        },
+        argv: [
+          'view',
+          'deck.pptx',
+          'screenshot',
+          '--page',
+          '1-3',
+          '--grid',
+          '2',
+          '--screenshot-width',
+          '1600',
+          '--screenshot-height',
+          '922',
+          '--render',
+          'html',
+          '--json',
+          '-o',
+          'preview.png'
+        ],
+        resolvedRenderPlan: {
+          requestedPages: [1, 2, 3],
+          slideWidthEmu: 12_192_000,
+          slideHeightEmu: 6_858_000,
+          viewport: { width: 1600, height: 922 },
+          grid: { mode: 'columns', columns: 2 }
+        }
+      },
+      reason: 'Render the presentation'
     }
   }
 }
@@ -688,6 +750,126 @@ it('rejects removed Office arguments and precondition fields at their nested bou
       })
     )
   ).toBeUndefined()
+})
+
+it('strictly validates frozen presentation render-plan bounds and schema identity', () => {
+  const current = currentPresentationRenderApproval()
+  expect(parsePersistedAgentRun(currentStoredRun({ approvals: [current] }))).toBeDefined()
+
+  for (const resolvedRenderPlan of [
+    null,
+    { ...current.officeOperation.prepared.resolvedRenderPlan, requestedPages: [1, 1] },
+    { ...current.officeOperation.prepared.resolvedRenderPlan, requestedPages: [10_001] },
+    {
+      ...current.officeOperation.prepared.resolvedRenderPlan,
+      requestedPages: Array.from({ length: 129 }, (_, index) => index + 1)
+    },
+    { ...current.officeOperation.prepared.resolvedRenderPlan, slideWidthEmu: 0x1_0000_0000 },
+    {
+      ...current.officeOperation.prepared.resolvedRenderPlan,
+      viewport: { width: 16_385, height: 922 }
+    },
+    { ...current.officeOperation.prepared.resolvedRenderPlan, grid: { mode: 'auto' } },
+    {
+      ...current.officeOperation.prepared.resolvedRenderPlan,
+      grid: { mode: 'columns', columns: 33 }
+    }
+  ]) {
+    expect(
+      parsePersistedAgentRun(
+        currentStoredRun({
+          approvals: [
+            {
+              ...current,
+              officeOperation: {
+                ...current.officeOperation,
+                prepared: { ...current.officeOperation.prepared, resolvedRenderPlan }
+              }
+            }
+          ]
+        })
+      )
+    ).toBeUndefined()
+  }
+
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [
+          {
+            ...current,
+            officeOperation: { ...current.officeOperation, schemaVersion: 5 }
+          }
+        ]
+      })
+    )
+  ).toBeUndefined()
+
+  expect(
+    parsePersistedAgentRun(
+      currentStoredRun({
+        approvals: [
+          {
+            ...current,
+            officeOperation: {
+              ...current.officeOperation,
+              prepared: { ...current.officeOperation.prepared, schemaVersion: 5 }
+            }
+          }
+        ]
+      })
+    )
+  ).toBeUndefined()
+})
+
+it('preserves Host-verified Office render layout geometry in the durable run projection', () => {
+  const officeCallId = 'office-render-result'
+  const layoutCoverage = {
+    requestedPages: [1, 2, 3],
+    evidence: 'trustedRendererGeometry',
+    grid: {
+      columns: 2,
+      rows: 2,
+      viewportWidth: 1600,
+      viewportHeight: 922,
+      contentWidth: 1600,
+      contentHeight: 922
+    }
+  }
+  const parsed = parsePersistedAgentRun(
+    currentStoredRun({
+      toolCalls: [
+        {
+          id: officeCallId,
+          tool: 'office_presentation',
+          args: { operation: 'render', filePath: 'deck.pptx' },
+          approvalStatus: 'not_required',
+          reason: null
+        }
+      ],
+      toolResults: [
+        {
+          callId: officeCallId,
+          tool: 'office_presentation',
+          ok: true,
+          result: {
+            outputs: [
+              {
+                role: 'render',
+                kind: 'image',
+                readPath: 'preview.png',
+                layoutCoverage
+              }
+            ]
+          }
+        }
+      ]
+    })
+  )
+
+  expect(parsed?.toolResults[0]?.result).toMatchObject({
+    outputs: [{ readPath: 'preview.png', layoutCoverage }]
+  })
 })
 
 it('strictly validates the current Skill installation action instead of accepting any object', () => {

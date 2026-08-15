@@ -742,8 +742,9 @@ pub fn compile_office_semantic_request(
                     pages,
                     range: render_range(semantic.document_kind, intent)?,
                     viewport: intent.viewport.clone(),
-                    grid: (semantic.document_kind != OfficeDocumentKind::Spreadsheet)
-                        .then_some(OfficeGridLayout::Auto),
+                    grid: (semantic.document_kind != OfficeDocumentKind::Spreadsheet
+                        && intent.page_or_slide.is_none())
+                    .then_some(OfficeGridLayout::Auto),
                     render_mode: (semantic.document_kind != OfficeDocumentKind::Spreadsheet)
                         .then_some(OfficeViewRenderMode::Auto),
                     page_count: false,
@@ -1926,6 +1927,45 @@ mod tests {
             None,
             intent,
         )
+    }
+
+    #[test]
+    fn presentation_single_slide_render_does_not_request_a_contact_sheet_grid() {
+        let single_slide = request(
+            OfficeDocumentKind::Presentation,
+            OfficeSemanticIntent::Render(OfficeRenderIntent {
+                output_path: "slide-4.png".to_string(),
+                page_or_slide: Some(4),
+                sheet_name: None,
+                range: None,
+                viewport: None,
+            }),
+        );
+        let single_slide = compile_office_semantic_request(&single_slide).unwrap();
+        let OfficeOperationParameters::View { pages, grid, .. } = single_slide.typed_parameters()
+        else {
+            panic!("expected view");
+        };
+        assert_eq!(pages.len(), 1);
+        assert_eq!(grid, &None);
+
+        let all_slides = request(
+            OfficeDocumentKind::Presentation,
+            OfficeSemanticIntent::Render(OfficeRenderIntent {
+                output_path: "all-slides.png".to_string(),
+                page_or_slide: None,
+                sheet_name: None,
+                range: None,
+                viewport: None,
+            }),
+        );
+        let all_slides = compile_office_semantic_request(&all_slides).unwrap();
+        let OfficeOperationParameters::View { pages, grid, .. } = all_slides.typed_parameters()
+        else {
+            panic!("expected view");
+        };
+        assert!(pages.is_empty());
+        assert_eq!(grid, &Some(OfficeGridLayout::Auto));
     }
 
     #[test]

@@ -197,15 +197,16 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 三个 Office Tool 共用 `OfficeExecutionResult`：
 
-| 字段组                                                                                             | 消费者    | 归属和约束                  |
-| -------------------------------------------------------------------------------------------------- | --------- | --------------------------- |
-| `documentKind`、`operation`                                                                        | M/E/T/A/C | 行动、审计、恢复            |
-| `providerId`、`engineRevision`、`argv`、`cwd`                                                      | E/T/A/C   | UI、审计、恢复、幂等        |
-| `exitCode`、`stdout`、`stderr`、超时/取消/截断/错误与捕获完整性字段                                | M/E/T/A/C | 行动、UI、审计、正文        |
-| `durationMs`                                                                                       | E/T/A/C   | UI、审计                    |
-| `outputs[].role/kind/mimeType/readPath/scope/readableByAgent/sizeBytes/width/height/pageSelection` | M/E/T/A/C | 后续读取、UI Artifact、恢复 |
-| `outputs[].source/sha256`                                                                          | E/T/A/C   | 审计、恢复                  |
-| 审计失败包装 `execution.*` 和不确定性字段                                                          | M/E/T/A/C | 行动、审计、恢复            |
+| 字段组                                                                                             | 消费者    | 归属和约束                                                              |
+| -------------------------------------------------------------------------------------------------- | --------- | ----------------------------------------------------------------------- |
+| `documentKind`、`operation`                                                                        | M/E/T/A/C | 行动、审计、恢复                                                        |
+| `providerId`、`engineRevision`、`argv`、`cwd`                                                      | E/T/A/C   | UI、审计、恢复、幂等                                                    |
+| `exitCode`、`stdout`、`stderr`、超时/取消/截断/错误与捕获完整性字段                                | M/E/T/A/C | 行动、UI、审计、正文                                                    |
+| `durationMs`                                                                                       | E/T/A/C   | UI、审计                                                                |
+| `outputs[].role/kind/mimeType/readPath/scope/readableByAgent/sizeBytes/width/height/pageSelection` | M/E/T/A/C | 后续读取、UI Artifact、恢复                                             |
+| `outputs[].layoutCoverage.requestedPages/evidence/grid.*`                                          | M/E/T/A/C | 仅证明冻结页集按可信渲染器布局完整落入 PNG viewport；不证明逐页视觉内容 |
+| `outputs[].source/sha256`                                                                          | E/T/A/C   | 审计、恢复                                                              |
+| 审计失败包装 `execution.*` 和不确定性字段                                                          | M/E/T/A/C | 行动、审计、恢复                                                        |
 
 `skillOfficeActivity.ts` 同时消费 Office 输出和 Command Artifact Observation，E 投影必须兼容。
 
@@ -260,7 +261,7 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 - 文件大小、解压、媒体、解析、传输、进程内存、walk、哈希和时间安全限；
 - Renderer favicon、Todo、附件定位、文件草稿和 Artifact Observation 字段；
 - Trace/Archive/Checkpoint 的审计、恢复和幂等身份；
-- 旧会话缺少新 coverage/cursor 字段时的读取兼容。
+- 旧会话缺少新 cursor 字段时的读取兼容。
 
 ## 6. 契约测试
 

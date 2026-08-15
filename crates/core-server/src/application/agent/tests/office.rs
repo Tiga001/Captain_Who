@@ -6,7 +6,8 @@ use mycopilot_core::office::{
     OfficeGridLayout, OfficeOperation, OfficeOperationAccess, OfficeOperationParameters,
     OfficePathIdentity, OfficePathPurpose, OfficePathScope, OfficePathSlot,
     OfficePreparedExecution, OfficePublishedOutput, OfficePublishedOutputKind,
-    OfficePublishedOutputRole, OfficeRenderPageSelection, OfficeViewMode, OfficeViewRenderMode,
+    OfficePublishedOutputRole, OfficeRenderGridGeometry, OfficeRenderLayoutCoverage,
+    OfficeRenderLayoutEvidence, OfficeRenderPageSelection, OfficeViewMode, OfficeViewRenderMode,
     OfficeWriteDisposition, OFFICECLI_PROVIDER_ID, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
     OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
@@ -259,6 +260,18 @@ fn test_published_render_output() -> OfficePublishedOutput {
         width: Some(640),
         height: Some(360),
         page_selection: OfficeRenderPageSelection::Explicit { pages: vec![1] },
+        layout_coverage: Some(OfficeRenderLayoutCoverage {
+            requested_pages: vec![1],
+            evidence: OfficeRenderLayoutEvidence::TrustedRendererGeometry,
+            grid: Some(OfficeRenderGridGeometry {
+                columns: 1,
+                rows: 1,
+                viewport_width: 640,
+                viewport_height: 360,
+                content_width: 640,
+                content_height: 360,
+            }),
+        }),
     }
 }
 
@@ -483,6 +496,7 @@ fn prepared_spreadsheet_operation() -> OfficePreparedExecution {
             "--prop".to_string(),
             "value=42".to_string(),
         ],
+        resolved_render_plan: None,
         paths: vec![OfficeFrozenPath {
             slot: OfficePathSlot::Document,
             logical_path: "budget.xlsx".to_string(),
@@ -544,6 +558,7 @@ fn prepared_document_render_operation() -> OfficePreparedExecution {
             "--output".to_string(),
             "preview.png".to_string(),
         ],
+        resolved_render_plan: None,
         paths: vec![
             OfficeFrozenPath {
                 slot: OfficePathSlot::Document,
@@ -869,6 +884,21 @@ fn approved_render_tool_result_preserves_authoritative_published_output() {
     assert_eq!(
         output["pageSelection"],
         serde_json::json!({ "type": "explicit", "pages": [1] })
+    );
+    assert_eq!(
+        output["layoutCoverage"],
+        serde_json::json!({
+            "requestedPages": [1],
+            "evidence": "trustedRendererGeometry",
+            "grid": {
+                "columns": 1,
+                "rows": 1,
+                "viewportWidth": 640,
+                "viewportHeight": 360,
+                "contentWidth": 640,
+                "contentHeight": 360
+            }
+        })
     );
 }
 

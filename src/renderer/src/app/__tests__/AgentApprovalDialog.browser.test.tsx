@@ -135,7 +135,7 @@ describe('AgentApprovalDialog Office approval', () => {
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 5,
+        schemaVersion: 6,
         id: 'office-action',
         approvalStatus: 'required',
         reason: '导出预算工作簿',
@@ -147,7 +147,7 @@ describe('AgentApprovalDialog Office approval', () => {
           reason: '导出预算工作簿'
         },
         prepared: {
-          schemaVersion: 5,
+          schemaVersion: 6,
           providerId: 'officecli',
           engineRevision: 'office-engine-sha256-v1:test',
           workspaceRevision: 'office-workspace-sha256-v1:test',
@@ -163,6 +163,7 @@ describe('AgentApprovalDialog Office approval', () => {
             timeoutMs: null
           },
           argv: ['view', 'budget.xlsx', 'html', '-o', '@downloads/budget-preview.html'],
+          resolvedRenderPlan: null,
           paths: [
             {
               slot: { type: 'document' },

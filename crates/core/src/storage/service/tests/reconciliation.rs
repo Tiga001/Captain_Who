@@ -387,6 +387,7 @@ impl ManualNonCommandFileEffect {
                                 "budget.xlsx".to_string()
                             },
                         ],
+                        resolved_render_plan: None,
                         paths: Vec::new(),
                         input_bindings: Vec::new(),
                     },

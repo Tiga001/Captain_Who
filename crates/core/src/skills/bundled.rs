@@ -887,7 +887,14 @@ mod tests {
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 8);
+            assert_eq!(
+                capability["contractVersion"],
+                if local_id == PRESENTATIONS_LOCAL_ID {
+                    9
+                } else {
+                    8
+                }
+            );
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
@@ -1132,6 +1139,88 @@ mod tests {
         assert!(
             check < build,
             "syntax preflight must precede Builder execution"
+        );
+    }
+
+    #[test]
+    fn presentations_skill_requires_one_visual_verdict_per_inspected_slide() {
+        let workflows = include_str!("bundled/presentations/references/workflows.md");
+
+        for required in [
+            "record its authoritative slide count `N`",
+            "contact sheet is optional and is overview-only",
+            "For every slide `1..N`, make a separate `render` call",
+            "that `pageOrSlide` and a unique `outputPath`",
+            "Any later deck edit invalidates the ledger",
+            "Without exactly `N` successful numbered verdicts",
+            "It does not prove slide content, visual quality, or successful per-slide inspection",
+        ] {
+            assert!(
+                PRESENTATIONS_SOURCE.contains(required),
+                "presentation instructions are missing `{required}`"
+            );
+        }
+
+        for required in [
+            "Repeat\nthis inspection after the last edit because earlier counts become stale",
+            "overview only. It cannot prove that every slide is present, fully visible, or readable",
+            "\"pageOrSlide\": 1",
+            "give every call a unique `outputPath`",
+            "Exactly `N` numbered verdicts are required",
+            "`total` and `pageSelection` describe source or requested selection metadata",
+            "`layoutCoverage.evidence = trustedRendererGeometry` proves only",
+            "An output filename such as `complete`, `all`, or `full` is never coverage evidence",
+            "Do not ask a reviewer to infer the slide count from a dense",
+        ] {
+            assert!(
+                workflows.contains(required),
+                "presentation workflow is missing `{required}`"
+            );
+        }
+
+        for stale in [
+            "Render all changed slides in one contact sheet",
+            "Render every slide to an explicit contact-sheet image",
+            "Run one native `render` request covering every final slide",
+            "render every slide in separate retry calls",
+        ] {
+            assert!(
+                !PRESENTATIONS_SOURCE.contains(stale) && !workflows.contains(stale),
+                "presentation instructions retain stale contact-sheet rule `{stale}`"
+            );
+        }
+
+        let capability: Value =
+            serde_json::from_str(include_str!("bundled/presentations/office-capability.json"))
+                .unwrap();
+        assert_eq!(capability["contractVersion"], 9);
+        let render_output = &capability["modes"]["native"]["renderOutput"];
+        assert_eq!(
+            render_output["contactSheetSemantics"],
+            "overview_only_not_coverage_evidence"
+        );
+        assert_eq!(render_output["layoutCoverageField"], "layoutCoverage");
+        assert_eq!(
+            render_output["layoutCoverageSemantics"],
+            "trusted_renderer_geometry_only_not_visual_content_evidence"
+        );
+        let verification = &render_output["visualVerification"];
+        assert_eq!(verification["slideCountSource"], "inspect");
+        assert_eq!(verification["requestMode"], "one_slide_per_render");
+        assert_eq!(verification["requestField"], "pageOrSlide");
+        assert_eq!(verification["uniqueOutputPathPerSlide"], true);
+        assert_eq!(verification["consumeEveryReturnedReadPath"], true);
+        assert_eq!(verification["requiredVerdicts"], "one_per_inspected_slide");
+        assert_eq!(verification["ledgerInvalidation"], "any_deck_edit");
+        assert_eq!(
+            verification["coverageCannotBeInferredFrom"],
+            serde_json::json!([
+                "total",
+                "pageSelection",
+                "layoutCoverage",
+                "outputFilename",
+                "contactSheet"
+            ])
         );
     }
 

@@ -41,8 +41,10 @@ Treat the gates independently: `syntax-valid != runtime-valid != PPTX-valid`. Th
 1. Inspect an existing deck before editing it and prefer a distinct output unless the user requested in-place editing.
 2. Establish the audience, slide count, narrative, aspect ratio, and visual direction before building.
 3. Confirm the expected file effect in the native result or `artifactObservation`.
-4. Inspect slide order and content, then validate the final package.
-5. Render all changed slides in one contact sheet. On success, pass the exact returned `outputs[].readPath` as `read_image.path`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect every slide for overflow, overlap, broken media, alignment, and contrast, patch the same Builder or semantic request when needed, then render again.
-6. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
+4. Inspect the final deck, record its authoritative slide count `N` and slide order, then validate the package.
+5. A whole-deck contact sheet is optional and is overview-only. Never use it to prove slide coverage or per-slide visual quality.
+6. For every slide `1..N`, make a separate `render` call with that `pageOrSlide` and a unique `outputPath`. Pass the exact returned `outputs[].readPath` to `read_image.path` and record one numbered visual verdict for that slide. Any later deck edit invalidates the ledger; re-inspect, revalidate, and rebuild all `N` verdicts from the final deck.
+7. `outputs[].layoutCoverage` proves only that the frozen requested slide set fits inside the PNG viewport under the trusted renderer's fixed layout geometry. It does not prove slide content, visual quality, or successful per-slide inspection. Do not infer visual coverage from it, `total`, `pageSelection`, an output filename, or a contact-sheet image. Without exactly `N` successful numbered verdicts, do not claim complete visual verification or completion.
+8. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
 
 Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and presentation-specific quality checks.
